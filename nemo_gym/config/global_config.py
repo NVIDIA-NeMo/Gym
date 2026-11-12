@@ -247,10 +247,14 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "pi_agent",
         "pool_agent",
         "simple_agent",
+        "simple_strands_agent",
         "stirrup_agent",
         "terminus_2_sandboxed_agent",
     }
 )
+# Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
+# Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -998,7 +1002,7 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
-            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES or source.agent_type in HOST_RUN_SWAP_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
@@ -1035,7 +1039,8 @@ Duplicate config paths:
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
         """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
 
-        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        Those agents either do not implement agent sessions or are in HOST_RUN_SWAP_AGENT_TYPES, whose swap template
+        runs on the host through /run, so single_agent_turn_legacy would fail every episode.
         The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
         """
         for instance_name, instance in global_config_dict.items():
@@ -1052,7 +1057,7 @@ Duplicate config paths:
                 continue
             logger.info(
                 f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
-                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+                f"that agent type has no agent sessions, or its swap template runs on the host through /run."
             )
             servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
             servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)

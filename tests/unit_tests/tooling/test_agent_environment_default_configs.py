@@ -281,6 +281,7 @@ def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: 
         "hermes_agent",
         "pi_agent",
         "pool_agent",
+        "simple_strands_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
