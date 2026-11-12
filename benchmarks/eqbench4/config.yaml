@@ -1,0 +1,40 @@
+# EQ-Bench 4: the policy roleplays with a simulated persona for up to eight turns per side, and judges compare its
+# transcripts with published leaderboard transcripts. The policy model is chosen on the command line; see README.md.
+config_paths:
+  - resources_servers/eqbench4/configs/eqbench4.yaml
+  - resources_servers/eqbench4/configs/eqbench4_models.yaml
+
+eqbench4_benchmark_resources_server:
+  _inherit_from: eqbench4_resources_server
+  resources_servers:
+    eqbench4:
+      datasets:
+      - name: eqbench4
+        type: benchmark
+        jsonl_fpath: benchmarks/eqbench4/data/eqbench4_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/eqbench4/prepare.py
+        num_repeats: 1
+        # Upstream: BSD-3-Clause with the Commons Clause condition, which the license list cannot name.
+        license: TBD
+
+eqbench4_benchmark_agent:
+  _inherit_from: eqbench4_agent
+  responses_api_agents:
+    eqbench4_agent:
+      resources_server:
+        type: resources_servers
+        name: eqbench4_benchmark_resources_server
+
+eqbench4_benchmark_environment_server:
+  _inherit_from: eqbench4_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        type: responses_api_agents
+        name: eqbench4_benchmark_agent
+
+# Judge and persona outages go to the failures sidecar, not the score; above these shares of expected rollouts the
+# run's health check reports it unhealthy.
+health_check_max_not_final_failure_fraction: 0.02
+health_check_max_final_failure_fraction: 0.02

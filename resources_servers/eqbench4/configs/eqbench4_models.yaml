@@ -1,0 +1,78 @@
+# Model servers for EQ-Bench 4's persona simulator and judges, defaulting to the models of the published leaderboard:
+# the persona is Gemini 3.1 Pro Preview, the pairwise judges are Gemini 3.1 Pro Preview, GPT-5.5 and Claude Opus 4.6,
+# and Claude Opus 4.8 scores the informational behavioural traits. Every server talks to one OpenAI-compatible Chat
+# Completions endpoint, as EQ-Bench 4 does. Set these top-level keys on the command line (`++judge_api_key=...`) or in
+# env.yaml:
+#   judge_base_url, judge_api_key: the endpoint (NVIDIA's inference API by default) and its key; Gym's shared judge keys.
+#   eqbench4_persona_model_name, eqbench4_gemini_judge_model_name, eqbench4_gpt_judge_model_name,
+#   eqbench4_claude_judge_model_name, eqbench4_trait_judge_model_name: model IDs, when the endpoint names them otherwise.
+# Chat Completions also avoids provider Responses translations whose reasoning items
+# Gym's Responses schema rejects (Gemini's carry no `summary`). Only the visible reply is used: reasoning the endpoint
+# returns in a separate field (as Gemini does even at minimal effort) is kept apart from it, hence
+# `uses_reasoning_parser: true`, which leaves replies without reasoning unchanged.
+#
+# The reasoning settings follow EQ-Bench 4: minimal reasoning for Gemini, none for GPT-5.5, and no extended thinking
+# for Claude. Remove an extra_body entry if your endpoint rejects the field.
+#
+# A shared endpoint answers 429 when busy. max_http_attempts retries with jittered backoff of up to 60 seconds a wait
+# (about a quarter of an hour in all at 36), as Gym's GDPval judges do on the same endpoint.
+#
+# The published transcripts were generated with Gemini 3.1 Pro Preview as the persona. A different persona model
+# changes what the policy is compared on, so ratings are only comparable to the leaderboard with the default persona.
+eqbench4_persona_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.select:judge_api_key,dummy}
+      model: ${oc.select:eqbench4_persona_model_name,gcp/google/gemini-3.1-pro-preview}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      extra_body: {reasoning_effort: minimal}
+      max_http_attempts: 36
+
+eqbench4_gemini_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.select:judge_api_key,dummy}
+      model: ${oc.select:eqbench4_gemini_judge_model_name,gcp/google/gemini-3.1-pro-preview}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      extra_body: {reasoning_effort: minimal}
+      max_http_attempts: 36
+
+eqbench4_gpt_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.select:judge_api_key,dummy}
+      model: ${oc.select:eqbench4_gpt_judge_model_name,openai/openai/gpt-5.5}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      extra_body: {reasoning_effort: none}
+      max_http_attempts: 36
+
+eqbench4_claude_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.select:judge_api_key,dummy}
+      model: ${oc.select:eqbench4_claude_judge_model_name,aws/anthropic/bedrock-claude-opus-4-6}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      max_http_attempts: 36
+
+eqbench4_trait_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.select:judge_api_key,dummy}
+      model: ${oc.select:eqbench4_trait_judge_model_name,aws/anthropic/bedrock-claude-opus-4-8}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      max_http_attempts: 36
