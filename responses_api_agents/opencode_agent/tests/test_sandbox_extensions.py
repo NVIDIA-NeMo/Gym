@@ -363,6 +363,8 @@ async def test_export_failure_is_a_gap_that_keeps_the_result_and_release(setup, 
 
 async def test_hanging_export_is_bounded_by_the_collection_budget(setup, tmp_path):
     agent, sandbox = setup
+    # The close budget bounds the collection; keep it short so the hanging export exhausts it.
+    agent.config.session_close_timeout_seconds = 1
     agent.config.export_dir = EXPORT_DIR
     capture_observations(sandbox, tmp_path)
     never = asyncio.Event()
@@ -558,14 +560,15 @@ def test_local_config_drops_null_tools(setup):
 
 async def test_compaction_and_step_cap_reach_the_sandbox_config(setup):
     agent, sandbox = setup
-    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}}
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 10}}}
     agent.config.max_steps = 400
     agent.config.system_prompt_mode = "replace"
     response, _ = await episode(agent, sandbox, instructions="outer", temperature=1.0)
     assert response.status == "completed"
     _, config = launch_config(sandbox)
-    assert config["compaction"] == {"auto": False, "prune": False}
-    # The cap joins the replaced prompt and request sampling on the build agent; other agents keep their defaults.
+    assert config["compaction"] == {"auto": False}
+    # The cap replaces a configured agent.build.steps and joins the replaced prompt and request sampling on the
+    # build agent; other agents keep their defaults.
     assert config["agent"] == {name: {"temperature": 1.0} for name in BUILTIN_AGENTS} | {
         "build": {"temperature": 1.0, "prompt": "outer", "steps": 400}
     }

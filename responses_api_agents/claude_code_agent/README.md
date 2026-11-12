@@ -113,6 +113,7 @@ claude_code_agent:
       claude_code_version: null
       thinking: null
       max_thinking_tokens: null
+      fold_thinking: null
       bare: true
       mcp_config: null
       settings: null
@@ -130,6 +131,7 @@ claude_code_agent:
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
+- `fold_thinking`: whether thinking is folded into the assistant message text as `<think>...</think>`. `null` (default) folds it unless training-token capture is on. `false` returns the capture-style transcript without capture: thinking as separate `reasoning` items, so the final message holds only the answer (useful when a judge grades the final message). `true` is rejected under capture
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
@@ -208,7 +210,8 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
   attribute the parent transcript without assigning its reward to a subagent's captured chain.
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
-  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
+  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted, unless
+  `fold_thinking: false` selects the capture-style transcript.
 - `turns_used` counts assistant messages, not tool calls.
 - Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
   command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
@@ -260,6 +263,30 @@ For an independently trusted checksum, set
 alternatively, `sandbox_executable_path` names a binary already **inside the
 sandbox**. These two options are mutually exclusive and require
 `sandbox_executable_sha256`.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+endpoint's host. The CLI is uploaded from the Agent Server, so setup needs no other
+host. The OpenSandbox policy is set when the sandbox is created, so a session that
+borrows a task sandbox rejects any value other than `inherit` (the default, the
+provider's network). Only the OpenSandbox provider enforces the policy, so every
+other provider rejects a restricted value, including ones with network controls of
+their own. `network_access` cannot be combined with
+`sandbox_config.provider_options.network_policy`. Claude uses no tool grants, so
+`model_and_tools` is rejected. Each of these refusals fails the seed with HTTP 422.
+Under `model_only` the image must already include `bash`: the step that installs a
+missing one on a root image runs after the sandbox starts, when the package mirrors
+are out of reach. A borrowed sandbox relies on its owner's network policy. The policy
+is only as strong as the OpenSandbox server's egress mode: in `dns` mode only name
+resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at
+the IP layer and is needed for full isolation.
+
+With neither `model_server` nor `anthropic_base_url` set, the CLI calls Anthropic's
+API directly, so `model_only` allows `api.anthropic.com`, and the real API key is in
+the sandbox. This path has not been run live behind the deny policy. It stops fetches
+by host name, but that host also serves Anthropic's server-side web search, so the
+policy alone may not stop the model from searching: pair it with
+`disallowed_tools: WebSearch,WebFetch`. With a Gym model server, the sandbox holds
+only placeholder credentials and this does not arise; the benchmark profile uses one.
 
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
 the endpoint must be reachable from the sandbox. With `model_server`, only
@@ -321,15 +348,9 @@ Messages API, with an empty `anthropic_api_key`, and pins `claude_code_version`,
 profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after 10 minutes. Supply the image
 in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `claude_code_agent.responses_api_agents.claude_code_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; the image must
+include `bash`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.

@@ -67,7 +67,7 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
     # Tool results depend only on the request, so a continuation needs no session state.
     checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig
-    _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _episode_by_session: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
     _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
@@ -93,7 +93,7 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         # A server whose seed or close awaits needs the lock; this one takes it so it reads as the pattern to copy.
         async with self._locks.locked(resources_session_id):
             self._fences.raise_if_fenced(resources_session_id)
-            identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
+            identity = self._episode_by_session.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
@@ -105,10 +105,10 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
             fenced_episode = self._fences.get(resources_session_id)
             if fenced_episode is not None and fenced_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-            identity = self._session_episodes.get(resources_session_id)
+            identity = self._episode_by_session.get(resources_session_id)
             if identity is not None and body.episode_id != identity[0]:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
-            self._session_episodes.pop(resources_session_id, None)
+            self._episode_by_session.pop(resources_session_id, None)
             self._fences.fence(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 

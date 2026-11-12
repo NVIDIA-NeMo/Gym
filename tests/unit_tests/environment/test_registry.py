@@ -321,10 +321,13 @@ class TestEnvironmentCatalog:
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"
+        assert (manifest_entry.resources_server, manifest_entry.agent_server) == ("manifest_env", "simple_agent")
         legacy_benchmark = entries[("benchmark", "legacy_benchmark")]
         assert legacy_benchmark.status == "no-manifest"
         assert legacy_benchmark.domain == "math"
         assert legacy_benchmark.description == "Legacy benchmark"
+        # Discovery does not resolve configs without a manifest.
+        assert (legacy_benchmark.resources_server, legacy_benchmark.agent_server) == (None, None)
 
     def test_nested_manifest_identity_uses_its_relative_path(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "suite/alpha", _manifest("suite/alpha"))
@@ -452,6 +455,17 @@ class TestEnvironmentCatalog:
             "      - {name: test, type: benchmark, jsonl_fpath: test.jsonl}\n",
             encoding="utf-8",
         )
+        # Malformed: `datasets` is not a list, so the config declares no dataset and is not runnable.
+        configs.joinpath("broken.yaml").write_text(
+            "resource:\n"
+            "  resources_servers:\n"
+            "    mcqa: {entrypoint: app.py, domain: knowledge}\n"
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      datasets: 1\n",
+            encoding="utf-8",
+        )
         pure = tmp_path / "resources_servers" / "judge" / "configs"
         pure.mkdir(parents=True)
         pure.joinpath("judge.yaml").write_text(
@@ -503,5 +517,16 @@ class TestReadEnvironmentDetails:
         assert details["domain"] == "agent" and details["description"] == "Desc"
         assert details["value"] == "The value"
         assert details["resources_servers"] == ["my_rs"]
-        assert details["agent"] == "simple_agent"
+        assert details["agents"] == ["simple_agent"]
         assert details["datasets"] == ["train", "example"]
+
+    def test_skips_datasets_that_are_not_a_list(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.registry import read_environment_details
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("env_agent:\n  responses_api_agents:\n    simple_agent:\n      datasets: 1\n")
+
+        details = read_environment_details(cfg)
+
+        assert details["agents"] == ["simple_agent"]
+        assert details["datasets"] == []

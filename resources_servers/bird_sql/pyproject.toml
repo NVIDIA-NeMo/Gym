@@ -7,6 +7,10 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
+    # Spark dialect: pyspark runs the model's SQL; sqlglot checks it is a single SELECT/WITH. Both are imported
+    # only when `dialect: spark`; the dialect also needs a JDK 17 on the machine (see benchmarks/birdbench/README.md).
+    "pyspark>=3.5,<4",
+    "sqlglot",
 ]
 
 [tool.uv]

@@ -69,7 +69,9 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | `.gym_followup_sentinel.<job ID>` | The job ID of the sentinel queued for that job's successor. |
 | `.gym_driver_failure.<job ID>` | The failure kind that job's driver left when it failed in a way the next job would repeat. |
 | `.gym_fresh_restart.<job ID>` | Written by a job that restarted the run fresh after `server_start_failed`; the next job does not restart it again. |
-| `.gym_chain_incomplete` | Why the chain stopped before the run finished: no eligible retries, the walltime cap, a cancel, a typed driver failure, a refused follow-up submission (`follow_up_submission_refused`), unknown accounting, or a complete run without its required export receipt. A chain that continues removes it, and so does a segment that completes the run. |
+| `.gym_chain_incomplete` | Why the chain stopped before the run finished (the stopping job also logs how many rollouts are open, from the coverage report's `open` count): no eligible retries, the walltime cap, a cancel, a typed driver failure, a refused follow-up submission (`follow_up_submission_refused`), unknown accounting, or a complete run without its required export receipt. A chain that continues removes it, and so does a segment that completes the run. |
+
+`job-allocations.jsonl` records the Slurm allocations of the run for GPU-hour accounting: one JSON line per allocation incarnation of every job of the run (segments, successors and sentinels, each requeue separately), from `sacct`. Each job appends every incarnation that has ended and has no line yet, once it has queued its successor; a job that ends with nothing after it to record it (a stop, a complete run, an idle sentinel, the segment that ends the chain) also appends its own, as of its exit, with `"ended": false`. A line has `job_id`, `restarts` (the incarnation), `state`, `start_epoch_s` and `end_epoch_s` (Unix seconds, `null` when the job never started or has not ended), `elapsed_s`, `nodes`, `node_list`, `alloc_tres`, `gpus` (the `gres/gpu` count of `alloc_tres`, `null` when absent), `ended`, `recorded_at` and `source` (`sacct`). Take the GPU-hours of an incarnation as `gpus * elapsed_s / 3600`, from its `"ended": true` line when there is one. Recording is best-effort: its `sacct` queries end within 30 seconds, and when `sacct` does not answer nothing is written for that job and a later job adds it; an incarnation that no later job saw has no line.
 
 ## Recover from saved evidence
 
@@ -165,31 +167,34 @@ Without `--recover`, ordinary `gym eval resubmit` keeps its existing explicit-re
 
 
 Recovery uses the shared outcome policy for eligible failures. The Python `recover(...,
-outcome_policy=RecoveryOutcomePolicyConfig(...))` API accepts partial failure-kind and HTTP-status overrides.
+outcome_policy=RecoveryOutcomePolicyConfig(...))` API accepts partial HTTP-status, failure-kind and failure-class action overrides, in that priority order before the default action.
 `retry` permits another episode only within the saved attempt and chain budgets; `verify` re-verifies a saved
 judge answer, and `fail` leaves it ungraded. Settled results and terminal failures are never reopened.
 Mixed decisions stop when the executor cannot honor them separately. Saved-answer re-verification still
 requires an executor that supports it. A benchmark config sets the same policy under its `resumable` mapping as
-`recovery_outcome_policy` (`by_failure_kind`, `by_status_code`, `default_action`; unnamed entries keep their defaults;
+`recovery_outcome_policy` (`by_failure_kind`, `by_status_code`, `by_failure_class`, `default_action`; unnamed entries keep their defaults;
 a mistake fails at config load as `invalid recovery_outcome_policy: <field>: <problem>`). The run saves it in
 `resolved-config.yaml`, its continuations use it, and a change between inspection and dispatch refuses the resubmit.
 An explicit Python `outcome_policy` replaces the config section as a whole; there is no CLI flag. The inspection
 reports the policy in force as `outcome_policy` with its `source` (`default`, `config` or `python`). The policy decides
-what is retriable and never changes evaluation health.
+what is retriable. Its `classification` subsection supplies the shared rules used by recovery, the health gate and health metrics. Action overrides do not change a failure's class. A class already saved with a result remains authoritative.
 
 `--max-response-failure-fraction` and `--max-trial-failure-fraction` are validated and reported under `criteria`
 with `applied: false`; they do not change the verdict. The gate's only health verdict is evaluation health, at the
 fixed limit of a strict fraction below `0.02`, before rounding, which `criteria.evaluation` reports; response and
-trial failures are reported by cause under `failures`. The fault classes are the shared `MODEL_FAULT_KINDS` and
-`SERVER_FAULT_KINDS` of `nemo_gym/core/failure_kinds.py`; a policy-model response timeout is the model's fault by
+trial failures are reported by cause under `failures`. The shared `FailureClass` mapping in
+`nemo_gym/core/failure_kinds.py` assigns `model`, `evaluation` (including infrastructure), or `unknown`; a policy-model response timeout is the model's fault by
 default, and `--policy-timeout-counts-as-model false` (`policy_timeout_counts_as_model`, reported under
 `criteria.evaluation`) counts it as a server fault for a self-hosted evaluation. None of this changes rewards or retry
-policy. A positive trial
+policy. A trial failure classified as `unknown` makes the gate `UNVERIFIED`. The report keeps these failures
+in its `unknown` bucket; `server_kinds` identifies the server subcategory within evaluation failures. A positive trial
 result requires observed coverage of every expected identity. Supported paths join invocation, selected response, model operations, client-executed function-tool results,
 and observed programmatic grading bound to the saved result. Unsupported paths, missing grading or runtime
 observations, and unjoined recovered failures remain unknown. Recovery NOOP is separate from acceptance and tracking delivery.
 
 
 The live and post-run tracking paths export the same saved-evidence health snapshot under `health/response`, `health/trial`, and separate model/grading recovery namespaces. Always check the current `known` metric before interpreting a `passed` value or rate: `known=0` means unknown and resets `passed=0` (not passed, not a classified failure); older count and rate values remain historical. Trial `counts_known=0` labels a known failure from a lower bound; its `failed_lower_bound` and `failure_rate_lower_bound` are not exact counts. These facts do not certify tracking delivery or replace the gate's evaluation health verdict.
+
+`health/trial/unclassified` counts trial failures whose class is `unknown`. It is separate from missing coverage: either can prevent a health verdict, but a recovered failure beside a complete result is not itself an unclassified trial.
 
 These exported health flags use the fixed strict 2% limit; no recovery command applies a custom threshold. Upstream recovery includes observed model HTTP operations, including judge calls; grading recovery is a separate joined projection. These counters overlap and must not be summed.

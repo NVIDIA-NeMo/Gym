@@ -29,6 +29,20 @@ from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 ensure_bird_sql()
 ```
 
+## Spark SQL dialect (experimental)
+
+Set `dialect: spark` for a model that writes Spark SQL. Its query runs on a local PySpark
+copy of the databases, while the BIRD gold query still runs, untouched, on the original
+SQLite database; only the two result sets are compared (floats rounded, dates as strings).
+No gold SQL is transpiled. Only a single `SELECT`/`WITH` model query is executed (anything
+else scores as a pred error) so the shared warehouse cannot be modified, and a timed-out
+query has its Spark job cancelled.
+
+On first startup each SQLite database is written to Parquet under
+`<bird_sql_dir>/spark_warehouse/` and registered as a Spark database named after its
+`db_id`. Requires a JDK 17 plus `pyspark`, `sqlglot`, `pandas` and `pyarrow` (see
+`benchmarks/birdbench/README.md`); the default SQLite dialect needs none of them.
+
 ## Example usage
 
 ### Running servers
