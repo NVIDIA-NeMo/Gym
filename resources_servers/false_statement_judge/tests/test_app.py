@@ -31,13 +31,14 @@ from httpx import ASGITransport, AsyncClient
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    FailureReportRow,
+    NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.verification import judge_failsafe
 from resources_servers.false_statement_judge.app import (
     FalseStatementJudgeConfig,
@@ -485,6 +486,45 @@ async def test_truncated_judge_with_points_retains_score_but_grade_is_unconfirme
     [invocation] = row["ng_verifier_invocations"]
     [operation] = invocation["grading_operations"]
     assert operation["outcome"] == "unknown"
+    assert operation["result_binding_sha256"]
+    [dependency] = operation["dependencies"]
+    assert dependency["response_id"] == payload["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "extra_fields", "expected_outcome"),
+    [
+        ("repetition", {}, "unknown"),
+        ("stop", {"native_finish_reason": "repetition"}, "unknown"),
+        ("stop", {"stop_reason": "repetition_detected"}, "unknown"),
+        ("stop", {"stop_reason": 0}, "completed"),
+        ("stop", {"stop_reason": 11}, "completed"),
+        ("stop", {"stop_reason": "stop_sequence"}, "completed"),
+        ("stop", {"native_finish_reason": "provider_stop"}, "completed"),
+    ],
+)
+async def test_chat_judge_completion_observes_only_known_repetition_causes(
+    finish_reason: str, extra_fields: dict[str, str | int], expected_outcome: str
+) -> None:
+    payload = _chat_payload("<points>2</points>")
+    payload["choices"][0].update(finish_reason=finish_reason, **extra_fields)
+    [choice] = NeMoGymChatCompletion.model_validate(payload).choices
+    assert choice.finish_reason == "stop"
+    if finish_reason == "repetition":
+        assert choice.native_finish_reason == "repetition"
+    for key, value in extra_fields.items():
+        assert getattr(choice, key) == value
+        assert type(getattr(choice, key)) is type(value)
+    server = _server_with_post(payload, use_chat=True)
+    body = _request()
+    row = await _verify_route(server, body)
+    assert row["reward"] == 1.0
+    assert row["judge_points"] == 2
+    assert row["response"] == body.response.model_dump(mode="json")
+    [invocation] = row["ng_verifier_invocations"]
+    [operation] = invocation["grading_operations"]
+    assert operation["outcome"] == expected_outcome
     assert operation["result_binding_sha256"]
     [dependency] = operation["dependencies"]
     assert dependency["response_id"] == payload["id"]

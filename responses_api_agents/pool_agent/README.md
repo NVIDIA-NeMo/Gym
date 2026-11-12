@@ -5,7 +5,9 @@ coordinates resource preparation, agent execution, verification, and cleanup.
 Pool runs its own tools and calls a Gym Model Server for inference.
 
 [configs/pool_agent.yaml](configs/pool_agent.yaml) defines the agent defaults.
-The adapter supports evaluation; token IDs and logprobs are not available for training.
+Training token-ID capture is off by default. Model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Configure and run
 
@@ -177,6 +179,6 @@ Run the shared lifecycle tests on Linux to exercise process supervision and clea
 
 ```bash
 python -m pytest tests/unit_tests/agents/test_sandbox_session.py \
-  tests/unit_tests/test_sandbox_supervisor_client.py \
-  tests/unit_tests/test_process_supervisor.py -q -o addopts=''
+  tests/unit_tests/agents/test_sandbox_supervisor_client.py \
+  tests/unit_tests/agents/test_process_supervisor.py -q -o addopts=''
 ```

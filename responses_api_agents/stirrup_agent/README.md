@@ -9,10 +9,18 @@ It is benchmark-agnostic: the task prompt, the task tools and the sandbox come f
 Stirrup runs only in agent sessions, seeded by an environment server with these grants:
 
 - `sandbox_access`: the task sandbox, owned by the resources server. Without it, the agent starts its own sandbox from
-  `sandbox_provider` and `sandbox_config`. At seed, the agent installs the server's Stirrup version in a venv outside
-  the working directory and stages `sandbox_runner.py` with the modules it imports.
+  `sandbox_provider` and `sandbox_config`. At seed, the agent uploads a Python runtime with the server's Stirrup
+  version, built on the agent's host, to a directory outside the working directory, and stages `sandbox_runner.py`
+  with the modules it imports. The sandbox needs no network access or Python of its own.
 - At most one `direct_http` tool access: the resources server's routes and the session cookies. A request with `tools`
   needs it.
+
+The sandbox must be x86_64 or aarch64 Linux with glibc 2.28 or newer, `bash`, and `tar` with gzip. musl images, such as
+Alpine, and older glibc are not supported: `imageio-ffmpeg` publishes no musllinux wheel, and the Pillow version in
+`pyproject.toml` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
+`sandbox_python` in Gym's `cache_dir`. Building needs the Python package index and the python-build-standalone
+releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python
+build can be given the file in that cache directory.
 
 The activation (`/ng-rollout/<id>/v1/responses`) runs `sandbox_runner.py` in the sandbox under Gym's process
 supervisor. The runner builds Stirrup's messages from `responses_create_params.input` and gives the model:
@@ -37,13 +45,13 @@ episode.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `model_server` | required | The policy model. |
-| `agent_max_turns` | `250` | Turn cap for the agent loop. |
+| `agent_max_turns` | `250` | Turn cap for the agent loop. A run that uses every turn without a finish call answers `status: incomplete` with `metadata.stop_reason: max_turns`. |
 | `concurrency` | `32` | Maximum concurrent episodes. |
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
 | `code_exec` | `true` | Whether the model gets the `code_exec` shell tool. Off when the request's tools are the only tools the task allows (EnterpriseOps-Gym). |
-| `sandbox_install_timeout_seconds` | `900` | Bound on installing the runtime in the sandbox. |
-| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
+| `sandbox_install_timeout_seconds` | `900` | Bound on building, uploading and installing the runtime at seed. |
+| `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode; a request's `metadata.agent_timeout_sec` (as Harbor task rows carry) can shorten it, never extend it, and the response metadata records the applied `agent_timeout_sec`. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
 
@@ -83,7 +91,7 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `min_completion_tokens` (client) | `1024` | Target per-call completion floor. The hard cap always applies, and the approximate estimate keeps this floor even when it exceeds the context. Agents that write a whole script or deliverable in one tool call may need a higher floor: a 1024-token completion cannot reliably hold one. |
 | `prompt_estimator_truncate_history_thinking` (client) | `None` | Estimator-only. When `True`, the character estimate drops completed reasoning from assistant turns before the last user turn, as Nemotron's template does. It is never sent to the provider and never changes the recorded history. |
 | `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
-| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and raises instead of replacing the history with an unusable summary. |
+| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
@@ -93,5 +101,5 @@ to vLLM.
 ## Licensing
 
 - **Code**: Apache License 2.0 (see repository `LICENSE`).
-- **Dependencies**: `stirrup` (Apache 2.0). See `requirements.txt` and the top-level `pyproject.toml` for full
+- **Dependencies**: `stirrup` (Apache 2.0). See `pyproject.toml` and the top-level `pyproject.toml` for full
   attribution.

@@ -249,7 +249,7 @@ Tradeoffs of LLM judges include extra latency and cost, non-determinism unless y
 
 - **Policy model:** the model being trained/evaluated to produce task outputs.
 - **Judge model:** a second model used inside `verify()` for scoring.
-- **Resources server:** the environment server that manages state, executes tools, formats tool results into messages for the model, and runs verification to produce a reward.
+- **Resources Server:** the server that manages state, executes tools, formats tool results into messages for the model, and runs verification to produce a reward.
 - **Verifier metadata:** task-specific fields passed from JSONL into `verify()`.
 - **Internal judge call:** call to a configured NeMo Gym model server through `/v1/responses`.
 - **External judge call:** direct OpenAI-compatible call (often `/v1/chat/completions`) to another endpoint.
@@ -359,7 +359,7 @@ Judge-only recovery requires a supported reverification path. On a manifest-back
 Custom handlers must catch both forms. This replaces catching only `JudgeError` around judge calls; that exception remains supported for parser-declared failures. The tuple also includes other Gym failures, so preserve the selector and re-raise unrelated events:
 
 ```python
-from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, is_judge_failure
 
 try:
     judge_response = await call_judge(...)

@@ -16,9 +16,11 @@ import logging
 import re
 import sys
 import textwrap
+import threading
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -47,6 +49,7 @@ from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
     AmbiguousAgentRenameError,
+    AmbiguousResourcesRenameError,
     BaseServerConfig,
     ConfigError,
     ConfigInterpolationError,
@@ -66,7 +69,6 @@ from nemo_gym.config.config_types import (
     maybe_get_server_instance_config,
 )
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.orchestration.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (
@@ -93,6 +95,7 @@ def _installed_version(distribution: str) -> Optional[str]:
 ray_version = _installed_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
+_SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
@@ -110,6 +113,8 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+H2_PING_SIDECAR_KEY_NAME = "sidecar"
+COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
@@ -118,6 +123,8 @@ DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
 SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME = "server_shutdown_timeout_seconds"
+# How long the Gym servers may take to become ready when the config sets no limit.
+DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS = 600
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
@@ -138,10 +145,15 @@ VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
+# Agents add the /ng-rollout/<id> prefix to model calls without capturing them, so model servers know the rollout.
+ROLLOUT_CORRELATION_KEY_NAME = "rollout_correlation"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
+# Set by a training framework whose rows carry model-call sampling values.
+# See ``nemo_gym/core/model_call_sampling.py``.
+MODEL_CALL_SAMPLING_BLOCK = "model_call_sampling"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -167,6 +179,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    COMPONENT_EXTRAS_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
@@ -188,8 +201,10 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
+    MODEL_CALL_SAMPLING_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -211,11 +226,17 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "browsecomp_agent",
         "claude_code_agent",
         "codex_agent",
+        "copilot_agent",
+        "droid_agent",
+        "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
+        "langgraph_agent",
         "kilocode_agent",
+        "mini_swe_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
         "openclaw_agent",
@@ -232,7 +253,14 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
 LEGACY_AGENT_SERVER_TYPE = "legacy_agent"
 # Kept when a single_agent_turn_legacy server falls back to a legacy_agent relay; the rest only applies to sessions.
-_LEGACY_RELAY_KEPT_KEYS = ("entrypoint", AGENT_SERVER_REF_KEY_NAME, "host", "port", "num_workers")
+_LEGACY_RELAY_KEPT_KEYS = (
+    "entrypoint",
+    AGENT_SERVER_REF_KEY_NAME,
+    "host",
+    "port",
+    "num_workers",
+    "uvicorn_reuse_port",
+)
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -312,6 +340,8 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Otherwise two dispatches would share one capture key.
 # The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
+# Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
+MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
@@ -890,15 +920,30 @@ Duplicate config paths:
         reference = self._resources_server_reference(server_config)
         return reference is not None and OmegaConf.is_missing(reference, "name")
 
+    def _agent_composition_sources(
+        self, instances: List[_AgentInstance], *, selected_agent: Optional[str] = None
+    ) -> List[_AgentInstance]:
+        """Include an explicitly selected model-only flavor without treating every null binding as unbound."""
+        return [
+            instance
+            for instance in instances
+            if self._is_unbound_agent(instance.server_config)
+            or (instance.name == selected_agent and instance.agent_type == "langgraph_agent")
+        ]
+
     def compose_unbound_agent(
-        self, global_config_dict: DictConfig, held_agent_overrides: Optional[DictConfig] = None
+        self,
+        global_config_dict: DictConfig,
+        held_agent_overrides: Optional[DictConfig] = None,
+        *,
+        selected_agent: Optional[str] = None,
     ) -> None:
         """Rehost every other agent instance on the config's unbound agent, then drop that agent.
 
         `held_agent_overrides` are command line overrides keyed by the name each instance is renamed to.
         """
         instances = self._agent_instances(global_config_dict)
-        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        sources = self._agent_composition_sources(instances, selected_agent=selected_agent)
         if not sources:
             return
 
@@ -946,7 +991,7 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
-            self._retarget_environment_servers(global_config_dict, renames)
+            self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
             if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
@@ -955,7 +1000,9 @@ Duplicate config paths:
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
 
     @staticmethod
-    def _retarget_environment_servers(global_config_dict: DictConfig, renames: dict[str, str]) -> None:
+    def _retarget_environment_servers(
+        global_config_dict: DictConfig, renames: dict[str, str], *, agent_type: Optional[str] = None
+    ) -> None:
         """Point each environment server at the agent composition put in place of the one it named.
 
         The server is named after the environment, not the agent, so a swap leaves its own name
@@ -967,12 +1014,16 @@ Duplicate config paths:
             servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
-            for server in servers.values():
+            for server_type, server in servers.items():
                 if not isinstance(server, DictConfig):
                     continue
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
+                        if agent_type == "langgraph_agent" and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE:
+                            # These graphs only call models; the environment still owns verification,
+                            # but must not grant resource tools the selected agent cannot consume.
+                            server["resources_tool_transports"] = []
 
     @staticmethod
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
@@ -1115,10 +1166,10 @@ Use the name the composed config reports."""
 the check."""
         )
 
-    def _composed_instance_names(self, config_dict: DictConfig) -> set:
+    def _composed_instance_names(self, config_dict: DictConfig, *, selected_agent: Optional[str] = None) -> set:
         """The instance names composition will produce, worked out before it runs."""
         instances = self._agent_instances(config_dict)
-        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        sources = self._agent_composition_sources(instances, selected_agent=selected_agent)
         if len(sources) != 1:
             return set()
         return {
@@ -1128,14 +1179,14 @@ the check."""
         }
 
     def _hold_back_composed_agent_overrides(
-        self, cli_global_config_dict: DictConfig, config_dict: DictConfig
+        self, cli_global_config_dict: DictConfig, config_dict: DictConfig, *, selected_agent: Optional[str] = None
     ) -> DictConfig:
         """Take command line overrides naming an instance composition is about to create out of the dict.
 
         That instance does not exist yet, so merging them now would build a partial server beside it.
         Returned to be applied to the composed agent instead.
         """
-        composed_names = self._composed_instance_names(config_dict)
+        composed_names = self._composed_instance_names(config_dict, selected_agent=selected_agent)
         held = OmegaConf.create({})
         for name in list(cli_global_config_dict.keys()):
             if name not in composed_names:
@@ -1272,24 +1323,35 @@ For example, on the command line:
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
+        original_resources = {
+            name
+            for name, instance in frozen_dict_config.items_ex(resolve=False)
+            if isinstance(instance, DictConfig)
+            and isinstance(instance.get(RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
+        }
         destinations: dict[str, list[str]] = defaultdict(list)
-        # Only a top-level move of an agent can retarget its environment server. Copies and
-        # nested inheritance do not rename the instance, and multiple destinations are ambiguous.
+        # Only a top-level move retargets an environment participant. Copies and
+        # nested inheritance keep the original binding; multiple destinations need an explicit choice.
         for name, value in frozen_dict_config.items_ex(resolve=False):
             source = None
             if isinstance(value, str) and value.startswith("${inherit_from:"):
                 source = value.removeprefix("${inherit_from:").removesuffix("}")
             elif isinstance(value, DictConfig) and not OmegaConf.is_missing(value, INHERIT_FROM_KEY_NAME):
                 source = value.get(INHERIT_FROM_KEY_NAME)
-            if isinstance(source, str) and source in original_agents:
+            if isinstance(source, str) and source in original_agents | original_resources:
                 destinations[source].append(name)
 
         with open_dict(dict_config):
             self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+            self._retarget_environment_resources(
+                dict_config,
+                {source: targets for source, targets in destinations.items() if source in original_resources},
+            )
             final_agents = {agent.name for agent in self._agent_instances(dict_config)}
             destinations = {
                 source: [target for target in targets if target in final_agents]
                 for source, targets in destinations.items()
+                if source in original_agents
             }
             renames = {
                 source: targets[0]
@@ -1305,6 +1367,51 @@ For example, on the command line:
                 self._raise_on_ambiguous_environment_agent_renames(dict_config, ambiguous)
             if renames:
                 self._retarget_environment_servers(dict_config, renames)
+
+    @staticmethod
+    def _retarget_environment_resources(dict_config: DictConfig, destinations: dict[str, list[str]]) -> None:
+        # The Environment Server owns its resources binding. Follow only a consumed resources
+        # instance, without consulting the agent's compatibility /run configuration.
+        destinations = {
+            source: [
+                target
+                for target in targets
+                if isinstance(dict_config.get(target), DictConfig)
+                and isinstance(dict_config[target].get(RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
+            ]
+            for source, targets in destinations.items()
+            if source not in dict_config
+        }
+        for name, instance in dict_config.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server_type, server in servers.items_ex(resolve=False):
+                if not isinstance(server, DictConfig):
+                    continue
+                for field, reference in server.items_ex(resolve=False):
+                    if not isinstance(reference, DictConfig):
+                        continue
+                    if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
+                        continue
+                    if reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME and not (
+                        field == "resources_server" and reference.get("type") is None
+                    ):
+                        continue
+                    source = reference.get("name")
+                    targets = destinations.get(source, [])
+                    if len(targets) == 1:
+                        reference["name"] = targets[0]
+                    elif len(targets) > 1:
+                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        raise AmbiguousResourcesRenameError(
+                            f"Resources server '{source}' was inherited into several names: "
+                            f"{', '.join(repr(target) for target in targets)}. "
+                            f"'{path}' still references '{source}'. "
+                            "Set this Environment Server's resources reference to the intended instance."
+                        )
 
     @staticmethod
     def _raise_on_ambiguous_environment_agent_renames(
@@ -1458,6 +1565,14 @@ For example, on the command line:
         # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
         OmegaConf.set_struct(cli_global_config_dict, False)
 
+        selected_agent = None
+        selected_config_path = cli_global_config_dict.pop("_selected_langgraph_config", None)
+        if selected_config_path:
+            selected_instances = self._agent_instances(_load_config_yaml(selected_config_path))
+            if len(selected_instances) != 1 or selected_instances[0].agent_type != "langgraph_agent":
+                raise AgentCompositionError("The selected LangGraph config must declare exactly one LangGraph agent.")
+            selected_agent = selected_instances[0].name
+
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
@@ -1497,7 +1612,9 @@ Pass each config with --config (it builds the list for you), e.g.:
         # An agent override naming an instance no config defines is addressed to one composition is about to
         # create, so it is held back from this merge, which has nowhere to put it, and applied there instead.
         held_agent_overrides = self._hold_back_composed_agent_overrides(
-            cli_global_config_dict, OmegaConf.merge(*extra_configs, initial_global_config_dict)
+            cli_global_config_dict,
+            OmegaConf.merge(*extra_configs, initial_global_config_dict),
+            selected_agent=selected_agent,
         )
         # Rebuilt rather than reused: the command line dict was trimmed after the early merge above.
         global_config_dict = OmegaConf.merge(
@@ -1515,7 +1632,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # missing-value check below (it removes the unbound agent instance that still carries '???').
         # NOTE(martas): this is the logic for legacy config structure. after migration
         # to environment servers, this should be updated.
-        self.compose_unbound_agent(global_config_dict, held_agent_overrides)
+        self.compose_unbound_agent(global_config_dict, held_agent_overrides, selected_agent=selected_agent)
         global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
@@ -1746,7 +1863,9 @@ Set the keys individually, in a config or as overrides, e.g.:
 
             # Bound server startup independently of model-endpoint readiness. Multi-worker
             # supervisors can otherwise replace a deterministically failing worker forever.
-            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+            global_config_dict.setdefault(
+                SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS
+            )
             global_config_dict.setdefault(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME, 1)
 
             # How long `gym env start` waits for the model endpoints named in the config to accept
@@ -1769,9 +1888,12 @@ Set the keys individually, in a config or as overrides, e.g.:
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
             # UV related configuration
-            # UV caching directory overrides to local folders, under the cache root.
+            # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a
+            # local folder under the cache root.
+            exported_uv_cache_dir = environ.get("UV_CACHE_DIR", "").strip()
             global_config_dict.setdefault(
-                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+                UV_CACHE_DIR_KEY_NAME,
+                exported_uv_cache_dir or str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv"),
             )
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
@@ -1875,6 +1997,24 @@ def reset_global_config_dict() -> None:
     """
     global _GLOBAL_CONFIG_DICT
     _GLOBAL_CONFIG_DICT = None
+
+
+@contextmanager
+def scoped_global_config_dict(global_config_dict: DictConfig) -> Iterator[None]:
+    """Make `global_config_dict` this process's global config inside the block, and restore the previous one after.
+
+    For a library caller whose code, such as a benchmark's prepare script, reads `get_global_config_dict()`
+    and must see the config it was given, not one resolved from the host program's command line. The global is
+    process-wide, so concurrent blocks are serialized.
+    """
+    global _GLOBAL_CONFIG_DICT
+    with _SCOPED_GLOBAL_CONFIG_LOCK:
+        previous = _GLOBAL_CONFIG_DICT
+        _GLOBAL_CONFIG_DICT = global_config_dict
+        try:
+            yield
+        finally:
+            _GLOBAL_CONFIG_DICT = previous
 
 
 def get_global_config_dict(

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import pytest
 
 from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED
-from nemo_gym.typed_exceptions import NgFailureEvent, route_reply_error
+from nemo_gym.core.typed_exceptions import NgFailureEvent, route_reply_error
 
 
 @contextmanager

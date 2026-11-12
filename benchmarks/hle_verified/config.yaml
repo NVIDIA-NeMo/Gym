@@ -14,6 +14,7 @@ hle_verified_equivalence_llm_judge_resources_server:
       judge_system_message: ""
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
+      judge_labels_case_insensitive: true
       judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
       response_extract_regex: null
       question_extract_regex: null
@@ -38,5 +39,8 @@ hle_verified_equivalence_llm_judge_environment_server:
   _inherit_from: equivalence_llm_judge_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: hle_verified_equivalence_llm_judge_resources_server
       agent_server:
         name: hle_verified_equivalence_llm_judge_simple_agent

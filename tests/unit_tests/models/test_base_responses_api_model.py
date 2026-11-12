@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 import orjson
 import pytest
-from fastapi import Body, FastAPI, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
@@ -28,7 +28,8 @@ from pydantic import BaseModel, Field
 from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.model_call_sampling import model_sampling_context
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -118,7 +119,7 @@ class TestBaseResponsesAPIModel:
         ("ModelCallRecord", "nemo_gym.trajectory.model_call_record"),
         ("read_model_call_records", "nemo_gym.rollouts.model_calls"),
         ("aggregate_model_call_metrics", "nemo_gym.rollouts.model_calls"),
-        ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode"),
+        ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode_context"),
         ("token_id_capture_config", "nemo_gym.models.token_capture.config:token_capture_config"),
     ],
 )
@@ -766,7 +767,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     from pydantic import BaseModel, ConfigDict
 
     from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -996,17 +997,36 @@ def test_capture_records_non_json_response_as_none(tmp_path):
 
 # --- base-agent correlation helpers ---
 def test_leading_rollout_prefix_round_trips_with_server_parser():
-    from nemo_gym.models.model_call_capture import _ROLLOUT_PATH_RE
+    from nemo_gym.core.correlation import parse_path
 
     assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
     assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
     assert rollout_path_prefix(None) == ""
 
     client_path = f"{rollout_path_prefix('task-7')}/v1/chat/completions"
-    match = _ROLLOUT_PATH_RE.match(client_path)
-    assert match is not None
-    assert match.group("rollout_id") == "task-7"
-    assert match.group("rest") == "/v1/chat/completions"
+    context, rest = parse_path(client_path)
+    assert context.capture_key == "task-7"
+    assert rest == "/v1/chat/completions"
+
+
+def test_a_model_root_url_carries_the_sampling_segment_last():
+    with model_sampling_context("values"):
+        assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1/ng-sampling/values"
+        assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/ng-sampling/values"
+        # A run's own values win over the request's; a URL shared across rollouts carries none.
+        assert (
+            apply_rollout_prefix("http://h:1", "r1", model_sampling="run")
+            == "http://h:1/ng-rollout/r1/ng-sampling/run"
+        )
+        assert apply_rollout_prefix("http://h:1", "r1", trace_context=False) == "http://h:1/ng-rollout/r1"
+        # An explicit segment applies even to a URL shared across rollouts, such as a sidecar's null.
+        assert (
+            apply_rollout_prefix("http://h:1", "r1", trace_context=False, model_sampling="null")
+            == "http://h:1/ng-rollout/r1/ng-sampling/null"
+        )
+    # Rollout prefixes for resources servers never carry it.
+    with model_sampling_context("values"):
+        assert rollout_path_prefix("r1") == "/ng-rollout/r1"
 
 
 def test_base_agent_resolve_model_base_url(monkeypatch):
@@ -1069,6 +1089,16 @@ def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
     assert disabled.base_url_for_run("http://h:1", body) == "http://h:1"
 
     assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/v1/responses"
+
+
+def test_base_agent_rollout_correlation_adds_the_prefix_without_capture():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+
+    agent = _make_base_agent({"rollout_correlation": True})
+
+    assert agent.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert agent.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
+    assert not agent._model_call_capture_enabled()
 
 
 def test_base_agent_propagates_explicit_token_capture_intent():
@@ -1369,7 +1399,7 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
@@ -1382,7 +1412,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
 
 
 def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     # Restarted index numbering derives the same id twice.
@@ -1397,7 +1427,7 @@ def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
 
 @pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
 def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
     if bad is None:
@@ -1411,7 +1441,7 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
     # The id becomes a path segment.
@@ -1436,6 +1466,114 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+
+
+_TRACEPARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+def test_a_named_prefix_with_a_trace_segment_routes_through_both_middlewares():
+    from nemo_gym.core.episode_context import current_rollout_id
+    from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
+
+    app = FastAPI()
+    seen = {}
+
+    @app.post("/v1/chat/completions")
+    async def _cc(request: Request) -> dict:
+        seen["rollout_id"] = current_rollout_id()
+        seen["traceparent"] = request.headers.get("traceparent")
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig())
+    install_trace_context_path(app)
+    path = (
+        f"/ng-rollout/3-0/ng-agent-instance/judge.2/training-token-capture/ng-trace/{_TRACEPARENT}/v1/chat/completions"
+    )
+
+    assert TestClient(app).post(path, json={}).status_code == 200
+    assert seen == {"rollout_id": "3-0", "traceparent": _TRACEPARENT}
+
+
+@pytest.mark.parametrize("with_trace_middleware", [False, True])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ng-rollout/3-0/training-token-capture/ng-agent-instance/judge/v1/chat/completions",
+        "/ng-rollout/3-0/ng-agent-instance/Judge/v1/chat/completions",
+    ],
+)
+def test_a_malformed_prefix_is_refused_with_404(path, with_trace_middleware):
+    from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig())
+    if with_trace_middleware:
+        install_trace_context_path(app)
+    response = TestClient(app).post(path, json={})
+
+    assert response.status_code == 404
+    assert path in response.json()["detail"]
+
+
+def test_a_redirect_keeps_a_named_capture_prefix():
+    from nemo_gym.models.model_call_capture import _preserve_capture_prefix_on_redirect
+
+    prefix = "/ng-rollout/3-0/ng-agent-instance/user/training-token-capture"
+    message = {"type": "http.response.start", "status": 307, "headers": [(b"location", b"/v1/responses/")]}
+
+    redirected = _preserve_capture_prefix_on_redirect(
+        message, capture_prefix=prefix, request_headers=[(b"host", b"testserver")]
+    )
+
+    assert dict(redirected["headers"])[b"location"] == f"{prefix}/v1/responses/".encode()
+
+
+@pytest.mark.parametrize("trace_segment", ["", f"/ng-trace/{_TRACEPARENT}"])
+def test_a_named_training_prefix_captures_tokens_and_keeps_the_full_prefix_on_redirect(tmp_path, trace_segment):
+    from fastapi.responses import RedirectResponse
+
+    from nemo_gym.core.episode_context import current_rollout_id
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+    from nemo_gym.models.token_capture.sink import current_capture_context
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
+    from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
+
+    app = FastAPI()
+    seen = {}
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        context = current_capture_context()
+        seen["rollout_id"] = current_rollout_id()
+        seen["capture_key"] = context.capture_key if context is not None else None
+        return {}
+
+    @app.post("/v1/moved")
+    async def _moved() -> RedirectResponse:
+        return RedirectResponse("/v1/chat/completions", status_code=307)
+
+    app.add_middleware(
+        _CaptureMiddleware,
+        store=None,
+        model_server_name="policy",
+        token_store=TokenCaptureStore(tmp_path),
+        token_capture_enabled=True,
+    )
+    install_trace_context_path(app)
+    client = TestClient(app)
+    prefix = "/ng-rollout/3-0/ng-agent-instance/judge/training-token-capture"
+
+    assert client.post(f"{prefix}{trace_segment}/v1/chat/completions", json={}).status_code == 200
+    assert seen == {"rollout_id": "3-0", "capture_key": "3-0"}, "the training segment after a name opens capture"
+
+    redirected = client.post(f"{prefix}{trace_segment}/v1/moved", json={}, follow_redirects=False)
+    assert redirected.status_code == 307
+    assert redirected.headers["location"] == f"{prefix}{trace_segment}/v1/chat/completions"
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):
@@ -1834,9 +1972,9 @@ def test_a_handled_upstream_error_reply_names_its_failure():
     original model failure as the final one."""
     from aiohttp import ClientResponseError
 
-    from nemo_gym.failure_transport import FailureHeader
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
     model = NgFailureEvent(
         boundary=FailureBoundary.MODEL,

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY, SandboxSpec
 from resources_servers.terminal_bench_4 import shared_logs as module
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
@@ -342,6 +342,7 @@ def test_logs_helper_uses_task_deployment_and_independent_role_mounts(
     assert cfg["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     assert cfg["opensandbox"]["connection"]["api_key"] == pool.upper() + "-credential"
     assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == pool
+    assert spec.metadata[PLACEMENT_GROUP_KEY] == env.build_spec().metadata[PLACEMENT_GROUP_KEY]
     assert spec.resources.gpu is None and not spec.env
     assert env.provider_config["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     env.shared_logs = logs

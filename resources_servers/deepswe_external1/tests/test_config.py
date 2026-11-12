@@ -8,9 +8,8 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, taskset_environment_server_name
 from nemo_gym.data import TrainDataProcessor
-from nemo_gym.rollouts import RolloutCollectionHelper
 
 
 def test_readme_collation_produces_rows_routable_by_the_documented_runtime(tmp_path: Path) -> None:
@@ -46,13 +45,15 @@ def test_readme_collation_produces_rows_routable_by_the_documented_runtime(tmp_p
     rows = [json.loads(line) for path in paths for line in path.read_text().splitlines()]
     assert len(rows) == 5
     runtime = config_for("gym env start")
-    RolloutCollectionHelper.resolve_task_sources(rows, runtime)
-    RolloutCollectionHelper._validate_agent_names(rows, runtime)
-    assert {row["agent_ref"]["name"] for row in rows} == {"deepswe_external1_opencode_sandboxed_agent"}
+    tasksets = {row["task_id"]["taskset"] for row in rows}
+    routes = {taskset_environment_server_name(runtime, taskset) for taskset in tasksets}
+    assert routes == {"deepswe_external1_opencode_single_agent_turn"}
+    environment = runtime["deepswe_external1_opencode_single_agent_turn"]["environment_servers"]["single_agent_turn"]
+    assert environment["agent_server"]["name"] in runtime
 
 
-def test_opencode_config_has_environment_server() -> None:
-    config_path = Path(__file__).resolve().parents[1] / "configs/deepswe_external1_opencode.yaml"
+def test_legacy_agent_config_keeps_the_relay() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "configs/deepswe_external1_opencode_legacy_agent.yaml"
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(

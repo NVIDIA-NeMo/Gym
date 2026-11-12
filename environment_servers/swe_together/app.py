@@ -58,8 +58,10 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     JUDGE_FAILED,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     verifier_invocation_context,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
@@ -75,10 +77,8 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    FailureBoundary,
+    handled_episode_failure,
 )
-from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -236,7 +236,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 failure.episode_evidence.update(
                     agent_close=agent_close,
                     agent_observations=agent_close.agent_observations if agent_close else None,
-                    trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    trajectory=agent_close.trajectory if agent_close else None,
                     cleanup_receipts=state.cleanup_receipts,
                 )
                 wire_reply = self.failure_response(request, failure)
@@ -363,10 +363,15 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 trajectory = await collect_judge_evidence(
                     trajectory, verification, self.server_client.global_config_dict, state.directory
                 )
-            await judge_cleanup.close()
-            await candidate_cleanup.close()
-            await runtime_cleanup.close()
-            await dependency_cleanup.close()
+            try:
+                await judge_cleanup.close()
+                await candidate_cleanup.close()
+                await runtime_cleanup.close()
+                await dependency_cleanup.close()
+            except Exception as error:
+                # The verdict is final. Final cleanup retries the open owners, and their expiry bounds any leak.
+                LOGGER.exception("SWE-Together cleanup failed after verification")
+                state.cleanup_receipts["post_verification_error"] = f"{type(error).__name__}: {error}"[:2000]
             response = SWETResponse(
                 episode_id=request.episode_id,
                 task_id=request.task.task_id,
@@ -376,7 +381,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -399,7 +404,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     "activations": activations,
                     "agent_close": agent_close,
                     "agent_observations": agent_close.agent_observations if agent_close else None,
-                    "trajectory": request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    "trajectory": agent_close.trajectory if agent_close else None,
                     "cleanup_receipts": state.cleanup_receipts,
                     "artifact_directory": str(state.directory),
                     "dependency_error": dependency,
@@ -460,8 +465,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     env=proxy_env,
                     files=proxy_files,
                     provider_options=options,
-                    metadata=state.runtime.metadata()
-                    | dict(sandbox_config.get("metadata", {}))
+                    metadata=state.runtime.metadata(dict(sandbox_config.get("metadata", {})))
                     | {
                         "benchmark": "swe-together",
                         "task_id": state.task.task_id,

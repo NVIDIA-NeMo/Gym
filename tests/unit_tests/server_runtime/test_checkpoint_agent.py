@@ -23,7 +23,7 @@ from nemo_gym.agents.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.agent import (
     AgentSessionParticipant,
     AgentSessionRecord,
@@ -660,7 +660,7 @@ async def test_a_retire_cut_short_keeps_the_session_until_its_activation_stops()
     assert hooks.retired == ["s"]
 
 
-async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_retry_frees_it() -> None:
+async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_retry_releases_it() -> None:
     release = asyncio.Event()
 
     class SlowRetireHooks(Hooks):
@@ -671,7 +671,7 @@ async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_
     hooks = SlowRetireHooks()
     participant = AgentSessionParticipant(hooks)
     episode_id = EpisodeId(rollout_id="r")
-    # Between activations: no task is running, so the retire goes straight to freeing the session.
+    # Between activations: no task is running, so the retire goes straight to releasing the session.
     participant.open_session("s", episode_id)
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(participant.retire(episode_id), 0.05)
@@ -839,7 +839,7 @@ async def test_a_close_after_a_retire_cut_short_does_not_cancel_the_activation_a
     await _until(lambda: participant._sessions["s"].closing)
     cleaned_up.set()
     await asyncio.wait_for(closing, 5)
-    # The retired session stays until a retried retire frees it.
+    # The retired session stays until a retried retire releases it.
     left_for_the_retire = participant.has_session("s")
     await participant.retire(episode_id)
 
@@ -995,11 +995,11 @@ class _SandboxAgent(SimpleResponsesAPIAgent):
         pass
 
     async def retire_agent_session(self, session_key: str) -> None:
-        self.events.append(f"freed {session_key}")
-        self._free_session(session_key)
+        self.events.append(f"released {session_key}")
+        self._release_retired_session(session_key)
 
 
-async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built() -> None:
+async def test_a_retire_waits_for_a_seed_in_progress_which_releases_what_it_built() -> None:
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     agent = _SandboxAgent(
@@ -1033,7 +1033,7 @@ async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built()
     assert not done
     assert retired.status_code == 200
     assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
-    assert agent.events == ["freed s", "retire replied"]
+    assert agent.events == ["released s", "retire replied"]
     assert "s" not in agent._session_records and not participant.has_session("s") and participant.ready()
 
 
@@ -1166,7 +1166,7 @@ class _RestartOnlySandboxAgent(_UnsupportedAgent):
         return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
 
-async def test_a_restart_only_retire_frees_its_rollout_s_sessions_and_waits_for_a_seed_in_progress() -> None:
+async def test_a_restart_only_retire_releases_its_rollout_s_sessions_and_waits_for_a_seed_in_progress() -> None:
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     agent = _RestartOnlySandboxAgent(
@@ -1265,7 +1265,7 @@ class _EpisodeClient(ServerClient):
     tool_calls: int = 0
 
     async def post(self, server_name: str, url_path: str, **kwargs: Any) -> Any:
-        from nemo_gym.core.episode import current_rollout_id
+        from nemo_gym.core.episode_context import current_rollout_id
 
         body = kwargs.get("json") or {}
         rollout = current_rollout_id()
@@ -1338,11 +1338,10 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
         SingleAgentTurnEnvironmentServerConfig,
     )
     from nemo_gym.config.config_types import AgentServerRef, ResourcesServerRef
-    from nemo_gym.core.episode import TaskId
+    from nemo_gym.core.episode_types import MaterializedTask, TaskId
     from nemo_gym.server_runtime._checkpoint import coordination
     from nemo_gym.server_runtime._checkpoint.control import install_participant
     from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
-    from nemo_gym.server_runtime.episode_types import MaterializedTask
     from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
     from tests.unit_tests.server_runtime.test_checkpoint_coordination import InProcessClient, Recorder
     from tests.unit_tests.server_runtime.test_checkpoint_resources import RestartOnlyServer, make_server, until

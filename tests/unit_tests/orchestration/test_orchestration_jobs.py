@@ -14,12 +14,9 @@
 # limitations under the License.
 
 import json
-import logging
-import os
 import subprocess
 import sys
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 import pytest
@@ -29,11 +26,12 @@ from pytest import MonkeyPatch
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.jobs import (
+    MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
     BenchmarkJob,
     SubmissionRecord,
-    installed_gym_commit,
+    benchmark_artifact_dirs,
     local_index_dir,
     new_gym_job_id,
 )
@@ -286,129 +284,6 @@ def test_submission_record_executor_is_not_closed_over_todays_executors():
     assert SubmissionRecord.load(json.loads(record.dumps())) == record
 
 
-class _Distribution:
-    def __init__(self, direct_url: dict | None) -> None:
-        self.direct_url = direct_url
-
-    def read_text(self, filename: str) -> str | None:
-        assert filename == "direct_url.json"
-        return None if self.direct_url is None else json.dumps(self.direct_url)
-
-
-def _install(monkeypatch: MonkeyPatch, direct_url: dict | None) -> None:
-    """What the distribution metadata says about the install; None for an index wheel."""
-    monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", lambda name: _Distribution(direct_url))
-
-
-def _not_installed(monkeypatch: MonkeyPatch) -> None:
-    def missing(name: str):
-        raise PackageNotFoundError(name)
-
-    monkeypatch.setattr("nemo_gym.orchestration.jobs.distribution", missing)
-
-
-def _running_from(monkeypatch: MonkeyPatch, package_dir: Path) -> None:
-    """Where the running nemo_gym package lives on disk."""
-    monkeypatch.setattr("nemo_gym.orchestration.jobs._PACKAGE_DIR", package_dir)
-
-
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "t",
-    "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "t",
-    "GIT_COMMITTER_EMAIL": "t@t",
-}
-
-
-def _checkout(repo: Path) -> tuple[Path, str]:
-    """A one-commit checkout tracking `nemo_gym/__init__.py`; returns (package dir, HEAD)."""
-    package_dir = repo / "nemo_gym"
-    package_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "nemo_gym/__init__.py"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True, env={**os.environ, **_GIT_IDENTITY}
-    )
-    head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-    return package_dir, head
-
-
-def test_installed_gym_commit_reads_a_git_install(tmp_path: Path, monkeypatch: MonkeyPatch):
-    """`pip install git+...@<sha>` records the sha in PEP 610 direct_url.json; the source is not consulted."""
-    _install(
-        monkeypatch,
-        {
-            "url": "https://github.com/NVIDIA-NeMo/gym.git",
-            "vcs_info": {"vcs": "git", "commit_id": "c" * 40, "requested_revision": "main"},
-        },
-    )
-    _running_from(monkeypatch, tmp_path / "site-packages" / "nemo_gym")
-    assert installed_gym_commit() == "c" * 40
-
-
-def test_installed_gym_commit_reads_a_clean_checkouts_head(tmp_path: Path, monkeypatch: MonkeyPatch):
-    """An editable install records no commit; the running package's checkout is asked instead."""
-    package_dir, head = _checkout(tmp_path)
-    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
-    _running_from(monkeypatch, package_dir)
-    assert installed_gym_commit() == head
-
-
-def test_installed_gym_commit_marks_a_dirty_checkout(tmp_path: Path, monkeypatch: MonkeyPatch):
-    """Uncommitted edits ran too, so the HEAD alone must not read as the Gym that ran."""
-    package_dir, head = _checkout(tmp_path)
-    (package_dir / "__init__.py").write_text("edited")
-    _install(monkeypatch, {"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
-    _running_from(monkeypatch, package_dir)
-    assert installed_gym_commit() == f"{head}-dirty"
-
-
-def test_installed_gym_commit_needs_no_distribution_metadata(tmp_path: Path, monkeypatch: MonkeyPatch):
-    """A source tree on sys.path without any install (no dist-info) still names its checkout."""
-    package_dir, head = _checkout(tmp_path)
-    _not_installed(monkeypatch)
-    _running_from(monkeypatch, package_dir)
-    assert installed_gym_commit() == head
-
-
-def test_installed_gym_commit_is_none_for_an_index_wheel(tmp_path: Path, monkeypatch: MonkeyPatch, caplog):
-    """A wheel from an index records no commit and lives in site-packages, tracked by no checkout."""
-    site = tmp_path / "site-packages" / "nemo_gym"
-    site.mkdir(parents=True)
-    (site / "__init__.py").write_text("")
-    _install(monkeypatch, None)
-    _running_from(monkeypatch, site)
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
-        assert installed_gym_commit() is None
-    assert "not tracked in a git checkout" in caplog.text
-
-
-def test_installed_gym_commit_ignores_a_checkout_the_venv_merely_sits_in(tmp_path: Path, monkeypatch: MonkeyPatch):
-    """A `.venv` inside a Gym clone must not report the clone's HEAD for a wheel installed into it."""
-    _checkout(tmp_path)
-    site = tmp_path / ".venv" / "site-packages" / "nemo_gym"
-    site.mkdir(parents=True)
-    (site / "__init__.py").write_text("")
-    _install(monkeypatch, None)
-    _running_from(monkeypatch, site)
-    assert installed_gym_commit() is None
-
-
-def test_installed_gym_commit_is_none_without_git(tmp_path: Path, monkeypatch: MonkeyPatch, caplog):
-    def no_git(*args, **kwargs):
-        raise FileNotFoundError("git")
-
-    monkeypatch.setattr("nemo_gym.orchestration.jobs.subprocess.run", no_git)
-    _install(monkeypatch, None)
-    _running_from(monkeypatch, tmp_path)
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
-        assert installed_gym_commit() is None
-    assert "git is not available" in caplog.text
-
-
 def test_a_record_written_before_gym_commit_still_loads():
     """Added with a default, as the module docstring requires of a same-version change."""
     old = json.loads(_record().dumps())
@@ -418,3 +293,111 @@ def test_a_record_written_before_gym_commit_still_loads():
 
     assert record.gym_commit is None
     assert record.schema_version == SCHEMA_VERSION
+
+
+def test_legacy_record_environment_remains_unknown():
+    record = _record()
+    assert record.environment is None
+    assert "environment" not in json.loads(record.dumps())
+    restored = SubmissionRecord.load(json.loads(record.dumps()))
+    assert restored.environment is None
+
+
+def test_submission_environment_records_names_not_values_and_preserves_updates(tmp_path, monkeypatch):
+    from nemo_gym.orchestration.jobs import SubmissionEnvironment
+
+    monkeypatch.setenv("SOURCE_KEY", "private-test-value")
+    raw = _submit_config(tmp_path).model_dump(mode="json")
+    raw["driver"]["env"] = {
+        "DEST_KEY": "host:SOURCE_KEY",
+        "RUNTIME_ONLY": "runtime:WORKER_KEY",
+        "LITERAL": "lit:host:NOT_A_REFERENCE",
+    }
+    config = SubmitConfig.model_validate(raw)
+    observation = BaseExecutor.submission_environment(
+        config, required_env=["FORWARDED_KEY"], forwarded_env=["FORWARDED_KEY", "FORWARDED_KEY"]
+    )
+    assert observation.required_env == ["FORWARDED_KEY", "SOURCE_KEY"]
+    assert observation.forwarded_env == ["FORWARDED_KEY"]
+    assert observation.telemetry.enabled is True  # actual resolved config default, not a legacy inference
+    assert observation.telemetry.token_env == "OTEL_TOKEN"
+    assert "private-test-value" not in observation.model_dump_json()
+    assert "NOT_A_REFERENCE" not in observation.model_dump_json() and "WORKER_KEY" not in observation.model_dump_json()
+    record = _record(environment=observation)
+    updated = record.with_benchmark(record.benchmarks[0].model_copy(update={"job_id": "new-job"}))
+    assert SubmissionRecord.load(json.loads(updated.dumps())).environment == observation
+    for bad in (
+        {"required_env": ["BAD=VALUE"], "forwarded_env": [], "telemetry": observation.telemetry},
+        {"required_env": [], "forwarded_env": [], "telemetry": {"token_env": "TOKEN"}},
+        {"required_env": [], "forwarded_env": [], "telemetry": observation.telemetry, "values": {"TOKEN": "x"}},
+    ):
+        with pytest.raises(ValueError):
+            SubmissionEnvironment.model_validate(bad)
+
+
+def test_persist_record_keeps_initial_environment_observation(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    observation = BaseExecutor.submission_environment(_submit_config(tmp_path), required_env=[], forwarded_env=[])
+    record = _record(environment=observation, run_dir=str(tmp_path / "run"))
+
+    class Executor(BaseExecutor):
+        def run(self, config, *, dry_run=False):
+            raise NotImplementedError
+
+        def resubmit(self, record, benchmark):
+            raise NotImplementedError
+
+    written = {}
+    updated = record.with_benchmark(record.benchmarks[0].model_copy(update={"job_id": "successor"}))
+    Executor().persist_record(updated, lambda path, text: written.__setitem__(path, text))
+    assert SubmissionRecord.load(json.loads(next(iter(written.values())))).environment == observation
+    index = tmp_path / "cache/nemo-gym/jobs" / (record.gym_job_id + ".json")
+    assert SubmissionRecord.load(json.loads(index.read_text())).environment == observation
+
+
+def test_submission_environment_includes_nested_service_host_references(tmp_path, monkeypatch):
+    for name in ("ROUTER_KEY", "PREFILL_KEY", "DECODE_KEY"):
+        monkeypatch.setenv(name, "private-nested-test-value")
+    raw = _submit_config(tmp_path).model_dump(mode="json")
+    raw["services"] = {
+        "policy": {
+            "type": "vllm_pd",
+            "container": "test/image",
+            "model": "test/model",
+            "env": {"API_KEY": "host:ROUTER_KEY"},
+            "prefill": {"env": {"API_KEY": "host:PREFILL_KEY"}},
+            "decode": {"env": {"API_KEY": "host:DECODE_KEY"}},
+        }
+    }
+    raw["compute"]["hsg"]["node_pools"] = {
+        name: {"partition": "test", "gpus_per_node": 1} for name in ("prefill", "decode")
+    }
+    for name in ("prefill", "decode"):
+        raw["services"]["policy"][name]["node_pool"] = name
+    config = SubmitConfig.model_validate(raw)
+    observation = BaseExecutor.submission_environment(config, required_env=[], forwarded_env=[])
+    assert observation.required_env == ["DECODE_KEY", "PREFILL_KEY", "ROUTER_KEY"]
+    assert observation.forwarded_env == []
+    assert "private-nested-test-value" not in observation.model_dump_json()
+
+
+def test_benchmark_artifact_dirs_resolves_a_job_id_and_a_run_directory(tmp_path: Path, monkeypatch: MonkeyPatch):
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.local_index_dir", lambda: tmp_path)
+    record = _record()
+    (tmp_path / f"{record.gym_job_id}.json").write_text(record.dumps())
+    expected = {"gsm8k": Path("/jobs/gym-job-20260909T100203Z-abc123/gsm8k/artifacts")}
+
+    assert benchmark_artifact_dirs(record.gym_job_id) == expected
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / MANIFEST_NAME).write_text(record.dumps())
+    assert benchmark_artifact_dirs(str(run_dir)) == expected
+
+
+def test_benchmark_artifact_dirs_is_none_without_a_record(tmp_path: Path, monkeypatch: MonkeyPatch):
+    monkeypatch.setattr("nemo_gym.orchestration.jobs.local_index_dir", lambda: tmp_path)
+    (tmp_path / "run").mkdir()
+
+    assert benchmark_artifact_dirs("gym-job-unknown") is None
+    assert benchmark_artifact_dirs(str(tmp_path / "run")) is None

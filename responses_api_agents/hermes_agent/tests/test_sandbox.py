@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlparse
 
 import pytest
 from fastapi import HTTPException
@@ -22,8 +23,10 @@ from nemo_gym.agents import (
     STOP_REQUEST_FILE,
     AgentCloseSessionRequest,
     AgentOutcomePolicyConfig,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     OutcomeAction,
+    SandboxPythonRuntime,
     SandboxSession,
     agent_outcome_policy,
     parse_cleanup_receipt,
@@ -59,9 +62,11 @@ def agent(monkeypatch):
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
 
-    monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
-    )
+    def resolve_model_base_url(*args, trained=True):
+        # As in a run that carries sampling values: a role the framework does not train gets null.
+        return f"http://model:8000/ng-rollout/episode-a1{'' if trained else '/ng-sampling/null'}/v1"
+
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", resolve_model_base_url)
     return result
 
 
@@ -362,7 +367,7 @@ async def test_close_failure_keeps_session_for_retry(
 
 @pytest.mark.parametrize("receipt", [None, {"cleanup_confirmed": False, "error": "cleanup failed"}])
 @pytest.mark.parametrize("launch_started,cleanup", [(False, None), (True, None), (True, {"cleanup_confirmed": True})])
-async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, receipt, launch_started, cleanup):
+async def test_owned_close_falls_back_to_stop_when_exec_unavailable(agent, state, receipt, launch_started, cleanup):
     state.session.owns_sandbox = True
     state.session.launch_started = launch_started
     state.session.cleanup = cleanup
@@ -385,7 +390,8 @@ async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, rece
         state.session.sandbox.exec.assert_awaited_once()
         assert download_json.await_count >= 1
     else:
-        state.session.sandbox.exec.assert_not_awaited()
+        state.session.sandbox.exec.assert_awaited_once()
+        assert "mv /tmp/nemo-gym-hermes-sessions/session" in state.session.sandbox.exec.await_args.args[0]
         download_json.assert_not_awaited()
 
 
@@ -403,7 +409,7 @@ async def test_owned_stop_failure_keeps_close_retryable(agent, state, failure):
     assert agent._session_records["session"].state is state
     assert agent._session_records["session"].closing
     assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
-    assert "session" not in agent._closed_session_records
+    assert "session" not in agent._fenced_session_records
     response = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == response
     assert state.session.sandbox.stop.await_count == 2
@@ -752,6 +758,74 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         await asyncio.gather(state.task, return_exceptions=True)
 
 
+async def test_seed_import_check_ignores_task_hermes_home(tmp_path):
+    private_home, task_home = tmp_path / "runtime-home", tmp_path / "task-home"
+    private_home.mkdir()
+    task_home.mkdir()
+    code = (
+        hermes_sandbox._HERMES_RUNTIME.import_check + "; import json; print(json.dumps(str(run_agent._hermes_home)))"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-c",
+        code,
+        cwd=task_home,
+        env={**os.environ, "HOME": str(private_home), "HERMES_HOME": str(task_home / ".hermes")},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert json.loads(stdout.splitlines()[-1]) == str(private_home / ".hermes")
+    assert not list(task_home.iterdir())
+
+
+async def test_the_runner_ignores_task_python_settings_but_preserves_them_for_tools(state, tmp_path, monkeypatch):
+    harness, task = tmp_path / "harness", tmp_path / "task"
+    harness.mkdir()
+    task.mkdir()
+    (harness / "sibling.py").write_text("VALUE = 'trusted'\n")
+    # These modules must not be imported by the harness, even when PYTHONPATH includes the task.
+    (task / "json.py").write_text("raise RuntimeError('task json imported')\n")
+    (task / "task_only.py").write_text("VALUE = 'task'\n")
+    runner = harness / "runner.py"
+    runner.write_text(
+        "import importlib.util, json, subprocess, sibling\n"
+        "assert sibling.VALUE == 'trusted'\n"
+        "assert importlib.util.find_spec('task_only') is None\n"
+        "print(json.dumps(subprocess.check_output(['python'], text=True).splitlines()))\n"
+    )
+    task_python = task / "python"
+    task_python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "task-python" "$HOME" "$PATH" "$VIRTUAL_ENV" '
+        '"$PYTHONPATH" "$PYTHONHOME" "$PYTHONUSERBASE"\npwd\n'
+    )
+    task_python.chmod(0o755)
+    task_env = {
+        "HOME": str(task / "home"),
+        "PATH": f"{task}:{os.environ['PATH']}",
+        "VIRTUAL_ENV": str(task / "venv"),
+        "PYTHONPATH": str(task),
+        "PYTHONHOME": str(task / "not-a-python-install"),
+        "PYTHONUSERBASE": str(task / "user-site"),
+    }
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_RUNNER", str(runner))
+    state.upload_json = AsyncMock()
+    command = await state.stage_activation({})
+    process = await asyncio.create_subprocess_exec(
+        *command.argv,
+        cwd=task,
+        env={**os.environ, **task_env},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert json.loads(stdout) == ["task-python", *task_env.values(), str(task)]
+
+
 def test_cleanup_and_runtime_are_independent():
     cleanup = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
     assert parse_cleanup_receipt(cleanup) == cleanup
@@ -990,6 +1064,8 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     agent.server_client.post.assert_not_called()
     payload = state.upload_json.await_args.args[1]
     assert payload["model_base_url"] == "http://model:8000/ng-rollout/episode-a1/v1"
+    # Compression is a side call no training framework trains, so it keeps its own sampling.
+    assert payload["compression_model_base_url"] == "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
 
 
 @pytest.mark.parametrize(
@@ -1430,12 +1506,11 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr("nemo_gym.agents.utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=RuntimeError("installer failed")))
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
-    failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
-    # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
-    # remove session files.
-    sandbox.exec.side_effect = [ok, failed, ok, failed, ok]
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="")
+    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok]
     cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
     if cleanup_fails:
         cleanup.side_effect = RuntimeError("cleanup unavailable")
@@ -1475,8 +1550,10 @@ async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, 
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
 
-    with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true"):
+    # The same URL fails every attempt, so the seed is refused with a final 422 rather than a retried 500.
+    with pytest.raises(AgentSeedRejectedError, match=r"\+\+use_absolute_ip=true") as refused:
         await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
 
     # Refused before the sandbox was connected or anything uploaded, so there is nothing to clean up.
     create_provider.assert_not_called()
@@ -1484,6 +1561,157 @@ async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, 
     state.session.sandbox.upload.assert_not_awaited()
     state.session.sandbox.exec.assert_not_awaited()
     assert all(record.state is None for record in agent._session_records.values())
+
+
+def _owned_seed_with_search_grant(state) -> AgentSeedSessionRequest:
+    body = state.request.model_copy(deep=True)
+    body.sandbox_access = None
+    body.tool_accesses = [
+        {
+            "kind": "mcp",
+            "name": "episode_search_tools",
+            "required": False,
+            "connection": {"url": "http://resources.example:7000/mcp", "headers": {"x-session": "token"}},
+        }
+    ]
+    return AgentSeedSessionRequest.model_validate(body.model_dump(mode="json"))
+
+
+def _owned_seed_with_several_grants(state, *, required: bool = True) -> AgentSeedSessionRequest:
+    """A required and an optional MCP grant on different hosts, plus an optional direct HTTP grant Hermes skips."""
+    body = _owned_seed_with_search_grant(state).model_dump(mode="json")
+    body["tool_accesses"] = [
+        {
+            "kind": "mcp",
+            "name": "episode_search_tools",
+            "required": required,
+            "connection": {"url": "http://resources.example:7000/mcp", "headers": {"x-session": "token"}},
+        },
+        {
+            "kind": "mcp",
+            "name": "episode_docs",
+            "required": False,
+            "connection": {"url": "http://docs.example:9000/mcp", "headers": {"x-session": "token"}},
+        },
+        {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+    ]
+    return AgentSeedSessionRequest.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    ("network_access", "required", "allowed"),
+    [
+        ("inherit", True, None),
+        # A required grant under model_only is refused (see the refusal test), so this case grants optional ones.
+        ("model_only", False, ["model"]),
+        ("model_and_tools", True, ["config.example", "docs.example", "model", "resources.example"]),
+    ],
+)
+async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(
+    agent, state, monkeypatch, network_access, required, allowed
+):
+    import responses_api_agents.hermes_agent.app as module
+
+    # A grant declared in the agent's configuration counts as well as the episode's.
+    agent.config = HermesAgentConfig.model_validate(
+        {
+            **agent.config.model_dump(),
+            "tool_accesses": [
+                {
+                    "kind": "mcp",
+                    "name": "configured_tools",
+                    "required": False,
+                    "connection": {"url": "http://config.example:8100/mcp", "headers": {"x-session": "token"}},
+                }
+            ],
+        }
+    )
+    agent.config.sandbox_provider = "runtime"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = network_access
+    sandbox = state.session.sandbox
+    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    monkeypatch.setattr(
+        module, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    )
+
+    body = _owned_seed_with_several_grants(state, required=required)
+    await agent.seed_agent_session(SimpleNamespace(session={}), body)
+
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+        # The runner's payload calls the Model Server at the URL whose host the policy allows.
+        payload_url = agent.resolve_model_base_url(agent.config.model_server.name, body.episode_id.capture_key)
+        assert urlparse(payload_url).hostname in allowed
+
+
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(agent, state, monkeypatch, network_access):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.network_access = network_access
+    factory = MagicMock(return_value=state.session.sandbox)
+    factory.connect = AsyncMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    create_provider = MagicMock()
+    monkeypatch.setattr(module, "create_provider", create_provider)
+
+    with TestClient(agent.setup_webserver()) as client:
+        rejected = client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json"))
+
+    assert rejected.status_code == 422, rejected.text
+    assert "borrowed" in rejected.json()["detail"]
+    create_provider.assert_not_called()
+    factory.connect.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("provider", "provider_options", "required", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, False, "not both"),
+        ("docker", {}, False, "requires the OpenSandbox network-policy provider"),
+        # model_only blocks a required grant's host, so the session would fail only after the sandbox exists.
+        ("opensandbox", {}, True, "model_and_tools"),
+    ],
+    ids=["explicit_policy", "provider_without_policies", "required_grant"],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(
+    agent, state, monkeypatch, provider, provider_options, required, reason
+):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.sandbox_provider = "runtime"
+    agent.config.sandbox_config = {
+        "image": "test-image",
+        "workdir": "/workspace",
+        "provider_options": provider_options,
+    }
+    agent.config.network_access = "model_only"
+    factory = MagicMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    # A non-host-network provider keeps the model URL check from refusing first.
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    created = SimpleNamespace(name=provider, aclose=AsyncMock())
+    monkeypatch.setattr(module, "create_provider", lambda config: created)
+    body = _owned_seed_with_several_grants(state, required=required)
+
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
+    factory.assert_not_called()
+    created.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
 
 
 async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monkeypatch, caplog):

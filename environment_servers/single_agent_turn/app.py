@@ -3,12 +3,14 @@
 
 """Resources-backed single-agent environment server."""
 
+import asyncio
+from collections.abc import Sequence
 from typing import Any, Literal
 from uuid import uuid4
-from warnings import warn
 
 from aiohttp import ClientConnectorError
 from fastapi import Body
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from nemo_gym.agents import (
@@ -22,8 +24,9 @@ from nemo_gym.agents import (
     AgentSeedSessionResponse,
     OutcomeAction,
     agent_outcome_policy,
+    confirmed_policy_response_timeout,
+    verification_failure_fields,
 )
-from nemo_gym.agents.agent_outcome import confirmed_policy_response_timeout
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
@@ -36,20 +39,29 @@ from nemo_gym.config import (
     ResourcesServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.core import MODEL_REQUEST_ERROR, NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    FailureBoundary,
+    FailureReport,
+    FailureReportRow,
+    ModelFailureDetails,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NgFailureEvent,
+    RequestFailureLog,
+    model_sampling_path_segment,
+    rebuild_failure,
+)
+from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
     DirectHTTPToolAccess,
-    FailureBoundary,
-    FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
-    ModelFailureDetails,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
@@ -59,10 +71,11 @@ from nemo_gym.server_runtime import (
     StepType,
     ToolAccess,
     dependency_failure,
+    handled_episode_failure,
+    is_handled_episode_failure,
     seed_restarts,
     seed_verify_step_type,
 )
-from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -71,8 +84,14 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     VerifierInvocation,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+class ToolSession(BaseModel):
+    """An episode's session on a tool server, a Resources server whose MCP tools the agent is granted."""
+
+    session_id: str
+    cookies: dict[str, str] = Field(default_factory=dict)
 
 
 class SessionHandles(BaseModel):
@@ -85,11 +104,16 @@ class SessionHandles(BaseModel):
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
     resources_verify_step_type: StepType = "wait"
     observation: str | None = None
+    # Keyed by tool server name.
+    tool_sessions: dict[str, ToolSession] = Field(default_factory=dict)
 
     @classmethod
-    def new(cls) -> "SessionHandles":
+    def new(cls, tool_servers: Sequence[str] = ()) -> "SessionHandles":
+        # Every session ID is assigned before seeding, so a lost seed reply cannot hide one from cleanup.
         return cls(
-            resources_session_id=f"resources-session-{uuid4().hex}", agent_session_id=f"agent-session-{uuid4().hex}"
+            resources_session_id=f"resources-session-{uuid4().hex}",
+            agent_session_id=f"agent-session-{uuid4().hex}",
+            tool_sessions={name: ToolSession(session_id=f"tool-session-{uuid4().hex}") for name in tool_servers},
         )
 
 
@@ -98,11 +122,14 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Unset, the bound agent's own resources server, the one its /run used under the legacy_agent relay.
-    resources_server: ResourcesServerRef | None = None
+    resources_server: ResourcesServerRef
     agent_server: AgentServerRef
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
+    # Resources servers, such as a search server, whose MCP tools every episode grants the agent besides its own
+    # Resources server's. Unset, the bound agent's own `tool_servers`, so an agent moved off the legacy_agent relay
+    # keeps the tool servers its /run seeded.
+    tool_servers: list[ResourcesServerRef] | None = None
     # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
@@ -115,50 +142,75 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
     checkpoint_mode = "exported"
+    applies_model_sampling = True
     response_model = SingleAgentTurnResponse
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        # Fail at startup, not on the first episode, when there is no resources server to bind.
-        self.resources_server_name
+        # Fail at startup, not on the first episode, when a tool server cannot serve its tools.
+        for name in self.tool_server_names:
+            self._check_tool_server(name, self.config.resources_server.name)
+
+    def _check_tool_server(self, name: str, resources_server_name: str) -> None:
+        server = f"Environment Server {self.config.name!r}"
+        instance = self.server_client.global_config_dict.get(name)
+        if instance is None:
+            raise ValueError(f"{server} grants tools of an unknown server {name!r}")
+        if not isinstance(instance, (dict, DictConfig)) or "resources_servers" not in instance:
+            raise ValueError(f"{server} grants tools of {name!r}, which is not a Resources server")
+        if name == resources_server_name:
+            raise ValueError(
+                f"{server} lists its Resources server {name!r} as a tool server; "
+                "grant its tools with resources_tool_transports: [mcp] instead"
+            )
+        if not get_first_server_config_dict(self.server_client.global_config_dict, name).get("expose_tools_over_mcp"):
+            raise ValueError(
+                f"{server} grants the MCP tools of {name!r}, which does not serve them; "
+                "set expose_tools_over_mcp: true on that server"
+            )
 
     @property
-    def resources_server_name(self) -> str:
-        """The resources server this server binds: its own setting, or else its agent's."""
-        if self.config.resources_server is not None:
-            return self.config.resources_server.name
-        agent_config = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.agent_server.name,
-        )
-        name = (agent_config.get("resources_server") or {}).get("name")
-        if not name:
-            raise ValueError(
-                f"Environment Server {self.config.name!r} sets no resources_server, "
-                f"and its agent {self.config.agent_server.name!r} names none either."
+    def tool_server_names(self) -> list[str]:
+        """The tool servers each episode seeds and grants: this server's own setting, or else its agent's."""
+        servers = self.config.tool_servers
+        if servers is None:
+            agent_config = get_first_server_config_dict(
+                self.server_client.global_config_dict,
+                self.config.agent_server.name,
             )
-        return name
+            raw = agent_config.get("tool_servers") or []
+            servers = TypeAdapter(list[ResourcesServerRef]).validate_python(
+                OmegaConf.to_container(raw, resolve=True) if OmegaConf.is_config(raw) else raw
+            )
+        return [server.name for server in servers]
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Forward to the resources server, which owns verification in this protocol.
+        """Combine the resources server's benchmark metrics with performance metrics for the whole batch.
 
-        Without verification there is nothing to aggregate, so a skipping server returns empty metrics.
+        Rollout collection derives each row's ``ng_perf`` from agent observations and model-call captures.
+        Performance metrics count every supplied rollout, including masked and unverified ones.
+        The resources server owns scoring, task-specific weighting, and headline metric selection.
         """
-        if self._skipped_verification_reward() is not None:
-            warn(
-                "Skipping aggregate metrics because skip_verification=True; "
-                "use disable_aggregation=True to avoid writing aggregate metric files.",
-                RuntimeWarning,
-                stacklevel=2,
+        metrics = AggregateMetrics()
+        if self._skipped_verification_reward() is None:
+            # Keep benchmark evidence (including response.usage) intact. The reserved
+            # performance summary is reduced here once, independently of resources server filtering.
+            benchmark_body = body.model_copy(
+                update={
+                    "verify_responses": [
+                        {key: value for key, value in row.items() if key != "ng_perf"} for row in body.verify_responses
+                    ]
+                }
             )
-            return AggregateMetrics()
-        response = await self.server_client.post(
-            server_name=self.resources_server_name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_boundary_failure(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/aggregate_metrics",
+                json=benchmark_body,
+            )
+            await raise_boundary_failure(response)
+            metrics = AggregateMetrics.model_validate(await get_response_json(response))
+        # The reduction is CPU-bound over every row, so keep it off the server's event loop.
+        return await asyncio.to_thread(add_perf_metrics, metrics, body.verify_responses)
 
     async def run(
         self,
@@ -173,7 +225,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         handles = (
             SessionHandles.model_validate(continuation["handles"])
             if "handles" in continuation
-            else SessionHandles.new()
+            else SessionHandles.new(self.tool_server_names)
         )
         agent_response = (
             NeMoGymResponse.model_validate(continuation["response"]) if continuation.get("response") else None
@@ -195,6 +247,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         resources_cleanup = cleanup.register_cleanup(
             "resources session", lambda: self._close_resources(request, handles)
         )
+        for name in handles.tool_sessions:
+            cleanup.register_cleanup(
+                f"{name} tool session", lambda name=name: self._close_tool_session(request, handles, name)
+            )
         closed_agent: list[AgentCloseSessionResponse] = []
 
         async def close_agent() -> None:
@@ -214,8 +270,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             # Seeds are idempotent for a caller-assigned session ID, so a checkpoint need not wait for them.
             async with self.checkpoint_step(request, "replay"):
                 seed = await self._seed_resources(request, handles)
+                tool_accesses = await self._seed_tool_servers(request, handles)
                 agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
-                await self._seed_agent(request, handles, seed)
+                await self._seed_agent(request, handles, seed, tool_accesses)
             stage = "invoke_agent"
 
         if stage == "invoke_agent":
@@ -374,7 +431,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         task_input = request.task.task_input
         try:
             seed_http_response = await self.server_client.post(
-                server_name=self.resources_server_name,
+                server_name=self.config.resources_server.name,
                 url_path="/seed_session",
                 json=ResourcesSeedSessionRequest(
                     resources_session_id=handles.resources_session_id,
@@ -401,10 +458,70 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         handles.observation = seed.observation
         return seed
 
+    async def _seed_tool_servers(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> list[ToolAccess]:
+        """Seed the episode's session on each tool server and grant the agent its MCP tools."""
+        task_input = request.task.task_input
+        tool_accesses: list[ToolAccess] = []
+        for name, session in handles.tool_sessions.items():
+            try:
+                seed_http_response = await self.server_client.post(
+                    server_name=name,
+                    url_path="/seed_session",
+                    json=ResourcesSeedSessionRequest(
+                        resources_session_id=session.session_id,
+                        episode_id=request.episode_id,
+                        task_id=request.task.task_id,
+                        task_data=task_input.task_data,
+                    ).model_dump(mode="json"),
+                )
+                await raise_boundary_failure(seed_http_response)
+                session.cookies = _cookies(seed_http_response)
+                seed = ResourcesSeedSessionResponse.model_validate(await get_response_json(seed_http_response))
+                if seed.resources_session_id != session.session_id:
+                    raise ValueError(f"Tool server {name!r} seed returned a different resources_session_id")
+            except Exception as error:
+                raise dependency_failure(
+                    error,
+                    stage="seed",
+                ) from error
+            tool_accesses.append(self._mcp_tool_access(name, seed))
+        if tool_accesses:
+            # As for the Resources Server's own MCP grant: each token names this attempt.
+            await self.checkpoint_restart(request)
+        return tool_accesses
+
+    def _mcp_tool_access(self, server_name: str, seed: ResourcesSeedSessionResponse) -> MCPToolAccess:
+        """The required MCP grant for a seeded session on `server_name`."""
+        if seed.resources_tools is None:
+            raise self._failure(
+                stage="seed",
+                failure_reason=f"Seed of {server_name!r} did not return requested MCP metadata",
+                terminal=True,
+            )
+        if seed.resources_tools.transport != "http":
+            raise self._failure(
+                stage="seed",
+                failure_reason=f"Unsupported MCP transport of {server_name!r}: {seed.resources_tools.transport}",
+                terminal=True,
+            )
+        base_url = self.server_client._resolve_base_url(server_name).rstrip("/")
+        return MCPToolAccess(
+            name=seed.resources_tools.server_name,
+            required=True,
+            connection=MCPStreamableHTTPConnection(
+                url=f"{base_url}/{seed.resources_tools.url_path.lstrip('/')}",
+                headers=seed.resources_tools.headers,
+            ),
+        )
+
     async def _seed_agent(
-        self, request: SingleAgentTurnRequest, handles: "SessionHandles", seed: ResourcesSeedSessionResponse
+        self,
+        request: SingleAgentTurnRequest,
+        handles: "SessionHandles",
+        seed: ResourcesSeedSessionResponse,
+        tool_server_accesses: Sequence[ToolAccess] = (),
     ) -> None:
-        resources_base_url = self.server_client._resolve_base_url(self.resources_server_name).rstrip("/")
+        resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
         if "direct_http" in self.config.resources_tool_transports:
             # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
@@ -417,40 +534,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             tool_accesses.append(
                 DirectHTTPToolAccess(
-                    name=f"{self.resources_server_name}.direct_http",
+                    name=f"{self.config.resources_server.name}.direct_http",
                     required=True,
                     base_url=tools_base_url,
                     cookies=handles.resources_cookies,
                 )
             )
         if "mcp" in self.config.resources_tool_transports:
-            if seed.resources_tools is None:
-                raise self._failure(
-                    stage="seed",
-                    failure_reason="Resources seed did not return requested MCP metadata",
-                    terminal=True,
-                )
-            if seed.resources_tools.transport != "http":
-                raise self._failure(
-                    stage="seed",
-                    failure_reason=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
-                    terminal=True,
-                )
-            url_path = seed.resources_tools.url_path.lstrip("/")
-            tool_accesses.append(
-                MCPToolAccess(
-                    name=seed.resources_tools.server_name,
-                    required=True,
-                    connection=MCPStreamableHTTPConnection(
-                        url=f"{resources_base_url}/{url_path}",
-                        headers=seed.resources_tools.headers,
-                    ),
-                )
-            )
+            tool_accesses.append(self._mcp_tool_access(self.config.resources_server.name, seed))
             # The MCP session token names this attempt, and the Resources Server refuses it once a restore replaces it.
             # An agent continued from a checkpoint would keep that token and see every tool call fail.
             # So the episode restarts from its input after a crash, and its new seed mints a token for the new attempt.
             await self.checkpoint_restart(request)
+        tool_accesses.extend(tool_server_accesses)
 
         try:
             agent_create_http_response = await self.server_client.post(
@@ -502,7 +598,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 handles.agent_cookies = response_cookies
-            return NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            # Capture body-carried observations before close or outcome policy can bypass verification.
+            # They are diagnostics, not a selection of the episode's terminal failure.
+            saved = (response.model_extra or {}).get("failure_report")
+            log = RequestFailureLog.current()
+            if saved is not None and log is not None:
+                log.add_saved(saved)
+            return response
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -533,14 +636,25 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return close
 
     async def _close_resources(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> None:
+        await self._close_session(
+            request, self.config.resources_server.name, handles.resources_session_id, handles.resources_cookies
+        )
+
+    async def _close_tool_session(self, request: SingleAgentTurnRequest, handles: "SessionHandles", name: str) -> None:
+        session = handles.tool_sessions[name]
+        await self._close_session(request, name, session.session_id, session.cookies)
+
+    async def _close_session(
+        self, request: SingleAgentTurnRequest, server_name: str, session_id: str, cookies: dict[str, str]
+    ) -> None:
         close_response = await self.server_client.post(
-            server_name=self.resources_server_name,
+            server_name=server_name,
             url_path="/close_session",
             json=ResourcesCloseSessionRequest(
-                resources_session_id=handles.resources_session_id,
+                resources_session_id=session_id,
                 episode_id=request.episode_id,
             ).model_dump(mode="json"),
-            cookies=handles.resources_cookies,
+            cookies=cookies,
         )
         await raise_boundary_failure(close_response)
 
@@ -555,10 +669,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         verifier_invocations = None
         try:
             verify_http_response = await self.server_client.post(
-                server_name=self.resources_server_name,
+                server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response),
+                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
@@ -701,7 +815,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        # The agent is the one the training framework trains, so its model calls carry the episode's values.
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(

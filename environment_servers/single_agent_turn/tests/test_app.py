@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import re
 import runpy
 import time
 from copy import deepcopy
@@ -33,14 +34,25 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
+    ModelCallSampling,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     TaskId,
+    encode_model_sampling,
 )
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -51,8 +63,7 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.typed_exceptions import NgFailureEvent
-from tests.single_agent_turn_helpers import _agent_response, _Client, _environment_server, _request, _Response
+from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,6 +77,30 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPa
     )
 
     assert namespace["app"] is worker_app
+
+
+@pytest.mark.parametrize("token_capture", [False, True])
+def test_the_trained_agents_activation_carries_the_episodes_sampling_values(token_capture: bool) -> None:
+    environment_server, _ = _environment_server(token_capture=token_capture)
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+    capture = "/training-token-capture" if token_capture else ""
+
+    path = environment_server._agent_responses_path(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/rollout-a2{capture}/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+    # Gym-only evaluation sends no values and gets the path it always had.
+    assert environment_server._agent_responses_path(_request()) == f"/ng-rollout/rollout-a2{capture}/v1/responses"
+
+
+async def test_an_episode_with_sampling_values_runs_and_its_agent_carries_them() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+    result = await environment_server.run_request(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert result.failure is None, result.failure
+    assert result.result.reward == 1.0
+    assert client.calls[2][1] == f"/ng-rollout/rollout-a2/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
 
 
 async def test_single_agent_turn_with_direct_resources_tools() -> None:
@@ -138,6 +173,180 @@ async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_
     assert mcp_access.connection.headers == {"Authorization": "Bearer scoped"}
     assert client.calls[1][2]["json"]["tool_accesses"][1]["kind"] == "mcp"
     assert client.calls[1][2]["json"]["tool_accesses"][1]["connection"]["transport"] == "streamable_http"
+
+
+_SEARCH = {"type": "resources_servers", "name": "search"}
+
+
+def _search_environment_server(
+    *,
+    agent_tool_servers: list[dict] | None = None,
+    own_tool_servers: list[dict] | None = None,
+    search_seed: dict | None = None,
+) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
+    """An environment server whose episodes may also seed a `search` tool server, granted as `tavily`."""
+    configured, client = _environment_server()
+    client.global_config_dict["search"] = {
+        "resources_servers": {
+            "tavily_search": {"host": "search", "port": 8000, "entrypoint": "app.py", "expose_tools_over_mcp": True}
+        }
+    }
+    if agent_tool_servers is not None:
+        client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": agent_tool_servers})
+    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**configured.config.model_dump(), "tool_servers": own_tool_servers}
+    )
+    # The search seed and close replies; the fake client echoes each request's session ID.
+    client.responses.insert(
+        1,
+        _Response(
+            search_seed
+            or {
+                "resources_session_id": "search-session",
+                "resources_tools": {"server_name": "tavily", "headers": {"Authorization": "Bearer search-token"}},
+            }
+        ),
+    )
+    client.responses.append(_Response({"resources_session_id": "search-session"}))
+    return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
+
+
+def _agent_seed_body(client: _Client) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest.model_validate(
+        next(kwargs["json"] for _, path, kwargs in client.calls if path == "/v1/agent_sessions")
+    )
+
+
+async def test_the_agents_tool_servers_are_seeded_granted_and_closed() -> None:
+    # An agent moved off the legacy_agent relay keeps the tool servers its /run seeded.
+    environment_server, client = _search_environment_server(agent_tool_servers=[_SEARCH])
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    search_calls = [(path, kwargs) for server, path, kwargs in client.calls if server == "search"]
+    assert [path for path, _ in search_calls] == ["/seed_session", "/close_session"]
+    seed_body = ResourcesSeedSessionRequest.model_validate(search_calls[0][1]["json"])
+    close_body = ResourcesCloseSessionRequest.model_validate(search_calls[1][1]["json"])
+    resources_seed_body = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"])
+    assert seed_body.resources_session_id == close_body.resources_session_id
+    assert seed_body.resources_session_id != resources_seed_body.resources_session_id
+    # The tool server sees the episode's task, as its Resources server does.
+    assert seed_body.task_data == {"instance_id": "task"}
+    assert search_calls[1][1]["cookies"] == {"session": "cookie-value"}
+    [access] = _agent_seed_body(client).tool_accesses
+    assert access.name == "tavily"
+    assert access.required is True
+    assert str(access.connection.url) == "http://search:8000/mcp"
+    assert access.connection.headers == {"Authorization": "Bearer search-token"}
+
+
+async def test_tool_server_grants_follow_the_resources_servers_own() -> None:
+    environment_server, client = _search_environment_server(own_tool_servers=[_SEARCH])
+    environment_server.config.resources_tool_transports = ["direct_http"]
+
+    await environment_server.run_request(_request())
+
+    assert [access.name for access in _agent_seed_body(client).tool_accesses] == ["resources.direct_http", "tavily"]
+
+
+async def test_the_environment_servers_own_tool_servers_override_the_agents() -> None:
+    environment_server, client = _search_environment_server(agent_tool_servers=[_SEARCH], own_tool_servers=[])
+    del client.responses[1], client.responses[-1]
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert not [server for server, _, _ in client.calls if server == "search"]
+    assert _agent_seed_body(client).tool_accesses == []
+
+
+async def test_a_tool_server_without_mcp_tools_fails_the_episode_and_closes_its_session() -> None:
+    environment_server, client = _search_environment_server(
+        agent_tool_servers=[_SEARCH], search_seed={"resources_session_id": "search-session"}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is not None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "'search' did not return requested MCP metadata" in result.failure.failure_reason
+    assert ("search", "/close_session") in [(server, path) for server, path, _ in client.calls]
+    assert "/v1/agent_sessions" not in [path for _, path, _ in client.calls]
+
+
+async def test_an_episode_that_grants_tool_server_tools_is_a_restart() -> None:
+    environment_server, client = _search_environment_server(agent_tool_servers=[_SEARCH])
+    restarts: list[list[str]] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append([path for _, path, _ in client.calls])
+
+    object.__setattr__(environment_server, "checkpoint_restart", record_restart)
+    await environment_server.run_request(_request())
+
+    # Marked before the agent receives the token, as for the Resources Server's own MCP grant.
+    assert restarts == [["/seed_session", "/seed_session"]]
+
+
+def test_a_server_that_grants_an_unknown_tool_server_does_not_start() -> None:
+    configured, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": [_SEARCH]})
+
+    with pytest.raises(ValueError, match="unknown server 'search'"):
+        SingleAgentTurnEnvironmentServer(config=configured.config, server_client=client)
+
+
+@pytest.mark.parametrize("listed_by", ["environment", "agent"])
+@pytest.mark.parametrize(
+    ("name", "block", "error"),
+    [
+        (
+            "policy_model",
+            {"responses_api_models": {"vllm_model": {"host": "model", "port": 8000}}},
+            "'policy_model', which is not a Resources server",
+        ),
+        (
+            "other_agent",
+            {"responses_api_agents": {"simple_agent": {"host": "agent", "port": 8000}}},
+            "'other_agent', which is not a Resources server",
+        ),
+        (
+            "search",
+            {"resources_servers": {"tavily_search": {"host": "search", "port": 8000}}},
+            "'search', which does not serve them; set expose_tools_over_mcp: true",
+        ),
+        ("resources", None, "lists its Resources server 'resources' as a tool server"),
+    ],
+)
+def test_a_server_that_grants_tools_no_resources_server_serves_does_not_start(
+    listed_by: str, name: str, block: dict | None, error: str
+) -> None:
+    configured, client = _environment_server()
+    if block is not None:
+        client.global_config_dict[name] = block
+    ref = {"type": "resources_servers", "name": name}
+    config = configured.config
+    if listed_by == "environment":
+        config = SingleAgentTurnEnvironmentServerConfig.model_validate({**config.model_dump(), "tool_servers": [ref]})
+    else:
+        client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": [ref]})
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+
+
+@pytest.mark.parametrize("listed_by", ["environment", "agent"])
+def test_a_server_that_grants_an_mcp_resources_servers_tools_starts(listed_by: str) -> None:
+    own_tool_servers = [_SEARCH] if listed_by == "environment" else None
+    agent_tool_servers = [_SEARCH] if listed_by == "agent" else None
+
+    environment_server, _ = _search_environment_server(
+        own_tool_servers=own_tool_servers, agent_tool_servers=agent_tool_servers
+    )
+
+    assert environment_server.tool_server_names == ["search"]
 
 
 async def test_token_capture_keeps_prefixed_twin_route() -> None:
@@ -322,7 +531,7 @@ async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_
     ("stage", "path", "status", "detail"),
     [
         ("agent", "/ng-rollout/rollout-a2/v1/responses", 422, "Agent turn refused: unsupported tool_choice"),
-        ("cleanup", "/v1/agent_sessions/close", 409, "Agent close receipt has expired"),
+        ("cleanup", "/v1/agent_sessions/close", 409, "Agent session is no longer available"),
         ("verification", "/verify", 422, "verify refused: task_data is missing expected_answer"),
     ],
 )
@@ -470,41 +679,197 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
 ) -> None:
     environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
 
-    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
-        metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+    metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 
     assert metrics == AggregateMetrics()
     assert client.calls == []
 
 
-def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:
-    return SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
+@pytest.mark.parametrize(
+    ("skip_verification", "masked"),
+    # Masking is never read when verification is skipped, so that case needs no masked twin.
+    [(False, False), (False, True), (True, False)],
+)
+async def test_aggregation_reports_execution_metrics_with_or_without_valid_scores(
+    skip_verification: bool, masked: bool
+) -> None:
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": skip_verification}, agent={}
+    )
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": 0.0,
+            "mask_sample": masked,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": 2},
+        }
+        for repeat, tokens in enumerate((10, 30))
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows)
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [10, 30]
+    assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
+    assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == 20
+    assert result.agent_metrics["ci_low_95_across_repeats/mean_completion_tokens"] < 20
+    assert result.agent_metrics["ci_high_95_across_repeats/mean_completion_tokens"] > 20
+    if skip_verification:
+        assert client.calls == []
+        assert result.key_metrics == {}
+        assert result.group_level_metrics == []
+    else:
+        assert client.calls[0][2]["json"] == {"verify_responses": benchmark_rows}
+        assert result.key_metrics == benchmark.key_metrics
+    if skip_verification or masked:
+        assert "mean/reward" not in result.agent_metrics
+
+
+async def test_aggregation_preserves_benchmark_hooks_and_existing_execution_statistics() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": float(task == repeat),
+            "response": {"usage": {"output_tokens": 1000}, "metrics": {"latency": 42}},
+            "num_steps_passed": int(task == repeat),
+            "num_steps_total": task + 1,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": turns},
+        }
+        for task, repeat, tokens, turns in ((0, 0, 4, 1), (1, 0, 8, 2), (0, 1, 12, 2), (1, 1, 20, 4))
+    ]
+
+    def subtask_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+        passed = sum(row["num_steps_passed"] for task in tasks for row in task)
+        total = sum(row["num_steps_total"] for task in tasks for row in task)
+        return {"subtask_accuracy": passed / total}
+
+    hooks = {
+        "compute_metrics_fn": subtask_metrics,
+        "compute_repeat_metrics_fn": subtask_metrics,
+        "get_key_metrics_fn": lambda metrics: {"subtask_accuracy": metrics["subtask_accuracy"]},
+    }
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows, **hooks)
+    assert benchmark.perf_summary is None
+    body = AggregateMetricsRequest(verify_responses=rows)
+    original = body.model_dump_json()
+    for _ in range(2):
+        client.responses = [_Response(benchmark.model_dump())]
+        result = await environment_server.aggregate_metrics(body)
+        assert result == compute_aggregate_metrics(rows, **hooks)
+        assert result.key_metrics == {"subtask_accuracy": pytest.approx(1 / 3)}
+        assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [6, 16]
+        assert result.perf_summary["total_completion_tokens"] == 44
+        assert body.model_dump_json() == original
+        assert client.calls[-1][0:2] == ("resources", "/aggregate_metrics")
+        assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_aggregation_preserves_custom_repeat_rows_without_indices(indexed: bool) -> None:
+    environment_server, client = _environment_server()
+    repeat_rows = [{"sample_count": 2, "mean/reward": 0.5}]
+    if indexed:
+        repeat_rows.append({ROLLOUT_INDEX_KEY_NAME: 1, "sample_count": 1})
+    benchmark = AggregateMetrics(repeat_level_metrics=repeat_rows, key_metrics={"custom_score": 0.5})
+    client.responses = [_Response(benchmark.model_dump())]
+    rows = [{ROLLOUT_INDEX_KEY_NAME: 0, "ng_perf": {"completion_tokens": 10}}]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.repeat_level_metrics == repeat_rows
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.perf_summary["total_completion_tokens"] == 10
+    assert "mean_across_repeats/mean_completion_tokens" not in result.agent_metrics
+
+
+async def test_aggregation_counts_execution_before_resources_filters_quality() -> None:
+    environment_server, client = _environment_server()
+    # A resources server override may select a stage with repeated task/repeat identities.
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": reward, "ng_perf": perf}
+        for reward, perf in ((0.0, {"completion_tokens": 10}), (1.0, {"completion_tokens": 30}))
+    ]
+    benchmark = compute_aggregate_metrics([{k: v for k, v in rows[1].items() if k != "ng_perf"}])
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.group_level_metrics == benchmark.group_level_metrics
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.agent_metrics["mean/reward"] == 1.0
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert result.repeat_level_metrics[0]["mean_completion_tokens"] == 20
+
+
+async def test_aggregation_withholds_observations_of_any_type_from_resources() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "ng_perf": None},
+        {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "ng_perf": "not-a-summary"},
+        {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+            "ng_perf": {"completion_tokens": 12, "num_turns": 3},
+        },
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    client.responses = [_Response(compute_aggregate_metrics(benchmark_rows).model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+    assert result.perf_summary["overall_observability_coverage"] == pytest.approx(1 / 3)
+    assert result.perf_summary["total_completion_tokens"] == 12
+    assert result.key_metrics["mean/reward"] == pytest.approx(2 / 3)
+
+
+async def test_aggregation_returns_resources_repeat_rows_as_published_when_nothing_was_observed() -> None:
+    environment_server, client = _environment_server()
+    published = AggregateMetrics(
+        agent_metrics={"mean/reward": 1.0},
+        key_metrics={"mean/reward": 1.0},
+        repeat_level_metrics=[{"mean/reward": 1.0}],
+    )
+    client.responses = [_Response(published.model_dump())]
+
+    result = await environment_server.aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
     )
 
+    assert result == published
 
-async def test_an_unset_resources_server_is_the_agents_own() -> None:
-    # A server that replaced a legacy_agent relay binds the resources server the agent's /run used.
-    configured, client = _environment_server(resources_tool_transports=["direct_http"])
+
+async def test_environment_resources_binding_is_independent_of_the_agents() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    environment_server = SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
 
     result = await environment_server.run_request(_request())
 
     assert result.result.reward == 1.0
-    resources_calls = [path for server, path, _ in client.calls if server == "agents_resources"]
+    resources_calls = [path for server, path, _ in client.calls if server == "resources"]
     assert resources_calls == ["/seed_session", "/verify", "/close_session"]
+    assert not any(server == "agents_resources" for server, _, _ in client.calls)
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert [access.name for access in create_body.tool_accesses] == ["agents_resources.direct_http"]
+    assert [access.name for access in create_body.tool_accesses] == ["resources.direct_http"]
 
 
-def test_a_server_whose_agent_names_no_resources_server_does_not_start() -> None:
-    configured, client = _environment_server()
+@pytest.mark.parametrize("resources", [{}, {"resources_server": None}])
+def test_environment_requires_its_own_resources_binding(resources: dict) -> None:
+    configured, _ = _environment_server()
+    config = configured.config.model_dump(exclude={"resources_server"})
 
-    with pytest.raises(ValueError, match="sets no resources_server"):
-        SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
+    with pytest.raises(ValidationError, match="resources_server"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate({**config, **resources})
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
@@ -1636,6 +2001,7 @@ async def test_seed_observation_is_appended_only_to_the_agent_request(
         **request.task.task_input.task_data,
         "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
         "response": _agent_response().model_dump(mode="json"),
+        "failure_report": None,
     }
     assert verify_call["cookies"] == {"session": "updated-cookie"}
     assert request.task.task_input.responses_create_params is params
