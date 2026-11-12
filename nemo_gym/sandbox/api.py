@@ -25,6 +25,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
@@ -43,12 +44,15 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
+    SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
     SupportsSandboxIndependentUploads,
+    SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     SupportsSandboxSidecars,
+    SupportsSandboxSnapshot,
     create_provider,
 )
 from nemo_gym.sandbox.resource_telemetry import (
@@ -560,12 +564,54 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
+    @property
+    def provider(self) -> SandboxProvider:
+        """The provider this sandbox runs on."""
+        return self._provider
+
+    @property
+    def owns_provider(self) -> bool:
+        """Whether ``stop()`` also closes the provider; false for a sandbox on a provider shared with others."""
+        return self._owns_provider
+
+    @property
+    def handle(self) -> SandboxHandle | None:
+        """The provider handle of a started or connected sandbox, or ``None`` before start and after stop."""
+        if self._handle is None or self._stopped:
+            return None
+        return self._handle
+
+    def checkpoint_exec_polling(self) -> AbstractContextManager[None]:
+        """Poll this sandbox's running commands for completion often while a harness in it stops for a checkpoint.
+
+        A no-op scope on providers without the capability. It changes how soon a command's end is seen, not
+        process signals, command deadlines or what a checkpoint waits for.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxCheckpointPolling):
+            return self._provider.checkpoint_exec_polling(handle)
+        return nullcontext()
+
+    def parked_exec_polling(self) -> AbstractContextManager[None]:
+        """Hold completion checks of this sandbox's commands while a harness in it is paused for a checkpoint.
+
+        A provider that polls command status stops asking a sandbox that a snapshot may leave unresponsive, and
+        asks again once the scope exits; other providers use a no-op scope. Do not wait inside the scope for a
+        command of this sandbox.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxParkedPolling):
+            return self._provider.parked_exec_polling(handle)
+        return nullcontext()
+
     async def start(
         self,
         spec: SandboxSpec | None = None,
         *,
+        snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -576,6 +622,14 @@ class AsyncSandbox:
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        if snapshot_id is not None and not isinstance(self._provider, SupportsSandboxSnapshot):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
+
+        async def create() -> SandboxHandle:
+            if snapshot_id is None:
+                return await self._provider.create(requested_spec)
+            return await self._provider.create_from_snapshot(snapshot_id, requested_spec)
 
         if is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
@@ -591,14 +645,14 @@ class AsyncSandbox:
                 "gym.sandbox.start",
                 **{**self._resource_attributes, **requested_attributes(requested_spec)},
             ) as span:
-                handle = await self._provider.create(requested_spec)
+                handle = await create()
                 if span is not None:
                     safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
             record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
         else:
-            handle = await self._provider.create(requested_spec)
+            handle = await create()
         self._handle = handle
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
