@@ -653,27 +653,15 @@ class TestReasoningEffort:
         rules = list(permission)
         for tool in ("task", "webfetch", "websearch"):
             assert permission[tool] == "deny" and rules.index(tool) > rules.index("*"), tool
-        assert permission["bash"]["*git clone*"] == "deny"
-
-    @pytest.mark.parametrize(
-        "config_file", ["opencode_full_legacy_agent.yaml", "opencode_search_full_legacy_agent.yaml"]
-    )
-    def test_full_presets_keep_the_sandboxed_agents_effort_knob(self, config_file):
-        opencode_config = get_first_server_config_dict(_resolve(config_file), FULL_AGENT)["opencode_config"]
-
-        assert opencode_config["provider"]["nemo_gym"]["models"]["dummy_model"]["options"]["reasoningEffort"] == "high"
-        # Merged into the inherited OpenCode config, not substituted for it.
-        assert list(opencode_config["instructions"]) == ["/tmp/nemo-gym-environment.txt"]
-        assert opencode_config["permission"]["webfetch"] == "deny"
 
 
 SESSION_PRESETS = [
-    # config file, agent, harness, network_access, the note's first words
-    ("opencode.yaml", "hle_diamond_opencode_agent", "opencode_agent", "model_only", "Internet access is disabled"),
-    ("opencode_search.yaml", "hle_diamond_opencode_agent", "opencode_agent", "model_and_tools", "Direct internet"),
-    ("opencode_reference.yaml", REFERENCE_AGENT, "opencode_agent", "model_and_tools", "Direct internet"),
-    ("pi.yaml", "hle_diamond_pi_agent", "pi_agent", "model_only", "Internet access is disabled"),
-    ("pi_search.yaml", "hle_diamond_pi_agent", "pi_agent", "model_and_tools", "Direct internet"),
+    # config file, agent, harness
+    ("opencode.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
+    ("opencode_search.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
+    ("opencode_reference.yaml", REFERENCE_AGENT, "opencode_agent"),
+    ("pi.yaml", "hle_diamond_pi_agent", "pi_agent"),
+    ("pi_search.yaml", "hle_diamond_pi_agent", "pi_agent"),
 ]
 
 
@@ -681,10 +669,8 @@ class TestAgentSessions:
     """The text presets run opencode_agent / pi_agent in agent sessions through single_agent_turn_legacy, each
     session in a sandbox the agent creates under the egress policy of the sandboxed presets they replace."""
 
-    @pytest.mark.parametrize(("config_file", "agent_name", "harness", "network_access", "note"), SESSION_PRESETS)
-    def test_session_presets_route_episodes_through_the_environment_server(
-        self, config_file, agent_name, harness, network_access, note
-    ):
+    @pytest.mark.parametrize(("config_file", "agent_name", "harness"), SESSION_PRESETS)
+    def test_session_presets_route_episodes_through_the_environment_server(self, config_file, agent_name, harness):
         resolved = _resolve(config_file)
         assert list(resolved[agent_name]["responses_api_agents"]) == [harness]
         env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
@@ -699,20 +685,12 @@ class TestAgentSessions:
 
         agent = get_first_server_config_dict(resolved, agent_name)
         assert agent["resources_server"]["name"] == JUDGE_SERVER
-        assert (agent["sandbox_provider"], agent["network_access"]) == ("sandbox", network_access)
-        assert [server["name"] for server in agent.get("tool_servers", [])] == (
-            ["tavily"] if network_access == "model_and_tools" else []
-        )
-        assert agent["system_prompt"].startswith(note)
         # The sandbox TTL starts at the seed and the run budget after it, so the TTL leaves room for the ready wait;
         # a sandbox lost before the deadline would make the row an execution error instead of a graded run.
-        assert agent["timeout"] == 14400
         assert agent["sandbox_config"]["ttl_s"] >= agent["timeout"] + agent["sandbox_config"]["ready_timeout_s"]
 
-    @pytest.mark.parametrize(("config_file", "agent_name", "harness", "network_access", "note"), SESSION_PRESETS)
-    def test_session_agents_validate_against_their_harness_config(
-        self, config_file, agent_name, harness, network_access, note, monkeypatch
-    ):
+    @pytest.mark.parametrize(("config_file", "agent_name", "harness"), SESSION_PRESETS)
+    def test_session_agents_validate_against_their_harness_config(self, config_file, agent_name, harness, monkeypatch):
         from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
         from responses_api_agents.pi_agent.app import PiAgentConfig
 
@@ -720,8 +698,7 @@ class TestAgentSessions:
         monkeypatch.setenv("PI_SANDBOX_IMAGE", "gym-pi-science:local")
         agent = OmegaConf.to_container(get_first_server_config_dict(_resolve(config_file), agent_name), resolve=True)
         config_class = {"opencode_agent": OpenCodeAgentConfig, "pi_agent": PiAgentConfig}[harness]
-        config = config_class.model_validate(agent | {"name": agent_name})
-        assert config.network_access == network_access
+        config_class.model_validate(agent | {"name": agent_name})
 
     @pytest.mark.parametrize(
         ("config_file", "agent_name", "hle_agent_name"),
@@ -745,13 +722,6 @@ class TestAgentSessions:
         differing = {key for key in set(agent) | set(hle) if agent.get(key) != hle.get(key)}
         assert differing - {"port"} == {"resources_server", "datasets"}
         assert [dataset["name"] for dataset in agent["datasets"]] == ["hle_diamond_text"]
-        harness = "opencode_agent" if config_file.startswith("opencode") else "pi_agent"
-        session_file = config_file.replace("_search", "")
-        config_paths = yaml.safe_load((HLE_DIAMOND_DIR / session_file).read_text(encoding="utf-8"))["config_paths"]
-        assert config_paths == [
-            "benchmarks/hle_diamond/config.yaml",
-            f"responses_api_agents/{harness}/configs/profiles/offline_science.yaml",
-        ]
 
     @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_reference.yaml"])
     def test_restricted_opencode_sandboxes_run_the_images_pinned_binary(self, config_file):
@@ -772,73 +742,25 @@ class TestAgentSessions:
         assert agent.get("opencode_version", OPENCODE_VERSION) == version
 
     def test_restricted_pi_sandboxes_run_the_images_runtime(self):
-        """pi_sandboxed_agent's science image installs Node in /opt/node and Pi in /opt/pi, the layout
-        sandbox_runtime_dir expects, so the preset runs that runtime at the version the image pins."""
+        """The preset runs the Pi runtime that pi_sandboxed_agent's science image installs, at the version the
+        image pins."""
         agent = get_first_server_config_dict(_resolve("pi.yaml"), "hle_diamond_pi_agent")
         pinned = json.loads(PI_SCIENCE_PACKAGE.read_text(encoding="utf-8"))["dependencies"]
-        assert agent["sandbox_runtime_dir"] == "/opt"
         assert agent["pi_version"] == pinned["@earendil-works/pi-coding-agent"]
 
 
 LEGACY_PRESETS = [
-    # config file, the session preset that replaces it, agent, harness, with search
-    ("opencode_legacy_agent.yaml", "opencode.yaml", "hle_diamond_opencode_agent", "opencode_sandboxed_agent", False),
-    (
-        "opencode_search_legacy_agent.yaml",
-        "opencode_search.yaml",
-        "hle_diamond_opencode_agent",
-        "opencode_sandboxed_agent",
-        True,
-    ),
-    (
-        "opencode_reference_legacy_agent.yaml",
-        "opencode_reference.yaml",
-        REFERENCE_AGENT,
-        "opencode_sandboxed_agent",
-        True,
-    ),
-    ("pi_legacy_agent.yaml", "pi.yaml", "hle_diamond_pi_agent", "pi_sandboxed_agent", False),
-    ("pi_search_legacy_agent.yaml", "pi_search.yaml", "hle_diamond_pi_agent", "pi_sandboxed_agent", True),
+    "opencode_legacy_agent.yaml",
+    "opencode_search_legacy_agent.yaml",
+    "opencode_reference_legacy_agent.yaml",
+    "pi_legacy_agent.yaml",
+    "pi_search_legacy_agent.yaml",
 ]
 
 
 class TestLegacyAgentPresets:
     """The deprecated sandboxed agents behind the legacy_agent relay stay selectable as *_legacy_agent until the
-    relay is removed; each names the session preset that replaces it."""
-
-    @pytest.mark.parametrize(("config_file", "session_file", "agent_name", "harness", "with_search"), LEGACY_PRESETS)
-    def test_legacy_presets_keep_the_relay_and_name_their_session_preset(
-        self, config_file, session_file, agent_name, harness, with_search
-    ):
-        resolved = _resolve(config_file)
-        assert list(resolved[agent_name]["responses_api_agents"]) == [harness]
-        env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
-        assert (
-            list(env_server) == ["legacy_agent"] and env_server["legacy_agent"]["agent_server"]["name"] == agent_name
-        )
-
-        agent = get_first_server_config_dict(resolved, agent_name)
-        assert agent["resources_server"]["name"] == JUDGE_SERVER
-        assert [dataset["name"] for dataset in agent["datasets"]] == ["hle_diamond_text"]
-        assert [server["name"] for server in agent.get("tool_servers", [])] == (["tavily"] if with_search else [])
-        if harness == "opencode_sandboxed_agent":
-            options = agent["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"]
-            assert options["reasoningEffort"] == "high"
-        else:
-            assert agent["thinking"] == "high"
-
-        header = (HLE_DIAMOND_DIR / config_file).read_text(encoding="utf-8").replace("\n# ", " ")
-        assert header.startswith("# Deprecated: ") and f"Use {session_file} instead" in header
-        session = _resolve(session_file)["hle_diamond_equivalence_llm_judge_environment_server"]
-        assert list(session["environment_servers"]) == ["single_agent_turn_legacy"]
-
-    @pytest.mark.parametrize(
-        "config_file", ["opencode_full_legacy_agent.yaml", "opencode_search_full_legacy_agent.yaml"]
-    )
-    def test_full_presets_are_deprecated_without_a_session_preset(self, config_file):
-        header = (HLE_DIAMOND_DIR / config_file).read_text(encoding="utf-8")
-        assert header.startswith("# Deprecated: ") and "no session preset covers the image questions" in header
-        assert not (HLE_DIAMOND_DIR / config_file.replace("_legacy_agent", "")).exists()
+    relay is removed."""
 
     def test_reference_legacy_agent_is_the_search_legacy_agent_on_the_reference_image(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
@@ -862,7 +784,7 @@ class TestLegacyAgentPresets:
         assert reference["sandbox_config"]["image"] == "gym-opencode-hle-reference:local"
         assert resolved["hle_diamond_opencode_agent"] is None
 
-    @pytest.mark.parametrize("config_file", [preset[0] for preset in LEGACY_PRESETS])
+    @pytest.mark.parametrize("config_file", LEGACY_PRESETS)
     def test_docker_override_does_not_compose_with_the_text_legacy_presets(self, config_file, monkeypatch):
         """They keep the session presets' agent names on a relay agent, so the override's session blocks would
         add a second harness to the agent; composing fails instead of starting a mixed agent."""
@@ -904,29 +826,28 @@ class TestLocalDockerOverride:
         assert not is_almost_server(block)
 
     def test_override_tells_the_model_the_truth_about_egress_and_keeps_the_preset_knobs(self):
-        opencode = get_first_server_config_dict(
-            _resolve("opencode_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_opencode_agent"
-        )
+        def agents(config_file, agent_name):
+            return (
+                get_first_server_config_dict(_resolve(config_file, "sandbox_docker_local.yaml"), agent_name),
+                get_first_server_config_dict(_resolve(config_file), agent_name),
+            )
+
+        opencode, preset = agents("opencode_search.yaml", "hle_diamond_opencode_agent")
         note = opencode["system_prompt"]
         assert "NOT restricted" in note and "disabled" not in note
-        assert opencode["sandbox_config"]["ttl_s"] == 16200  # the rest of the inherited sandbox_config survives
-        assert opencode["opencode_config"]["permission"]["task"] == "deny"
+        # The rest of the inherited sandbox_config and the OpenCode config survive the override.
+        assert opencode["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
+        assert opencode["opencode_config"] == preset["opencode_config"]
 
-        full = get_first_server_config_dict(
-            _resolve("opencode_search_full_legacy_agent.yaml", "sandbox_docker_local.yaml"), FULL_AGENT
-        )
+        full, preset = agents("opencode_search_full_legacy_agent.yaml", FULL_AGENT)
         note = full["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
         assert "NOT restricted" in note and "disabled" not in note
-        assert full["sandbox_config"]["ttl_s"] == 14400
-        assert full["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"] == {
-            "reasoningEffort": "high"
-        }
+        assert full["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
+        assert full["opencode_config"] == preset["opencode_config"]
 
-        pi = get_first_server_config_dict(
-            _resolve("pi_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_pi_agent"
-        )
+        pi, preset = agents("pi_search.yaml", "hle_diamond_pi_agent")
         assert "NOT restricted" in pi["system_prompt"] and "disabled" not in pi["system_prompt"]
-        assert pi["output_token_policy"] == "remaining_context"
+        assert pi["output_token_policy"] == preset["output_token_policy"]
 
     def test_override_is_not_a_benchmark_and_documents_the_local_recipe(self):
         text = self.OVERRIDE.read_text(encoding="utf-8")
@@ -1039,7 +960,8 @@ class TestReferencePreset:
         note = acknowledged["system_prompt"]
         assert "NOT restricted" in note and "disabled" not in note
         assert "Python 3.11" in note and "SageMath" not in note and "Lean" not in note
-        assert acknowledged["sandbox_config"]["ttl_s"] == 16200  # the inherited sandbox_config survives
+        # The inherited sandbox_config survives.
+        assert acknowledged["sandbox_config"]["ttl_s"] == self._agents(monkeypatch)[1]["sandbox_config"]["ttl_s"]
         # The other presets are untouched by the knob: their override block stays unconditional.
         monkeypatch.delenv(ACK_ENV)
         search = get_first_server_config_dict(

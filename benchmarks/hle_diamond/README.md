@@ -170,7 +170,12 @@ high effort:
   `opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort: high`, which
   OpenCode 1.17.11 maps to `reasoning_effort: high` in its chat-completions body (verified in a
   capture). Override per run with
-  `++hle_diamond_opencode_full_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>`.
+  `++<agent>.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>`,
+  where `<agent>` is the preset's agent instance: `hle_diamond_opencode_full_agent` on the full
+  presets, `hle_diamond_opencode_reference_agent` on `opencode_reference_legacy_agent.yaml`, and
+  `hle_diamond_opencode_agent` on `opencode_legacy_agent.yaml` and `opencode_search_legacy_agent.yaml`.
+  Under any other name the override adds an agent block that nothing uses, and the effort stays
+  `high`.
 - `pi_legacy_agent.yaml` (inherited by `pi_search_legacy_agent.yaml`), on the deprecated
   `pi_sandboxed_agent`: `thinking: high`, which that agent passes as `--thinking high`. Pi's
   `openai-completions` path emits `reasoning_effort` only when its provider declares support, and the
@@ -414,9 +419,16 @@ multipleChoice):
   call, so the sandboxed presets' `remaining_context` policy, which left the cap to the model server,
   has no equivalent in `opencode_agent`, and asking for the whole 262,144-token window makes vLLM
   refuse the call. The Pi session presets keep `remaining_context`.
-- The OpenCode session presets lose two settings of the sandboxed benchmark profile, the 400-step cap
-  of the build agent and `compaction.auto: false`: compaction, the step limit and session titles
-  follow OpenCode's defaults, and the run budget (`timeout`, 14,400 s) bounds the episode.
+- Step cap and compaction on the OpenCode session presets: the shared profile leaves unset two
+  settings of the sandboxed benchmark profile, the build agent's 400-step cap and
+  `compaction.auto: false`, so compaction, the step limit and session titles follow OpenCode's
+  defaults, and the run budget (`timeout`, 14,400 s) bounds the episode. `opencode_agent` accepts
+  both in a session's `opencode_config`, so a run can restore them with
+  `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.opencode_config.compaction.auto=false`
+  and
+  `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.opencode_config.agent.build.steps=400`
+  (`hle_diamond_opencode_reference_agent` on `opencode_reference`). Either can move scores. The
+  profile keeps these presets and `benchmarks/hle`'s alike, so a change there belongs in the profile.
 - Failed runs: a session run that stops at its output, context or time limit is graded on what it
   produced, as in `benchmarks/hle`. A harness crash (a nonzero exit, no result) is retried and then
   reported as a failed rollout, so it leaves the denominator; the relay presets'

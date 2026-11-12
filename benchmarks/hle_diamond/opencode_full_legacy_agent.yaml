@@ -9,7 +9,7 @@
 # forward. Needs a vision-capable policy model.
 #
 # The agent has its own name so that sandbox_docker_local.yaml can override it and the session agent of
-# opencode.yaml (hle_diamond_opencode_agent) separately. Same knobs as opencode.yaml: reasoning high, the
+# opencode.yaml (hle_diamond_opencode_agent) separately. Same knobs as opencode_legacy_agent.yaml: reasoning high, the
 # environment note, the permissions, model-only egress.
 config_paths:
 - benchmarks/hle_diamond/config.yaml
