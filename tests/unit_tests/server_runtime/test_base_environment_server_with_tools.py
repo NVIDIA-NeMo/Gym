@@ -992,6 +992,50 @@ async def test_a_failed_setup_stops_the_sandbox_and_the_cleanup_retries_a_failed
     assert "Could not stop the database sandbox whose setup failed: episode_id=3-0" in caplog.text
 
 
+async def test_a_sandbox_stopped_after_a_failed_setup_is_not_stopped_again(fake_sandbox: type[_FakeSandbox]) -> None:
+    server, _ = _app()
+    request = _request()
+    cleanup = _episode_cleanup(request)
+
+    async def setup(sandbox: _FakeSandbox) -> None:
+        raise RuntimeError("the task's database did not load")
+
+    with pytest.raises(RuntimeError, match="did not load"):
+        await server.start_episode_sandbox(request, cleanup, SandboxSpec(ttl_s=60), setup)
+    await cleanup.aclose()
+
+    (sandbox,) = fake_sandbox.made
+    assert sandbox.events == ["start", "stop"]
+
+
+async def test_a_stop_that_hangs_after_a_failed_setup_does_not_hold_up_the_error(
+    fake_sandbox: type[_FakeSandbox], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider that does not answer the stop must not delay the setup's error past the cleanup timeout."""
+    server, _ = _app()
+    request = _request()
+    cleanup = CleanupContext(episode_id=request.episode_id, cleanup_timeout_seconds=0.05)
+    hangs = [True]
+
+    async def stop(self: _FakeSandbox) -> None:
+        self.events.append("stop")
+        if hangs.pop() if hangs else False:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(fake_sandbox, "stop", stop)
+
+    async def setup(sandbox: _FakeSandbox) -> None:
+        raise RuntimeError("the task's database did not load")
+
+    with pytest.raises(RuntimeError, match="did not load"):
+        await asyncio.wait_for(server.start_episode_sandbox(request, cleanup, SandboxSpec(ttl_s=60), setup), 1)
+    await cleanup.aclose()
+
+    (sandbox,) = fake_sandbox.made
+    # The stop timed out once; the episode's cleanup stopped the sandbox.
+    assert sandbox.events == ["start", "stop", "stop"]
+
+
 async def test_the_shutdown_sweep_stops_the_sandbox_of_a_running_episode(fake_sandbox: type[_FakeSandbox]) -> None:
     started = asyncio.Event()
 
