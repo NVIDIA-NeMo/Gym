@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Read-only SQL execution used by the ``execute_sql`` tool.
+
+Kept free of any server/framework code so it can be tested directly.
+"""
+
+import re
+import sqlite3  # noqa: F401  (needed once you fill in the TODOs; delete this noqa then)
+import time  # noqa: F401  (needed once you fill in the TODOs; delete this noqa then)
+from pathlib import Path
+from typing import Any, Optional
+
+
+# Matches queries that start with SELECT, WITH, or PRAGMA table_info (any case, leading spaces ok).
+ALLOWED_PREFIX = re.compile(r"^\s*(select|with|pragma\s+table_info)\b", re.IGNORECASE)
+
+
+def check_sql_allowed(sql: str) -> Optional[str]:
+    """Return an error message if ``sql`` is not allowed, else ``None``."""
+
+    s = sql.strip()
+    if s.endswith(";"):
+        s = s[:-1].strip()
+
+    if not s:
+        return "Empty query."
+
+    if _has_unquoted_semicolon(s):
+        return "Only one statement per call is allowed."
+    
+    if not ALLOWED_PREFIX.match(s):
+        return "Only read-only SELECT, WITH, or PRAGMA table_info(...) queries are allowed."
+    
+    return None
+
+    
+    
+    raise NotImplementedError
+
+
+def _has_unquoted_semicolon(sql: str) -> bool:
+    """True if ``sql`` contains a ';' that is not inside '...', "..." or `...`. (Given, no TODO.)"""
+    quote: Optional[str] = None
+    for ch in sql:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == ";":
+            return True
+    return False
+
+
+def format_rows(
+    columns: list[str], rows: list[tuple[Any, ...]], total_rows: int, max_rows: int, max_cell_chars: int
+) -> dict[str, Any]:
+    """Turn fetched rows into the (truncated) dict returned to the model.
+
+    TODO(Sally): implement. Return a dict with exactly these keys:
+      "columns":    the column names, unchanged
+      "rows":       at most ``max_rows`` rows, each as a list (not tuple). For each cell:
+                      - bytes -> decode with errors="replace"
+                      - str longer than max_cell_chars -> first max_cell_chars chars + "..."
+                      - anything else unchanged
+      "total_rows": ``total_rows`` (the real row count, which can be bigger than len(rows))
+      "truncated":  True if total_rows is bigger than the number of rows you return
+      "error":      None
+    """
+    raise NotImplementedError
+
+
+def run_readonly_query(
+    db_path: Path, sql: str, timeout_s: float, max_rows: int, max_cell_chars: int
+) -> dict[str, Any]:
+    """Run one allowed query on a read-only connection. Never raises for SQL problems.
+
+    TODO(Sally): implement. Steps:
+      1. error = check_sql_allowed(sql); if error, return {"error": error}.
+      2. Open the database READ-ONLY:
+             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+         If opening fails (sqlite3.Error) -> return {"error": f"Could not open database: {e}"}.
+      3. Set up the connection (given, just copy these two lines):
+             deadline = time.monotonic() + timeout_s
+             conn.text_factory = lambda b: b.decode(errors="replace")
+             conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+         The progress handler makes SQLite abort the query once the deadline passes
+         (it raises sqlite3.OperationalError with "interrupted" in the message).
+      4. cur = conn.execute(sql)
+         columns = [d[0] for d in cur.description or []]
+         rows = cur.fetchmany(max_rows)
+         total_rows = len(rows) + (count the remaining rows by looping over cur, WITHOUT storing them)
+      5. Errors (catch sqlite3.Error, don't let them escape):
+           - "interrupted" in the message -> {"error": f"Query timed out after {timeout_s:g} seconds."}
+           - anything else                -> {"error": f"SQL error: {e}"}
+      6. Always close the connection (try/finally).
+      7. On success: return format_rows(columns, rows, total_rows, max_rows, max_cell_chars)
+
+    Think about: why fetchmany + counting instead of fetchall()?
+    """
+    raise NotImplementedError
