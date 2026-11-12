@@ -21,9 +21,20 @@ from resources_servers.gdpval.preconvert import resolve_pdf_provenance
 class FakeSandbox:
     """Sandbox paths live under ``root``; the LibreOffice command writes a PDF unless told to fail."""
 
-    def __init__(self, root: Path, failures: int = 0):
+    def __init__(
+        self,
+        root: Path,
+        failures: int = 0,
+        inconclusive: int = 0,
+        upload_error: bool = False,
+        cleanup_error: bool = False,
+    ):
         self.root = root
         self.failures = failures
+        # Conversions that write a PDF but end without a conclusive result, as on a timeout.
+        self.inconclusive = inconclusive
+        self.upload_error = upload_error
+        self.cleanup_error = cleanup_error
         self.conversions: list[list[str]] = []
 
     def local(self, remote: str) -> Path:
@@ -34,6 +45,8 @@ class FakeSandbox:
         if argv[:2] == ["mkdir", "-p"]:
             self.local(argv[2]).mkdir(parents=True)
         elif argv[:2] == ["rm", "-rf"]:
+            if self.cleanup_error:
+                raise ConnectionResetError("stream closed")
             shutil.rmtree(self.local(argv[2]), ignore_errors=True)
         else:
             self.conversions.append(argv)
@@ -43,9 +56,14 @@ class FakeSandbox:
             outdir, source = self.local(argv[argv.index("--outdir") + 1]), Path(argv[-1])
             outdir.mkdir(parents=True, exist_ok=True)
             (outdir / f"{source.stem}.pdf").write_bytes(b"%PDF-1.7 " + source.name.encode())
+            if self.inconclusive:
+                self.inconclusive -= 1
+                return SandboxExecResult(stdout=None, stderr=None, return_code=125, error_type="timeout")
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def upload(self, local_path: Path, remote_path: str) -> None:
+        if self.upload_error:
+            raise OSError("connection reset")
         shutil.copy2(local_path, self.local(remote_path))
 
     async def download(self, remote_path: str, local_path: Path) -> None:
@@ -111,6 +129,41 @@ async def test_a_file_that_never_renders_keeps_no_sidecar(tmp_path, caplog):
 
     assert not (staging / "plan.xlsx.pdf").exists()
     assert "Could not render plan.xlsx in the sandbox" in caplog.text
+
+
+@pytest.mark.parametrize("inconclusive", [1, 2])
+async def test_a_pdf_from_an_inconclusive_conversion_is_never_kept(tmp_path, inconclusive):
+    staging = tmp_path / "staging"
+    _workbook(staging / "plan.xlsx")
+    sandbox = FakeSandbox(tmp_path / "sandbox", inconclusive=inconclusive)
+
+    await task_sandbox.render_office_in_sandbox(sandbox, staging, ["libreoffice"])
+
+    # A workbook gets one retry: it renders when that retry completes, and keeps no sidecar otherwise.
+    assert len(sandbox.conversions) == 2
+    assert (staging / "plan.xlsx.pdf").exists() == (inconclusive == 1)
+
+
+async def test_a_sandbox_operation_that_raises_leaves_the_file_unrendered(tmp_path, caplog):
+    staging = tmp_path / "staging"
+    _workbook(staging / "plan.xlsx")
+    sandbox = FakeSandbox(tmp_path / "sandbox", upload_error=True)
+
+    await task_sandbox.render_office_in_sandbox(sandbox, staging, ["libreoffice"])
+
+    assert (staging / "plan.xlsx").exists()
+    assert not (staging / "plan.xlsx.pdf").exists()
+    assert "sandbox render failed" in caplog.text
+
+
+async def test_a_failed_scratch_cleanup_keeps_the_render(tmp_path):
+    staging = tmp_path / "staging"
+    _workbook(staging / "plan.xlsx")
+    sandbox = FakeSandbox(tmp_path / "sandbox", cleanup_error=True)
+
+    await task_sandbox.render_office_in_sandbox(sandbox, staging, ["libreoffice"])
+
+    assert (staging / "plan.xlsx.pdf").exists()
 
 
 @pytest.mark.parametrize("render", [None, ["libreoffice"]])

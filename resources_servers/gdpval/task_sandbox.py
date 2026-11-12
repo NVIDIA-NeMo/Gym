@@ -172,7 +172,11 @@ async def render_office_in_sandbox(sandbox: AsyncSandbox, directory: Path, libre
 async def _render_one(
     sandbox: AsyncSandbox, source: Path, output_pdf: Path, libreoffice_command: Sequence[str]
 ) -> Optional[str]:
-    """Render ``source`` to ``output_pdf`` in the sandbox; return the error, or None on success."""
+    """Render ``source`` to ``output_pdf`` in the sandbox; return the error, or None on success.
+
+    Rendering is optional, so a sandbox operation that raises is a render error too: the collected file is then
+    judged without a render instead of failing /verify.
+    """
     remote = Path(f"/tmp/gdpval-render-{uuid.uuid4().hex}")
     remote_source = remote / "in" / source.name
     try:
@@ -182,6 +186,9 @@ async def _render_one(
         await sandbox.upload(source, str(remote_source))
         argv = libreoffice_pdf_argv(remote_source, remote / "out", remote / "profile", libreoffice_command)
         result = await sandbox.exec(shlex.join(argv), timeout_s=150)
+        # A timed-out or otherwise inconclusive run may still have written a partial PDF; never accept it.
+        if result.error_type is not None:
+            return f"LibreOffice execution failed ({result.error_type}): {(result.stderr or '').strip()[-300:]}"
         remote_pdf = remote / "out" / (source.stem + ".pdf")
         try:
             await sandbox.download(str(remote_pdf), output_pdf)
@@ -189,8 +196,16 @@ async def _render_one(
             output_pdf.unlink(missing_ok=True)
             return f"rc={result.return_code} produced no PDF ({exc!r}): {(result.stderr or '').strip()[-300:]}"
         return None
+    except Exception as exc:
+        output_pdf.unlink(missing_ok=True)
+        return f"sandbox render failed: {exc!r}"
     finally:
-        await sandbox.exec(f"rm -rf {shlex.quote(str(remote))}", timeout_s=60)
+        try:
+            cleanup = await sandbox.exec(f"rm -rf {shlex.quote(str(remote))}", timeout_s=60)
+            if cleanup.error_type is not None or cleanup.return_code != 0:
+                LOGGER.warning("Could not remove render scratch %s: %s", remote, cleanup.stderr)
+        except Exception:
+            LOGGER.warning("Could not remove render scratch %s", remote, exc_info=True)
 
 
 def _make_group_readable(task_dir: Path) -> None:
