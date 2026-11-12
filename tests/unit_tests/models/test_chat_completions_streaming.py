@@ -23,6 +23,7 @@ requests keep the historical strict-validation behavior.
 
 import asyncio
 import json
+from pathlib import Path
 from time import time
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -60,6 +61,7 @@ def _completion(
     reasoning=None,
     refusal=None,
     finish_reason="stop",
+    stop_reason=None,
     usage=None,
     choices=None,
 ) -> NeMoGymChatCompletion:
@@ -72,6 +74,8 @@ def _completion(
         if tool_calls:
             message["tool_calls"] = tool_calls
         choices = [{"index": 0, "finish_reason": finish_reason, "message": message}]
+        if stop_reason is not None:
+            choices[0]["stop_reason"] = stop_reason
     data = {
         "id": f"chatcmpl-{uuid4().hex}",
         "object": "chat.completion",
@@ -186,6 +190,47 @@ class TestSynthesizeChatSSE:
         rebuilt = _reconstruct_chat_sse(_parse_sse_events(text.encode()))
         assert rebuilt["choices"][0]["message"]["content"] == "hello world"
         assert rebuilt["choices"][0]["finish_reason"] == "stop"
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "native_finish_reason"),
+        [(None, None), (0, None), (11, None), ("repetition_detected", None), (None, "repetition"), (0, "repetition")],
+    )
+    def test_provider_reasons_survive_capture_reconstruction(
+        self, stop_reason: str | int | None, native_finish_reason: str | None
+    ) -> None:
+        terminal = {
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop",
+            "stop_reason": stop_reason,
+            "native_finish_reason": native_finish_reason,
+        }
+        chunks = [
+            {"id": "chatcmpl-stopped", "model": "m", "choices": [{"delta": {"role": "assistant"}}]},
+            {"choices": [{"delta": {"reasoning_content": "Consider."}}]},
+            {"choices": [{"delta": {"content": "Retained answer."}}]},
+            {"choices": [terminal]},
+            {"choices": [], "usage": _USAGE},
+        ]
+        raw = ("".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n").encode()
+
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(raw))
+
+        [choice] = rebuilt["choices"]
+        assert choice.get("stop_reason") == stop_reason
+        assert type(choice.get("stop_reason")) is type(stop_reason)
+        assert ("stop_reason" in choice) is (stop_reason is not None)
+        assert choice.get("native_finish_reason") == native_finish_reason
+        assert type(choice.get("native_finish_reason")) is type(native_finish_reason)
+        assert ("native_finish_reason" in choice) is (native_finish_reason is not None)
+        assert choice["finish_reason"] == "stop"
+        assert choice["message"] == {
+            "role": "assistant",
+            "content": "Retained answer.",
+            "reasoning_content": "Consider.",
+        }
+        assert rebuilt["id"] == "chatcmpl-stopped"
+        assert rebuilt["usage"] == _USAGE
 
     def test_reasoning_delta_emitted(self) -> None:
         completion = _completion(content="answer", reasoning="let me think").model_dump(mode="json")
@@ -555,6 +600,100 @@ class TestChatDispatchRoute:
         assert any(e.get("usage") for e in _events(resp.text)) is include_usage
         [exchange] = CaptureStore(tmp_path).read("r1")
         assert exchange["response"]["usage"]["total_tokens"] == _USAGE["total_tokens"]
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "stop_reason", "refusal", "include_usage", "native_finish_reason"),
+        [
+            *(
+                ("stop", stop, None, usage, None)
+                for stop in (None, 0, 11, "repetition_detected")
+                for usage in (False, True)
+            ),
+            ("repetition", None, None, False, "repetition"),
+            ("repetition", 0, None, True, "repetition"),
+            ("stop", None, "Cannot help with that request.", False, None),
+        ],
+    )
+    def test_streamed_provider_reasons_survive_capture(
+        self,
+        tmp_path: Path,
+        finish_reason: str,
+        stop_reason: str | int | None,
+        refusal: str | None,
+        include_usage: bool,
+        native_finish_reason: str | None,
+    ) -> None:
+        content = "Retained answer." if refusal is None else None
+        completion = _completion(
+            content=content,
+            reasoning="Consider.",
+            refusal=refusal,
+            finish_reason=finish_reason,
+            stop_reason=stop_reason,
+            usage=_USAGE,
+        )
+        assert completion.choices[0].finish_reason == "stop"
+        assert getattr(completion.choices[0], "native_finish_reason", None) == native_finish_reason
+
+        class StoppedChatModel(_EchoChatModel):
+            async def chat_completions(
+                self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+            ) -> NeMoGymChatCompletion:
+                return completion
+
+        _, server = _client(StoppedChatModel)
+        app = server.setup_webserver()
+        install_model_call_capture(
+            app,
+            ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path),
+            model_server_name="srv",
+            assistant_message_header=b"x-assistant-message-id",
+        )
+
+        response = TestClient(app).post(
+            "/ng-rollout/stopped/v1/chat/completions",
+            json={
+                "stream": True,
+                "stream_options": {"include_usage": include_usage},
+                "messages": [{"role": "user", "content": "question"}],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.text.endswith("data: [DONE]\n\n")
+        events = _events(response.text)
+        assert any(event.get("usage") for event in events) is include_usage
+        choices = [choice for event in events for choice in event["choices"]]
+        terminal = choices[-1]
+        assert terminal["finish_reason"] == "stop"
+        assert terminal["delta"] == {}
+        assert terminal.get("stop_reason") == stop_reason
+        assert type(terminal.get("stop_reason")) is type(stop_reason)
+        assert ("stop_reason" in terminal) is (stop_reason is not None)
+        assert terminal.get("native_finish_reason") == native_finish_reason
+        assert type(terminal.get("native_finish_reason")) is type(native_finish_reason)
+        assert ("native_finish_reason" in terminal) is (native_finish_reason is not None)
+        assert all("stop_reason" not in choice for choice in choices[:-1])
+        assert all("native_finish_reason" not in choice for choice in choices[:-1])
+        [exchange] = CaptureStore(tmp_path).read("stopped")
+        assert exchange["response_raw"] == response.text
+        [captured] = exchange["response"]["choices"]
+        assert captured.get("stop_reason") == stop_reason
+        assert type(captured.get("stop_reason")) is type(stop_reason)
+        assert ("stop_reason" in captured) is (stop_reason is not None)
+        assert captured.get("native_finish_reason") == native_finish_reason
+        assert type(captured.get("native_finish_reason")) is type(native_finish_reason)
+        assert ("native_finish_reason" in captured) is (native_finish_reason is not None)
+        assert captured["finish_reason"] == "stop"
+        expected_message = {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": "Consider.",
+        }
+        if refusal is not None:
+            expected_message["refusal"] = refusal
+        assert captured["message"] == expected_message
+        assert exchange["response"]["usage"] == completion.usage.model_dump(mode="json")
 
     def test_streaming_request_invalid_params_returns_422(self) -> None:
         client, _ = _client(_EchoChatModel)
