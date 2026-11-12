@@ -107,6 +107,46 @@ def test_joint_search_checks_unbalanced_designs_when_no_balanced_seed_is_feasibl
     assert result.statistics.power >= parameters.target_power
 
 
+@pytest.mark.parametrize("mode", ["optimize", "existing"])
+def test_infeasible_scalar_bound_avoids_exhaustive_noncentral_t_work(monkeypatch, mode: str) -> None:
+    cell = PlanningCell("m", "b", 25.0, 25.0, existing_baseline_repeats=20_000 if mode == "existing" else None)
+    parameters = PlanningParameters(baseline_mode=mode, margin_points=0.1)
+    real_survival = nct.sf
+    evaluations = 0
+
+    def counted_survival(*args, **kwargs):
+        nonlocal evaluations
+        evaluations += np.broadcast(*args[:3]).size
+        # Fail promptly if pruning regresses, instead of running the 400-million-pair search.
+        assert evaluations < 1_000
+        return real_survival(*args, **kwargs)
+
+    monkeypatch.setattr(nct, "sf", counted_survival)
+    with pytest.raises(ValueError, match="max_repeats=20000.*known-variance power upper bound"):
+        plan_repeats([cell], parameters=parameters)
+    assert evaluations == 0
+
+
+def test_scalar_bound_preserves_exhaustive_checks_near_roundoff_boundary(monkeypatch) -> None:
+    target = 0.8
+    distance = float(norm.isf(0.05) + norm.ppf(target) - 2e-12)
+    cell = PlanningCell("m", "b", 1.0, 1.0)
+    parameters = PlanningParameters(margin_points=distance, max_repeats=2)
+    real_survival = nct.sf
+    evaluations = 0
+
+    def counted_survival(*args, **kwargs):
+        nonlocal evaluations
+        evaluations += np.broadcast(*args[:3]).size
+        return real_survival(*args, **kwargs)
+
+    monkeypatch.setattr(nct, "sf", counted_survival)
+    with pytest.raises(ValueError, match="No feasible allocation found within max_repeats=2"):
+        plan_repeats([cell], parameters=parameters)
+    # The normal bound is just below target; the buffer must leave the real NCT test in charge.
+    assert evaluations > 0
+
+
 def test_existing_baseline_search_handles_nonmonotone_power() -> None:
     cell = PlanningCell("m", "b", 0.01, 0.01, existing_baseline_repeats=2)
     parameters = PlanningParameters(baseline_mode="existing", margin_points=0.5, target_power=0.95, max_repeats=100)

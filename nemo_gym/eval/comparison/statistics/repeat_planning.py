@@ -285,14 +285,47 @@ def _limits(
     return lower, upper, steps, prices.ravel()
 
 
+def _could_reach_target(
+    cell: PlanningCell,
+    designs: NDArray[np.float64],
+    weight: float,
+    parameters: PlanningParameters,
+) -> NDArray[np.bool_]:
+    """Retain scalar designs whose known-variance power bound permits the target.
+
+    For T=(Z+lambda)/sqrt(U/df), the Student-t rejection rule has null size
+    alpha. The Neyman-Pearson lemma makes the Z test most powerful when the
+    variance is known, so NCT power cannot exceed Phi(lambda-z_(1-alpha)),
+    whatever the degrees of freedom. This bounds the analytic planning model,
+    not the actual Welch simulation's rejection rate. No monotonicity of
+    Welch power in either arm count or degrees of freedom is assumed.
+
+    References: https://stat210a.berkeley.edu/fall-2025/reader/hypothesis-testing.html
+    and https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.nct.html
+    """
+    variance = weight**2 * (cell.baseline_variance / designs[:, 0] + cell.candidate_variance / designs[:, 1])
+    distance = parameters.expected_delta_points + parameters.margin_points
+    with np.errstate(divide="ignore", over="ignore"):
+        normal_power = norm.sf(norm.isf(parameters.alpha) - distance / np.sqrt(variance))
+    # A conservative buffer preserves exhaustive checks near the floating-point boundary.
+    return np.asarray(normal_power >= parameters.target_power - 1e-12)
+
+
 def _scalar_counts(
     cells: Sequence[PlanningCell], parameters: PlanningParameters, weights: tuple[float, ...]
 ) -> tuple[NDArray[np.float64], str]:
     lower, upper, steps, _ = _limits(cells, parameters)
     step = int(steps[1])
+    if not _could_reach_target(cells[0], upper[None, :], weights[0], parameters)[0]:
+        subject = "candidate count" if parameters.baseline_mode == "existing" else "allocation"
+        raise ValueError(
+            f"No feasible {subject} found within max_repeats={parameters.max_repeats}: "
+            "even the known-variance power upper bound is below the target."
+        )
     if parameters.baseline_mode == "existing":
         candidates = np.arange(lower[1], upper[1] + 1, step)
         designs = np.column_stack((np.full(len(candidates), lower[0]), candidates))
+        designs = designs[_could_reach_target(cells[0], designs, weights[0], parameters)]
         feasible = np.flatnonzero(_powers(cells, designs, weights, parameters) >= parameters.target_power)
         if not len(feasible):
             raise ValueError(f"No feasible candidate count found within max_repeats={parameters.max_repeats}.")
@@ -310,13 +343,15 @@ def _scalar_counts(
     if not found:
         # This bound includes the whole legal rectangle until a feasible pair is found.
         best_total += 1
-    # Every cheaper legal pair is evaluated, including low-count nonmonotone power.
+    # Every cheaper legal pair is evaluated or excluded by the known-variance
+    # upper bound, including low-count nonmonotone power.
     for nc in range(int(lower[1]), min(int(upper[1]), (best_total - int(lower[0]) - 1) // experiments) + 1, step):
         maximum = min(int(upper[0]), best_total - experiments * nc - 1)
         baselines = np.arange(lower[0], maximum + 1, steps[0])
         if not len(baselines):
             continue
         designs = np.column_stack((baselines, np.full(len(baselines), nc)))
+        designs = designs[_could_reach_target(cells[0], designs, weights[0], parameters)]
         feasible = np.flatnonzero(_powers(cells, designs, weights, parameters) >= parameters.target_power)
         if len(feasible):
             incumbent = designs[feasible[0]]
@@ -487,6 +522,11 @@ def simulate_plan(
     variances. Power uses the expected delta; false positives use the negative
     margin boundary. Wilson intervals quantify simulation sampling error only.
     Historical variance-estimation uncertainty is not resampled.
+
+    Both arms' sample means and variances are redrawn in hypothetical
+    experiments, including existing-baseline mode. This is an unconditional
+    repeated-experiment diagnostic, not a calculation conditional on the
+    already collected baseline observations.
     """
     resolved = _inputs(cells, weights)
     _integer(trials, "trials")

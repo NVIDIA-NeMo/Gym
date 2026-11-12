@@ -23,6 +23,7 @@ import subprocess
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -410,8 +411,39 @@ def validate_raw_normal_simulation(*, trials: int) -> dict[str, object]:
 def run_validation(
     *, reference_root: Path | None, output: Path, suite_report: Path | None, trials: int
 ) -> dict[str, object]:
-    """Write reproducible statistical evidence, failing immediately on numerical disagreement."""
-    output.mkdir(parents=True, exist_ok=True)
+    """Stage a complete audit before publishing its outputs.
+
+    Failed checks preserve previous outputs. Publishing replaces generated
+    files only, with completion markers last; publication errors remove those
+    markers so partial outputs cannot appear to be a completed audit.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as directory:
+        staging = Path(directory)
+        receipt = _write_validation(
+            reference_root=reference_root, output=staging, suite_report=suite_report, trials=trials
+        )
+        output.mkdir(parents=True, exist_ok=True)
+        completion_files = ("validation_receipt.json", "VALIDATION.md")
+        for name in completion_files:
+            (output / name).unlink(missing_ok=True)
+        try:
+            for path in sorted(staging.iterdir()):
+                if path.name not in completion_files:
+                    path.replace(output / path.name)
+            for name in completion_files:
+                (staging / name).replace(output / name)
+        except OSError:
+            for name in completion_files:
+                (output / name).unlink(missing_ok=True)
+            raise
+        return receipt
+
+
+def _write_validation(
+    *, reference_root: Path | None, output: Path, suite_report: Path | None, trials: int
+) -> dict[str, object]:
+    """Write one audit into an unpublished staging directory."""
     receipt: dict[str, object] = dict(
         gym_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         script_sha256=_sha256(Path(__file__)),

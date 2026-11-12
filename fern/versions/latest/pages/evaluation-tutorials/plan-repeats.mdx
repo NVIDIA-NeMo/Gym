@@ -148,7 +148,7 @@ gym eval plan-repeats \
     --output-dir results/repeat-planning-walkthrough/multiple-metrics
 ```
 
-This example supplies one-point SDs for every selected metric and explicitly supplies Omniscience's composite SD as 0.7071067811865476 points. Obtain a measured composite SD by equally averaging the normalized metrics within each complete repeat, then calculating SD across those averaged scores. The individual metric SDs alone cannot determine it. Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each benchmark has suite weight 0.5. Inspect the report's metric inputs and benchmark composites:
+This example supplies one-point SDs for every selected metric and explicitly supplies Omniscience's composite SD as 0.9 points. Obtain a measured composite SD by equally averaging the normalized metrics within each complete repeat, then calculating SD across those averaged scores. The individual metric SDs alone cannot determine it. Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each benchmark has suite weight 0.5. Inspect the report's metric inputs and benchmark composites:
 
 | Benchmark | Selected metric | Within-benchmark weight | Metric's overall suite weight |
 | --- | --- | ---: | ---: |
@@ -156,15 +156,15 @@ This example supplies one-point SDs for every selected metric and explicitly sup
 | AA Omniscience | accuracy | 0.5 | 0.25 |
 | AA Omniscience | non-hallucination | 0.5 | 0.25 |
 
-The two Omniscience rows describe a single benchmark with total suite weight 0.5. Its supplied baseline and candidate composite SDs are both **0.7071 points**, while GPQA's are one point. The report retains the individual metric SDs as descriptive inputs. All Omniscience metrics share one repeat count and one repeat cost.
+The two Omniscience rows describe a single benchmark with total suite weight 0.5. Its supplied baseline and candidate composite SDs are both **0.9 points**, while GPQA's are one point. The report retains the individual metric SDs as descriptive inputs. All Omniscience metrics share one repeat count and one repeat cost.
 
-The minimum allowed new counts already meet the target: **eight GPQA passes and ten Omniscience passes per candidate**, 18 new passes in total, with approximate suite power **94.95%**. These results use this example's SDs and existing counts; they are not measured AA Omniscience or GPQA budgets.
+The minimum allowed new counts already meet the target: **eight GPQA passes and ten Omniscience passes per candidate**, 18 new passes in total, with approximate suite power **91.87%**. These results use this example's SDs and existing counts; they are not measured AA Omniscience or GPQA budgets.
 
 ## 6. Collect the planned passes and compare once
 
 Keep the input YAML and report with the experiment. Collect the reported baseline and per-candidate counts using the evaluation workflow appropriate to your benchmark, keeping tasks, scoring, sampling, and other comparison settings fixed. The commands above only plan the budget.
 
-After collecting a single-benchmark comparison, use the same decision level:
+For the single higher-is-better reward metric on a 0–1 scale used by the first example, use the same decision level:
 
 ```bash
 gym eval compare \
@@ -174,7 +174,7 @@ gym eval compare \
     --output-dir results/final-comparison
 ```
 
-For the suite, configure the collected runs in a comparison manifest and use:
+For multi-metric benchmarks, metrics with other bounds or directions, model averages, and suites, configure the collected runs in a comparison manifest with the same metric selection, normalization bounds, and directions used to estimate the planning SDs. Use a one-cell manifest for a benchmark claim, the per-model aggregate for a model claim, or the overall aggregate over the same entries for a suite claim:
 
 ```bash
 gym eval compare-suite \
@@ -185,4 +185,4 @@ gym eval compare-suite \
 
 These final commands require the collected artifacts; the planning walkthrough does not create them. A comparison manifest names run paths and metrics, while a planning YAML contains SD inputs and design settings. See [Compare Results](/main/evaluation/compare-results) for the comparison manifest and report walkthrough.
 
-For the one-point margin used here, establish non-inferiority when the resulting delta interval's lower endpoint is above −1 normalized point. Single-benchmark `compare` can report raw reward units: for a reward scale of 0–1, the same threshold is −0.01. Suite comparison uses normalized score points. An interval crossing the threshold is inconclusive; it does not establish that the candidate is too much worse. Keep that outcome rather than automatically extending the experiment after inspecting the result.
+For the one-point margin used here, establish non-inferiority when the resulting delta interval's lower endpoint is above −1 normalized point. The first example's single higher-is-better 0–1 reward uses threshold −0.01 in `compare`'s raw units. `compare` does not produce the multi-metric composite interval; use the matching `compare-suite` aggregate for that claim. An interval crossing the threshold is inconclusive; it does not establish that the candidate is too much worse. Keep that outcome rather than automatically extending the experiment after inspecting the result.

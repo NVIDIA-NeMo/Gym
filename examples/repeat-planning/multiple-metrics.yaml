@@ -21,8 +21,8 @@ cells:
     existing_baseline_repeats: 10
     repeat_step: 10
     # SD across complete-repeat scores after equally averaging the two metrics.
-    baseline_std_points: 0.7071067811865476
-    candidate_std_points: 0.7071067811865476
+    baseline_std_points: 0.9
+    candidate_std_points: 0.9
     metrics:
       - name: accuracy
         baseline_std_points: 1.0

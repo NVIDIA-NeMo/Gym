@@ -26,6 +26,8 @@ Read both the human report and full-precision JSON. Check the selected entries, 
 
 Read analytic power alongside simulated power and its Monte Carlo interval. Simulations retain fixed supplied variance forecasts; agreement does not establish that those forecasts are accurate. Alpha 0.05 corresponds to a one-sided 95% lower bound, or the lower endpoint of a two-sided 90% interval. Use the same level in the final Gym comparison.
 
+The simulation redraws both arms in hypothetical normal experiments even with existing baseline counts; it is not conditional power given the collected baseline observations. Evaluate composite, model, and suite claims with `compare-suite` using the same metric selection, bounds, directions, and entries. A benchmark claim uses a one-cell manifest; a model claim uses its per-model aggregate. `compare` reports separate raw-unit metric intervals; the walkthrough's −0.01 threshold applies to its single higher-is-better 0–1 reward metric.
+
 For sensitivity, change one of margin, candidate SD, expected change, target power, or candidate experiment count at a time. Re-run the command; do not scale an old answer by a rule of thumb. Compare cost and counts with the original plan, and explain when changing margin or suite membership changes the quality claim.
 
 ## Keep planning separate from execution

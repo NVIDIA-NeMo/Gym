@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.validate_repeat_planning import export_suite_planning_inputs
+from scripts.validate_repeat_planning import export_suite_planning_inputs, run_validation
 
 
 def _report() -> dict:
@@ -132,4 +132,88 @@ def test_rejects_incomplete_or_inconsistent_saved_evidence(tmp_path: Path, defec
     with pytest.raises(ValueError, match=message):
         export_suite_planning_inputs(source, tmp_path)
 
-    assert not (tmp_path / "cluster_benchmark_plan.yaml").exists()
+    assert list(tmp_path.glob("cluster_*")) == []
+
+
+def _audit_snapshot(output: Path) -> dict[str, tuple[bytes, int]]:
+    return {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in output.iterdir()}
+
+
+@pytest.fixture
+def completed_audit(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "suite.json"
+    source.write_text(json.dumps(_report()))
+    output = tmp_path / "audit"
+    run_validation(reference_root=None, output=output, suite_report=source, trials=256)
+    (output / "user_notes.txt").write_text("Keep these unrelated notes.")
+    return source, output
+
+
+def _change_baseline_evidence(source: Path) -> None:
+    report = _report()
+    report["cells"][0]["baseline"]["repeat_scores"] = [20.0, 24.0, 28.0]
+    report["cells"][0]["baseline"]["summary"]["sample_variance"] = 16.0
+    source.write_text(json.dumps(report))
+
+
+@pytest.mark.parametrize("failure", ["excluded", "simulation"])
+def test_failed_rerun_preserves_previous_successful_audit(completed_audit: tuple[Path, Path], failure: str) -> None:
+    source, output = completed_audit
+    before = _audit_snapshot(output)
+    if failure == "excluded":
+        report = _report()
+        report["cells"][0]["eligible"] = False
+        source.write_text(json.dumps(report))
+        trials, message = 256, "no eligible model/benchmark cells"
+    else:
+        _change_baseline_evidence(source)
+        trials, message = 0, "trials"
+
+    with pytest.raises(ValueError, match=message):
+        run_validation(reference_root=None, output=output, suite_report=source, trials=trials)
+
+    assert _audit_snapshot(output) == before
+
+
+def test_successful_rerun_publishes_new_evidence_and_preserves_unrelated_files(
+    completed_audit: tuple[Path, Path],
+) -> None:
+    source, output = completed_audit
+    _change_baseline_evidence(source)
+
+    receipt = run_validation(reference_root=None, output=output, suite_report=source, trials=256)
+
+    assert (output / "user_notes.txt").read_text() == "Keep these unrelated notes."
+    assert (output / "VALIDATION.md").is_file()
+    saved_receipt = json.loads((output / "validation_receipt.json").read_text())
+    assert saved_receipt["cluster_input"] == receipt["cluster_input"]
+    assert saved_receipt["cluster_input"]["cells"][0]["baseline"]["std"] == 4.0
+    evidence = json.loads((output / "cluster_numeric_evidence.json").read_text())
+    assert evidence[0]["baseline"]["std"] == 4.0
+    plan = yaml.safe_load((output / "cluster_suite_plan.yaml").read_text())
+    assert plan["cells"][0]["baseline_std_points"] == 4.0
+
+
+@pytest.mark.parametrize("completion_file", ["validation_receipt.json", "VALIDATION.md"])
+def test_publication_failure_does_not_leave_passed_markers_beside_new_evidence(
+    completed_audit: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, completion_file: str
+) -> None:
+    source, output = completed_audit
+    _change_baseline_evidence(source)
+    original_replace = Path.replace
+
+    def reject_completion_publication(path: Path, target: Path) -> Path:
+        if target == output / completion_file:
+            raise OSError("Completion publication failed")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", reject_completion_publication)
+
+    with pytest.raises(OSError, match="Completion publication failed"):
+        run_validation(reference_root=None, output=output, suite_report=source, trials=256)
+
+    assert not (output / "VALIDATION.md").exists()
+    assert not (output / "validation_receipt.json").exists()
+    assert (output / "user_notes.txt").read_text() == "Keep these unrelated notes."
+    evidence = json.loads((output / "cluster_numeric_evidence.json").read_text())
+    assert evidence[0]["baseline"]["std"] == 4.0

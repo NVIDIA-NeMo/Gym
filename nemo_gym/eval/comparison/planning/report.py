@@ -184,7 +184,15 @@ def render_repeat_planning_markdown(result: RepeatPlanningResult) -> str:
                 f"| {label} | {rate.successes} | {rate.trials} | {_number(rate.estimate)} "
                 f"| [{_number(rate.ci_low)}, {_number(rate.ci_high)}] |"
             )
-        lines.extend(["", "Lower-bound coverage has nominal level 1 − alpha."])
+        lines.extend(
+            [
+                "",
+                "Lower-bound coverage has nominal level 1 − alpha.",
+                "The diagnostic redraws sample means and sample variances in both arms, including with existing "
+                "baseline counts. It describes hypothetical normal experiments, not conditional power given "
+                "already collected baseline observations.",
+            ]
+        )
     lines.extend(["", "## Invocation", "", "```bash", result.command, "```", ""])
     return "\n".join(lines)
 

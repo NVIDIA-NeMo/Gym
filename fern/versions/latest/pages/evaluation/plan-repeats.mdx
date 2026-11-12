@@ -67,6 +67,8 @@ All entries receive equal weight. A sparse suite therefore gives models with mor
 
 `alpha: 0.05` selects a one-sided 5% non-inferiority test. This uses the lower endpoint of a two-sided 90% Welch interval: the candidate establishes non-inferiority when that endpoint is above the negative margin. To use the same decision with `compare-suite`, set `--confidence-level 0.90`. A two-sided 95% interval instead gives a one-sided 2.5% test.
 
+Use `compare-suite` with the same selected metrics, normalization bounds, and directions to evaluate the planned score. A benchmark claim uses a one-cell comparison manifest; a model claim uses that model's aggregate, and a suite claim uses the overall aggregate over the same entries. `gym eval compare` reports separate intervals in raw metric units. It matches the walkthrough's one-point decision directly for a single higher-is-better metric on a 0–1 scale, where the threshold is −0.01.
+
 ## Plan baseline investment across candidate checkpoints
 
 To plan a baseline and 48 distinct candidate checkpoints, change the baseline mode, set the candidate count, and remove `existing_baseline_repeats` from every entry:
@@ -92,8 +94,8 @@ cells:
     existing_baseline_repeats: 10
     repeat_step: 10
     # SD across complete-repeat scores after equally averaging the two metrics.
-    baseline_std_points: 0.7071067811865476
-    candidate_std_points: 0.7071067811865476
+    baseline_std_points: 0.9
+    candidate_std_points: 0.9
     metrics:
       - name: accuracy
         baseline_std_points: 1.0
@@ -114,6 +116,8 @@ The command writes `repeat_planning_report.md` and `repeat_planning_report.json`
 The analytic power calculation uses forecast variances, Welch–Satterthwaite degrees of freedom, and a noncentral-t tail. Its numerical implementation shares the uncertainty calculation with NeMo Gym's existing Welch comparison. This prospective power is approximate: the actual future comparison recalculates variances and degrees of freedom from collected scores.
 
 The default validation uses 10,000 normal-model experiments and reports power and false-success rate with 95% Wilson Monte Carlo intervals. `validation_trials` and `seed` are configurable in YAML; set `validation_trials: 0` to skip this diagnostic. Simulation holds the supplied variance forecasts fixed, so its intervals measure simulation precision rather than uncertainty in historical SD estimates. A disagreement with the analytic target remains visible; simulation does not change the chosen allocation.
+
+This diagnostic repeats hypothetical experiments by redrawing sample means and sample variances in both arms, including when baseline counts are existing. It is not a conditional power estimate given the already collected baseline observations.
 
 Single-benchmark searches check legal integer allocations and identify an exact minimum within `max_repeats` (default 20,000 newly planned repeats per arm). Existing baseline counts may exceed that limit. Suite searches report a feasible local allocation rather than a globally optimal integer solution. Exhausting a bound means that no feasible plan was found within that search, not that the target is impossible. A zero total forecast variance cannot support a Welch power calculation.
 
