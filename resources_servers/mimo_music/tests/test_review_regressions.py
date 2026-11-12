@@ -61,7 +61,7 @@ async def test_renderer_signal_is_masked(tmp_path: Path, termination_signal: int
     result = await music_server.verify(request(ABC))
     assert result.reward == 0
     assert result.mask_sample is True
-    assert result.failure_kind == "mimo_music:scorer_error"
+    assert result.failure_kind == "judge_failed"
     assert f"signal {int(termination_signal)}" in result.failure_reason
     assert f"return code {-int(termination_signal)}" in result.failure_reason
 

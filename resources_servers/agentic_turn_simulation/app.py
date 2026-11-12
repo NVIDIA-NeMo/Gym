@@ -324,10 +324,16 @@ def _row_system_prompt(body: AgenticTurnSimulationRunRequest, prefix: list[dict[
 
 
 def _masked(failure_kind: str, reason: str, *, retry: bool = False) -> dict[str, Any]:
-    """A masked outcome; with ``retry`` the environment owns the fault and recovery runs the rollout again."""
+    """A masked outcome. With ``retry`` the environment owns a fault of the episode itself (the simulator is part of
+    it, and the wall-clock cap is its serving speed), so the row records the agent stage: its partial answer is not
+    kept and recovery runs the rollout again."""
     masked = {MASK_SAMPLE_FIELD: True, "failure_kind": failure_kind, "failure_reason": reason}
     if retry:
-        masked.update(failure_outcome_action=OutcomeAction.RETRY, failure_outcome_attribution=FailureClass.EVALUATION)
+        masked.update(
+            failure_outcome_action=OutcomeAction.RETRY,
+            failure_outcome_attribution=FailureClass.EVALUATION,
+            _ng_failure_stage="agent",
+        )
     return masked
 
 
