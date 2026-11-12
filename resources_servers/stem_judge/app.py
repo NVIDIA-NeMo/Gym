@@ -303,6 +303,22 @@ def parse_criteria(text: str, ids: list[str]) -> Optional[dict[str, bool]]:
     return None
 
 
+LEADING_MINUS = re.compile(r"^(\s*)-\s+(?=\S)")
+LIST_ITEM = re.compile(r"^\s*[-*+]\s", re.MULTILINE)
+
+
+def render_reference(expected: str) -> str:
+    """The reference as the judge prompt shows it.
+
+    The templates put the reference on a line of its own, so "- (π^2/9) m^2" reads as a
+    markdown list item and the judge drops the minus sign. Close the gap after a leading
+    minus unless the reference is a list, i.e. has two or more item lines.
+    """
+    if LEADING_MINUS.match(expected) and len(LIST_ITEM.findall(expected)) == 1:
+        return LEADING_MINUS.sub(r"\1-", expected, count=1)
+    return expected
+
+
 def render_rubric(rubric: list[RubricCriterion]) -> str:
     lines = []
     for c in rubric:
@@ -414,7 +430,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
     async def _grade_answer(
         self, body: StemJudgeVerifyRequest, expected: str, answer_format: str, question: str, solution: str
     ) -> StemJudgeVerifyResponse:
-        prompt = self._answer_template.format(question=question, expected_answer=expected, generated_answer=solution)
+        prompt = self._answer_template.format(
+            question=question, expected_answer=render_reference(expected), generated_answer=solution
+        )
         evaluation, text = await self._call_judge(prompt)
         evaluation.verdict_label = parse_verdict(text) if text is not None else None
         if evaluation.verdict_label is None:
@@ -428,7 +446,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         rubric = body.rubric
         prompt = self._rubric_template.format(
             question=question,
-            expected_answer=expected or "(none)",
+            expected_answer=render_reference(expected) or "(none)",
             rubric=render_rubric(rubric),
             generated_answer=solution,
         )

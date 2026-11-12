@@ -43,6 +43,7 @@ from resources_servers.stem_judge.app import (
     last_boxed,
     parse_criteria,
     parse_verdict,
+    render_reference,
     render_rubric,
     rubric_fraction,
 )
@@ -201,6 +202,24 @@ class TestParsing:
     def test_criteria_unparsed(self, text: str) -> None:
         assert parse_criteria(text, ["r1", "r2"]) is None
 
+    @mark.parametrize(
+        "expected, rendered",
+        [
+            ("- (π^2/9) m_t^2 m_H^2 / m_1^2", "-(π^2/9) m_t^2 m_H^2 / m_1^2"),
+            ("  - g^4 N / (4π)", "  -g^4 N / (4π)"),
+            ("- \\Theta(t^2 - r^2) f\n  \\times g", "-\\Theta(t^2 - r^2) f\n  \\times g"),
+            ("-3.2 eV", "-3.2 eV"),
+            ("x - y", "x - y"),
+            (
+                "- Molecular formula: C2H6O\n- Molar mass: 46 g/mol",
+                "- Molecular formula: C2H6O\n- Molar mass: 46 g/mol",
+            ),
+            ("", ""),
+        ],
+    )
+    def test_render_reference(self, expected: str, rendered: str) -> None:
+        assert render_reference(expected) == rendered
+
     def test_render_and_score(self) -> None:
         rubric = [RubricCriterion(**c) for c in RUBRIC]
         assert render_rubric(rubric).splitlines()[2] == (
@@ -270,6 +289,12 @@ class TestVerify:
         server = _server(config.model_copy(update={"boxed_judge_input": "box"}), "Judgement: 'yes'")
         res = await server.verify(_request(_split("y" * 16001 + " \\boxed{2}")))
         assert res.reward == approx(1.0)
+
+    async def test_leading_minus_reference_keeps_its_sign(self, config: StemJudgeConfig) -> None:
+        server = _server(config, "Judgement: 'yes'")
+        res = await server.verify(_request(_split("\\boxed{-2}"), expected="- 2"))
+        assert "**Reference Answer(s)**:\n-2\n" in _judge_prompt(server)
+        assert res.expected_answer == "- 2"
 
     async def test_free_row_needs_no_box(self, config: StemJudgeConfig) -> None:
         server = _server(config, "Judgement: 'yes'")
