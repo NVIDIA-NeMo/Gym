@@ -2033,18 +2033,24 @@ def test_review_policy_never_reopens_settled_or_missing_outcomes(tmp_path):
         assert missing.events == [] and missing.failure_kind is None and missing.failure_id is None
 
 
-def _judge_failure(task: int, **extra) -> dict:
-    return ident(task, _ng_failure_class="judge_failed", failure_kind="judge_failed", **extra)
+def _judge_failure(task: int, *, kind: str = "judge_failed", **extra) -> dict:
+    return ident(task, _ng_failure_class=kind, failure_kind=kind, **extra)
 
 
 @pytest.mark.parametrize("where", ["results", "failures"])
-def test_review_same_saved_answer_judge_failure_verifies_or_fails_by_configuration(tmp_path, where):
-    row = _judge_failure(1, response=SAVED_ANSWER, **({"reward": 0.0} if where == "results" else {}))
+@pytest.mark.parametrize("kind", ["judge_failed", "judge_unparseable", "judge_invalid"])
+def test_review_same_saved_answer_judge_failure_verifies_or_fails_by_configuration(tmp_path, where, kind):
+    row = _judge_failure(1, kind=kind, response=SAVED_ANSWER, **({"reward": 0.0} if where == "results" else {}))
     results = [ident(0, reward=1.0)] + ([row] if where == "results" else [])
     job = write_job_dir(tmp_path / "job", n=2, results=results, failures=[row] if where == "failures" else [])
     before = {p.name: p.read_bytes() for p in (job / "artifacts").iterdir()}
     verify = _decide(job)
-    fail = _decide(job, RecoveryOutcomePolicyConfig(by_failure_kind={"judge_failed": "fail"}))
+    fail_policy = (
+        RecoveryOutcomePolicyConfig(saved_answer_default_action="fail")
+        if kind == "judge_invalid"  # collection's own class, not a registered failure kind
+        else RecoveryOutcomePolicyConfig(by_failure_kind={kind: "fail"})
+    )
+    fail = _decide(job, fail_policy)
     assert verify.identities["judge_recoverable"] == [(1, 0)] and verify.action == RecoveryAction.REVERIFY
     assert fail.identities["terminal"] == [(1, 0)] and fail.action == RecoveryAction.STOP
     assert fail.identities.get("judge_recoverable") is None

@@ -20,7 +20,7 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
 - ``model_final``: a failures-sidecar row marked ``_ng_failure_counts_as_zero``: the evaluated model's terminal failure,
   a scored zero that no infra retry may replace; or an ``agent_timeout`` row that kept the agent's answer
   (``is_answered_agent_deadline``), the model's result under its own deadline, which no resume runs again.
-- ``judge_recoverable``: a result row of class ``judge_failed``. Its saved answer is re-judged by
+- ``judge_recoverable``: a judge failure (``JUDGE_FAILURE_KINDS``) with a saved answer, re-judged by
   ``gym eval reverify --judge-failed-only``; queueing the policy again is never needed for it.
 - ``retryable``: the last sidecar row is non-terminal and under its recorded attempt cap: a Gym resume retries it.
 - ``exhausted``: the last sidecar row is non-terminal and at its attempt cap: only a resubmit gives it a fresh budget.
