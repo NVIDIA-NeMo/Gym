@@ -140,7 +140,7 @@ class SimulationRate:
 
 @dataclass(frozen=True, slots=True)
 class SimulationResult:
-    """Conditional actual-Welch diagnostics, separate from analytic planning."""
+    """Actual-Welch diagnostics at fixed supplied population variances."""
 
     trials: int
     seed: int
@@ -352,6 +352,8 @@ def _scalar_counts(
             continue
         designs = np.column_stack((baselines, np.full(len(baselines), nc)))
         designs = designs[_could_reach_target(cells[0], designs, weights[0], parameters)]
+        if not len(designs):
+            continue
         feasible = np.flatnonzero(_powers(cells, designs, weights, parameters) >= parameters.target_power)
         if len(feasible):
             incumbent = designs[feasible[0]]

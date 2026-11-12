@@ -510,6 +510,28 @@ def test_cli_plans_from_composite_sds_and_keeps_metric_sds_descriptive(tmp_path:
     assert [metric.candidate_std_points for metric in second.cells[0].metrics] == [5.0, 5.0]
 
 
+@pytest.mark.parametrize(
+    "name,baseline,candidate,power",
+    [
+        ("benchmark", (15,), (12,), 0.8057546329230019),
+        ("suite", (16, 32), (96, 160), 0.8015822293047277),
+        ("multiple-metrics", (8, 10), (8, 10), 0.9186697623451402),
+    ],
+)
+def test_checked_in_examples_reproduce_documented_allocations(
+    tmp_path: Path, monkeypatch, name: str, baseline: tuple[int, ...], candidate: tuple[int, ...], power: float
+) -> None:
+    plan = Path(__file__).resolve().parents[3] / "examples" / "repeat-planning" / f"{name}.yaml"
+    original = plan.read_bytes()
+    result = _run_cli(plan, tmp_path / "reports", monkeypatch)
+    assert result.allocation.baseline_counts == baseline
+    assert result.allocation.candidate_counts == candidate
+    assert result.allocation.statistics.power == pytest.approx(power, rel=1e-12, abs=1e-12)
+    assert result.simulation is not None
+    assert result.simulation.trials == 10000
+    assert plan.read_bytes() == original
+
+
 @pytest.mark.parametrize("trials", [1, 100])
 def test_real_cli_validates_fixed_allocation_with_reproducible_simulation(
     tmp_path: Path, monkeypatch, trials: int

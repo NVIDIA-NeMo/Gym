@@ -65,7 +65,7 @@ All entries receive equal weight. A sparse suite therefore gives models with mor
 
 `margin_points: 1` permits a loss smaller than one normalized score point; it is not a 1% relative loss. `expected_delta_points` is the forecast true candidate-minus-baseline change, with zero forecasting equal quality. Set both before seeing the comparison's results.
 
-`alpha: 0.05` selects a one-sided 5% non-inferiority test. This uses the lower endpoint of a two-sided 90% Welch interval: the candidate establishes non-inferiority when that endpoint is above the negative margin. To use the same decision with `compare-suite`, set `--confidence-level 0.90`. A two-sided 95% interval instead gives a one-sided 2.5% test.
+`alpha: 0.05` selects a one-sided 5% non-inferiority test. This uses the lower endpoint of a two-sided 90% Welch interval: the candidate establishes non-inferiority when that endpoint is above the negative margin. With either `compare` or `compare-suite`, set `--confidence-level 0.90` to use that decision. A two-sided 95% interval instead gives a one-sided 2.5% test.
 
 Use `compare-suite` with the same selected metrics, normalization bounds, and directions to evaluate the planned score. A benchmark claim uses a one-cell comparison manifest; a model claim uses that model's aggregate, and a suite claim uses the overall aggregate over the same entries. `gym eval compare` reports separate intervals in raw metric units. It matches the walkthrough's one-point decision directly for a single higher-is-better metric on a 0–1 scale, where the threshold is −0.01.
 

@@ -164,7 +164,7 @@ The minimum allowed new counts already meet the target: **eight GPQA passes and 
 
 Keep the input YAML and report with the experiment. Collect the reported baseline and per-candidate counts using the evaluation workflow appropriate to your benchmark, keeping tasks, scoring, sampling, and other comparison settings fixed. The commands above only plan the budget.
 
-For the single higher-is-better reward metric on a 0–1 scale used by the first example, use the same decision level:
+If your benchmark uses a single higher-is-better reward metric on a 0–1 scale, use the same decision level:
 
 ```bash
 gym eval compare \
@@ -185,4 +185,4 @@ gym eval compare-suite \
 
 These final commands require the collected artifacts; the planning walkthrough does not create them. A comparison manifest names run paths and metrics, while a planning YAML contains SD inputs and design settings. See [Compare Results](/main/evaluation/compare-results) for the comparison manifest and report walkthrough.
 
-For the one-point margin used here, establish non-inferiority when the resulting delta interval's lower endpoint is above −1 normalized point. The first example's single higher-is-better 0–1 reward uses threshold −0.01 in `compare`'s raw units. `compare` does not produce the multi-metric composite interval; use the matching `compare-suite` aggregate for that claim. An interval crossing the threshold is inconclusive; it does not establish that the candidate is too much worse. Keep that outcome rather than automatically extending the experiment after inspecting the result.
+For the one-point margin used here, establish non-inferiority when the resulting delta interval's lower endpoint is above −1 normalized point. For a single higher-is-better 0–1 reward, the threshold is −0.01 in `compare`'s raw units. `compare` does not produce the multi-metric composite interval; use the matching `compare-suite` aggregate for that claim. An interval crossing the threshold is inconclusive; it does not establish that the candidate is too much worse. Keep that outcome rather than automatically extending the experiment after inspecting the result.

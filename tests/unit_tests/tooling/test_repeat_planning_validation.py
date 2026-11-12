@@ -3,6 +3,8 @@
 """Check that the audit exporter preserves the observation unit and rejects bad evidence."""
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -217,3 +219,110 @@ def test_publication_failure_does_not_leave_passed_markers_beside_new_evidence(
     assert (output / "user_notes.txt").read_text() == "Keep these unrelated notes."
     evidence = json.loads((output / "cluster_numeric_evidence.json").read_text())
     assert evidence[0]["baseline"]["std"] == 4.0
+
+
+def test_rerun_replaces_numbered_benchmark_plans_when_suite_shrinks(tmp_path: Path) -> None:
+    report = _report()
+    second = _report()["cells"][0]
+    second["benchmark"] = "another"
+    report["cells"].append(second)
+    source = tmp_path / "suite.json"
+    source.write_text(json.dumps(report))
+    output = tmp_path / "audit"
+    run_validation(reference_root=None, output=output, suite_report=source, trials=256)
+    assert (output / "cluster_benchmark_1_plan.yaml").is_file()
+    assert (output / "cluster_benchmark_2_plan.yaml").is_file()
+    source.write_text(json.dumps(_report()))
+
+    run_validation(reference_root=None, output=output, suite_report=source, trials=256)
+
+    assert {path.name for path in output.glob("cluster_benchmark*plan.yaml")} == {"cluster_benchmark_plan.yaml"}
+    plan = yaml.safe_load((output / "cluster_suite_plan.yaml").read_text())
+    assert [cell["benchmark"] for cell in plan["cells"]] == ["benchmark"]
+
+
+def test_rerun_removes_dropped_optional_artifacts_and_keeps_similarly_named_user_files(
+    completed_audit: tuple[Path, Path],
+) -> None:
+    _, output = completed_audit
+    references = ["reference_benchmark_parity.csv", "reference_suite_parity.csv", "shared_baseline_parity.csv"]
+    for name in references:
+        (output / name).write_text("previous,reference\n")
+    user_files = [
+        "cluster_notes_plan.yaml",
+        "cluster_benchmark_notes_plan.yaml",
+        "cluster_benchmark_1_plan.yaml.backup",
+        "reference_notes.csv",
+    ]
+    for name in user_files:
+        (output / name).write_text("Keep this user file.")
+
+    receipt = run_validation(reference_root=None, output=output, suite_report=None, trials=256)
+
+    assert "cluster_input" not in receipt
+    assert all(not (output / name).exists() for name in references)
+    assert all(
+        not (output / name).exists()
+        for name in ["cluster_suite_plan.yaml", "cluster_benchmark_plan.yaml", "cluster_numeric_evidence.json"]
+    )
+    assert all((output / name).read_text() == "Keep this user file." for name in user_files)
+    assert (output / "user_notes.txt").read_text() == "Keep these unrelated notes."
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="Requires a non-root user and POSIX directory permissions.",
+)
+def test_audit_can_publish_into_existing_output_with_unwritable_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "readonly"
+    output = parent / "audit"
+    output.mkdir(parents=True)
+    mode = parent.stat().st_mode & 0o777
+    parent.chmod(0o555)
+    try:
+        run_validation(reference_root=None, output=output, suite_report=None, trials=256)
+    finally:
+        parent.chmod(mode)
+
+    assert (output / "VALIDATION.md").is_file()
+    assert (output / "validation_receipt.json").is_file()
+
+
+def test_audit_records_gym_commit_when_called_outside_a_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    expected = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    receipt = run_validation(reference_root=None, output=tmp_path / "audit", suite_report=None, trials=256)
+
+    assert receipt["gym_commit"] == expected
+
+
+@pytest.mark.parametrize("failure_name", ["validation_receipt.json", "reference_suite_parity.csv"])
+def test_publication_cleanup_failure_invalidates_both_completion_markers(
+    completed_audit: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, failure_name: str
+) -> None:
+    _, output = completed_audit
+    (output / "reference_suite_parity.csv").write_text("previous,reference\n")
+    original_unlink = Path.unlink
+    failed = False
+
+    def reject_first_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        nonlocal failed
+        if path == output / failure_name and not failed:
+            failed = True
+            raise OSError("Artifact cleanup failed")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", reject_first_cleanup)
+
+    with pytest.raises(OSError, match="Artifact cleanup failed"):
+        run_validation(reference_root=None, output=output, suite_report=None, trials=256)
+
+    assert not (output / "VALIDATION.md").exists()
+    assert not (output / "validation_receipt.json").exists()
+    assert (output / "user_notes.txt").read_text() == "Keep these unrelated notes."

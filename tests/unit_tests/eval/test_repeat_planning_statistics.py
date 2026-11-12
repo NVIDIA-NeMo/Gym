@@ -141,10 +141,39 @@ def test_scalar_bound_preserves_exhaustive_checks_near_roundoff_boundary(monkeyp
         return real_survival(*args, **kwargs)
 
     monkeypatch.setattr(nct, "sf", counted_survival)
-    with pytest.raises(ValueError, match="No feasible allocation found within max_repeats=2"):
+    with pytest.raises(ValueError, match=r"No feasible allocation found within max_repeats=2\.$"):
         plan_repeats([cell], parameters=parameters)
     # The normal bound is just below target; the buffer must leave the real NCT test in charge.
     assert evaluations > 0
+
+
+def test_existing_baseline_filter_preserves_the_first_feasible_candidate_count(monkeypatch) -> None:
+    cell = PlanningCell("m", "b", 1.0, 1.5, existing_baseline_repeats=50)
+    parameters = PlanningParameters(baseline_mode="existing", max_repeats=64)
+    candidates = np.arange(2, 65)
+    baseline_variance, candidate_variance = 1 / 50, 1.5 / candidates
+    total_variance = baseline_variance + candidate_variance
+    degrees = total_variance**2 / (baseline_variance**2 / 49 + candidate_variance**2 / (candidates - 1))
+    independent_power = nct.sf(t.isf(0.05, degrees), degrees, 1 / np.sqrt(total_variance))
+    expected = candidates[np.flatnonzero(independent_power >= parameters.target_power)[0]]
+    normal_upper = norm.sf(norm.isf(0.05) - 1 / np.sqrt(total_variance))
+    assert normal_upper[0] < parameters.target_power - 1e-12
+
+    real_survival = nct.sf
+    evaluations = 0
+
+    def counted_survival(*args, **kwargs):
+        nonlocal evaluations
+        evaluations += np.broadcast(*args[:3]).size
+        return real_survival(*args, **kwargs)
+
+    monkeypatch.setattr(nct, "sf", counted_survival)
+    result = plan_repeats([cell], parameters=parameters)
+    assert result.baseline_counts == (50,)
+    assert result.candidate_counts == (expected,)
+    assert result.statistics.power >= parameters.target_power
+    # Initial rows really were filtered; all retained probabilities use the real SciPy calculation.
+    assert 0 < evaluations < len(candidates)
 
 
 def test_existing_baseline_search_handles_nonmonotone_power() -> None:

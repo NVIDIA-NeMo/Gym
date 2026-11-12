@@ -19,6 +19,7 @@ import hashlib
 import inspect
 import json
 import math
+import re
 import subprocess
 from collections import Counter
 from dataclasses import asdict
@@ -417,17 +418,31 @@ def run_validation(
     files only, with completion markers last; publication errors remove those
     markers so partial outputs cannot appear to be a completed audit.
     """
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as directory:
+    output.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=f".{output.name}-", dir=output) as directory:
         staging = Path(directory)
         receipt = _write_validation(
             reference_root=reference_root, output=staging, suite_report=suite_report, trials=trials
         )
-        output.mkdir(parents=True, exist_ok=True)
         completion_files = ("validation_receipt.json", "VALIDATION.md")
-        for name in completion_files:
-            (output / name).unlink(missing_ok=True)
+        generated_files = {
+            "scalar_optimality.csv",
+            "reference_benchmark_parity.csv",
+            "reference_suite_parity.csv",
+            "shared_baseline_parity.csv",
+            "cluster_suite_plan.yaml",
+            "cluster_benchmark_plan.yaml",
+            "cluster_numeric_evidence.json",
+        }
+        staged_names = {path.name for path in staging.iterdir()}
         try:
+            for name in completion_files:
+                (output / name).unlink(missing_ok=True)
+            for path in output.iterdir():
+                if path.name not in staged_names and (
+                    path.name in generated_files or re.fullmatch(r"cluster_benchmark_[0-9]+_plan\.yaml", path.name)
+                ):
+                    path.unlink()
             for path in sorted(staging.iterdir()):
                 if path.name not in completion_files:
                     path.replace(output / path.name)
@@ -445,7 +460,9 @@ def _write_validation(
 ) -> dict[str, object]:
     """Write one audit into an unpublished staging directory."""
     receipt: dict[str, object] = dict(
-        gym_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        gym_commit=subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1], text=True
+        ).strip(),
         script_sha256=_sha256(Path(__file__)),
         scalar_optimality=validate_scalar_optimality(output),
     )
@@ -507,7 +524,7 @@ def _write_validation(
                 f"| {row['case']} | {row['allocation']['baseline_counts'][0]} / {row['allocation']['candidate_counts'][0]} | {row['allocation']['statistics']['power']:.4%} | {row['simulation']['power']['estimate']:.2%} ({row['simulation']['power']['ci_low']:.2%}–{row['simulation']['power']['ci_high']:.2%}) | {row['simulation']['false_positive']['estimate']:.2%} |"
                 for row in simulations
             ],
-            "Pilot variance uncertainty is separate from the conditional calculations checked here. Repeating after inspecting the final decision is outside this fixed-count design.\n",
+            "Calculations use fixed supplied variance forecasts; they do not include uncertainty from estimating those forecasts. Repeating after inspecting the final decision is outside this fixed-count design.\n",
             "A separate two-benchmark diagnostic generates complete raw normal observations at unequal arm counts, recomputes their sample means and variances, and calls Gym's Welch comparison. Its power and false-positive intervals overlap those from the production sufficient-statistic simulator; full seeds and rates are in the receipt.\n",
             "## Cluster inputs\n",
             "The optional suite report is reduced to complete-pass scores and SDs, with no response text. Generated direct-SD YAML files exercise benchmark and suite planning with the historical baseline frozen.\n",
