@@ -1214,12 +1214,11 @@ def transcript_to_atif(
     all (a copied assistant turn, a later system turn, a result for no call or a second
     ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
 
-    An ``mcp_call`` is a tool call the model endpoint handled itself: gpt-oss calls its built-in
-    ``container.exec`` tool even when the request declares no tools, and NVIDIA-hosted endpoints return the
-    call without running it. It exports as an agent step with that one tool call, with a status other than
-    ``completed`` kept in the call's ``extra``. The endpoint's output, or else its error, becomes the step's
-    observation, and an error is also kept in the result's ``extra``; a call with neither stays in
-    ``open_tool_calls``, since no one ran it.
+    An ``mcp_call`` is a tool call the model endpoint handled itself, possibly without running it; a model
+    can call a built-in tool even when the request declares no tools. It exports as an agent step with that
+    one tool call, with a status other than ``completed`` kept in the call's ``extra``. The endpoint's
+    output, or else its error, becomes the step's observation, and an error is also kept in the result's
+    ``extra``; a call with neither stays in ``open_tool_calls``, since no one ran it.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")

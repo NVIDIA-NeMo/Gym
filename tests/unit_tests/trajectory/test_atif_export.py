@@ -1941,7 +1941,7 @@ def test_transcript_to_atif_maps_developer_to_system_and_keeps_pending_calls_ope
 
 
 def _mcp_call(item_id: str, **fields: Any) -> dict[str, Any]:
-    """An ``mcp_call`` as an NVIDIA-hosted gpt-oss endpoint returns it for the model's built-in container tool."""
+    """An ``mcp_call`` an endpoint returns for a call to the model's built-in container tool that it did not run."""
     return {
         "id": item_id,
         "type": "mcp_call",
@@ -1957,7 +1957,7 @@ def _mcp_call(item_id: str, **fields: Any) -> dict[str, Any]:
 
 
 def test_transcript_to_atif_exports_an_endpoint_tool_call_the_harness_never_ran() -> None:
-    """gpt-oss calls its container tool though Terminus declares none; the endpoint returns the call unrun."""
+    """The model calls a built-in tool though Terminus declares none, and the endpoint returns the call unrun."""
     trajectory = _transcript(
         "Summarize the logs",
         [
