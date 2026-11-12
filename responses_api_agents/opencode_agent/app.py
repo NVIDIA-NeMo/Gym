@@ -383,6 +383,14 @@ def _continues_the_prompt(messages: Sequence[Mapping[str, Any]], index: int) -> 
     return index > 0 and messages[index - 1]["info"].get("summary") is True
 
 
+def _is_compaction_summary(info: Mapping[str, Any]) -> bool:
+    """Whether an exported assistant message is a compaction summary.
+
+    OpenCode 1.17 marks a summary ``summary: true`` and names ``compaction`` as its agent; either marker is enough.
+    """
+    return info.get("summary") is True or info.get("agent") == "compaction"
+
+
 def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
     """Whether the last prompt of an OpenCode export reached the step limit that ``steps`` sets.
 
@@ -497,6 +505,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
     # of a compaction is counted as a step too.
     return_session_trajectory: bool = True
+    # Sandbox sessions only. Leave OpenCode's compaction summaries out of the response output. A summary is an
+    # assistant message like any other, so a run that ends on a compaction otherwise hands a verifier that grades the
+    # last assistant text the summary instead of an answer. Off by default, so the output keeps every assistant
+    # message; the compaction record in the observations keeps the summary either way.
+    exclude_compaction_summaries: bool = False
     # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
     # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
     # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
@@ -1487,6 +1500,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         gym_reasoning = self.config.model_server is not None
         for message in export.get("messages", []):
             if message.get("info", {}).get("role") != "assistant":
+                continue
+            if self.config.exclude_compaction_summaries and _is_compaction_summary(message["info"]):
                 continue
             parts = message.get("parts", [])
             # The empty-answer decision needs the whole message; each part still converts on its own.

@@ -413,6 +413,15 @@ configuration Gym passes is merged last and still takes precedence. A repository
 add instructions, agents, plugins or tools, so set it only for task repositories you would
 run OpenCode in yourself. Export and import never read project config.
 
+### Compaction summaries in the output
+
+By default, a session's response output includes OpenCode's compaction summaries. A summary is
+an assistant message like any other, so when a run ends on a compaction, a verifier that grades
+the last assistant text gets the summary instead of an answer. With
+`exclude_compaction_summaries: true`, the output leaves out each assistant message that
+OpenCode marks `summary: true` or that its `compaction` agent wrote. The compaction record in
+the observations keeps the summary text either way.
+
 ### Session exports
 
 `export_dir` is an absolute sandbox directory chosen by the sandbox owner, outside the

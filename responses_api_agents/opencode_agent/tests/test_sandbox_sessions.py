@@ -1176,6 +1176,50 @@ def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, pass
     assert not reached_step_limit({"messages": messages}, passes + 1)
 
 
+def compacted_events() -> str:
+    """events() with an automatic compaction before the final answer, in the message shapes OpenCode 1.17.11 saves."""
+    prompt, answer = json.loads(events())["messages"]
+    summary = {
+        "info": {"role": "assistant", "summary": True, "mode": "compaction", "agent": "compaction", "finish": "stop"},
+        "parts": [{"type": "text", "text": "Summary of the work so far"}],
+    }
+    return json.dumps({"messages": [prompt, _compaction(), summary, _CONTINUE, answer]})
+
+
+@pytest.mark.parametrize("exclude", [False, True])
+def test_exclude_compaction_summaries_leaves_them_out_of_the_output(setup, exclude):
+    agent, sandbox = setup
+    agent.config.exclude_compaction_summaries = exclude
+    sandbox.events = compacted_events()
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+    assert result.status_code == 200, result.text
+    output = [
+        (item["type"], item["content"][0]["text"] if item["type"] == "message" else None)
+        for item in result.json()["output"]
+    ]
+    answer = [("reasoning", None), ("function_call", None), ("function_call_output", None), ("message", "Fixed")]
+    assert output == (answer if exclude else [("message", "Summary of the work so far"), *answer])
+
+
+@pytest.mark.parametrize("marker", [{"summary": True}, {"agent": "compaction"}])
+def test_either_marker_identifies_a_compaction_summary(setup, marker):
+    """OpenCode 1.17.11 sets both markers on a summary; either one alone still identifies it."""
+    from nemo_gym.trajectory import AgentObservationBundle
+
+    agent, _ = setup
+    agent.config.exclude_compaction_summaries = True
+    export = {
+        "messages": [
+            {"info": {"role": "assistant", **marker}, "parts": [{"type": "text", "text": "Summary"}]},
+            {"info": {"role": "assistant", "agent": "build"}, "parts": [{"type": "text", "text": "Answer"}]},
+        ]
+    }
+    output = agent._session_output(export, AgentObservationBundle(source="opencode"))
+    assert [item.content[0].text for item in output] == ["Answer"]
+
+
 @pytest.mark.parametrize(
     ("opencode_config", "detail"),
     [
