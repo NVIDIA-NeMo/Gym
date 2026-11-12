@@ -17,7 +17,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -502,6 +502,57 @@ class TestApp:
             # Both the eval and the reference report reach the judge as the rendered PDF.
             assert json.dumps(call.kwargs["messages"]).count(render) == 2
         assert (eval_dir / "report.pdf").is_file() and (ref_dir / "report.pdf").is_file()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reference_has_pdf", [False, True])
+    async def test_verify_comparison_with_sandbox_rendering_never_converts_on_the_host(
+        self, tmp_path, monkeypatch, reference_has_pdf
+    ) -> None:
+        import fitz
+
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        for directory in (eval_dir, ref_dir):
+            directory.mkdir(parents=True)
+            (directory / "finish_params.json").write_text("{}")
+            (directory / "report.docx").write_bytes(b"office source")
+        # The sandbox rendered the eval submission; the reference carries its PDF or not.
+        renders = [eval_dir / "report.docx.pdf"] + ([ref_dir / "report.pdf"] if reference_has_pdf else [])
+        for render in renders:
+            document = fitz.open()
+            document.new_page().insert_text((72, 72), "render")
+            document.save(render)
+            document.close()
+        host_convert = AsyncMock(return_value=(0, 0, []))
+        monkeypatch.setattr("resources_servers.gdpval.preconvert.preconvert_dir_async", host_convert)
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=True):
+            server = _server(
+                reward_mode="comparison",
+                reference_deliverables_dir=str(ref_root),
+                preconvert_office_to_pdf=True,
+                sandbox_libreoffice_command=["libreoffice"],
+                persist_deliverables_dir=str(tmp_path / "persist"),
+            )
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="BOXED[B]"))]
+        monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda _: "http://localhost:9999")
+        monkeypatch.setattr("openai.OpenAI", lambda **_: client)
+
+        response = await server.verify(_NO_SESSION, _verify_request(deliverables_dir=str(eval_dir)))
+
+        host_convert.assert_not_called()
+        if reference_has_pdf:
+            assert response.judge_response["total_judged"] == 4
+        else:
+            # Judging would have shown the judge an empty reference.
+            client.chat.completions.create.assert_not_called()
+            assert response.judge_response == {
+                "error": "reference_unrendered",
+                "unrendered": [str(ref_dir / "report.docx")],
+            }
+            dumped = response.model_dump()
+            assert (dumped["_ng_failure_class"], dumped["_ng_failure_terminal"]) == ("reference_unrendered", True)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_renders_office_with_configured_command(self, tmp_path, monkeypatch) -> None:

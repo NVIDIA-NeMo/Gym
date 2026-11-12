@@ -325,6 +325,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # Command that runs LibreOffice inside the task sandbox, e.g. [libreoffice]. When set, /verify
     # renders each Office file to its <name>.pdf sidecar in the sandbox before the sandbox stops, so
     # the server needs no LibreOffice of its own and the host install and startup check are skipped.
+    # Without libreoffice_command, comparison mode then converts nothing on the host: references must
+    # carry their PDFs. The agent controls that sandbox, so it can forge its own renders; see the README.
     sandbox_libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
     # Where /verify caches the tasks of s3:// reference deliverables; None uses a directory under the temp dir.
     reference_cache_dir: Optional[str] = None
@@ -542,6 +544,9 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 # nemo_gym: the class name is GDPVal vocabulary.
 REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 EVAL_MISSING_FAILURE_CLASS = "eval_missing"
+# Sandbox rendering is on, so the server converts nothing, and a reference deliverable has an Office file without a
+# PDF. Judging would show the judge an empty reference; the reference set needs its PDFs.
+REFERENCE_UNRENDERED_FAILURE_CLASS = "reference_unrendered"
 TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
 PERMANENT_JUDGE_ERROR_FAILURE_CLASS = "permanent_judge_error"
 
@@ -739,6 +744,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     "deployment container, or set preconvert_office_to_pdf=false to opt out."
                 )
         super().model_post_init(context)
+
+    @property
+    def _renders_only_in_sandbox(self) -> bool:
+        # Without a libreoffice_command, sandbox rendering means the server never runs LibreOffice in comparison mode,
+        # even when the host has it: that is what keeps model-written files away from it.
+        return self.config.sandbox_libreoffice_command is not None and self.config.libreoffice_command is None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -1346,7 +1357,33 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure(EVAL_MISSING_FAILURE_CLASS, terminal=True),
             )
 
-        if self.config.preconvert_office_to_pdf:
+        if self.config.preconvert_office_to_pdf and self._renders_only_in_sandbox:
+            from resources_servers.gdpval.preconvert import find_convertible_files
+
+            # The sandbox rendered the eval submission; references are judged only from the PDFs they carry.
+            unrendered = [
+                str(path)
+                for dirs in ref_dirs_by_id.values()
+                for ref_dir in dirs
+                for path, _ in find_convertible_files(ref_dir, recursive=False)
+            ]
+            if unrendered:
+                print(
+                    f"[gdpval] reference Office files without a PDF for task {body.task_id}: {unrendered}",
+                    flush=True,
+                )
+                if self.config.strict_comparison_trials:
+                    raise RuntimeError(
+                        f"strict comparison trial contract failed for task {body.task_id}: reference_unrendered"
+                    )
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={"error": "reference_unrendered", "unrendered": unrendered},
+                    **_gdpval_failure(REFERENCE_UNRENDERED_FAILURE_CLASS, terminal=True),
+                )
+        elif self.config.preconvert_office_to_pdf:
             await self._preconvert_and_log(eval_task_dir, label=f"eval/{body.task_id}")
             for ref_id, dirs in ref_dirs_by_id.items():
                 for ref_dir in dirs:
