@@ -379,8 +379,8 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # receives this value as a cooperative deadline so model/step boundaries
     # can stop cleanly before the parent has to cancel the Ray task.
     task_timeout: int = 1800
-    # Agent-loop budget counted from the first step, like the legacy
-    # nemotron_osworld rollout_timeout_s; reaching it ends the rollout as a timeout.
+    # Agent-loop budget counted from the first step; reaching it ends the
+    # rollout as a timeout.
     rollout_timeout_s: Optional[float] = Field(default=None, gt=0)
     task_cancel_grace_s: float = Field(default=30.0, gt=0)
     # Optional semantic Ray resources for each OSWorld rollout task. This lets

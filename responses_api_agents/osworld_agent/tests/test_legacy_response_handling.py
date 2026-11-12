@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy nemotron_osworld response handling switches."""
+"""Opt-in response-handling switches."""
 
 from __future__ import annotations
 
@@ -261,7 +261,7 @@ def test_legacy_parser_enters_the_contract_only_when_enabled() -> None:
             'Click on "View".\n## Code:\n```python\npyautogui.click(0.82543, 0.208526)\n```',
             "pyautogui.click(1585, 225)",
         ),
-        # No Action section: the old agent executed the parser's FAIL as a policy action.
+        # No Action section: the parser's FAIL is executed as a policy action.
         (INLINE_CODE_HEADING, "FAIL"),
     ],
 )

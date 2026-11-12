@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy ``nemotron_osworld`` response parsing.
+"""Legacy OSWorld response parsing.
 
-``nemotron_osworld`` is the standalone OSWorld training agent used before this
-Gym integration. ``parse_response_to_cot_and_action`` and
-``project_coordinate_to_absolute_scale`` are copied from the pinned OSWorld
-``mm_agents.nvidia.nemotron_agent`` module, and ``normalize_vendor_parser_input``
-/ ``is_invalid_legacy_parse`` from the ``nemotron_osworld`` agent, so legacy runs accept and execute
-exactly what the old agent did. Keep them byte-for-byte in behavior.
+``parse_response_to_cot_and_action`` and ``project_coordinate_to_absolute_scale``
+are copied from the pinned OSWorld ``mm_agents.nvidia.nemotron_agent`` module;
+``normalize_vendor_parser_input`` and ``is_invalid_legacy_parse`` add the input
+normalization and invalid-parse rule used with that parser. Keep them
+byte-for-byte in behavior.
 """
 
 from __future__ import annotations
@@ -43,10 +42,10 @@ def normalize_vendor_parser_input(response: Mapping[str, str]) -> Dict[str, str]
 
 
 def is_invalid_legacy_parse(low_level_instruction: Any, actions: List[str], cot: Any) -> bool:
-    """The old agent replaced these parses with a FAIL action.
+    """Parses that are replaced with a FAIL action.
 
-    An ``<Error>`` parse that still produced code is not in this set: the old
-    agent executed its returned ``FAIL`` action as an ordinary policy action.
+    An ``<Error>`` parse that still produced code is not in this set: its
+    returned ``FAIL`` action is executed as an ordinary policy action.
     """
 
     return (

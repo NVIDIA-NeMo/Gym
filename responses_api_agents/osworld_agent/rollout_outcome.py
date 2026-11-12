@@ -31,8 +31,8 @@ class RolloutOutcomeFacts:
     environment_done: bool = False
     horizon_reached: bool = False
     policy_stop_reason: Optional[str] = None
-    # Legacy nemotron_osworld training masked every rollout that ended without DONE/FAIL
-    # or environment termination; opt in to reproduce that admission rule.
+    # Opt-in admission rule: mask every rollout that ended without DONE/FAIL
+    # or environment termination.
     mask_unterminated: bool = False
 
     def __post_init__(self) -> None:

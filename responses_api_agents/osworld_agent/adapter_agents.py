@@ -99,9 +99,7 @@ TEXT_HISTORY_CODE_TEMPLATE = "\n## Code:\n```python\n{code}\n```\n"
 _ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"normalized", "raw_live", "raw_full"})
 _RAW_ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"raw_live", "raw_full"})
 # osworld: text-folded history from ``history_policy`` (reference agent).
-# cc_chat: the prompt of the legacy ``nemotron_osworld`` agent, the standalone
-# OSWorld training agent used before this Gym integration. Every turn stays a
-# chat turn; dropped screenshots become a marker at the start of each omitted
+# cc_chat: chat-style history. Every turn stays a chat turn; dropped screenshots become a marker at the start of each omitted
 # run; the first screenshot is never dropped; and the image window is a frozen
 # base of the last ``cc_keep_last_groups`` observations plus a growing tail,
 # re-based once it holds more than ``cc_max_active_images`` images.
@@ -623,7 +621,7 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
             if type(prompt_token_guard) is not int or prompt_token_guard <= 0:
                 raise ValueError("cc_prompt_token_guard must be a positive integer")
             result["cc_prompt_token_guard"] = prompt_token_guard
-    # Legacy nemotron_osworld response handling. Only non-default values
+    # Opt-in response-handling switches. Only non-default values
     # enter the contract, so existing contracts stay byte-identical.
     for field, default in (
         ("validate_python_syntax", True),
@@ -962,7 +960,7 @@ class NemotronV3NanoOmniAgent:
         return content
 
     def _legacy_parse(self, response: Any) -> tuple[str, List[str], Dict[str, Any]]:
-        """Parse as the legacy nemotron_osworld agent did from the engine's reasoning split."""
+        """Parse with the legacy OSWorld parser from the engine's reasoning split."""
 
         raw_content = response.get("raw_content") if isinstance(response, Mapping) else None
         if isinstance(raw_content, str) and raw_content.startswith("<think>") and "</think>" in raw_content:
@@ -1139,8 +1137,7 @@ class NemotronV3NanoOmniAgent:
     def _cc_prompt_guard_exceeded(self, chunk_start: int, turn: int) -> bool:
         """Predict whether the next in-chunk prompt crosses the CC token guard.
 
-        The legacy nemotron_osworld client measured the prepared prompt and closed a
-        non-empty chunk once it exceeded the guard. Appending one turn grows
+        A non-empty chunk is closed before its prompt exceeds the guard. Appending one turn grows
         the prompt by the previous completion plus one observation, whose size
         is measured from consecutive in-chunk calls of this episode.
         """
@@ -1497,8 +1494,8 @@ class NemotronV3NanoOmniAgent:
                 "last_error": last_error,
             }
             # Transport failures stay runtime facts for admission to mask.
-            # The legacy nemotron_osworld client rejected a rollout whose rebased prompt
-            # still exceeded its guard, so that rollout was never trained.
+            # With mask_context_limit, a rollout that still overflows after re-basing
+            # is masked rather than trained.
             mask_context_limit = context_limit_stop and self.mask_context_limit
             if (
                 self.unterminated_episode_policy == "fail"
@@ -1506,8 +1503,8 @@ class NemotronV3NanoOmniAgent:
                 and not mask_context_limit
             ):
                 if self.train_invalid_terminal_call and not context_limit_stop:
-                    # The legacy nemotron_osworld agent kept the rejected generation in the
-                    # trained trace, so the episode reward reaches its tokens.
+                    # Keep the rejected generation in the trained trace so the
+                    # episode reward reaches its tokens.
                     model_calls[-1]["loss_member"] = True
                 parsed_info.update(
                     {
