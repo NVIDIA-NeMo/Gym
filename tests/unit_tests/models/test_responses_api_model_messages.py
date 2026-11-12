@@ -15,8 +15,8 @@
 """Tests for the default ``/v1/messages`` route on ``SimpleResponsesAPIModel``.
 
 Every Gym model server inherits an Anthropic Messages endpoint that maps Messages <-> Responses
-around the server's own ``responses()``. These tests use minimal fake servers to exercise the
-default mapping for both ``responses()`` signatures (with and without a leading ``request``).
+around the server's own ``responses()``. Minimal servers cover both ``responses()`` signatures
+and native-cause capture reconstruction.
 """
 
 from time import time
@@ -35,6 +35,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.models.model_call_capture import _reconstruct_anthropic_sse
 
 
 def _build_response(text: str, model: str = "downstream-model") -> NeMoGymResponse:
@@ -168,3 +169,29 @@ class TestDefaultMessagesRoute:
         assert "event: message_start" in body
         assert "event: content_block_delta" in body
         assert "event: message_stop" in body
+
+
+def test_anthropic_sse_reconstruction_preserves_zero_native_causes() -> None:
+    response = _reconstruct_anthropic_sse(
+        [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "message",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "model",
+                    "stop_reason": "end_turn",
+                    "native_stop_reason": 0,
+                    "native_finish_reason": 0,
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "answer"}},
+            {"type": "message_stop"},
+        ]
+    )
+    assert response["stop_reason"] == "end_turn"
+    assert response["content"] == [{"type": "text", "text": "answer"}]
+    for key in ("native_stop_reason", "native_finish_reason"):
+        assert response[key] == 0
+        assert type(response[key]) is int

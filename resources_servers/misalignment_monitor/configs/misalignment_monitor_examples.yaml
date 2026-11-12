@@ -1,0 +1,34 @@
+misalignment_monitor:
+  resources_servers:
+    misalignment_monitor:
+      domain: safety
+      description: Layered misalignment monitor for training and evaluation rollouts (activation screen, model review, investigation)
+      value: Catch reward hacking, deception, sandbox escapes and other misaligned agent behavior without changing rewards
+      # The judge is a separate model server: a monitored policy must not grade itself.
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      verified: false
+misalignment_monitor_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: misalignment_monitor
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/misalignment_monitor/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+misalignment_monitor_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: misalignment_monitor_simple_agent
