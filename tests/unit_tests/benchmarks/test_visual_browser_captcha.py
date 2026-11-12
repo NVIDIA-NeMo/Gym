@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Resource-level CAPTCHA lifecycle tests collected by the repository CI suite."""
+"""CAPTCHA provider contracts measured by core coverage without live provider requests."""
 
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -563,3 +564,187 @@ def test_environment_selects_custom_and_noop_solvers(monkeypatch) -> None:
     monkeypatch.setenv("CAPSOLVER_API_KEY", "CAP-present-but-disabled")
     monkeypatch.setenv("WA_CAPTCHA_PROVIDER", "none")
     assert isinstance(captcha.captcha_solver_from_environment(), captcha.NoopCaptchaSolver)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _ScriptedClient(_Client):
+    def __init__(self, payloads: list[dict]) -> None:
+        super().__init__(timeout=2.0)
+        self.payloads = list(payloads)
+
+    def post(self, url: str, *, json: dict) -> _Response:
+        self.requests.append((url, json))
+        return _Response(self.payloads.pop(0))
+
+
+@pytest.mark.parametrize(
+    ("payloads", "message", "expected_requests"),
+    [
+        ([{"errorDescription": "request rejected"}], "createTask failed: request rejected", 1),
+        (
+            [{"taskId": "test-task"}, {"status": "failed", "errorDescription": "provider unavailable"}],
+            "task failed: provider unavailable",
+            2,
+        ),
+        ([{"taskId": "test-task"}, {"status": "ready", "solution": {}}], "returned no browser token", 2),
+    ],
+)
+def test_provider_failure_does_not_inject_or_cache_a_solution(
+    monkeypatch, payloads, message, expected_requests
+) -> None:
+    client = _ScriptedClient(payloads)
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha, "time", _Clock())
+    page = _BlockingPage()
+    solver = captcha.CapSolverBrowserSolver("test-client-key", timeout=2)
+
+    with pytest.raises(RuntimeError, match=message):
+        solver.maybe_solve(page, phase="after computer")
+
+    assert page.injected_token is None
+    assert not solver._completed_challenges
+    assert len(client.requests) == expected_requests
+    assert client.requests[0][0] == solver.CREATE_URL
+
+
+def test_processing_poll_deadline_fails_without_injecting_a_token(monkeypatch) -> None:
+    client = _ScriptedClient([{"taskId": "test-task"}, {"status": "processing"}, {"status": "processing"}])
+    clock = _Clock()
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha, "time", clock)
+    page = _BlockingPage()
+    solver = captcha.CapSolverBrowserSolver("test-client-key", timeout=2)
+
+    with pytest.raises(TimeoutError, match="did not finish within 2.0s"):
+        solver.maybe_solve(page, phase="before capture")
+
+    assert clock.now == 2
+    assert len(client.requests) == 3
+    assert page.injected_token is None
+    assert not solver._completed_challenges
+
+
+def test_processing_poll_can_finish_with_recaptcha_response_token(monkeypatch) -> None:
+    client = _ScriptedClient(
+        [
+            {"taskId": "test-task"},
+            {"status": "processing"},
+            {"status": "ready", "solution": {"gRecaptchaResponse": "browser-token"}},
+        ]
+    )
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha, "time", _Clock())
+    page = _BlockingPage()
+    solver = captcha.CapSolverBrowserSolver("test-client-key", timeout=3)
+
+    assert solver.maybe_solve(page, phase="initial") is True
+    assert page.injected_token == "browser-token"
+    assert len(client.requests) == 3
+    assert len(solver._completed_challenges) == 1
+
+
+@pytest.mark.parametrize("value", ["ftp://proxy.example:1234", "http://proxy.example", "http://proxy.example:bad"])
+def test_invalid_solver_proxy_is_rejected_before_provider_request(value) -> None:
+    with pytest.raises(ValueError, match="WA_CAPTCHA_PROXY_SERVER"):
+        captcha.CapSolverBrowserSolver("test-client-key", proxy_server=value)
+
+
+def test_solver_proxy_decodes_credentials_and_preserves_protocol() -> None:
+    config = captcha.CapSolverBrowserSolver._parse_proxy_server("socks5://user%40name:pass%3Aword@proxy.example:1080")
+
+    assert config == {"server": "socks5://proxy.example:1080", "username": "user@name", "password": "pass:word"}
+
+
+@pytest.mark.parametrize(
+    ("proxy", "expected"),
+    [
+        ("http://localhost:1", True),
+        ("http://127.0.0.2:2", True),
+        ("http://[::1]:3", True),
+        ("http://proxy.example:4", False),
+    ],
+)
+def test_solver_detects_loopback_proxy_addresses(proxy, expected) -> None:
+    assert captcha.CapSolverBrowserSolver._is_loopback_proxy({"server": proxy}) is expected
+
+
+def test_captured_turnstile_key_takes_priority_over_dom_and_iframe_keys() -> None:
+    page = _Page("dom-key")
+    page.frames = [SimpleNamespace(url="https://google.com/recaptcha/api2/anchor?k=frame-key")]
+    page.evaluate = lambda _script: "captured-key"
+
+    assert captcha.CapSolverBrowserSolver._challenge(page) == ("turnstile", "captured-key")
+
+
+@pytest.mark.parametrize(
+    ("solution", "expected"),
+    [
+        (
+            {"cookies": {"session": "session-cookie"}, "token": "clearance-token"},
+            [
+                {"name": "session", "value": "session-cookie", "url": "https://example.test/"},
+                {"name": "cf_clearance", "value": "clearance-token", "url": "https://example.test/"},
+            ],
+        ),
+        (
+            {"cookies": [{"name": "cf_clearance", "value": "cookie", "domain": "example.test", "path": "/"}, None]},
+            [{"name": "cf_clearance", "value": "cookie", "domain": "example.test", "path": "/"}],
+        ),
+    ],
+)
+def test_cloudflare_cookie_solutions_preserve_cookie_scope(solution, expected) -> None:
+    page = _CloudflarePage()
+
+    result = captcha.CapSolverBrowserSolver._apply_cloudflare_solution(page, solution)
+
+    assert page.context.cookies == expected
+    assert result == {"fieldCount": len(expected), "callbacksCalled": 0}
+
+
+@pytest.mark.parametrize("solution", [{"cookies": {"empty": ""}}, {"cookies": "invalid"}, {}])
+def test_empty_cloudflare_solution_does_not_modify_context(solution) -> None:
+    page = _CloudflarePage()
+
+    with pytest.raises(RuntimeError, match="contained no cookies"):
+        captcha.CapSolverBrowserSolver._apply_cloudflare_solution(page, solution)
+
+    assert page.context.cookies == []
+
+
+def test_challenge_wait_has_a_bounded_fallback_when_page_wait_fails(monkeypatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(captcha, "time", clock)
+    page = _BlockingPage()
+
+    assert captcha.CapSolverBrowserSolver._wait_for_challenge_clear(page, timeout=2) is False
+    assert clock.now == 2
+
+
+@pytest.mark.parametrize(
+    ("kind", "field"), [("turnstile", "cf-turnstile-response"), ("recaptcha", "g-recaptcha-response")]
+)
+def test_token_injection_returns_browser_acknowledgement(kind, field) -> None:
+    calls = []
+    page = SimpleNamespace(evaluate=lambda script, args: calls.append((script, args)) or {"fieldCount": "2"})
+
+    assert captcha.CapSolverBrowserSolver._inject(page, kind, "token") == {"fieldCount": 2, "callbacksCalled": 0}
+    assert calls[0][1] == [field, "token", kind]
+
+
+def test_token_injection_without_browser_acknowledgement_reports_no_effect() -> None:
+    page = SimpleNamespace(evaluate=lambda _script, _args: None)
+
+    assert captcha.CapSolverBrowserSolver._inject(page, "turnstile", "token") == {
+        "fieldCount": 0,
+        "callbacksCalled": 0,
+    }
