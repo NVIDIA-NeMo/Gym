@@ -11,12 +11,24 @@ import asyncio
 import logging
 import math
 import shlex
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from nemo_gym.core.failure_kinds import (
+    PROVIDER_COMMAND_TIMEOUT,
+    PROVIDER_CREATE_TIMEOUT,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_NOT_READY,
+    PROVIDER_REQUEST_FAILED,
+    PROVIDER_UNAVAILABLE,
+)
+from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxEndpoint,
@@ -26,6 +38,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config
+from nemo_gym.utils.exception_inspection import error_to_http_status
 
 
 if TYPE_CHECKING:
@@ -105,6 +118,45 @@ class CWSandboxProvider:
         if handle.provider_name != self.name:
             raise ValueError(f"Expected a cwsandbox handle, got {handle.provider_name!r}")
         return handle.raw
+
+    def _failure(self, operation: str, cause: Exception, sandbox_id: str | None = None) -> NgFailureEvent:
+        status = error_to_http_status(cause)
+        if status in (401, 403) or isinstance(cause, getattr(self._sdk, "CWSandboxAuthenticationError", ())):
+            kind = PROVIDER_CREDENTIALS_REJECTED
+        elif isinstance(cause, getattr(self._sdk, "SandboxCommandTimeoutError", ())):
+            kind = PROVIDER_COMMAND_TIMEOUT
+        elif isinstance(cause, self._sdk.SandboxTimeoutError):
+            # This SDK exception also covers RPC/reconnect timeouts, not just command deadlines.
+            kind = PROVIDER_IO_TIMEOUT
+        elif isinstance(cause, TimeoutError):
+            kind = PROVIDER_CREATE_TIMEOUT if operation == "readiness" else PROVIDER_IO_TIMEOUT
+        elif isinstance(cause, SandboxCreateError):
+            kind = PROVIDER_NOT_READY
+        elif (
+            status in (410, 502, 503, 504)
+            or isinstance(cause, ConnectionError)
+            or isinstance(cause, getattr(self._sdk, "SandboxUnavailableError", ()))
+        ):
+            kind = PROVIDER_UNAVAILABLE
+        else:
+            kind = PROVIDER_REQUEST_FAILED
+        return sandbox_failure(
+            operation=operation,
+            failure_kind=kind,
+            provider=self.name,
+            sandbox_id=sandbox_id,
+            cause=cause,
+            http_status=status,
+        )
+
+    @asynccontextmanager
+    async def _operation(self, operation: str, sandbox_id: str | None = None) -> AsyncIterator[None]:
+        try:
+            yield
+        except NgFailureEvent:
+            raise
+        except Exception as exc:
+            raise self._failure(operation, exc, sandbox_id) from exc
 
     @staticmethod
     def _mapping_list(value: object, name: str) -> list[dict[str, Any]]:
@@ -218,25 +270,27 @@ class CWSandboxProvider:
         _positive("ready_timeout_s", ready_timeout)
         if spec.entrypoint is not None and not spec.entrypoint:
             raise ValueError("entrypoint must be nonempty when supplied")
-        sandbox = self._sdk.Sandbox(
-            container_image=spec.image.removeprefix("docker://"),
-            base_url=self.connection.base_url,
-            auth=self._auth,
-            request_timeout_seconds=self.connection.request_timeout_s,
-            max_lifetime_seconds=ttl,
-            runner_ids=self.create_config.runner_ids,
-            resources=sdk_resources if requests or limits or resources.gpu else None,
-            environment_variables=dict(spec.env),
-            working_dir=spec.workdir,
-            annotations=dict(spec.metadata),
-            network=self._sdk.NetworkOptions(**network_kwargs),
-            services=services or None,
-            volumes=volumes or None,
-            file_system_snapshot=snapshot_options,
-            security_context=self._sdk.SecurityContext(run_as_user=0, run_as_group=0, privileged=False),
-            command=spec.entrypoint[0] if spec.entrypoint else None,
-            args=spec.entrypoint[1:] if spec.entrypoint else None,
-        )
+        async with self._operation("create"):
+            sandbox = self._sdk.Sandbox(
+                container_image=spec.image.removeprefix("docker://"),
+                base_url=self.connection.base_url,
+                auth=self._auth,
+                request_timeout_seconds=self.connection.request_timeout_s,
+                max_lifetime_seconds=ttl,
+                runner_ids=self.create_config.runner_ids,
+                resources=sdk_resources if requests or limits or resources.gpu else None,
+                environment_variables=dict(spec.env),
+                working_dir=spec.workdir,
+                annotations=dict(spec.metadata),
+                network=self._sdk.NetworkOptions(**network_kwargs),
+                services=services or None,
+                volumes=volumes or None,
+                file_system_snapshot=snapshot_options,
+                security_context=self._sdk.SecurityContext(run_as_user=0, run_as_group=0, privileged=False),
+                command=spec.entrypoint[0] if spec.entrypoint else None,
+                args=spec.entrypoint[1:] if spec.entrypoint else None,
+            )
+
         start_task = asyncio.ensure_future(sandbox.start())
         try:
             async with asyncio.timeout(ready_timeout):
@@ -248,7 +302,7 @@ class CWSandboxProvider:
                 result = await sandbox.exec(["bash", "-c", "printf nemo-gym-ready"], timeout_seconds=30)
                 if result.returncode != 0 or result.stdout != "nemo-gym-ready":
                     raise SandboxCreateError("cwsandbox readiness exec probe failed")
-        except BaseException:
+        except BaseException as exc:
             try:
                 await asyncio.wait_for(asyncio.shield(start_task), timeout=30)
             except BaseException:
@@ -258,6 +312,8 @@ class CWSandboxProvider:
                     await self.close(SandboxHandle(sandbox.sandbox_id, self.name, sandbox))
                 except Exception:
                     LOGGER.exception("Failed to clean up cwsandbox %s after startup failure", sandbox.sandbox_id)
+            if isinstance(exc, Exception) and not isinstance(exc, NgFailureEvent):
+                raise self._failure("readiness", exc, sandbox.sandbox_id) from exc
             raise
         return SandboxHandle(sandbox.sandbox_id, self.name, sandbox)
 
@@ -279,61 +335,69 @@ class CWSandboxProvider:
             command = (
                 f'env {shlex.join([f"{key}={value}" for key, value in env.items()])} "$BASH" -c {shlex.quote(command)}'
             )
-        if user is not None and str(user) not in {"root", "0"}:
-            username = str(user)
-            if username.isdecimal():
-                lookup = await sandbox.exec(["getent", "passwd", username], timeout_seconds=30)
-                if lookup.returncode != 0 or not lookup.stdout.strip():
-                    raise ValueError(f"UID {user} not found in sandbox /etc/passwd")
-                username = lookup.stdout.split(":", 1)[0].strip()
-            command = f"su {shlex.quote(username)} -s /bin/bash -c {shlex.quote(command)}"
-        try:
+        async with self._operation("exec", handle.sandbox_id):
+            if user is not None and str(user) not in {"root", "0"}:
+                username = str(user)
+                if username.isdecimal():
+                    lookup = await sandbox.exec(["getent", "passwd", username], timeout_seconds=30)
+                    if lookup.returncode != 0 or not lookup.stdout.strip():
+                        raise ValueError(f"UID {user} not found in sandbox /etc/passwd")
+                    username = lookup.stdout.split(":", 1)[0].strip()
+                command = f"su {shlex.quote(username)} -s /bin/bash -c {shlex.quote(command)}"
             result = await sandbox.exec(["bash", "-c", command], cwd=cwd, timeout_seconds=timeout)
-        except self._sdk.SandboxTimeoutError:
-            return SandboxExecResult(None, f"cwsandbox command timed out after {timeout:g}s", 124, "timeout")
-        return SandboxExecResult(result.stdout, result.stderr, result.returncode)
+            return SandboxExecResult(result.stdout, result.stderr, result.returncode)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Transfer binary contents using the SDK file API."""
-        data = await asyncio.to_thread(source_path.read_bytes)
-        await self._sandbox(handle).write_file(target_path, data, timeout_seconds=self.connection.request_timeout_s)
+        async with self._operation("upload_file", handle.sandbox_id):
+            data = await asyncio.to_thread(source_path.read_bytes)
+            await self._sandbox(handle).write_file(
+                target_path, data, timeout_seconds=self.connection.request_timeout_s
+            )
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         """Download a binary file and create its local parent directory."""
-        data = await self._sandbox(handle).read_file(source_path, timeout_seconds=self.connection.request_timeout_s)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(target_path.write_bytes, data)
+        async with self._operation("download_file", handle.sandbox_id):
+            data = await self._sandbox(handle).read_file(
+                source_path, timeout_seconds=self.connection.request_timeout_s
+            )
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(target_path.write_bytes, data)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Translate SDK lifecycle states into Gym states."""
-        try:
-            state = str(await asyncio.to_thread(self._sandbox(handle).get_status))
-        except self._sdk.SandboxNotFoundError:
-            return SandboxStatus.STOPPED
-        return {
-            "pending": SandboxStatus.STARTING,
-            "creating": SandboxStatus.STARTING,
-            "preparing": SandboxStatus.STARTING,
-            "running": SandboxStatus.RUNNING,
-            "paused": SandboxStatus.PAUSED,
-            "terminating": SandboxStatus.STOPPED,
-            "completed": SandboxStatus.STOPPED,
-            "terminated": SandboxStatus.STOPPED,
-            "failed": SandboxStatus.ERROR,
-        }.get(state, SandboxStatus.UNKNOWN)
+        async with self._operation("status", handle.sandbox_id):
+            try:
+                state = str(await asyncio.to_thread(self._sandbox(handle).get_status))
+            except self._sdk.SandboxNotFoundError:
+                return SandboxStatus.STOPPED
+            return {
+                "pending": SandboxStatus.STARTING,
+                "creating": SandboxStatus.STARTING,
+                "preparing": SandboxStatus.STARTING,
+                "running": SandboxStatus.RUNNING,
+                "paused": SandboxStatus.PAUSED,
+                "terminating": SandboxStatus.STOPPED,
+                "completed": SandboxStatus.STOPPED,
+                "terminated": SandboxStatus.STOPPED,
+                "failed": SandboxStatus.ERROR,
+            }.get(state, SandboxStatus.UNKNOWN)
 
     async def close(self, handle: SandboxHandle) -> None:
         """Stop and delete, attempting deletion even if graceful stop fails."""
-        try:
-            await self._sandbox(handle).stop(missing_ok=True, wait_for_ready=False)
-        finally:
-            await self._sdk.Sandbox.delete(
-                handle.sandbox_id,
-                base_url=self.connection.base_url,
-                auth=self._auth,
-                timeout_seconds=self.connection.request_timeout_s,
-                missing_ok=True,
-            )
+        sandbox = self._sandbox(handle)
+        async with self._operation("close", handle.sandbox_id):
+            try:
+                await sandbox.stop(missing_ok=True, wait_for_ready=False)
+            finally:
+                await self._sdk.Sandbox.delete(
+                    handle.sandbox_id,
+                    base_url=self.connection.base_url,
+                    auth=self._auth,
+                    timeout_seconds=self.connection.request_timeout_s,
+                    missing_ok=True,
+                )
+                await self._detach_client(sandbox)
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a credential-free descriptor; CoreWeave has no lease scopes.
@@ -349,17 +413,18 @@ class CWSandboxProvider:
         sandbox_id = descriptor.get("sandbox_id")
         if not isinstance(sandbox_id, str) or not sandbox_id.strip():
             raise ValueError("A cwsandbox descriptor requires a nonempty sandbox_id")
-        sandbox = await self._sdk.Sandbox.from_id(
-            sandbox_id,
-            base_url=self.connection.base_url,
-            auth=self._auth,
-            timeout_seconds=self.connection.request_timeout_s,
-        )
-        if str(sandbox.status) != "running":
-            await self._detach_client(sandbox)
-            raise RuntimeError(f"Cannot connect to cwsandbox {sandbox_id!r}: status is {sandbox.status}")
-        self._attached.append(sandbox)
-        return SandboxHandle(sandbox_id, self.name, sandbox)
+        async with self._operation("connect", sandbox_id):
+            sandbox = await self._sdk.Sandbox.from_id(
+                sandbox_id,
+                base_url=self.connection.base_url,
+                auth=self._auth,
+                timeout_seconds=self.connection.request_timeout_s,
+            )
+            if str(sandbox.status) != "running":
+                await self._detach_client(sandbox)
+                raise RuntimeError(f"Cannot connect to cwsandbox {sandbox_id!r}: status is {sandbox.status}")
+            self._attached.append(sandbox)
+            return SandboxHandle(sandbox_id, self.name, sandbox)
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve an HTTPS service, without forwarding the control-plane key.
@@ -369,7 +434,8 @@ class CWSandboxProvider:
         resolved SandboxEndpoint to a borrower separately if needed.
         """
         sandbox = self._sandbox(handle)
-        await asyncio.to_thread(sandbox.get_status)
+        async with self._operation("endpoint", handle.sandbox_id):
+            await asyncio.to_thread(sandbox.get_status)
         for endpoint in sandbox.service_endpoints:
             if endpoint.port != port or not endpoint.url:
                 continue
@@ -390,19 +456,21 @@ class CWSandboxProvider:
         Snapshot storage must be enabled for the organization. Snapshots outlive
         their sandbox and must be removed explicitly with delete_snapshot().
         """
-        return await self._sandbox(handle).snapshot(wait_for_ready=True)
+        async with self._operation("snapshot", handle.sandbox_id):
+            return await self._sandbox(handle).snapshot(wait_for_ready=True)
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         """Delete one caller-owned snapshot; an already-deleted id is harmless."""
         if not isinstance(snapshot_id, str) or not snapshot_id.strip():
             raise ValueError("snapshot_id must be a nonempty string")
-        await self._sdk.Sandbox.delete_snapshot(
-            snapshot_id,
-            base_url=self.connection.base_url,
-            auth=self._auth,
-            timeout_seconds=self.connection.request_timeout_s,
-            missing_ok=True,
-        )
+        async with self._operation("delete_snapshot"):
+            await self._sdk.Sandbox.delete_snapshot(
+                snapshot_id,
+                base_url=self.connection.base_url,
+                auth=self._auth,
+                timeout_seconds=self.connection.request_timeout_s,
+                missing_ok=True,
+            )
 
     @staticmethod
     async def _detach_client(sandbox: "Sandbox") -> None:
@@ -419,5 +487,6 @@ class CWSandboxProvider:
     async def aclose(self) -> None:
         """Release attached clients without stopping the owner's sandboxes."""
         for sandbox in self._attached:
-            await self._detach_client(sandbox)
+            async with self._operation("disconnect", sandbox.sandbox_id):
+                await self._detach_client(sandbox)
         self._attached.clear()

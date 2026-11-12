@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
-    SandboxCreateError,
     SandboxHandle,
     SandboxSpec,
     SandboxStatus,
@@ -127,7 +127,7 @@ async def test_failed_start_reclaims_sandbox(backend, failure):
         sandbox.exec.return_value.returncode = 1
     else:
         sandbox.status = "completed"
-    with pytest.raises((RuntimeError, TimeoutError, SandboxCreateError)):
+    with pytest.raises(NgFailureEvent):
         await provider.create(SandboxSpec(image="task:v1"))
     sdk.Sandbox.delete.assert_awaited_once()
 
@@ -225,9 +225,11 @@ async def test_numeric_user_and_default_timeout(backend):
 async def test_exec_timeout_is_not_retried(backend):
     sandbox, _, provider = backend
     sandbox.exec.side_effect = SDKTimeout()
-    result = await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), "sleep 60", timeout_s=1)
-    assert result.return_code == 124
-    assert result.error_type == "timeout"
+    with pytest.raises(NgFailureEvent) as caught:
+        await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), "sleep 60", timeout_s=1)
+    assert caught.value.failure_kind == "provider_io_timeout"
+    assert caught.value.details.exit_code is None
+    assert caught.value.__cause__ is sandbox.exec.side_effect
     sandbox.exec.assert_awaited_once()
 
 
@@ -248,9 +250,11 @@ async def test_binary_transfer(backend, tmp_path):
 async def test_delete_attempted_when_stop_fails(backend):
     sandbox, sdk, provider = backend
     sandbox.stop.side_effect = RuntimeError("stop failed")
-    with pytest.raises(RuntimeError, match="stop failed"):
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.close(SandboxHandle("cw-test", "cwsandbox", sandbox))
+    assert caught.value.__cause__ is sandbox.stop.side_effect
     sdk.Sandbox.delete.assert_awaited_once()
+    sandbox._cleanup_channels.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -401,8 +405,10 @@ async def test_readiness_budget_includes_start_acceptance(backend):
         await asyncio.sleep(0.02)
 
     sandbox.start.side_effect = slow_start
-    with pytest.raises(TimeoutError):
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.create(SandboxSpec(image="task", ready_timeout_s=0.001))
+    assert caught.value.failure_kind == "provider_create_timeout"
+    assert isinstance(caught.value.__cause__, TimeoutError)
     sdk.Sandbox.delete.assert_awaited_once()
     sandbox.wait.assert_not_awaited()
 
@@ -455,8 +461,9 @@ async def test_connect_requires_valid_id(backend, sandbox_id):
 async def test_connect_nonrunning_releases_client_without_deleting(backend):
     sandbox, sdk, provider = backend
     sandbox.status = "completed"
-    with pytest.raises(RuntimeError, match="completed"):
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.connect({"sandbox_id": "cw-test"})
+    assert "completed" in str(caught.value.__cause__)
     sandbox._cleanup_channels.assert_called_once()
     sdk.Sandbox.delete.assert_not_awaited()
 
@@ -595,7 +602,7 @@ async def test_readiness_wait_is_cancelled_before_allocation_cleanup(backend, en
         await entered.wait()
     if ending == "cancel":
         task.cancel()
-    with pytest.raises(asyncio.CancelledError if ending == "cancel" else TimeoutError):
+    with pytest.raises(asyncio.CancelledError if ending == "cancel" else NgFailureEvent):
         await task
     assert finished.is_set()
     sandbox.wait.assert_awaited_once()
@@ -611,8 +618,9 @@ async def test_disconnect_reports_incompatible_sdk_without_stopping_owner(backen
         del sandbox._cleanup_channels
     else:
         sandbox._cleanup_channels = cleanup
-    with pytest.raises(RuntimeError, match="Install cwsandbox==1.21.0"):
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.aclose()
+    assert "Install cwsandbox==1.21.0" in str(caught.value.__cause__)
     assert provider._attached == [sandbox]
     sandbox.stop.assert_not_awaited()
     sdk.Sandbox.delete.assert_not_awaited()
@@ -647,3 +655,148 @@ async def test_installed_sdk_readiness_cancellation_reaches_sdk_loop(monkeypatch
     finally:
         task.cancel()
         await asyncio.to_thread(sandbox._cleanup_channels)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create",
+        "readiness",
+        "exec",
+        "upload_file",
+        "download_file",
+        "status",
+        "close",
+        "connect",
+        "endpoint",
+        "snapshot",
+        "delete_snapshot",
+        "disconnect",
+    ],
+)
+async def test_provider_failures_retain_sandbox_evidence_across_report_roundtrip(backend, tmp_path, operation):
+    from cwsandbox import CWSandboxAuthenticationError
+
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for, rebuild_failure
+
+    sandbox, sdk, provider = backend
+    sdk.CWSandboxAuthenticationError = CWSandboxAuthenticationError
+    cause = CWSandboxAuthenticationError("credential rejected")
+    handle = SandboxHandle("cw-test", "cwsandbox", sandbox)
+    source = tmp_path / "input"
+    source.write_bytes(b"payload")
+    if operation == "create":
+        sdk.Sandbox.side_effect = cause
+        invoke = lambda: provider.create(SandboxSpec(image="task"))
+    elif operation == "readiness":
+        sandbox.wait.side_effect = cause
+        invoke = lambda: provider.create(SandboxSpec(image="task"))
+    elif operation == "exec":
+        sandbox.exec.side_effect = cause
+        invoke = lambda: provider.exec(handle, "printf ok", user=1000)
+    elif operation == "upload_file":
+        sandbox.write_file.side_effect = cause
+        invoke = lambda: provider.upload_file(handle, source, "/input")
+    elif operation == "download_file":
+        sandbox.read_file.side_effect = cause
+        invoke = lambda: provider.download_file(handle, "/output", tmp_path / "output")
+    elif operation in ("status", "endpoint"):
+        sandbox.get_status.side_effect = cause
+        invoke = (
+            (lambda: provider.status(handle)) if operation == "status" else (lambda: provider.endpoint(handle, 80))
+        )
+    elif operation == "close":
+        sdk.Sandbox.delete.side_effect = cause
+        invoke = lambda: provider.close(handle)
+    elif operation == "connect":
+        sdk.Sandbox.from_id.side_effect = cause
+        invoke = lambda: provider.connect({"sandbox_id": "cw-test"})
+    elif operation == "snapshot":
+        sandbox.snapshot.side_effect = cause
+        invoke = lambda: provider.snapshot(handle)
+    elif operation == "delete_snapshot":
+        sdk.Sandbox.delete_snapshot.side_effect = cause
+        invoke = lambda: provider.delete_snapshot("snapshot-test")
+    else:
+        sandbox._cleanup_channels.side_effect = cause
+        provider._attached.append(sandbox)
+        invoke = provider.aclose
+    with pytest.raises(NgFailureEvent) as caught:
+        await invoke()
+    error = caught.value
+    assert error.__cause__ is cause
+    assert error.boundary == "sandbox"
+    assert error.operation == operation
+    assert error.failure_kind == "provider_credentials_rejected"
+    assert error.details.provider == "cwsandbox"
+    assert error.details.sandbox_id == (None if operation in ("create", "delete_snapshot") else "cw-test")
+    try:
+        raise NgFailureEvent(
+            boundary="agent", failure_kind="agent_route_failed", failure_reason="Agent failed"
+        ) from error
+    except NgFailureEvent as outer:
+        report = FailureHeader.decode(FailureHeader.encode(failure_report_for(outer)))
+    restored = rebuild_failure(report)
+    assert restored.__cause__.event_id == error.event_id
+    assert restored.__cause__.details == error.details
+    assert restored.__cause__.foreign_error.message == "credential rejected"
+    assert failure_report_for(restored) == report
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_download_preserves_existing_failure_or_cancellation(backend, tmp_path, cancel):
+    from nemo_gym.sandbox.failures import sandbox_failure
+
+    sandbox, _, provider = backend
+    original = (
+        asyncio.CancelledError() if cancel else sandbox_failure(operation="read", failure_kind="provider_unavailable")
+    )
+    sandbox.read_file.side_effect = original
+    with pytest.raises(type(original)) as caught:
+        await provider.download_file(SandboxHandle("cw-test", "cwsandbox", sandbox), "/output", tmp_path / "output")
+    assert caught.value is original
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "terminated"])
+async def test_close_releases_original_sdk_channel_for_terminal_sandbox(monkeypatch, state):
+    import importlib
+
+    sdk = pytest.importorskip("cwsandbox")
+    sandbox = sdk.Sandbox(container_image="ubuntu:24.04")
+    sdk_module = importlib.import_module(sdk.Sandbox.__module__)
+    sandbox._state = sdk_module._Terminal(sandbox_id="cw-terminal", status=state)
+    channel = SimpleNamespace(close=AsyncMock())
+    sandbox._channel = channel
+    delete = AsyncMock()
+    monkeypatch.setattr(sdk.Sandbox, "delete", delete)
+    provider = CWSandboxProvider()
+    await provider.close(SandboxHandle("cw-terminal", "cwsandbox", sandbox))
+    await provider.aclose()
+    delete.assert_awaited_once()
+    channel.close.assert_awaited_once()
+    assert sandbox._channel is None
+
+
+@pytest.mark.parametrize("confirmed_command_deadline", [False, True])
+async def test_sdk_timeouts_only_report_command_deadline_when_confirmed(backend, confirmed_command_deadline):
+    sdk = pytest.importorskip("cwsandbox")
+    sandbox, fake_sdk, provider = backend
+    fake_sdk.SandboxTimeoutError = sdk.SandboxTimeoutError
+    if confirmed_command_deadline:
+        error_type = getattr(sdk, "SandboxCommandTimeoutError", None)
+        if error_type is None:
+            pytest.skip("This SDK cannot identify a confirmed command deadline")
+        fake_sdk.SandboxCommandTimeoutError = error_type
+    else:
+        error_type = sdk.SandboxTimeoutError
+    cause = error_type("command timed out")
+    sandbox.exec.side_effect = cause
+    with pytest.raises(NgFailureEvent) as caught:
+        await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), "side-effect", timeout_s=1)
+    assert caught.value.failure_kind == (
+        "provider_command_timeout" if confirmed_command_deadline else "provider_io_timeout"
+    )
+    assert caught.value.details.exit_code is None
+    assert caught.value.__cause__ is cause
+    sandbox.exec.assert_awaited_once()
