@@ -68,6 +68,7 @@ jobs:
       workflow_ref: 037094bcc9138c72bc125418e6e3653f9e1c4160 # pragma: allowlist secret
 
   previous-tag:
+    if: ${{ !inputs.gh-release-from-tag }}
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.find.outputs.tag }}
