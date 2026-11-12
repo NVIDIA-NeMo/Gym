@@ -1,0 +1,31 @@
+name: vstar_spatiotemporal
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: V-STaR video spatio-temporal reasoning (2,094 items, each asked as five tasks - what, when and where
+  in two orders). Up to 16 frames 1 second apart are sent as images; the answer is judged, the time span scored by
+  temporal IoU and the 0-1000 grid boxes by per-second IoU, combined into mAM and mLGM.
+modality: text, image
+licensing: CC-BY-NC-SA-4.0
+authors:
+- Pulkit Khandelwal
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: vstar_spatiotemporal
+agent_server: simple_agent
+datasets:
+- name: vstar_spatiotemporal
+  type: benchmark
+  jsonl_fpath: benchmarks/vstar_spatiotemporal/data/vstar_spatiotemporal_benchmark.jsonl
+  prepare_script: benchmarks/vstar_spatiotemporal/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
