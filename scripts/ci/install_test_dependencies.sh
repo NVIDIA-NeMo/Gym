@@ -23,6 +23,8 @@ packages=(
 # killing dpkg during configuration. Refresh indexes only until successful:
 # container update hooks can otherwise clear completed and partial downloads.
 # The workflow timeout still bounds the complete installation.
+# Keep tools already supplied by the runner. Upgrading Git can select its
+# git-core PPA and make unrelated tests depend on that service being available.
 indexes_updated=false
 for attempt in 1 2 3 4; do
     if [[ "$indexes_updated" == false ]]; then
@@ -36,8 +38,8 @@ for attempt in 1 2 3 4; do
     if sudo bash -c '
         export DEBIAN_FRONTEND=noninteractive
         dpkg --configure -a &&
-            timeout 5m apt-get install --download-only -y --no-install-recommends "$@" &&
-            apt-get install --no-download -y --no-install-recommends "$@"
+            timeout 5m apt-get install --download-only -y --no-install-recommends --no-upgrade "$@" &&
+            apt-get install --no-download -y --no-install-recommends --no-upgrade "$@"
         ' bash "${packages[@]}"; then
         exit 0
     fi

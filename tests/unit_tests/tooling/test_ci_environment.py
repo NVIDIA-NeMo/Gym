@@ -596,6 +596,23 @@ def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
     assert "push:" not in on_block
 
 
+def test_full_test_suite_pushes_images_only_from_main() -> None:
+    """Every ECR login and crane push is gated on exactly `refs/heads/main`."""
+    jobs = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())["jobs"]
+    conditions = [jobs["offline-image"]["if"]]
+    for name, job in jobs.items():
+        for step in job.get("steps", []):
+            if name != "offline-image" and (
+                "amazon-ecr-login" in step.get("uses", "") or "crane" in step.get("run", "")
+            ):
+                conditions.append(step["if"])
+
+    assert len(conditions) == 3
+    for condition in conditions:
+        assert "github.ref == 'refs/heads/main'" in condition
+        assert condition.count("refs/") == 1, condition
+
+
 def test_notify_failure_respects_send_notification_input() -> None:
     guard = "(github.event_name != 'workflow_dispatch' || inputs.send_notification)"
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
@@ -916,7 +933,9 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("failure", ["none", "interrupted", "permanent", "download_timeout", "index_failure"])
+@pytest.mark.parametrize(
+    "failure", ["none", "interrupted", "permanent", "download_timeout", "index_failure", "git_ppa_unavailable"]
+)
 def test_system_dependency_install_recovers_interrupted_configuration(tmp_path: Path, failure: str) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -954,6 +973,13 @@ if test "$1" = update; then
 fi
 test "$1" = install
 test "$DEBIAN_FRONTEND" = noninteractive
+# An installed runner tool must not require its newer PPA candidate.
+if test "$INSTALL_TEST_FAILURE" = git_ppa_unavailable; then
+    case " $* " in
+        *' --no-upgrade '*) ;;
+        *) echo 'git-core PPA: 503 Service Unavailable' >&2; exit 100 ;;
+    esac
+fi
 case " $* " in
     *' --download-only '*)
         test "$INSTALL_TEST_BOUNDED" = 1
@@ -1006,7 +1032,9 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
         assert calls.read_text().splitlines().count("install") == 4
     else:
         assert result.returncode == 0, result.stderr
-        assert {"--no-install-recommends", "build-essential", "ffmpeg"} <= set(installed.read_text().splitlines())
+        assert {"--no-install-recommends", "--no-upgrade", "build-essential", "ffmpeg"} <= set(
+            installed.read_text().splitlines()
+        )
         assert not (tmp_path / "interrupted").exists()
         assert calls.read_text().splitlines().count("install") == (2 if failure == "interrupted" else 1)
     assert calls.read_text().splitlines().count("download") == (

@@ -1432,28 +1432,22 @@ class PiAgent(SimpleResponsesAPIAgent):
                 env=env,
             )
             assert proc.stdout is not None and proc.stderr is not None
-            events: list[tuple[float, dict[str, Any]]] = []
-            if collect_observations:
-                stdout_task = asyncio.create_task(_read_pi_stdout(proc.stdout))
-                stderr_task = asyncio.create_task(proc.stderr.read())
-                output_task = asyncio.gather(stdout_task, stderr_task, proc.wait())
-                try:
-                    (stdout, events), stderr, _ = await asyncio.wait_for(asyncio.shield(output_task), timeout=timeout)
-                except asyncio.TimeoutError:
-                    if proc.returncode is None:
-                        proc.kill()
-                    (_, events), _, _ = await output_task
-                    events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
-                    LOG.warning("pi timed out after %ss", timeout)
-                    return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
-            else:
-                try:
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                except asyncio.TimeoutError:
+            # Read stdout as it streams, also when no observations are collected: a cancelled communicate() drops
+            # what it had read, so a run stopped at its deadline would lose the transcript it printed.
+            stdout_task = asyncio.create_task(_read_pi_stdout(proc.stdout))
+            stderr_task = asyncio.create_task(proc.stderr.read())
+            output_task = asyncio.gather(stdout_task, stderr_task, proc.wait())
+            try:
+                (stdout, events), stderr, _ = await asyncio.wait_for(asyncio.shield(output_task), timeout=timeout)
+            except asyncio.TimeoutError:
+                if proc.returncode is None:
                     proc.kill()
-                    await proc.communicate()
-                    LOG.warning("pi timed out after %ss", timeout)
-                    return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
+                (stdout, events), _, _ = await output_task
+                events.append((time(), {"type": "_ng_process_exit", "timed_out": True}))
+                LOG.warning("pi timed out after %ss", timeout)
+                return (*parse_pi_events(stdout), self.config.model, events if collect_observations else [])
+            if not collect_observations:
+                events = []
 
             if proc.returncode == MCP_SETUP_ERROR_EXIT_CODE and self.config.mcp_servers:
                 raise RuntimeError("Required Gym MCP tools could not be initialized")

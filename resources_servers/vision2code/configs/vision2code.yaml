@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+vision2code:
+  resources_servers:
+    vision2code:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Image recreation with optional feedback-driven revision, isolated Python rendering, and rubric rewards
+      value: Evaluate charts, chemistry, documents, circuits, geometry, graphs, physics, and spatial scenes with dataset-specific and generic rubrics
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 4096
+      # Retry invalid judgments with the unchanged request; repair and rejudge are also available.
+      judge_repair_attempts: 2
+      judge_repair_mode: retry
+      judge_transport_attempts: 3
+      judge_repair_max_output_tokens: null
+      sandbox_provider:
+        enroot: {}
+      sandbox_image: ${oc.env:VISION2CODE_SQSH}
+      execution_timeout: 60
+      render_concurrency: 8
+      # Pixel workers run independently of rendering; their limit also holds through cancellation.
+      image_metrics_concurrency: 2
+      # Additional fresh-sandbox attempts, only after infrastructure failures with confirmed cleanup.
+      inconclusive_verification_retries: 1
+      # Attempts on the same handle; unresolved handles are retained for shutdown cleanup.
+      sandbox_cleanup_attempts: 2
+      reward_power: 2.0
+      # Opt in to reference Blend A / 5; uses raw LLM scores and ignores reward_power.
+      # 0.1 * foreground_RGB + 0.2 * foreground_F1 + 0.2 * edge_F1 + 0.5 * raw_LLM/5.
+      use_blended_reward: false
+      # With Blend A, cap only the judge term using the selected rubric's caps.
+      blended_reward_apply_judge_caps: false
+      spatial_uncapped_judge_squared: false
+      artifact_dir: ${oc.env:VISION2CODE_ARTIFACTS,artifacts/vision2code}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/vision2code/data/example.jsonl
+
+vision2code_simple_agent:
+  responses_api_agents:
+    vision2code_agent:
+      entrypoint: app.py
+      # Return the last attempt; final_judge_score stops at the rounded judge rating of 5.
+      num_passes: 1
+      result_selection: last
+      stop_on: reward
+      minimum_scores: {}
+      require_same_dimensions: true
+      include_rendered_image: true
+      # Numeric feedback is opt-in to avoid exposing reward signals by default.
+      include_judge_scores: false
+      include_pixel_scores: false
+      resources_server:
+        type: resources_servers
+        name: vision2code
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+# Both adapters connect to existing services; no inference job is launched.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:VISION2CODE_POLICY_URL}
+      api_key: ${oc.env:VISION2CODE_POLICY_KEY,EMPTY}
+      model: ${oc.env:VISION2CODE_POLICY_MODEL}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:VISION2CODE_JUDGE_URL}
+      api_key: ${oc.env:VISION2CODE_JUDGE_KEY,EMPTY}
+      model: ${oc.env:VISION2CODE_JUDGE_MODEL}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+vision2code_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vision2code_simple_agent

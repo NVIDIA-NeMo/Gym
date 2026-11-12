@@ -1,0 +1,75 @@
+Vision2Code rubric and generation prompt port
+Source: https://github.com/image2code/vision2code
+Source base commit (checkout has local rubric changes): 000f2e162dd62fac5637c718e018d7123b3aff1e
+Copyright 2026 Vision2Code Authors
+License: Apache-2.0 (see LICENSE.upstream)
+Rubric version: recreation_rubric_v5_whitespace_diagnostic
+Files: vision2code/evaluation/dataset_rubrics.py; vision2code/evaluation/generic_rubric.py;
+vision2code/generation/prompts.py; vision2code/evaluation/image_metrics.py
+
+All 16 dataset definitions, including ChemVQA-2K-spacing-v1, and the generic
+rubric are retained with their scoring, image inspection, parsing, and prompt
+helpers. Strict-category rubrics, custom strict-ceiling prompts/scoring and upstream orchestration are excluded.
+Judge recovery is implemented separately as described below. Generic scoring retains its
+own prompts and equal-weight mean without dataset caps.
+Formatting/import cleanup is applied; the historical modified definitions are retained under explicit variant names.
+Gym requires explicit rubric names; unused filename-based rubric inference,
+the duplicate prompt wrapper, and the no-op whitespace compatibility option
+have been removed. Runtime orchestration uses Gym APIs rather than the upstream package.
+Judge image MIME types are detected from content to match Gym preparation,
+including references without a filename extension.
+Golden fixtures were generated from this source checkout, not from the port.
+
+The source checkout was modified. Exact source SHA-256 hashes are recorded in
+tests/fixtures/provenance.json, including the existing EEE background revision
+and whitespace-diagnostic behavior, plus the generic source hash. The base commit
+alone does not identify it.
+
+Image similarity and Blend A aggregation use the source protocol pinned by
+image_metrics_source_sha256 in the provenance file. Golden image-metric fixtures
+record the modified source outputs; no external repository is needed at runtime.
+The optional capped Blend A variant additionally applies the recorded rubric caps
+to the unrounded judge term before blending, leaving the pixel terms unchanged.
+
+Matplotlib output handling in launcher.py is adapted from
+vision2code/rendering/render_python.py at the unmodified source base commit
+000f2e162dd62fac5637c718e018d7123b3aff1e (Apache-2.0, Copyright 2026 Vision2Code Authors):
+https://github.com/image2code/vision2code/blob/000f2e162dd62fac5637c718e018d7123b3aff1e/vision2code/rendering/render_python.py
+Both pyplot and Figure saves use Figure.savefig interception, the required output
+path, target dimensions, and 100 DPI, overriding explicit cropping and padding
+arguments. Explicit output formats and Matplotlib global cropping settings are preserved.
+
+README and bundled dataset examples
+Reference images: Matplotlib gallery
+Sources:
+https://matplotlib.org/stable/gallery/statistics/confidence_ellipse.html
+https://matplotlib.org/stable/gallery/userdemo/simple_legend02.html
+https://matplotlib.org/stable/gallery/pyplots/pyplot_simple.html
+https://matplotlib.org/stable/gallery/event_handling/data_browser.html
+https://matplotlib.org/stable/gallery/widgets/buttons.html
+Copyright (c) 2012- Matplotlib Development Team; All Rights Reserved
+License: Matplotlib (see data/LICENSE.matplotlib and results/revision-example/LICENSE.matplotlib)
+References and model-generated recreations were copied from saved Kimi K3 single-pass
+and Qwen3.8-27B three-pass Gym rollouts without image edits. Source identity, image
+hashes, selection criteria, settings, and recorded scores are in data/example-provenance.json
+and results/revision-example/provenance.json. Saved policy requests, responses, and feedback
+are in data/example_rollouts.jsonl and results/revision-example/rollout.jsonl.
+
+Review compatibility changes
+DocVQA and EEE-Bench definitions are restored from the unmodified public source
+base revision above. The previously ported definitions are registered as DocVQA-v2
+and EEE-Bench-v2, with their modified prompts and weights preserved. The existing
+historical golden fixtures now validate those variants; original-doc-eee.json
+independently records original definitions, prompts, weights, and caps.
+
+Judge repair prompts in judge_recovery.py and retry orchestration in app.py
+are adapted from the Apache-2.0 public Vision2Code repository:
+https://github.com/image2code/vision2code
+Exact revision: 000f2e162dd62fac5637c718e018d7123b3aff1e
+Copyright 2026 Vision2Code Authors
+Sources: vision2code/evaluation/dataset_rubrics.py,
+vision2code/evaluation/generic_rubric.py, vision2code/benchmark/run_benchmark.py.
+Gym adds bounded recovery schemas and fresh rejudging prompts, exposes both
+repair and schema-constrained rejudging through configuration,
+extends recovery to invalid category scores, and preserves bounded retries and
+failure masking. No upstream transport or process orchestration is copied.

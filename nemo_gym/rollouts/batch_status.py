@@ -35,6 +35,7 @@ from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -388,6 +389,34 @@ def _read_aggregate_entries(metrics_fpath: Optional[Path]) -> tuple[Dict[str, Di
     return entries, None
 
 
+def _environment_status_members(rows: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Identify members whose saved rows consistently name their own environment."""
+    own_environment: Dict[str, bool] = {}
+    for row in rows:
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        member = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+        member = member or row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+        if isinstance(member, str) and member:
+            own_environment[member] = own_environment.get(member, True) and (
+                row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == member
+            )
+    return {member for member, own_stamp in own_environment.items() if own_stamp}
+
+
+def _aggregate_entry_for_member(
+    entries: Mapping[str, Dict[str, Any]], member: str, *, environment_member: bool
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Join environment members by their stamp and agent members by their metric label."""
+    if environment_member:
+        matches = [entry for entry in entries.values() if entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == member]
+        if len(matches) > 1:
+            return None, "AmbiguousAggregateMetricsEntry"
+        entry = matches[0] if matches else None
+    else:
+        entry = entries.get(member)
+    return entry, None if entry is not None else "MissingAggregateMetricsEntry"
+
+
 def _safe_aggregation_error(error: Any) -> Dict[str, Any]:
     """Copy only non-secret diagnostics into batch_status.json."""
     if not isinstance(error, Mapping):
@@ -427,6 +456,7 @@ class BatchStatusTracker:
         self.manifest, self.manifest_sha256 = load_batch_manifest(manifest_fpath)
         self.observations = observe_materialized_rows(materialized_rows)
         validate_batch_manifest(self.manifest, self.observations)
+        self._environment_members = _environment_status_members(materialized_rows)
         self._expected_rollout_identities: set[tuple[str, int, int]] = {
             (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
             for row in materialized_rows
@@ -508,7 +538,9 @@ class BatchStatusTracker:
         for benchmark_slug, expected in sorted(self.manifest.members.items()):
             agent_name = expected.agent_name
             observed = self.observations[agent_name]
-            aggregate_entry = aggregate_entries.get(agent_name)
+            aggregate_entry, entry_error = _aggregate_entry_for_member(
+                aggregate_entries, agent_name, environment_member=agent_name in self._environment_members
+            )
             observed_metric_keys = sorted((aggregate_entry or {}).get("key_metrics") or {})
             aggregation_error = None
             if aggregation_deferred:
@@ -518,9 +550,9 @@ class BatchStatusTracker:
             elif aggregate_artifact_error is not None:
                 aggregation_status = "error"
                 aggregation_error = {"type": aggregate_artifact_error}
-            elif aggregate_entry is None:
+            elif entry_error is not None:
                 aggregation_status = "error"
-                aggregation_error = {"type": "MissingAggregateMetricsEntry"}
+                aggregation_error = {"type": entry_error}
             elif AGGREGATION_ERROR_KEY in aggregate_entry:
                 aggregation_status = "error"
                 aggregation_error = _safe_aggregation_error(aggregate_entry[AGGREGATION_ERROR_KEY])
@@ -620,10 +652,11 @@ class RunStatusTracker(BatchStatusTracker):
         write_interval_seconds: Optional[float] = None,
     ) -> None:
         self.status_fpath = status_fpath
+        rows = list(materialized_rows)
         self._expected_rollout_identities = {
-            (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
-            for row in materialized_rows
+            (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows
         }
+        self._environment_members = _environment_status_members(rows)
         self.write_interval_seconds = (
             BATCH_STATUS_WRITE_INTERVAL_SECONDS if write_interval_seconds is None else write_interval_seconds
         )
@@ -695,7 +728,9 @@ class RunStatusTracker(BatchStatusTracker):
         aggregates, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
         members = {}
         for agent, expected in sorted(self._expected_by_agent.items()):
-            entry = aggregates.get(agent)
+            entry, _ = _aggregate_entry_for_member(
+                aggregates, agent, environment_member=agent in self._environment_members
+            )
             if aggregation_deferred:
                 aggregation_status = "deferred"
             elif aggregate_metrics_fpath is None:
