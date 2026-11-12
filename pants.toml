@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+[GLOBAL]
+pants_version = "2.30.2"
+backend_packages = ["pants.backend.python", "pants.backend.project_info"]
+# The pilot is deliberately separate from Gym's existing CI gates.
+pants_ignore.add = ["/.pants-bin", "/.venv", "/cache", "/results", "/work"]
+
+[source]
+root_patterns = ["/"]
+
+[python]
+interpreter_constraints = ["CPython==3.13.*"]
+enable_resolves = true
+default_resolve = "pilot"
+resolves = { pilot = "scripts/pants/pilot.lock" }
+# Match the baseline's environment rather than pruning third-party packages.
+run_against_entire_lockfile = true
+
+[python-infer]
+# Lazy public exports use strings as well as TYPE_CHECKING imports.
+string_imports = true
+
+[pytest]
+install_from_resolve = "pilot"
+requirements = ["pytest", "pytest-asyncio", "pytest-cov", "pytest-xdist", "requests-mock"]
+
+[test]
+extra_env_vars = ["PATH", "LANG", "LC_ALL"]

@@ -276,3 +276,9 @@ environments/hello_*/compose-images.json.lock
 environments/hello_*/built-images.json
 environments/hello_*/built-images.json.lock
 environments/hello_*/manifest.toml
+
+# Pants demo local bootstrap and execution state
+.pants-bin/
+.pants.d/
+.pids/
+dist/pants-demo/

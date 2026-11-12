@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Pants core0 dependency diagnostic (not a CI comparison)
+
+on:
+  push:
+    branches: [glovisotto/pants-pilot]
+    paths:
+      - .github/workflows/pants-core0-diagnostic.yml
+      - scripts/pants/diagnostics/**
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact full main commit SHA to diagnose
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# Serialize with the comparison on this branch so diagnostic load does not compete with it.
+concurrency:
+  group: pants-full-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PANTS_LOCAL_EXECUTION_ROOT_DIR: /var/tmp/pants-full-ci
+
+jobs:
+  core0-dependencies:
+    name: Profile core0 dependencies only (not test timing)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: nemo-ci-aws-cpu-4-16
+    timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable main source and cache contract
+        id: source
+        working-directory: controller
+        env:
+          REQUESTED_SOURCE: ${{ inputs.source_sha }}
+        run: |
+          [[ "$REQUESTED_SOURCE" =~ ^[a-f0-9]{40}$ ]] || { echo 'Expected a full commit SHA'; exit 1; }
+          git merge-base --is-ancestor "$REQUESTED_SOURCE" origin/main
+          echo "cache_contract=$(git ls-files -z scripts/pants/full_ci.py scripts/pants/full_ci.toml scripts/pants/full_ci.BUILD scripts/pants/native_core | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: sample
+          submodules: recursive
+          persist-credentials: false
+      - name: Reclaim runner disk
+        working-directory: sample
+        run: ./scripts/ci/reclaim_runner_disk.sh
+      - name: Configure portable cache paths
+        run: |
+          echo "UV_CACHE_DIR=$HOME/.cache/uv" >> "$GITHUB_ENV"
+          echo "PANTS_GLOBAL_WORKDIR=$HOME/.cache/pants/full-ci" >> "$GITHUB_ENV"
+          echo "PANTS_NAMED_CACHES_DIR=$HOME/.cache/pants/named_caches" >> "$GITHUB_ENV"
+          echo "PANTS_LOCAL_STORE_DIR=$HOME/.cache/pants/lmdb_store" >> "$GITHUB_ENV"
+      - name: Restore existing Pants uv cache without saving
+        id: uv-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/uv
+          key: pants-full-v2-uv-pants-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
+          restore-keys: |
+            pants-full-v2-uv-pants-${{ runner.os }}-
+      - name: Restore ARC Pants launcher
+        id: launcher-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: pants-full-launcher-v1-arc-${{ runner.os }}-${{ runner.arch }}-2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0-pants-2.30.2
+      - name: Restore compatible Pants artifacts
+        id: pants-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/pants/full-ci
+            ~/.cache/pants/named_caches
+            ~/.cache/pants/lmdb_store
+          key: pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-core-${{ steps.source.outputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          restore-keys: |
+            pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-core-${{ steps.source.outputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+      - name: Install system test dependencies
+        working-directory: sample
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+      - name: Check shared test-data inventory
+        working-directory: sample
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+      - name: Install Pants launcher
+        working-directory: controller
+        timeout-minutes: 7
+        run: |
+          pants_bin="$RUNNER_TEMP/pants-launcher/pants"
+          mkdir -p "$(dirname "$pants_bin")"
+          curl --fail --location --retry 3 \
+            https://github.com/pantsbuild/scie-pants/releases/download/v0.13.4/scie-pants-linux-x86_64 \
+            --output "$pants_bin"
+          echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
+          chmod +x "$pants_bin"
+          # Retry launcher bootstrap only; the measured CI command runs once.
+          for attempt in 1 2 3; do
+            if pants_version=$(timeout --kill-after=10s 120s "$pants_bin" \
+                --no-pantsd --version); then
+              if [[ "$pants_version" != '2.30.2' ]]; then
+                echo "Unexpected Pants version: $pants_version" >&2
+                exit 1
+              fi
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              echo "Pants bootstrap failed after three attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
+      - name: Install pinned uv for both core and sandbox arms
+        run: |
+          uv_bin_dir="$RUNNER_TEMP/pants-native-uv-0.13.4"
+          if command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == '0.13.4' ]]; then
+            uv_bin_dir="$(dirname "$(command -v uv)")"
+          else
+            curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 \
+              https://astral.sh/uv/0.13.4/install.sh \
+              --output "$RUNNER_TEMP/pants-native-uv-install.sh"
+            env UV_UNMANAGED_INSTALL="$uv_bin_dir" sh "$RUNNER_TEMP/pants-native-uv-install.sh"
+          fi
+          test "$("$uv_bin_dir/uv" --version | awk '{print $2}')" = '0.13.4'
+          echo "$uv_bin_dir" >> "$GITHUB_PATH"
+      - name: Record restore-only cache context
+        env:
+          UV_HIT: ${{ steps.uv-cache.outputs.cache-hit }}
+          UV_KEY: ${{ steps.uv-cache.outputs.cache-matched-key }}
+          LAUNCHER_HIT: ${{ steps.launcher-cache.outputs.cache-hit }}
+          LAUNCHER_KEY: ${{ steps.launcher-cache.outputs.cache-matched-key }}
+          ENGINE_HIT: ${{ steps.pants-cache.outputs.cache-hit }}
+          ENGINE_KEY: ${{ steps.pants-cache.outputs.cache-matched-key }}
+        run: |
+          mkdir -p sample/results/core0-diagnostic
+          python3 - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          keys = ('UV_HIT', 'UV_KEY', 'LAUNCHER_HIT', 'LAUNCHER_KEY', 'ENGINE_HIT', 'ENGINE_KEY')
+          Path('sample/results/core0-diagnostic/cache-context.json').write_text(json.dumps({key: os.environ[key] for key in keys}, indent=2) + '\n')
+          PYCODE
+      - name: Collect exact core0 targets and profile dependency traversal
+        working-directory: sample
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 ../controller/scripts/pants/diagnostics/core0_dependencies.py \
+            --controller ../controller --source . --source-sha "$SOURCE_SHA" \
+            --output results/core0-diagnostic --pants "$PANTS_BIN" --uv "$(command -v uv)"
+      - name: Upload diagnostic evidence (never test or performance verdicts)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core0-dependency-diagnostic
+          path: sample/results/core0-diagnostic
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

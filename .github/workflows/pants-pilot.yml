@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Pants subset bootstrap (manual)
+
+# Historical subset harness. The full CI experiment owns recurring comparisons.
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Repetitions per cache case (1 for smoke, 3 for evidence)
+        type: choice
+        options: ['1', '3']
+        default: '3'
+      max_samples:
+        description: Maximum recent main commits to sample
+        type: choice
+        options: ['1', '2', '3']
+        default: '3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pants-pilot-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      REPEATS: ${{ inputs.repeats || '1' }}
+      MAX_SAMPLES: ${{ inputs.max_samples || '3' }}
+    steps:
+      - name: Set benchmark paths
+        shell: bash
+        run: |
+          echo "PANTS_BIN=$RUNNER_TEMP/pants-bin/pants" >> "$GITHUB_ENV"
+          echo "RESULT_DIR=$RUNNER_TEMP/pants-pilot-results" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13.14'
+      - name: Install benchmark tools
+        shell: bash
+        run: |
+          python -m pip install uv==0.11.31
+          mkdir -p "$(dirname "$PANTS_BIN")"
+          curl --fail --location --retry 3 \
+            https://github.com/pantsbuild/scie-pants/releases/download/v0.13.4/scie-pants-linux-x86_64 \
+            --output "$PANTS_BIN"
+          chmod +x "$PANTS_BIN"
+          "$PANTS_BIN" --version
+      - name: Run comparison harness tests
+        run: python -m unittest discover -s scripts/pants -p 'test_*.py'
+      - name: Compare sampled commits
+        run: >-
+          python scripts/pants/monitor.py --once --no-fetch --no-rebase
+          --max-samples "$MAX_SAMPLES" --repeats "$REPEATS" --output "$RESULT_DIR"
+      - name: Publish job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -d "$RESULT_DIR/daily" ]; then
+            find "$RESULT_DIR/daily" -name '*.md' -exec cat {} \; >> "$GITHUB_STEP_SUMMARY"
+          fi
+          find "$RESULT_DIR" -name summary.md -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Retain measurements, provenance and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pants-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pants-pilot-results
+          retention-days: 14
+          if-no-files-found: warn

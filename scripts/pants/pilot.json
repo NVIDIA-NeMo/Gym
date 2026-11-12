@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "python": "3.13.14",
+  "pants_version": "2.30.2",
+  "groups": [
+    {
+      "name": "core-and-weather",
+      "test_files": [
+        "tests/unit_tests/utils/test_text.py",
+        "tests/unit_tests/utils/test_install_lock.py",
+        "tests/unit_tests/config/test_secret_utils.py",
+        "tests/unit_tests/trajectory/test_model_call_record.py",
+        "tests/unit_tests/test_git_ref.py",
+        "resources_servers/example_single_tool_call/tests/test_app.py"
+      ],
+      "pants_targets": [
+        "tests:pilot",
+        "resources_servers/example_single_tool_call:tests"
+      ],
+      "requirements": "scripts/pants/pilot.requirements.txt"
+    }
+  ]
+}
