@@ -1,0 +1,1128 @@
+{
+  "ChartQA": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "ChartQA",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "numeric_information_fidelity": {
+        "label": "Numeric Information Fidelity",
+        "description": "Values, trends, ordering, and answer-relevant chart information are correct.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "structure_layout_fidelity": {
+        "label": "Structure and Layout Fidelity",
+        "description": "Chart type, orientation, title placement, legend placement, and overall chart structure match the reference.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "text_label_legibility_accuracy": {
+        "label": "Text, Label, and Legibility Accuracy",
+        "description": "Labels, numbers, headings, and text remain accurate, legible, and not crowded.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "cleanliness_completeness": {
+        "label": "Cleanliness and Completeness",
+        "description": "The chart is unclipped, readable, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "dvqa": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "dvqa",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "numeric_information_fidelity": {
+        "label": "Numeric Information Fidelity",
+        "description": "Values, trends, grouping, and answer-relevant chart information are correct.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "structure_layout_fidelity": {
+        "label": "Structure and Layout Fidelity",
+        "description": "Chart type, grouping or stacking structure, orientation, title placement, and legend placement match the reference.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "text_label_legibility_accuracy": {
+        "label": "Text, Label, and Legibility Accuracy",
+        "description": "Axis labels, category labels, numbers, and titles remain accurate, legible, and not crowded.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "cleanliness_completeness": {
+        "label": "Cleanliness and Completeness",
+        "description": "The chart is unclipped, readable, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "figureqa": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "figureqa",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "numeric_information_fidelity": {
+        "label": "Numeric Information Fidelity",
+        "description": "Values, trends, series relationships, and answer-relevant information are correct.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "structure_layout_fidelity": {
+        "label": "Structure and Layout Fidelity",
+        "description": "Plot type, orientation, legend placement, series structure, and overall chart layout match the reference.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "text_label_legibility_accuracy": {
+        "label": "Text, Label, and Legibility Accuracy",
+        "description": "Legends, labels, headings, and textual chart content remain accurate and readable.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "cleanliness_completeness": {
+        "label": "Cleanliness and Completeness",
+        "description": "The chart is unclipped, readable, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "ChemVQA-2K": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "ChemVQA-2K",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "molecular_structure_fidelity": {
+        "label": "Molecular Structure Fidelity",
+        "description": "Connectivity, overall structure, and core arrangement of the molecule are correct.",
+        "weight": 0.4,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "chemical_symbol_accuracy": {
+        "label": "Chemical Symbol Accuracy",
+        "description": "Atom labels, charges, and bond notation remain accurate and readable.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "bond_line_marker_fidelity": {
+        "label": "Bond Line and Marker Fidelity",
+        "description": "Bond lines, highlighting, color-coded difference markers, and related visual indicators are preserved.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The structure is readable, unclipped, and not missing major visible content.",
+        "weight": 0.1,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "DocVQA": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "DocVQA",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "text_information_fidelity": {
+        "label": "Text Information Fidelity",
+        "description": "Visible text, numbers, and key document information remain accurate.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "document_structure_layout": {
+        "label": "Document Structure and Layout",
+        "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "legibility_noncrowding": {
+        "label": "Legibility and Non-Crowding",
+        "description": "Content remains readable, not overly crowded, and reasonably well spaced.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "key_visual_elements": {
+        "label": "Key Visual Elements",
+        "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "EEE-Bench": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "EEE-Bench",
+    "rubric_revision": "eee_background_v1",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "circuit_topology_connectivity": {
+        "label": "Circuit Topology and Connectivity",
+        "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "component_identity_symbols": {
+        "label": "Component Identity and Symbols",
+        "description": "Resistors, capacitors, sources, and other component identities remain correct.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "labels_values_directions": {
+        "label": "Labels, Values, and Directions",
+        "description": "Current directions, voltage labels, signs, and numeric values remain accurate.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The circuit is readable, uncluttered, and not missing major visible content.",
+        "weight": 0.1,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "background_color_fidelity": {
+        "label": "Background Color Fidelity",
+        "description": "The canvas and panel backgrounds match the reference hue, brightness, tint, and any visible regional variation.",
+        "weight": 0.1,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "GEOQA_8K_R1V": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "GEOQA_8K_R1V",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "geometric_structure_precision": {
+        "label": "Geometric Structure Precision",
+        "description": "Shapes, relations, and the core geometric construction remain precise and faithful.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "numbers_labels_markers": {
+        "label": "Numbers, Labels, and Markers",
+        "description": "Lengths, angles, labels, givens, and geometric markers remain accurate and readable.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "association_placement_precision": {
+        "label": "Association and Placement Precision",
+        "description": "Annotations are placed clearly enough that their target edge, angle, or point is unambiguous.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The figure is legible, unclipped, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "Geoperception": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "Geoperception",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "geometric_structure_precision": {
+        "label": "Geometric Structure Precision",
+        "description": "Shapes, intersections, and the core geometric relations remain precise and faithful.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "numbers_labels_markers": {
+        "label": "Numbers, Labels, and Markers",
+        "description": "Point labels, givens, numeric annotations, and geometric markers remain accurate and readable.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "association_placement_precision": {
+        "label": "Association and Placement Precision",
+        "description": "Annotations are positioned clearly enough that their intended target is unambiguous.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The figure is legible, unclipped, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "geometry3k": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "geometry3k",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "geometric_structure_precision": {
+        "label": "Geometric Structure Precision",
+        "description": "Shapes, relations, and the core geometric construction remain precise and faithful.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "numbers_labels_markers": {
+        "label": "Numbers, Labels, and Markers",
+        "description": "Lengths, angles, point labels, and geometric markers remain accurate and readable.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "association_placement_precision": {
+        "label": "Association and Placement Precision",
+        "description": "Annotations are placed clearly enough that their target edge, angle, or point is unambiguous.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The figure is legible, unclipped, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "Graph-Algorithms": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "Graph-Algorithms",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "graph_structure_fidelity": {
+        "label": "Graph Structure Fidelity",
+        "description": "Nodes, edges, and overall graph topology remain correct.",
+        "weight": 0.4,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "ordering_direction_semantics": {
+        "label": "Ordering and Direction Semantics",
+        "description": "Directions, ordering, and weights or edge semantics remain faithful.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "label_number_precision": {
+        "label": "Label and Number Precision",
+        "description": "Node ids, edge labels, and numeric annotations remain accurate and readable.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The graph remains readable and is not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "GraphVQA-Swift": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "GraphVQA-Swift",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "graph_structure_fidelity": {
+        "label": "Graph Structure Fidelity",
+        "description": "Node-edge structure and the overall graph topology remain faithful.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "label_number_precision": {
+        "label": "Label and Number Precision",
+        "description": "Labels, counts, and numeric annotations remain accurate and attached to the correct elements.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "attribute_mapping_fidelity": {
+        "label": "Attribute Mapping Fidelity",
+        "description": "Colors or other attributes remain attached to the correct nodes or edges.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The graph remains readable and is not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "matplotlib": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "matplotlib",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "layout_composition_fidelity": {
+        "label": "Layout and Composition Fidelity",
+        "description": "Axes, subplot layout, framing, and composition match the reference.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "plot_element_fidelity": {
+        "label": "Plot Element Fidelity",
+        "description": "Lines, bars, markers, patches, and other major plotted elements are faithful.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "text_ticks_annotations": {
+        "label": "Text, Ticks, and Annotations",
+        "description": "Titles, labels, tick text, legends, and annotations are present, accurate, and well placed.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "style_rendering_fidelity": {
+        "label": "Style and Rendering Fidelity",
+        "description": "Line styles, fonts, colors, and overall rendering feel resemble the reference.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "OlympiadBench": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "OlympiadBench",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "problem_structure_semantics": {
+        "label": "Problem Structure and Semantics",
+        "description": "The core problem diagram and its essential relations remain faithful.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "labels_numbers_symbols": {
+        "label": "Labels, Numbers, and Symbols",
+        "description": "Given values, labels, and symbols remain accurate and readable.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "spatial_precision": {
+        "label": "Spatial Precision",
+        "description": "Placement and construction remain faithful enough for the same reasoning task.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The diagram remains readable, unclipped, and complete enough to use.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "Physics": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "Physics",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "physical_setup_fidelity": {
+        "label": "Physical Setup Fidelity",
+        "description": "The overall scene and essential physical setup remain faithful.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "vectors_labels_numbers": {
+        "label": "Vectors, Labels, and Numbers",
+        "description": "Force arrows, directions, angles, labels, and values remain accurate and readable.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "object_geometry_consistency": {
+        "label": "Object Geometry Consistency",
+        "description": "Object placement and geometry remain physically consistent with the reference.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The diagram is readable, unclipped, and not missing major visible content.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "spatialvlm_qa": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "spatialvlm_qa",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "object_shape_identity_fidelity": {
+        "label": "Object Shape and Identity Fidelity",
+        "description": "The right objects, basic shapes, and counts are present.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "spatial_relation_correctness": {
+        "label": "Spatial Relation Correctness",
+        "description": "Relative positions such as left or right, above or below, and front or behind are correct.",
+        "weight": 0.35,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "three_d_depth_rendering": {
+        "label": "3D Depth Rendering",
+        "description": "Depth, volume, shadows, and 3D reconstruction cues are preserved.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "color_scene_completeness": {
+        "label": "Color and Scene Completeness",
+        "description": "The scene remains reasonably complete, with major colors and scene elements preserved.",
+        "weight": 0.15,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "ChemVQA-2K-spacing-v1": {
+    "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+    "rubric_dataset": "ChemVQA-2K-spacing-v1",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "molecular_structure_fidelity": {
+        "label": "Molecular Structure Fidelity",
+        "description": "Connectivity, overall structure, and core arrangement of the molecule are correct.",
+        "weight": 0.4,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "chemical_symbol_accuracy": {
+        "label": "Chemical Symbol Accuracy",
+        "description": "Atom labels, charges, and bond notation remain accurate and readable.",
+        "weight": 0.3,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": true
+      },
+      "bond_line_marker_fidelity": {
+        "label": "Bond Line and Marker Fidelity",
+        "description": "Bond lines, highlighting, color-coded difference markers, and related visual indicators are preserved.",
+        "weight": 0.2,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "readability_completeness": {
+        "label": "Readability and Completeness",
+        "description": "The structure is complete and unclipped; atom symbols, indices, charges, subscripts, and adjacent bonds retain clear separation relative to the reference.",
+        "weight": 0.1,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [
+      {
+        "type": "execution_failure",
+        "cap_to": 0.0,
+        "reason": "Execution did not produce a valid render: code_error",
+        "changed_final_rating": true
+      }
+    ],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  },
+  "generic": {
+    "rubric_version": "generic_recreation_rubric_v1_equal_weight",
+    "rubric_dataset": "generic",
+    "source_dataset": "generic",
+    "status": "render_failed",
+    "execution_status": "render_failed",
+    "execution_detail": "code_error",
+    "execution_error_present": true,
+    "reference_image_path": "",
+    "candidate_image_path": "",
+    "candidate_inspection": {},
+    "category_scores": {
+      "core_information_fidelity": {
+        "label": "Core Information Fidelity",
+        "description": "Preserves important visible information, values, objects, relations, or semantics.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "structure_layout_fidelity": {
+        "label": "Structure and Layout Fidelity",
+        "description": "Preserves overall layout, geometry, chart or diagram structure, document structure, and spatial arrangement.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "text_annotation_accuracy": {
+        "label": "Text and Annotation Accuracy",
+        "description": "Preserves readable labels, numbers, symbols, legends, annotations, and text.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      },
+      "visual_completeness_cleanliness": {
+        "label": "Visual Completeness and Cleanliness",
+        "description": "The output is complete, unclipped, readable, nonblank, and visually clean.",
+        "weight": 0.25,
+        "score_0_to_5": 0.0,
+        "weighted_score_0_to_5": 0.0,
+        "rationale": "Candidate image unavailable because generation or render failed: code_error",
+        "is_critical": false
+      }
+    },
+    "raw_score_0_to_5": 0.0,
+    "raw_visual_score_0_to_5": 0.0,
+    "provisional_rating_0_to_5": 0.0,
+    "applied_caps": [],
+    "final_rating_0_to_5": 0.0,
+    "strengths": [],
+    "issues": [
+      "Render failed before visual evaluation: code_error"
+    ],
+    "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+  }
+}
