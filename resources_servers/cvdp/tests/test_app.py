@@ -849,6 +849,29 @@ class TestRunServiceProvider:
         assert "disk full" in output
 
     @pytest.mark.asyncio
+    async def test_snapshot_that_only_raced_a_waveform_write_keeps_the_verdict(self, tmp_path):
+        raced = "tar: ./rundir/sim_build/dump.fst: file changed as we read it\n"
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout="", stderr=raced, return_code=1),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 0
+        assert output == "hi\n"
+        assert fake.downloads[0][0] == "/sandbox/cvdp-workspace-out.tar.gz"
+
+    @pytest.mark.asyncio
+    async def test_snapshot_with_a_race_and_a_real_error_still_fails(self, tmp_path):
+        stderr = "tar: a.fst: file changed as we read it\ntar: b: Cannot open: Permission denied\n"
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout="", stderr=stderr, return_code=1),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 1
+        assert "workspace snapshot failed" in output
+
+    @pytest.mark.asyncio
     async def test_tmp_bind_path_added(self, tmp_path):
         self.server.config.container_tmp_bind_path = "/container/tmp"
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
