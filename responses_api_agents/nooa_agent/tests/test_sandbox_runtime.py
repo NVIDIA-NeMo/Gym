@@ -284,6 +284,7 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
     sandbox.exec.side_effect = [
         SandboxExecResult("x86_64/gnu", "", 0),
         SandboxExecResult("", "bad import", 1),
+        SandboxExecResult("", "", 0),  # runtime root, as root
         SandboxExecResult("ready", "", 0),
         SandboxExecResult("", "", 0),
     ]
@@ -299,7 +300,7 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
     assert set(sandbox.uploaded) == {script, f"{scratch}/source.tar.gz", f"{scratch}/python.tar.gz"}
     assert sandbox.uploaded[f"{scratch}/source.tar.gz"] == source
     assert hashlib.sha256(sandbox.uploaded[f"{scratch}/python.tar.gz"]).hexdigest() == expected
-    install = sandbox.exec.await_args_list[2]
+    install = sandbox.exec.await_args_list[3]
     assert shlex.split(install.args[0]) == [
         "bash",
         script,
@@ -311,6 +312,60 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
         sandbox_runtime._IMPORT_CHECK,
     ]
     assert install.kwargs == {"cwd": "/", "timeout_s": 1800}
+
+
+@pytest.mark.asyncio
+async def test_cold_install_lets_a_non_root_task_user_install_under_the_runtime_root(
+    sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock
+) -> None:
+    # Root opens the shared root like /tmp; the installer itself still runs as the sandbox's default user (a
+    # Harbor task's `[agent].user`), which owns and later runs the private runtime.
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "", 1),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("ready", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    await sandbox_runtime.prepare_nooa_runtime(sandbox)
+
+    calls = sandbox.exec.await_args_list
+    assert calls[2].args == ("mkdir -p -- /opt/nemo-gym-nooa && chmod 1777 -- /opt/nemo-gym-nooa",)
+    assert calls[2].kwargs == {"cwd": "/", "timeout_s": 30, "user": "root"}
+    assert shlex.split(calls[3].args[0])[2] == "install"
+    assert "user" not in calls[3].kwargs
+    assert [shlex.split(call.args[0])[0] for call in calls] == ["bash", "bash", "mkdir", "bash", "rm"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "root_results",
+    [
+        [SandboxExecResult("", "chmod: Operation not permitted", 1)],
+        [
+            SandboxExecResult("", "", -1, error_type="user_switch_unavailable"),
+            SandboxExecResult("", "mkdir: Permission denied", 1),
+        ],
+    ],
+    ids=["root-step-fails", "cannot-switch-users"],
+)
+async def test_runtime_root_step_leaves_failures_to_the_installer(
+    sandbox: AsyncMock,
+    runtime_package: tuple[bytes, str],
+    portable_download: AsyncMock,
+    root_results: list[SandboxExecResult],
+) -> None:
+    # A sandbox that cannot switch users tries as its default user; either way the installer reports an
+    # unwritable root itself, as it did before the root step existed.
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "", 1),
+        *root_results,
+        SandboxExecResult("", "mkdir: cannot create directory '/opt/nemo-gym-nooa': Permission denied", 1),
+    ]
+    with pytest.raises(RuntimeError, match="NOOA runtime preparation failed.*Permission denied"):
+        await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    assert shlex.split(sandbox.exec.await_args.args[0])[2] == "install"
 
 
 @pytest.mark.asyncio
@@ -358,7 +413,7 @@ async def test_concurrent_preparations_use_distinct_upload_paths(
 
     async def execute(command: str, **kwargs: object) -> SandboxExecResult:
         arguments = shlex.split(command)
-        if arguments[:1] == ["rm"]:
+        if arguments[:1] in (["rm"], ["mkdir"]):
             return SandboxExecResult("", "", 0)
         if arguments[2] == "probe":
             return SandboxExecResult("aarch64/gnu", "", 0)
@@ -393,9 +448,11 @@ async def test_failed_install_preserves_diagnostics_and_retry_uses_fresh_paths(
     sandbox.exec.side_effect = [
         SandboxExecResult("x86_64/gnu", "", 0),
         SandboxExecResult("", "", 1),
+        SandboxExecResult("", "", 0),  # runtime root, as root
         SandboxExecResult("No matching distribution found", "exit status 17", 17),
         SandboxExecResult("x86_64/gnu", "", 0),
         SandboxExecResult("", "", 1),
+        SandboxExecResult("", "", 0),  # runtime root, as root
         SandboxExecResult("ready", "", 0),
         SandboxExecResult("", "", 0),
     ]
@@ -407,7 +464,7 @@ async def test_failed_install_preserves_diagnostics_and_retry_uses_fresh_paths(
     assert "No matching distribution found" in failure
     assert "exit status 17" in failure
     assert f"diagnostics={first_script.removesuffix('.sh')}" in failure
-    assert sandbox.exec.await_count == 3
+    assert sandbox.exec.await_count == 4
     await sandbox_runtime.prepare_nooa_runtime(sandbox)
     second_script = sandbox.upload.await_args_list[3].args[1]
     assert second_script != first_script
@@ -423,11 +480,12 @@ async def test_cancelled_install_retains_remote_diagnostics(
     sandbox.exec.side_effect = [
         SandboxExecResult("x86_64/gnu", "", 0),
         SandboxExecResult("", "", 1),
+        SandboxExecResult("", "", 0),  # runtime root, as root
         asyncio.CancelledError(),
     ]
     with pytest.raises(asyncio.CancelledError):
         await sandbox_runtime.prepare_nooa_runtime(sandbox)
-    assert sandbox.exec.await_count == 3
+    assert sandbox.exec.await_count == 4
     assert len(sandbox.uploaded) == 3
 
 
@@ -502,6 +560,7 @@ async def test_offline_runtime_stages_only_verified_local_artifacts(
         SandboxExecResult("x86_64/gnu", "", 0),
         SandboxExecResult("glibc 2.31", "", 0),
         SandboxExecResult("", "", 1),
+        SandboxExecResult("", "", 0),  # runtime root, as root
         SandboxExecResult("ready", "", 0),
         SandboxExecResult("", "", 0),
     ]
@@ -511,7 +570,7 @@ async def test_offline_runtime_stages_only_verified_local_artifacts(
     scratch = script.removesuffix(".sh")
     assert sandbox.uploaded[f"{scratch}/wheels.tar.gz"] == (wheelhouse / "wheels.tar.gz").read_bytes()
     assert sandbox.uploaded[f"{scratch}/python.tar.gz"] == (wheelhouse / "python.tar.gz").read_bytes()
-    command = shlex.split(sandbox.exec.await_args_list[3].args[0])
+    command = shlex.split(sandbox.exec.await_args_list[4].args[0])
     wheels_sha = json.loads((wheelhouse / "manifest.json").read_text())["wheels_sha256"]
     expected_fingerprint = hashlib.sha256(f"{runtime_package[1]}:{wheels_sha}".encode()).hexdigest()
     assert command[2] == "install"
