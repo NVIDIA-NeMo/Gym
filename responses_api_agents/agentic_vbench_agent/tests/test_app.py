@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 from omegaconf import OmegaConf
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.agentic_vbench_agent import app
 
 

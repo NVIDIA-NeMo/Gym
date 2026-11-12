@@ -1,2 +1,0 @@
-# harbor imports pathspec (MPL-2.0) in its job packager; the root pyproject drops it.
-pathspec

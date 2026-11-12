@@ -83,4 +83,4 @@ report a subset or a single-seed result as the benchmark score.
 
 Avg is the unweighted mean of the four family means in percent; ± is the population standard
 deviation across the three seeds; failed rollouts score 0. Measured through NVIDIA Eval Factory
-on nsc-svg with this agent (2026-10).
+on an internal Slurm cluster with this agent (2026-10).

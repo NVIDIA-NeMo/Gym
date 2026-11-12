@@ -112,14 +112,14 @@ def test_default_checkout_root_follows_hf_home(monkeypatch):
 
 def test_backend_environment_reads_client_env_and_rebinds_cert_path(tmp_path):
     (tmp_path / "client.env").write_text(
-        "export DOCKER_HOST=tcp://nsc-svg-slurm-1-cpu-26:18443\n"
+        "export DOCKER_HOST=tcp://podman-backend.example.internal:18443\n"
         "export DOCKER_TLS_VERIFY=1\n"
         "export DOCKER_CERT_PATH=/somewhere/on/the/backend\n"
         "export DOCKER_BUILDKIT=0\n"
     )
     env = core.backend_environment(tmp_path, wait_seconds=0)
     assert env == {
-        "DOCKER_HOST": "tcp://nsc-svg-slurm-1-cpu-26:18443",
+        "DOCKER_HOST": "tcp://podman-backend.example.internal:18443",
         "DOCKER_TLS_VERIFY": "1",
         "DOCKER_CERT_PATH": str(tmp_path),
         "DOCKER_BUILDKIT": "0",
