@@ -14,6 +14,7 @@ import difflib
 import hashlib
 import json
 import logging
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -26,6 +27,28 @@ from .navigation import goto
 
 
 logger = logging.getLogger(__name__)
+
+_JS_STRING = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
+_DOM_READ = re.compile(
+    rf"\.(?:querySelector|getAttribute)\(\s*{_JS_STRING}\s*\)"
+    r"|\.(?:lastChild|firstElementChild|outerText|innerText|textContent)\b"
+)
+
+
+def _program_html_snapshot_expression(locator: str) -> str:
+    """Capture absent DOM nodes as empty without hiding browser or script errors."""
+    expression = f"() => {locator}"
+    if not locator.startswith("document.querySelector("):
+        return expression
+    suffix = locator.removeprefix("document")
+    reads = list(_DOM_READ.finditer(suffix))
+    if not reads or "".join(read.group() for read in reads) != suffix:
+        return expression
+    # These locators read optional profile fields, empty wishlists, and other
+    # content that a mutation task can create. Only a missing node is empty;
+    # invalid selectors, disconnected pages, and arbitrary expressions still fail.
+    safe_locator = "document" + "".join("?." + read.group()[1:] for read in reads)
+    return f'() => ({safe_locator}) ?? ""'
 
 
 def _stable_key(record: dict[str, Any], preferred_keys: tuple[str, ...]) -> str:
@@ -214,7 +237,7 @@ async def _gitlab_member_role(page, account_name: str) -> str:
         )
         return str(
             await page.evaluate(
-                """(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || """,
+                '(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || ""',
                 account_idx,
             )
         )
@@ -280,7 +303,7 @@ async def _select_program_html_snapshot(target: dict[str, Any], page) -> str:
         return str(await page.content())
     if locator.startswith("document.") or locator.startswith("[...document."):
         try:
-            return str(await page.evaluate(f"() => {locator}") or "")
+            return str(await page.evaluate(_program_html_snapshot_expression(locator)) or "")
         except Exception as exc:
             raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("lambda:"):
@@ -487,7 +510,7 @@ def _gitlab_member_role_sync(page, account_name: str) -> str:
         )
         return str(
             page.evaluate(
-                """(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || """,
+                '(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || ""',
                 account_idx,
             )
         )
@@ -528,7 +551,7 @@ def _select_program_html_snapshot_sync(target: dict[str, Any], page) -> str:
         return str(page.content())
     if locator.startswith("document.") or locator.startswith("[...document."):
         try:
-            return str(page.evaluate(f"() => {locator}") or "")
+            return str(page.evaluate(_program_html_snapshot_expression(locator)) or "")
         except Exception as exc:
             raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
     if locator.startswith("lambda:"):
