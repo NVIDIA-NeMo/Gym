@@ -31,6 +31,9 @@ from responses_api_agents.web_agent.app import (
     _redact_old_images,
     _web_failure_kind,
 )
+from responses_api_agents.web_agent.qwen_computer_use import QwenPolicyState
+from responses_api_agents.web_agent.qwen_computer_use import response_text as qwen_response_text
+from responses_api_agents.web_agent.tests.test_qwen_computer_use import SCREENSHOT, _xml
 
 
 def _model_response(text: str) -> dict:
@@ -73,6 +76,145 @@ def _length_model_response() -> dict:
     payload["status"] = "incomplete"
     payload["incomplete_details"] = {"reason": "max_output_tokens"}
     return payload
+
+
+def _reasoning_response(final: str) -> dict:
+    payload = _model_response(final)
+    payload["output"].insert(
+        0,
+        {
+            "id": "draft-reasoning",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": _xml("type", text="draft must not execute")}],
+        },
+    )
+    return payload
+
+
+@pytest.mark.parametrize("final", [_xml("left_click", coordinate="[500, 250]"), "The requested answer is 42."])
+def test_qwen_action_boundary_ignores_reasoning_but_keeps_history(final: str) -> None:
+    response = NeMoGymResponse.model_validate(_reasoning_response(final))
+    state = QwenPolicyState(instruction="Find the answer")
+    action = _parse_response_action(
+        response,
+        WebActionProfile.COMPUTER_USE,
+        policy_protocol="qwen_xml_computer_use",
+        qwen_state=state,
+    )
+    if final.startswith("Action:"):
+        assert action.arguments["calls"] == [
+            {
+                "id": None,
+                "name": "computer",
+                "arguments": {
+                    "actions": [{"action": "left_click", "coordinate": pytest.approx([500 / 999, 250 / 999])}]
+                },
+            }
+        ]
+    else:
+        assert action.terminal is True
+        assert action.arguments["calls"] == [
+            {"id": None, "name": "terminate", "arguments": {"status": "success", "answer": final}}
+        ]
+        assert action.answer == final
+    state.record_response(qwen_response_text(response), action)
+    assert "draft must not execute" in state.responses[0]
+    assert final in state.responses[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["nano_omni_toolcall", "qwen_xml_computer_use"])
+async def test_deterministic_parser_failure_exhausts_budget_then_evaluates(protocol: str) -> None:
+    agent = _agent(
+        parse_retries=1,
+        policy_protocol=protocol,
+        nano_omni_retry_invalid_tool_calls=True,
+        nano_omni_parse_retry_delay_secs=0,
+    )
+    seed = _seed()
+    seed["observation"]["screenshot"]["data_url"] = SCREENSHOT
+    response = (
+        _native_model_response("computer", '{"actions":[{"action":[]}]}')
+        if protocol == "nano_omni_toolcall"
+        else _model_response(_xml("scroll", pixels="NaN"))
+    )
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [seed],
+            "/v1/responses": [response, response],
+            "/evaluate": [{"result": {"valid_sample": True, "reward": 1.0, "task_success": True}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": [], "temperature": 0.1},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+    assert [path for _server, path, _body in calls] == [
+        "/seed_session",
+        "/v1/responses",
+        "/v1/responses",
+        "/evaluate",
+        "/close",
+    ]
+    assert (result.model_turns, result.environment_steps) == (2, 0)
+    assert result.reward == 1.0
+    assert result.mask_sample is False
+    assert result.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_schema_exception_executes_only_complete_prefix_before_evaluation() -> None:
+    agent = _agent(parse_retries=0, nano_omni_retry_invalid_tool_calls=False)
+    response = _native_model_response("navigate", '{"url":"back"}')
+    response["output"].extend(
+        [
+            {
+                **_native_model_response("computer", '{"actions":[{"action":"wait","duration":0},{"action":[]}]}')[
+                    "output"
+                ][0],
+                "call_id": "bad",
+            },
+            {**_native_model_response("navigate", '{"url":"forward"}')["output"][0], "call_id": "later"},
+        ]
+    )
+    before = json.dumps(response)
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed()],
+            "/v1/responses": [response],
+            "/step": [{"operation_id": "step-0", "observation": _observation(), "execution_ok": True}],
+            "/evaluate": [{"result": {"valid_sample": True, "reward": 1.0, "task_success": True}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    result = await agent.run(
+        request,
+        WebAgentRunRequest(
+            responses_create_params={"input": []},
+            web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        ),
+    )
+    assert [path for _server, path, _body in calls] == [
+        "/seed_session",
+        "/v1/responses",
+        "/step",
+        "/evaluate",
+        "/close",
+    ]
+    step = next(body for _server, path, body in calls if path == "/step")
+    assert step["action"]["arguments"]["calls"] == [{"id": "call-1", "name": "navigate", "arguments": {"url": "back"}}]
+    assert (result.reward, result.mask_sample, result.model_turns, result.environment_steps) == (1.0, False, 1, 1)
+    assert json.dumps(response) == before
 
 
 def test_incomplete_model_reason_reads_openai_response_details() -> None:

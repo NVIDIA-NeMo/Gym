@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -8,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.types import Message, Receive, Scope, Send
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -25,7 +28,7 @@ from nemo_gym.web.models import (
     WebVerifierResult,
 )
 from nemo_gym.web.resource_config import WebResourcesServerConfig
-from nemo_gym.web.resources_server import WebResourcesServer, _error_response
+from nemo_gym.web.resources_server import WebResourcesServer, _BearerAuthMiddleware, _error_response
 from nemo_gym.web.session import (
     BenchmarkPreconditionError,
     CapacityUnavailableError,
@@ -387,6 +390,85 @@ def test_bearer_auth_protects_stateful_routes_but_not_health(monkeypatch: pytest
                 "retryable": False,
             }
         assert client.get("/session", headers={"Authorization": "bearer expected-token"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_status"),
+    [("/", 404), ("/healthz", 200), ("/docs", 200), ("/openapi.json", 200), ("/redoc", 200)],
+)
+def test_bearer_auth_allows_public_paths_without_a_token(
+    path: str, expected_status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEB_TEST_TOKEN", "expected-token")
+    app = _server(FakeManager(), require_auth=True, auth_token_env="WEB_TEST_TOKEN").setup_webserver()
+
+    with TestClient(app) as client:
+        assert client.get(path).status_code == expected_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_auth", [False, True])
+async def test_bearer_auth_preserves_task_context_and_streamed_reply(
+    require_auth: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEB_TEST_TOKEN", "expected-token")
+    caller_task = asyncio.current_task()
+    state = ContextVar("bearer_test_state", default="before")
+    observed_tasks = []
+    messages: list[Message] = []
+
+    async def application(scope: Scope, receive: Receive, send: Send) -> None:
+        observed_tasks.append(asyncio.current_task())
+        state.set("after")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"first", "more_body": True})
+        await send({"type": "http.response.body", "body": b"last", "more_body": False})
+
+    async def receive() -> Message:
+        raise AssertionError("Bearer authentication must not consume the request body")
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/session",
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer expected-token" if require_auth else b"Basic ignored")],
+    }
+    middleware = _BearerAuthMiddleware(
+        application, config=_config(require_auth=require_auth, auth_token_env="WEB_TEST_TOKEN")
+    )
+    await middleware(scope, receive, send)
+
+    assert observed_tasks == [caller_task]
+    assert state.get() == "after"
+    assert messages == [
+        {"type": "http.response.start", "status": 200, "headers": []},
+        {"type": "http.response.body", "body": b"first", "more_body": True},
+        {"type": "http.response.body", "body": b"last", "more_body": False},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope_type", ["websocket", "lifespan"])
+async def test_bearer_auth_passes_non_http_scopes_to_the_application(scope_type: str) -> None:
+    messages: list[Message] = []
+
+    async def application(scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "websocket.accept" if scope["type"] == "websocket" else "lifespan.startup.complete"})
+
+    async def receive() -> Message:
+        raise AssertionError("Bearer authentication must not consume non-HTTP messages")
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    middleware = _BearerAuthMiddleware(application, config=_config(require_auth=True))
+    await middleware({"type": scope_type}, receive, send)
+
+    assert messages == [{"type": "websocket.accept" if scope_type == "websocket" else "lifespan.startup.complete"}]
 
 
 def test_required_auth_token_is_checked_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:

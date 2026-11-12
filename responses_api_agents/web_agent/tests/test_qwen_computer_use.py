@@ -7,7 +7,7 @@ import io
 import pytest
 from PIL import Image
 
-from nemo_gym.web import WebImage, WebObservation
+from nemo_gym.web import ActionParseError, WebImage, WebObservation
 from responses_api_agents.web_agent.qwen_computer_use import (
     COLLAPSED_SCREENSHOT_TEXT,
     QwenPolicyState,
@@ -187,3 +187,31 @@ def test_qwen_history_folds_old_screenshots_without_dropping_actions() -> None:
 )
 def test_qwen_smart_resize_uses_factor_32(height, width, expected) -> None:
     assert smart_resize(height, width) == expected
+
+
+@pytest.mark.parametrize("action", ["scroll", "hscroll"])
+@pytest.mark.parametrize("pixels", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_qwen_scroll_rejects_nonfinite_values_as_parse_errors(action, pixels) -> None:
+    with pytest.raises(ActionParseError, match="finite"):
+        parse_qwen_action(
+            _xml(action, pixels=pixels),
+            coordinate_type="relative",
+            original_size=(1920, 1080),
+            processed_size=(1920, 1088),
+        )
+
+
+@pytest.mark.parametrize("action,positive,negative", [("scroll", "up", "down"), ("hscroll", "right", "left")])
+@pytest.mark.parametrize("pixels,amount", [("1e300", 50), ("-100000", 50), ("0", 0)])
+def test_qwen_finite_scroll_keeps_cap_sign_and_zero(action, positive, negative, pixels, amount) -> None:
+    parsed = parse_qwen_action(
+        _xml(action, pixels=pixels),
+        coordinate_type="relative",
+        original_size=(1920, 1080),
+        processed_size=(1920, 1088),
+    )
+    parameters = parsed.arguments["calls"][0]["arguments"]["actions"][0]["scroll_parameters"]
+    assert parameters == {
+        "scroll_direction": negative if pixels.startswith("-") else positive,
+        "scroll_amount": amount,
+    }

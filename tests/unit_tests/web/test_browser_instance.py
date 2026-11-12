@@ -6,6 +6,7 @@ import os
 import socket
 import threading
 import time
+import urllib.error
 from typing import Any
 from unittest.mock import Mock
 
@@ -93,6 +94,16 @@ def instance():
         endpoint=f"http://127.0.0.1:{port}",
         metadata={"token": "secret", "request_timeout_seconds": 10},
     )
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with browser_instance.DIRECT.open(f"{handle.endpoint}/healthz", timeout=1) as response:
+                assert response.status == 200
+            break
+        except (urllib.error.URLError, TimeoutError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
     yield handle, thread, result
 
 

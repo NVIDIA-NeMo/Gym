@@ -4,13 +4,14 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import ConfigError, ModelServerRef
 from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.verification import is_judge_failure
@@ -102,8 +103,8 @@ def _request(answer="answer", *, screenshot_count=1, page_url_count=0):
     )
 
 
-def _standard_request() -> WebVoyagerStandardVerifyRequest:
-    evidence_request = _request()
+def _standard_request(*, screenshot_count: int = 1) -> WebVoyagerStandardVerifyRequest:
+    evidence_request = _request(screenshot_count=screenshot_count)
     return WebVoyagerStandardVerifyRequest.model_validate(
         {
             "responses_create_params": {"input": "Solve"},
@@ -114,6 +115,88 @@ def _standard_request() -> WebVoyagerStandardVerifyRequest:
             "page_urls": evidence_request.page_urls,
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["", "answer"])
+async def test_standard_verify_masks_missing_required_screenshots(answer: str, caplog) -> None:
+    import httpx
+
+    server = _server()
+    server.server_client.post = AsyncMock(side_effect=AssertionError("missing evidence must not call the judge"))
+    request = _standard_request(screenshot_count=0).model_copy(update={"final_answer": answer})
+    transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.webvoyager_judge"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/verify", json=request.model_dump(mode="json"))
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["reward"] == result["verifier_result"]["reward"] == 0.0
+    assert result["mask_sample"] is True
+    assert result["verifier_result"]["valid_sample"] is False
+    assert result["failure_kind"] == result["verifier_result"]["failure_kind"] == "web:missing_judge_evidence"
+    assert result["judge_text"] == ""
+    assert result["response"] == request.response.model_dump(mode="json")
+    assert "reason=missing_judge_evidence valid_sample=False" in caplog.text
+    server.server_client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,reward", [("SUCCESS", 1.0), ("FAILURE", 0.0)])
+async def test_standard_verify_supports_text_only_judging_when_configured(verdict: str, reward: float) -> None:
+    import httpx
+
+    server = _server(require_screenshot=False)
+    server.server_client.post = AsyncMock(
+        return_value=_FakeHttpResponse(_model_response(json.dumps({"verdict": verdict})))
+    )
+    request = _standard_request(screenshot_count=0)
+    transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/verify", json=request.model_dump(mode="json"))
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["reward"] == result["verifier_result"]["reward"] == reward
+    assert result["mask_sample"] is False
+    assert result["verifier_result"]["valid_sample"] is True
+    assert result["failure_kind"] is None
+    assert result["verifier_result"]["metadata"]["parsed"]["verdict"] == verdict
+    assert result["verifier_result"]["metadata"]["screenshots_used"] == 0
+    server.server_client.post.assert_awaited_once()
+    params = server.server_client.post.await_args.kwargs["json"]
+    assert [block["type"] for block in params.model_dump(mode="json")["input"][0]["content"]] == ["input_text"]
+
+
+@pytest.mark.asyncio
+async def test_committed_screenshotless_examples_match_missing_evidence_contract() -> None:
+    import httpx
+
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    rows = [json.loads(line) for line in (data_dir / "example_rollouts.jsonl").read_text().splitlines()]
+    metrics = json.loads((data_dir / "example_metrics.json").read_text())
+    server = _server()
+    server.server_client.post = AsyncMock(side_effect=AssertionError("screenshotless fixture must not call the judge"))
+    transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for row in rows:
+            response = await client.post("/verify", json=row)
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert row["screenshots"] == []
+            assert row["reward"] == result["reward"] == 0.0
+            assert row["mask_sample"] is result["mask_sample"] is True
+            assert row["failure_kind"] == result["failure_kind"] == "web:missing_judge_evidence"
+            assert row["verifier_result"]["valid_sample"] is result["verifier_result"]["valid_sample"] is False
+            assert row["verifier_result"] == result["verifier_result"]
+            assert row["verifier_metadata"] == result["verifier_metadata"] == {}
+
+    assert len(rows) == metrics["Number of examples"] == 5
+    assert metrics["Masked examples"] == sum(row["mask_sample"] for row in rows) == 5
+    assert metrics["Scored examples"] == sum(not row["mask_sample"] for row in rows) == 0
+    server.server_client.post.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -438,13 +521,13 @@ async def test_judge_caller_cancellation_propagates():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict,reward", [("SUCCESS", 1.0), ("FAILURE", 0.0)])
+@pytest.mark.parametrize("verdict,reward", [("SUCCESS", 1.0), ("FAILURE", 0.0), (None, 0.0)])
 async def test_public_rejudgment_persists_consistent_nested_grade(tmp_path, verdict, reward):
     import httpx
 
     from nemo_gym.rollouts import RolloutStore, RunManifest
 
-    request = _standard_request()
+    request = _standard_request(screenshot_count=0 if verdict is None else 1)
     inputs = [{"_ng_task_index": 0, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}]
     source = tmp_path / "input.jsonl"
     source.write_text(json.dumps(inputs[0]) + "\n")
@@ -484,11 +567,24 @@ async def test_public_rejudgment_persists_consistent_nested_grade(tmp_path, verd
             _ng_rejudge_operation_id=pending.operation_id,
             _ng_rejudge_admitted_at=pending.admitted_at,
         )
-        assert store.record_rejudgment(failure, result)
+        if verdict is None:
+            assert result["mask_sample"] is True
+            assert result["verifier_result"]["valid_sample"] is False
+            with pytest.raises(ConfigError, match="no scored result"):
+                store.record_rejudgment(failure, result)
+            store.withdraw_rejudgment("0-0", pending.operation_id, unsaved_judge_failure=True)
+        else:
+            assert store.record_rejudgment(failure, result)
+    if verdict is None:
+        assert RolloutStore.read(output).selected("success") == []
+        assert RolloutStore.read(output).selected("failure") == [failure]
+        server.server_client.post.assert_not_awaited()
+        return
     (saved,) = RolloutStore.read(output).selected("success")
     assert saved["reward"] == saved["verifier_result"]["reward"] == reward
-    assert saved["mask_sample"] is False and saved["verifier_result"]["valid_sample"] is True
-    assert saved["verifier_result"]["failure_kind"] is None
+    assert saved["mask_sample"] is False
+    assert saved["verifier_result"]["valid_sample"] is True
+    assert saved["failure_kind"] == saved["verifier_result"]["failure_kind"] is None
     assert saved["task_success"] == saved["verifier_result"]["task_success"] == (reward == 1)
     assert saved["verifier_metadata"] == saved["verifier_result"]["metadata"]
     assert saved["response"] == failure["response"]

@@ -7,7 +7,7 @@
 # Constraints only pin packages a component installs anyway; they add nothing.
 #
 # Exported with importlib.metadata from the component venvs of the WebVoyager 552 reference
-# runtime (Gym ed29912c8, cw-dfw, built 2026-10-11; results 434/552, 436/552, 429/552,
+# runtime (Gym ed29912c8, reference environment, built 2026-10-11; results 434/552, 436/552, 429/552,
 # 420/552, 421/552). Component venvs are otherwise resolved fresh at build time and drifted
 # within a week (pillow 12.3.0 -> 13.0.0 and 20+ other minor versions); runs on the drifted
 # venvs had 2-3x more action-parse failures, which disappeared with these pins

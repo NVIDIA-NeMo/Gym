@@ -370,3 +370,50 @@ def test_invalid_batch_does_not_expose_unsafe_or_over_budget_prefix(prefix_kind)
     with pytest.raises(ActionParseError) as error:
         parse_nano_omni_tool_calls(prefix + [bad], max_calls=1 if prefix_kind in {"at_limit", "over_limit"} else None)
     assert error.value.validated_prefix is None
+
+
+@pytest.mark.parametrize(
+    "name,arguments",
+    [
+        pytest.param("computer", {"actions": [{"action": []}]}, id="unhashable-action"),
+        pytest.param(
+            "computer",
+            {"actions": [{"action": "scroll", "scroll_parameters": {"scroll_direction": [], "scroll_amount": 1}}]},
+            id="unhashable-direction",
+        ),
+        pytest.param("terminate", {"status": []}, id="unhashable-status"),
+        pytest.param("navigate", {"url": "http://["}, id="malformed-navigate-url"),
+        pytest.param("tabs_create", {"url": "http://["}, id="malformed-tab-url"),
+        pytest.param(
+            "computer", {"actions": [{"action": "left_click", "coordinate": [10**400, 0]}]}, id="float-overflow"
+        ),
+        pytest.param([], {}, id="nonstring-tool-name"),
+        pytest.param("navigate", '{"url":' + "9" * 5000 + "}", id="json-integer-limit"),
+    ],
+)
+def test_native_deterministic_argument_errors_remain_parse_errors(name, arguments) -> None:
+    item = {"type": "function_call", "name": name, "arguments": arguments}
+    with pytest.raises(ActionParseError) as error:
+        parse_nano_omni_tool_calls([item])
+    assert error.value.reason == "invalid_tool_arguments"
+    assert error.value.validated_prefix is None
+
+
+def test_native_schema_exception_exposes_only_previous_complete_calls() -> None:
+    calls = [
+        {"type": "function_call", "call_id": "first", "name": "navigate", "arguments": '{"url":"back"}'},
+        {
+            "type": "function_call",
+            "call_id": "bad",
+            "name": "computer",
+            "arguments": '{"actions":[{"action":"wait","duration":0},{"action":[]}]}',
+        },
+        {"type": "function_call", "call_id": "later", "name": "navigate", "arguments": '{"url":"forward"}'},
+    ]
+    before = json.dumps(calls)
+    with pytest.raises(ActionParseError) as error:
+        parse_nano_omni_tool_calls(calls)
+    assert error.value.validated_prefix.arguments["calls"] == [
+        {"id": "first", "name": "navigate", "arguments": {"url": "back"}}
+    ]
+    assert json.dumps(calls) == before

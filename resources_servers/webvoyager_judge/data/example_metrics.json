@@ -5,5 +5,7 @@
   "num_repeats": 1,
   "license": "Apache 2.0",
   "Number of examples": 5,
-  "note": "Deterministic empty-answer fixtures only; no benchmark scores are reported."
+  "note": "Screenshotless fixtures are masked for missing required judge evidence; no benchmark scores are reported.",
+  "Masked examples": 5,
+  "Scored examples": 0
 }

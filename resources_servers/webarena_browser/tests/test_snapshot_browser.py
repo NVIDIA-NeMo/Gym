@@ -13,9 +13,9 @@ from nemo_gym.web import (
     EvaluatorInfrastructureError,
     VisualBrowserEvaluationContext,
     WebObservation,
+    build_collision_plan,
     snapshot_target_key,
 )
-from nemo_gym.web.evaluation_collision import build_collision_plans
 from resources_servers.webarena_browser.evaluators import WebArenaTaskEvaluator
 from resources_servers.webarena_browser.reference_evaluation import classic_evaluation as classic
 from resources_servers.webarena_browser.reference_evaluation import eval_snapshots as snapshots
@@ -193,7 +193,7 @@ def test_public_collision_scoring_with_real_captures(chromium, monkeypatch, befo
         "required_contents": {"must_include": ["saved"]},
     }
     config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
-    plan = build_collision_plans([{"id": 1, **config}, {"id": 2, **config}])[0]
+    plan = build_collision_plan(config, program_html_collision_keys={f"url:{target['url']}"})
     task = _webarena_task(original_metadata=config, task_kwargs={"collision_plan": plan})
     state = {"html": before_html}
     context = chromium.new_context()

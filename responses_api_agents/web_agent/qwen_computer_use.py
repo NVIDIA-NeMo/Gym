@@ -563,7 +563,10 @@ def parse_qwen_action(
             computer_actions.append(action)
             status = "action"
         elif name in {"scroll", "hscroll"}:
-            requested = int(_number(params.get("pixels"), 0.0))
+            pixels = _number(params.get("pixels"), 0.0)
+            if not math.isfinite(pixels):
+                raise ActionParseError("Qwen scroll pixels must be finite")
+            requested = int(pixels)
             amount = min(abs(requested), MAX_SCROLL_AMOUNT)
             if name == "scroll":
                 direction = "up" if requested >= 0 else "down"

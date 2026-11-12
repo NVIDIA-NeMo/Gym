@@ -11,8 +11,8 @@ from resources_servers.visual_browser.task_data import TaskData as WebTaskRow
 
 class TaskData(WebTaskRow):
     final_answer: str = Field(default="", json_schema_extra={"consumed_by": ["verify"]})
-    screenshots: List[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["verify"]})
-    page_urls: List[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["verify"]})
+    screenshots: List[str] = Field(default_factory=list, max_length=200, json_schema_extra={"consumed_by": ["verify"]})
+    page_urls: List[str] = Field(default_factory=list, max_length=200, json_schema_extra={"consumed_by": ["verify"]})
     response: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Optional stored rollout response used to recover judge evidence during reverification.",

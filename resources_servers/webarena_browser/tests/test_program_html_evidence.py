@@ -13,7 +13,6 @@ from nemo_gym.web import (
     build_collision_plan,
     snapshot_target_key,
 )
-from nemo_gym.web.evaluation_collision import build_collision_plans
 from resources_servers.webarena_browser import reference_evaluation as reference
 from resources_servers.webarena_browser.evaluators import WebArenaTaskEvaluator
 from resources_servers.webarena_browser.reference_evaluation import classic_evaluation as classic
@@ -102,7 +101,7 @@ async def test_planned_program_html_delta_is_authoritative(
     monkeypatch, no_navigation_delay, entrypoint, before_value, after_value, expected
 ):
     target = {"url": URL, "locator": "document.body.innerText", "required_contents": {"must_include": ["saved"]}}
-    plan = build_collision_plans([{"id": 1, **_config_for(target)}, {"id": 2, **_config_for(target)}])[0]
+    plan = build_collision_plan(_config_for(target), program_html_collision_keys={f"url:{target['url']}"})
     assert len(plan["snapshot_adapters"]["program_html"]["targets"]) == 1
     key = snapshot_target_key(target)
     before = {"program_html": [{"key": key, "value": before_value}]}
@@ -121,7 +120,7 @@ async def test_unplanned_target_retains_final_state_scoring(
     plan, before, after = {}, {}, {}
     if unrelated_adapter:
         other = {**target, "url": URL + "/other"}
-        plan = build_collision_plans([{"id": 1, **_config_for(other)}, {"id": 2, **_config_for(other)}])[0]
+        plan = build_collision_plan(_config_for(other), program_html_collision_keys={f"url:{other['url']}"})
         before = after = {"program_html": [{"key": snapshot_target_key(other), "value": "saved"}]}
     page = _page(asynchronous=entrypoint == "async")
     assert await _evaluate(entrypoint, target, page, plan, before, after, monkeypatch) == 1
