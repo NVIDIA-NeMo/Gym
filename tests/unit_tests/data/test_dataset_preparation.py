@@ -18,8 +18,9 @@ import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
+from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import MonkeyPatch, raises
+from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.config.global_config
 import nemo_gym.data.dataset_preparation
@@ -97,6 +98,144 @@ def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPI
 
 
 class TestLoadAndValidateServerInstanceConfigs:
+    @mark.parametrize("interpolated", [False, True], ids=["literal-path", "interpolated-path"])
+    @mark.parametrize(
+        "source_settings",
+        [
+            {
+                "source": {
+                    "type": "gitlab",
+                    "dataset_name": "example_multi_step",
+                    "version": "0.0.1",
+                    "artifact_fpath": "train.jsonl",
+                }
+            },
+            {
+                "source": {
+                    "type": "huggingface",
+                    "repo_id": "nvidia/example_multi_step",
+                    "artifact_fpath": "train.jsonl",
+                }
+            },
+            {
+                "gitlab_identifier": {
+                    "dataset_name": "example_multi_step",
+                    "version": "0.0.1",
+                    "artifact_fpath": "train.jsonl",
+                }
+            },
+            {"huggingface_identifier": {"repo_id": "nvidia/example_multi_step", "artifact_fpath": "train.jsonl"}},
+            {
+                "gitlab_identifier": {
+                    "dataset_name": "example_multi_step",
+                    "version": "0.0.1",
+                    "artifact_fpath": "train.jsonl",
+                },
+                "huggingface_identifier": {"repo_id": "nvidia/example_multi_step", "artifact_fpath": "train.jsonl"},
+            },
+        ],
+        ids=["gitlab-source", "huggingface-source", "gitlab-identifier", "huggingface-identifier", "fallback-pair"],
+    )
+    def test_dataset_path_resolution_preserves_source_metadata(
+        self, source_settings: dict[str, dict[str, str]], interpolated: bool
+    ) -> None:
+        repo = Path(__file__).resolve().parents[3]
+        config = OmegaConf.load(repo / "resources_servers/example_multi_step/configs/example_multi_step.yaml")
+        datasets = config.example_multi_step_simple_agent.responses_api_agents.simple_agent.datasets
+        original = OmegaConf.to_container(datasets[0], resolve=False)
+        original.pop("source")
+        original.update(source_settings)
+        expected = DatasetConfig.model_validate(original)
+        datasets[0] = original
+        del datasets[1:]
+        config.selected_train_input = "selected-train.jsonl"
+        if interpolated:
+            datasets[0].jsonl_fpath = "${selected_train_input}"
+        before = OmegaConf.to_container(config, resolve=False)
+
+        owners = TrainDataProcessor().load_and_validate_server_instance_configs(
+            TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"), config
+        )
+
+        assert len(owners) == 1 and owners[0].name == "example_multi_step_simple_agent"
+        assert len(owners[0].datasets) == 1
+        actual = owners[0].datasets[0]
+        assert actual.jsonl_fpath == ("selected-train.jsonl" if interpolated else expected.jsonl_fpath)
+        assert actual.model_dump(exclude={"jsonl_fpath"}) == expected.model_dump(exclude={"jsonl_fpath"})
+        assert OmegaConf.to_container(config, resolve=False) == before
+
+    @mark.parametrize("unused_value", ["${undefined_key}", "${oc.env:LAB_TEST_UNSET_VARIABLE}"])
+    def test_resolves_dataset_paths_without_resolving_all_server_fields(
+        self, unused_value: str, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("LAB_TEST_UNSET_VARIABLE", raising=False)
+        global_config_dict = DictConfig(
+            {
+                "selected_input": "selected.jsonl",
+                "selected_prepare_script": "benchmarks/example/prepare.py",
+                "selected_prepare_project": "resources_servers/example",
+                "selected_prompt_config": "prompts/custom.yaml",
+                "agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            "runtime_only_setting": "${runtime_only_value}",
+                            "datasets": [
+                                {
+                                    "name": "benchmark",
+                                    "type": "benchmark",
+                                    "jsonl_fpath": "${selected_input}",
+                                    "prompt_config": "${selected_prompt_config}",
+                                    "prepare_script": "${selected_prepare_script}",
+                                    "prepare_project": "${selected_prepare_project}",
+                                    "num_repeats": 1,
+                                }
+                            ],
+                            "resources_server": {
+                                "type": "resources_servers",
+                                "name": "resources",
+                            },
+                            "model_server": {
+                                "type": "responses_api_models",
+                                "name": "policy_model",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+        datasets = global_config_dict.agent.responses_api_agents.simple_agent.datasets
+        datasets[0].unused_extra = unused_value
+        datasets.append({"name": "unused", "type": "example", "jsonl_fpath": unused_value})
+
+        result = TrainDataProcessor().load_and_validate_server_instance_configs(
+            config=TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"),
+            global_config_dict=global_config_dict,
+        )
+
+        dataset = result[0].datasets[0]
+        assert dataset.jsonl_fpath == Path("selected.jsonl")
+        assert dataset.prepare_script == Path("benchmarks/example/prepare.py")
+        assert dataset.prepare_project == Path("resources_servers/example")
+        assert dataset.prompt_config == Path("prompts/custom.yaml")
+        assert result[0].get_inner_run_server_config().model_extra["runtime_only_setting"] == "${runtime_only_value}"
+
+    def test_unresolved_selected_path_names_dataset(self) -> None:
+        repo = Path(__file__).resolve().parents[3]
+        config = OmegaConf.load(repo / "resources_servers/example_multi_step/configs/example_multi_step.yaml")
+        datasets = config.example_multi_step_simple_agent.responses_api_agents.simple_agent.datasets
+        del datasets[1:]
+        datasets[0].name = "broken_train"
+        datasets[0].jsonl_fpath = "${undefined_key}"
+
+        with raises(ValueError, match="Could not resolve paths for dataset 'broken_train'"):
+            TrainDataProcessor().load_and_validate_server_instance_configs(
+                TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"), config
+            )
+
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()
@@ -1820,3 +1959,24 @@ class TestDeclaringInstanceValidation:
                 }
             )
         assert [c.name for c in out] == ["my_agent"]
+
+
+def test_preparation_hint_resolves_interpolated_path(tmp_path: Path) -> None:
+    from nemo_gym.config.config_types import BenchmarkDatasetConfig
+    from nemo_gym.data.dataset_preparation import _prepare_command
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """prepare_script_args:
+  output_dir: old
+agent:
+  datasets:
+    - jsonl_fpath: ${undefined_output}/unrelated.jsonl
+      prepare_script: unrelated_prepare.py
+    - jsonl_fpath: ${prepare_script_args.output_dir}/tasks.jsonl
+      prepare_script: prepare.py
+"""
+    )
+    runtime = OmegaConf.create({"config_paths": [str(config)], "prepare_script_args": {"output_dir": "selected"}})
+    dataset = BenchmarkDatasetConfig(name="tasks", type="benchmark", jsonl_fpath="selected/tasks.jsonl")
+    assert _prepare_command(runtime, dataset) == f"gym eval prepare --config {config}"
