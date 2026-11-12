@@ -489,6 +489,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     task_data=task_input.task_data,
+                    # As _verify_body sends them: a server whose session is built from the task's history or tools
+                    # reads them at seed. Tool servers' seeds do not get them.
+                    responses_create_params=task_input.responses_create_params.model_dump(
+                        mode="json", exclude_unset=True
+                    ),
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(seed_http_response)

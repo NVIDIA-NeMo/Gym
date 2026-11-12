@@ -306,6 +306,20 @@ class ResourcesSeedSessionRequest(BaseModel):
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
+    # The task's own responses_create_params, which task_data leaves out: the prompt params /verify also receives.
+    # A server whose seed_request_model declares a `responses_create_params` field gets them in its seed request,
+    # for a session built from the task's history or tools; every other server's task_data validates as before.
+    responses_create_params: dict[str, JsonValue] | None = None
+
+    # A return annotation would replace the model's serialization schema with that container schema.
+    @model_serializer(mode="wrap")
+    def _serialize_responses_create_params(self, handler: SerializerFunctionWrapHandler):
+        """Leave the key out when there are no params, so tool-server seeds keep the wire shape an older server's
+        extra="forbid" model accepts."""
+        result = handler(self)
+        if self.responses_create_params is None:
+            result.pop("responses_create_params", None)
+        return result
 
 
 def reject_partial_typed_seed(value: object) -> object:
@@ -1104,6 +1118,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """
         return None
 
+    def _typed_seed_fields(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
+        """What a typed seed's ``seed_request_model`` validates: its ``task_data``, plus the task's
+        ``responses_create_params`` when the model declares that field and the seed carries them."""
+        if (
+            body.responses_create_params is None
+            or "responses_create_params" not in self.seed_request_model.model_fields
+        ):
+            return body.task_data
+        return {**body.task_data, "responses_create_params": body.responses_create_params}
+
     async def seed_session(
         self,
         body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
@@ -1181,11 +1205,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             if session_id in self._cookie_sessions or (previous is None and self.has_session_state(session_id)):
                 raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
             if session_id not in self._session_episodes:
+                seed_fields = self._typed_seed_fields(body)
                 try:
-                    task = self.seed_request_model.model_validate(body.task_data)
+                    task = self.seed_request_model.model_validate(seed_fields)
                 except ValidationError as error:
+                    # Name the params too when the model validated them, so a refusal points at the right input.
+                    validated = (
+                        "task_data" if seed_fields is body.task_data else "task_data with responses_create_params"
+                    )
                     raise ResourcesSeedRejectedError(
-                        f"task_data is not a valid {self.seed_request_model.__name__}: {error}"
+                        f"{validated} is not a valid {self.seed_request_model.__name__}: {error}"
                     ) from error
                 if session_id in self._initializing_sessions:
                     # The preceding initialization failed and its cleanup also failed. Retry cleanup before
