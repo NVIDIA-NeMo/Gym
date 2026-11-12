@@ -37,6 +37,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -1252,6 +1253,87 @@ contested: second_inner
         assert "server.items[1]" in missing
         assert "server.nested[0].k" in missing
 
+    @staticmethod
+    def _in_key_order(order: str, **entries) -> DictConfig:
+        names = list(entries)
+        return DictConfig({name: entries[name] for name in (names if order == "sources_first" else names[::-1])})
+
+    @mark.parametrize("order", ["sources_first", "derived_first"])
+    @mark.parametrize(
+        "top, middle, expected",
+        [
+            ({"_inherit_from": "middle", "c": 3}, {"_inherit_from": "base", "b": 2}, {"a": 1, "b": 2, "c": 3}),
+            ("${inherit_from:middle}", {"_inherit_from": "base", "b": 2}, {"a": 1, "b": 2, "c": 1}),
+            ({"_inherit_from": "middle", "c": 3}, "${inherit_from:base}", {"a": 1, "b": 1, "c": 3}),
+        ],
+        ids=["property-property", "string-property", "property-string"],
+    )
+    def test_inherit_chain_resolves_every_link(self, top, middle, expected, order: str) -> None:
+        # top inherits middle, which itself inherits base: top gets base's values with each link's overrides
+        # applied, whichever of them the swap reaches first. Every link is a move, so only top remains.
+        config = self._in_key_order(order, base={"a": 1, "b": 1, "c": 1}, middle=middle, top=top)
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {"top": expected}
+
+    @mark.parametrize("order", ["sources_first", "derived_first"])
+    @mark.parametrize("copy, c", [({"_copy": "middle", "c": 3}, 3), ("${copy:middle}", 1)], ids=["property", "string"])
+    def test_copy_of_inherited_source_resolves_the_source_first(self, copy, c: int, order: str) -> None:
+        config = self._in_key_order(
+            order, base={"a": 1, "b": 1, "c": 1}, middle={"_inherit_from": "base", "b": 2}, copied=copy
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        # The copy keeps middle, which still moved base into itself.
+        assert OmegaConf.to_container(config) == {
+            "middle": {"a": 1, "b": 2, "c": 1},
+            "copied": {"a": 1, "b": 2, "c": c},
+        }
+
+    @mark.parametrize("order", ["sources_first", "derived_first"])
+    def test_inherit_chain_applies_delete_key_of_each_link(self, order: str) -> None:
+        config = self._in_key_order(
+            order,
+            base={"a": 1, "b": 1, "c": 1},
+            middle={"_inherit_from": "base", "_delete_key": "a"},
+            top={"_inherit_from": "middle", "_delete_key": "b", "d": 4},
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {"top": {"c": 1, "d": 4}}
+
+    def test_inherit_chain_of_missing_value_is_reported(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = DictConfig(
+            {
+                "top": {"_inherit_from": "middle"},
+                "middle": "${inherit_from:source.model}",
+                "source": {"model": "???"},
+            }
+        )
+
+        parser._recursively_swap_keys(config)
+
+        assert parser.collect_missing_value_paths(config) == ["top"]
+
+    @mark.parametrize(
+        "entries, cycle",
+        [
+            ({"a": {"_inherit_from": "b"}, "b": {"_inherit_from": "a"}}, "b -> a -> b"),
+            ({"a": "${inherit_from:b}", "b": "${inherit_from:a}"}, "b -> a -> b"),
+            ({"a": {"_copy": "b"}, "b": {"_inherit_from": "a"}}, "b -> a -> b"),
+            ({"a": {"_inherit_from": "a"}}, "a -> a"),
+            ({"a": {"x": "${inherit_from:a}"}}, "a -> a"),
+        ],
+        ids=["property", "string", "copy", "self", "nested-self"],
+    )
+    def test_inherit_cycle_raises(self, entries: dict, cycle: str) -> None:
+        with raises(InheritPathNotFoundError, match=f"form a cycle: {cycle}\\."):
+            GlobalConfigDictParser()._recursively_swap_keys(DictConfig(entries))
+
     def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -2456,6 +2538,43 @@ class TestConfigLoadErrors:
             "other_agent": ["mcqa_environment_server"],
             "renamed_agent": ["renamed_environment_server"],
         }
+
+    @mark.parametrize("referenced", ["taskset_agent", "flavor_agent"])
+    @mark.parametrize("taskset_first", [False, True])
+    def test_agent_inherit_chain_preserves_environment_server(self, referenced: str, taskset_first: bool) -> None:
+        # The Harbor route's shape: a taskset agent inherits a harness flavor that itself inherits the base
+        # agent. The environment server names the final agent, or the flavor that the taskset agent renames.
+        flavor = {
+            "_inherit_from": "mcqa_simple_agent",
+            "responses_api_agents": {"simple_agent": {"execution_mode": "sandboxed"}},
+        }
+        taskset = {
+            "_inherit_from": "flavor_agent",
+            "responses_api_agents": {"simple_agent": {"datasets": []}},
+        }
+        derived = {"flavor_agent": flavor, "taskset_agent": taskset}
+        if taskset_first:
+            derived = dict(reversed(derived.items()))
+        config = self._agent_with_environment_server_config(error_on_agent_without_environment_server=True, **derived)
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = referenced
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "flavor_agent" not in resolved
+        assert _environment_servers_by_agent(resolved) == {"taskset_agent": ["mcqa_environment_server"]}
+        agent = resolved.taskset_agent.responses_api_agents.simple_agent
+        assert "_inherit_from" not in resolved.taskset_agent
+        assert agent.execution_mode == "sandboxed"
+        assert agent.datasets == []
+        assert agent.resources_server.name == "mcqa"
 
     @mark.parametrize(
         "target",
