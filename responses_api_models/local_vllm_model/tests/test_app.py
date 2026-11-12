@@ -27,7 +27,7 @@ import responses_api_models.local_vllm_model.app
 from nemo_gym.client import ServerClient
 from nemo_gym.config import DISALLOWED_PORTS_KEY_NAME
 from nemo_gym.config.global_config import DictConfig
-from nemo_gym.models.token_capture.store import TokenCaptureStore
+from nemo_gym.models.token_capture import TokenCaptureStore
 from responses_api_models.local_vllm_model.app import LocalVLLMModel, LocalVLLMModelConfig
 from responses_api_models.local_vllm_model.local_vllm_model_actor import _get_local_dp_ranks
 

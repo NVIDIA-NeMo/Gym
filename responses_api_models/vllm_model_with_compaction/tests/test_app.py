@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
-from nemo_gym.models.token_capture.store import TokenCaptureStore
+from nemo_gym.models.token_capture import TokenCaptureStore
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import (
     VLLMContextCompactionResponseCreateParams,
