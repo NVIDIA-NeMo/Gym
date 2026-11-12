@@ -312,20 +312,20 @@ def _collated_rows(global_config_dict: DictConfig, output_dir: Path) -> list[dic
 
 
 class TaskRunner:
-    """Runs single tasks of collated rows against Gym servers that are already running.
+    """Runs single tasks of collated rows, flat or materialized, against Gym servers that are already running.
 
     The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row, sends it
-    through the agent's `/run` and returns the rollout's outcome. Concurrent calls in one event loop are supported.
+    through the agent's `/run`, or a materialized row through the environment server its taskset routes to, and
+    returns the rollout's outcome. The running servers' configuration is read from the registry server once and shared
+    by every call, flat or materialized, so build a new `TaskRunner` after the deployment's servers change.
+    Concurrent calls in one event loop are supported.
     """
 
     @experimental(once=True)
     def __init__(self, rows: Sequence[Mapping[str, Any]], *, registry_server: BaseServerConfig):
-        self._helper = RolloutCollectionHelper()
+        self._helper = RolloutCollectionHelper(reuse_server_client=True)
         self._registry_server = registry_server
         self._row_of_task = _first_row_of_each_task(rows)
-        for task_id, row in self._row_of_task.items():
-            if is_materialized_task_row(row):
-                raise ConfigError(f"Task {task_id!r} is a materialized task row; TaskRunner runs flat task rows only.")
 
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
@@ -344,8 +344,16 @@ class TaskRunner:
         """
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
+        task_row = self._row_of_task[task_id]
+        global_config_dict = (
+            self._helper.setup_server_client(self._registry_server).global_config_dict
+            if is_materialized_task_row(task_row)
+            else None
+        )
         with ignoring_command_line():
-            rows = self._helper.preprocess_examples([self._row_of_task[task_id]], task_ids=[task_id], num_repeats=1)
+            rows = self._helper.preprocess_examples(
+                [task_row], task_ids=[task_id], num_repeats=1, global_config_dict=global_config_dict
+            )
         row = {**rows[0], "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
         completions = self._helper.run_outcomes(
             [row],
