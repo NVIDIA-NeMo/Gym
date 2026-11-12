@@ -43,6 +43,11 @@ terminal_bench_science_miniswe_agent:
       step_limit: ${oc.select:tbsci_max_steps,0}
       step_timeout: ${oc.select:tbsci_step_timeout_sec,30}
       sandbox_runner_timeout_seconds: ${oc.select:tbsci_agent_max_timeout_sec,28800}
+      # As many runs as the resources server seeds tasks: a seeded task waiting on a lower agent limit would run
+      # down its seeded-session deadline (tbsci_seeded_session_timeout_sec).
+      concurrency: ${oc.select:tbsci_concurrency,8}
+      # Collecting an 8-hour trajectory at close, as codex.yaml allows its agent.
+      session_close_timeout_seconds: 300
 
 terminal_bench_science_miniswe:
   _inherit_from: single_agent_turn_legacy
@@ -55,6 +60,7 @@ terminal_bench_science_miniswe:
         type: responses_api_agents
         name: terminal_bench_science_miniswe_agent
       # Provisioning, the mini-SWE runtime installation, the 8-hour agent budget, and verification (up to
-      # 12000 seconds for the slowest verifier, plus its startup).
+      # 12000 seconds for the slowest verifier, plus its startup). It assumes image and verifier builds finish well
+      # inside their own timeouts: a task that used every package timeout in full could need more, as with Codex.
       default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
       cleanup_timeout_seconds: 600

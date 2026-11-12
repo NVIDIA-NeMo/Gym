@@ -926,14 +926,26 @@ def test_miniswe_profile_composes_borrowing_resources_mini_swe_and_the_environme
     assert environment.agent_server.name == "terminal_bench_science_miniswe_agent"
     # Harbor's mini-swe-agent, as the relay profile: no step cap, 30-second commands, the 8-hour task budget.
     assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (0, 30, 28800)
+    # As many runs as seeded task sessions, and time to collect an 8-hour trajectory at close.
+    seeded = config.terminal_bench_science.resources_servers.terminal_bench_4
+    assert agent.concurrency == seeded.max_concurrent_sessions == 8
+    assert agent.session_close_timeout_seconds == 300
     # The episode bound covers the runtime installation, the 8-hour budget and the 12000-second verifier.
     install = config.mini_swe_agent.responses_api_agents.mini_swe_agent.sandbox_install_timeout_seconds
     assert environment.default_episode_timeout_seconds > install + 28800 + 12000
     capped = OmegaConf.merge(
-        config, {"tbsci_max_steps": 3, "tbsci_step_timeout_sec": 60, "tbsci_agent_max_timeout_sec": 900}
+        config,
+        {
+            "tbsci_max_steps": 3,
+            "tbsci_step_timeout_sec": 60,
+            "tbsci_agent_max_timeout_sec": 900,
+            "tbsci_concurrency": 64,
+        },
     )
     agent = capped.terminal_bench_science_miniswe_agent.responses_api_agents.mini_swe_agent
     assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (3, 60, 900)
+    seeded = capped.terminal_bench_science.resources_servers.terminal_bench_4
+    assert agent.concurrency == seeded.max_concurrent_sessions == 64
 
 
 # The README's vllm_model settings for Codex in front of a chat-completions server.
