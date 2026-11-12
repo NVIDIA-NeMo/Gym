@@ -241,6 +241,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "nooa_agent",
         "openclaw_agent",
         "opencode_agent",
+        "openhands_agent",
         "pi_agent",
         "pool_agent",
         "simple_agent",
