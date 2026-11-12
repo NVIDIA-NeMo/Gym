@@ -9,6 +9,7 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
+from scripts.harness_conformance.episode import _settings
 from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
@@ -134,29 +135,37 @@ def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_pa
     assert [c["response"] for c in captures] == [a["response"] for a in probe.attempts]
 
 
-def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path):
-    probe = Probe(SCENARIOS_BY_NAME["tool_failure"], tmp_path, harness="terminus_2_sandboxed", final_responses=2)
+@pytest.mark.parametrize("scenario_name", ["tool_failure", "context_compaction"])
+def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path, scenario_name):
+    scenario = replace(SCENARIOS_BY_NAME[scenario_name], tool_steps=2)
+    settings = _settings("terminus_2_sandboxed", tmp_path, 30, scenario)
+    probe = Probe(scenario, tmp_path, harness="terminus_2_sandboxed", **settings.probe_overrides)
     body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
     with TestClient(probe.model_app()) as client:
-        for index in range(4):
+        for index, reply in enumerate(probe.responses):
             response = client.post("/v1/responses", json=body)
             assert response.status_code == 200
             message = response.json()["output"][0]
-            instruction = json.loads(message["content"][0]["text"])
             body["input"].append(message)
-            if index < 2:
+            if reply["kind"] == "summary":
+                assert message["content"][0]["text"] == probe.compaction_summary
+                assert not probe.finished
+                continue
+            instruction = json.loads(message["content"][0]["text"])
+            if reply["kind"] == "tool":
                 assert probe.tool_calls[index]["token"] not in instruction["commands"][0]["keystrokes"]
                 execution = subprocess.run(
                     instruction["commands"][0]["keystrokes"], shell=True, capture_output=True, text=True
                 )
-                assert execution.returncode == (7 if index == 0 else 0)
+                assert execution.returncode == (scenario.tool_exit_code if index == 0 else 0)
                 body["input"].append({"role": "user", "content": execution.stdout})
                 assert instruction["task_complete"] is False
             else:
                 assert instruction["task_complete"] is True and not instruction["commands"]
-                assert probe.finished is (index == 3)
+                assert probe.finished is (index == len(probe.responses) - 1)
                 body["input"].append({"role": "user", "content": "Confirm completion"})
     assert not probe.violations
+    assert len(probe.compaction_response_ids) == (3 if scenario.compaction else 0)
     assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
 
 

@@ -317,6 +317,19 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 "max_turns": steps,
                 "enable_summarize": True,
                 "model_context_limit": 32768,
+                "proactive_summarization_threshold": 8000,
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    # Harbor summarizes, asks handoff questions, then answers them.
+                    *[{"kind": "summary", "input_tokens": 500, "output_tokens": 11} for _ in range(3)],
+                    *[{"kind": "final", "input_tokens": 100, "output_tokens": 8} for _ in range(2)],
+                ],
             },
         },
     }.get(harness, {})
