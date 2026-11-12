@@ -1,0 +1,20 @@
+vs_bench_gameplay_agent:
+  responses_api_agents:
+    vs_bench_gameplay:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      author_root: ${vs_bench_author_root}
+      author_python: ${vs_bench_author_python}
+      episode_root: ${vs_bench_gameplay_artifact_root}
+      max_response_tokens: ${vs_bench_max_response_tokens}
+      max_reasoning_tokens: ${vs_bench_max_reasoning_tokens}
+
+vs_bench_gameplay_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vs_bench_gameplay_agent
