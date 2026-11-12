@@ -148,7 +148,7 @@ gym eval plan-repeats \
     --output-dir results/repeat-planning-walkthrough/multiple-metrics
 ```
 
-This example supplies one-point SDs for every selected metric. Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each benchmark has suite weight 0.5. Inspect the report's metric inputs and benchmark composites:
+This example supplies one-point SDs for every selected metric and explicitly supplies Omniscience's composite SD as 0.7071067811865476 points. Obtain a measured composite SD by equally averaging the normalized metrics within each complete repeat, then calculating SD across those averaged scores. The individual metric SDs alone cannot determine it. Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each benchmark has suite weight 0.5. Inspect the report's metric inputs and benchmark composites:
 
 | Benchmark | Selected metric | Within-benchmark weight | Metric's overall suite weight |
 | --- | --- | ---: | ---: |
@@ -156,7 +156,7 @@ This example supplies one-point SDs for every selected metric. Its existing base
 | AA Omniscience | accuracy | 0.5 | 0.25 |
 | AA Omniscience | non-hallucination | 0.5 | 0.25 |
 
-The two Omniscience rows describe a single benchmark with total suite weight 0.5. Its baseline and candidate composite SDs are both **0.7071 points**, while GPQA's are one point. All Omniscience metrics share one repeat count and one repeat cost.
+The two Omniscience rows describe a single benchmark with total suite weight 0.5. Its supplied baseline and candidate composite SDs are both **0.7071 points**, while GPQA's are one point. The report retains the individual metric SDs as descriptive inputs. All Omniscience metrics share one repeat count and one repeat cost.
 
 The minimum allowed new counts already meet the target: **eight GPQA passes and ten Omniscience passes per candidate**, 18 new passes in total, with approximate suite power **94.95%**. These results use this example's SDs and existing counts; they are not measured AA Omniscience or GPQA budgets.
 

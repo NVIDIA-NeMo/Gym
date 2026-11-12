@@ -90,12 +90,17 @@ def render_repeat_planning_markdown(result: RepeatPlanningResult) -> str:
                 f"| {_text(cell.model)} | {_text(cell.benchmark)} | {_text(metric.name)} | {_number(metric.weight)} "
                 f"| {_number(metric.baseline_std_points)} | {_number(metric.candidate_std_points)} |"
             )
-    if any(metric.candidate_std_defaulted for cell in result.cells for metric in cell.metrics):
+    if any(
+        cell.baseline_std_points is not None and cell.candidate_std_points is None for cell in settings.cells
+    ) or any(metric.candidate_std_defaulted for cell in result.cells for metric in cell.metrics):
         lines.extend(["", "Omitted candidate SDs default to the corresponding baseline SDs."])
     lines.extend(
         [
             "",
             "## Benchmark composites",
+            "",
+            "Multi-metric cells use the supplied SD of the normalized, equally averaged complete-repeat scores. "
+            "Their individual metric SDs above are descriptive inputs; they do not determine the composite SD.",
             "",
             "| Model | Benchmark | Cell weight | Baseline SD | Candidate SD |",
             "| --- | --- | ---: | ---: | ---: |",

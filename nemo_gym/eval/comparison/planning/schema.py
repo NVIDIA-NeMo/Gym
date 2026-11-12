@@ -55,7 +55,12 @@ class RepeatPlanningMetric(_PlanningModel):
 
 
 class RepeatPlanningCell(_PlanningModel):
-    """One model and benchmark, with one shared repeat count for its selected metrics."""
+    """One model and benchmark, with one shared repeat count for its selected metrics.
+
+    Multi-metric cells require cell-level SDs of the normalized, equally averaged
+    complete-repeat scores. Their individual metric SDs are descriptive inputs.
+    An omitted candidate composite SD defaults to the baseline composite SD.
+    """
 
     model: Name
     benchmark: Name
@@ -69,11 +74,19 @@ class RepeatPlanningCell(_PlanningModel):
     @model_validator(mode="after")
     def validate_metrics(self) -> "RepeatPlanningCell":
         if self.metrics is not None:
-            if self.baseline_std_points is not None or self.candidate_std_points is not None:
-                raise ValueError("Use either scalar standard deviations or metrics, not both.")
             names = [metric.name for metric in self.metrics]
             if len(names) != len(set(names)):
                 raise ValueError("Metric names must be unique within a benchmark cell.")
+            if len(self.metrics) > 1:
+                if self.baseline_std_points is None:
+                    raise ValueError(
+                        "Multiple metrics require cell-level baseline_std_points: supply the SD across complete-repeat "
+                        "scores after normalizing and averaging the selected metrics within each repeat. "
+                        "Individual metric SDs cannot determine the SD of their average. "
+                        "Omit cell-level candidate_std_points to use that baseline composite SD."
+                    )
+            elif self.baseline_std_points is not None or self.candidate_std_points is not None:
+                raise ValueError("For one metric, use either scalar standard deviations or metrics, not both.")
         elif self.baseline_std_points is None:
             raise ValueError("Provide baseline_std_points or a nonempty metrics list.")
         return self

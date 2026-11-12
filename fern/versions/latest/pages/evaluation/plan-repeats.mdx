@@ -91,6 +91,9 @@ cells:
     benchmark: aa-omniscience
     existing_baseline_repeats: 10
     repeat_step: 10
+    # SD across complete-repeat scores after equally averaging the two metrics.
+    baseline_std_points: 0.7071067811865476
+    candidate_std_points: 0.7071067811865476
     metrics:
       - name: accuracy
         baseline_std_points: 1.0
@@ -100,7 +103,9 @@ cells:
         candidate_std_points: 1.0
 ```
 
-Use either the cell-level SD shorthand or a `metrics` list. Omit a candidate SD to use its baseline SD forecast. Supply normalized SDs; metric labels alone do not convert raw scoring units or reverse a metric's direction. For each arm, the planner combines the supplied metric variances with squared equal metric weights, then plans against the resulting benchmark SD. It does not average SDs or treat extra metrics as extra benchmarks.
+For multiple metrics, supply the cell-level `baseline_std_points` as the SD **across complete-repeat scores after equally averaging the normalized metrics within each repeat**. This is the same observation used by suite comparison. Individual metric SDs cannot determine the SD of their average. The `metrics` list records their names, weights, and individual SDs for inspection; the planner uses the supplied cell-level composite SD. The example's composite SD is illustrative, not calculated from its individual metric SDs.
+
+Omit cell-level `candidate_std_points` to use the baseline composite SD forecast. An omitted candidate SD inside `metrics` defaults only that metric's descriptive SD; it does not determine the candidate composite. For one metric, use either the scalar cell-level shorthand or a one-entry `metrics` list. Supply normalized SDs; metric labels alone do not convert raw scoring units or reverse a metric's direction.
 
 ## Inspect the result
 
@@ -116,7 +121,7 @@ If the final planned experiment is inconclusive, retain that result. Adding repe
 
 ## Use saved cluster results
 
-On a cluster, obtain the SD across complete-repeat scores from the selected run's saved aggregate metrics. For multiple independent source runs, concatenate their complete-repeat scores and recompute SD; do not average source SDs or use standard error as SD. Normalize before constructing the direct-input YAML.
+On a cluster, obtain the SD across complete-repeat scores from the selected run's saved aggregate metrics. For a multi-metric benchmark, normalize and equally average the selected metrics within each repeat first, then calculate the SD across those averaged scores. For multiple independent source runs, concatenate their complete-repeat scores and recompute SD; do not average source SDs or use standard error as SD. Normalize before constructing the direct-input YAML.
 
 The same YAML runs on a laptop or on the cluster once NeMo Gym is installed. It contains only numerical inputs and benchmark labels, so no rollout text, prompts, cluster connection, or inference service is required. Keep the source run identities and SD-extraction evidence with the experiment's validation artifacts.
 

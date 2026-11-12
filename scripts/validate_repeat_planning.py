@@ -317,6 +317,8 @@ def export_suite_planning_inputs(report_path: Path, output: Path) -> list[dict[s
                 count=len(scores), mean=mean, variance=variance, std=math.sqrt(variance), scores=scores
             )
         records.append(dict(model=cell["model"], benchmark=cell["benchmark"], **summaries))
+    if not records:
+        raise ValueError(f"Saved suite report '{report_path}' has no eligible model/benchmark cells to export.")
     groups = [("suite", "suite", records)]
     groups.extend(
         ("benchmark", "benchmark" if len(records) == 1 else f"benchmark_{index}", [row])

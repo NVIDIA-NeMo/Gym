@@ -79,6 +79,44 @@ def test_exports_each_benchmark_separately_and_one_complete_suite(tmp_path: Path
     assert [cell["benchmark"] for cell in suite["cells"]] == ["benchmark", "another"]
 
 
+@pytest.mark.parametrize("excluded_count", [0, 2])
+def test_rejects_suite_without_eligible_cells_before_writing_outputs(tmp_path: Path, excluded_count: int) -> None:
+    report = {
+        "cells": [
+            {"model": "excluded", "benchmark": f"benchmark-{index}", "eligible": False}
+            for index in range(excluded_count)
+        ]
+    }
+    source = tmp_path / "suite.json"
+    source.write_text(json.dumps(report))
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(ValueError, match="no eligible model/benchmark cells"):
+        export_suite_planning_inputs(source, output)
+
+    assert list(output.iterdir()) == []
+
+
+def test_mixed_eligibility_exports_only_validated_eligible_evidence(tmp_path: Path) -> None:
+    report = _report()
+    excluded = {"model": "excluded", "benchmark": "unscored", "eligible": False}
+    report["cells"] = [excluded, *report["cells"], excluded]
+    source = tmp_path / "suite.json"
+    source.write_text(json.dumps(report))
+
+    records = export_suite_planning_inputs(source, tmp_path)
+
+    assert [(record["model"], record["benchmark"]) for record in records] == [("model", "benchmark")]
+    assert records[0]["baseline"]["scores"] == [10.0, 12.0, 14.0]
+    assert records[0]["candidate"]["variance"] == 18.0
+    assert json.loads((tmp_path / "cluster_numeric_evidence.json").read_text()) == records
+    for level in ("benchmark", "suite"):
+        manifest = yaml.safe_load((tmp_path / f"cluster_{level}_plan.yaml").read_text())
+        assert [(cell["model"], cell["benchmark"]) for cell in manifest["cells"]] == [("model", "benchmark")]
+        assert manifest["cells"][0]["baseline_std_points"] == 2.0
+
+
 @pytest.mark.parametrize("defect", ["incomplete", "wrong_variance"])
 def test_rejects_incomplete_or_inconsistent_saved_evidence(tmp_path: Path, defect: str) -> None:
     report = _report()

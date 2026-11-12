@@ -17,7 +17,7 @@
 import shlex
 import sys
 from datetime import datetime, timezone
-from math import fsum, sqrt
+from math import sqrt
 from pathlib import Path
 
 import yaml
@@ -88,12 +88,20 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
                 for metric in definitions
             ]
             resolved_metrics.append(metrics)
+            # A multi-metric cell supplies the SD of its per-repeat average.
+            # Marginal metric SDs alone do not determine that composite SD.
+            baseline_std = cell.baseline_std_points
+            if baseline_std is None:
+                baseline_std = metrics[0].baseline_std_points
+                candidate_std = metrics[0].candidate_std_points
+            else:
+                candidate_std = baseline_std if cell.candidate_std_points is None else cell.candidate_std_points
             cells.append(
                 PlanningCell(
                     model=cell.model,
                     benchmark=cell.benchmark,
-                    baseline_variance=fsum(metric.baseline_std_points**2 for metric in metrics) / len(metrics) ** 2,
-                    candidate_variance=fsum(metric.candidate_std_points**2 for metric in metrics) / len(metrics) ** 2,
+                    baseline_variance=baseline_std**2,
+                    candidate_variance=candidate_std**2,
                     repeat_step=cell.repeat_step,
                     repeat_cost=cell.repeat_cost,
                     existing_baseline_repeats=cell.existing_baseline_repeats,
