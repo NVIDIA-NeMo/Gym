@@ -121,3 +121,13 @@ Final reconciliation and per-task results are archived under the run ID above;
 deployment details and large artifacts are maintained separately from Gym.
 This is evidence for this checkpoint and recipe, not a public-v3 baseline or
 proof of score parity with another deployment.
+
+## Audited 2026-11-12 result
+
+The full maintained population scored **231/908 (25.44052863436123%)** at
+`f8031c55e638491f4d0b39890714d553ed1fc09e`. See the
+[complete validation report](validation-2026-11-12.md) for the measured source,
+model, tokenizer, template, tool and reasoning parsers, runtime identities,
+sampling, recovery, all 22 comparison groups and remaining visual review.
+Later source changes require their own validation; this result does not measure
+the current PR head.
