@@ -194,6 +194,22 @@ class TestExtractSqlFromResponse:
         assert extract_sql_from_response("```SQLite\nSELECT 1\n```") is None
         assert extract_sql_from_response("```sqlalchemy\nSELECT 1\n```") is None
 
+    def test_unfinished_block_preserves_previous_complete_block(self):
+        text = "```sql SELECT 1```\n```sql SELECT 2"
+        assert extract_sql_from_response(text) == "SELECT 1"
+
+    def test_letter_requirement_preserves_cross_fence_matching(self):
+        text = "```sql 123```\n```sql SELECT 2```"
+        assert extract_sql_from_response(text) == "123```\n```sql SELECT 2"
+
+    @pytest.mark.parametrize("content", ["SELECT x " * 100_000, "1 " * 500_000], ids=["letters", "digits"])
+    def test_long_unterminated_response(self, content):
+        # Generation can exhaust its context before closing a fence. Extraction
+        # must not monopolize the resource server's event loop on that response.
+        started = time.monotonic()
+        assert extract_sql_from_response("```sql\n" + content) is None
+        assert time.monotonic() - started < 2
+
 
 # ---------------------------------------------------------------------------
 # result_sets_match

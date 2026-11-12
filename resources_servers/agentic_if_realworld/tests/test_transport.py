@@ -73,6 +73,45 @@ async def no_sleep(seconds):
     pass
 
 
+@pytest.mark.parametrize("metadata", [{"native_finish_reason": "repetition"}, {"stop_reason": "repetition_detected"}])
+def test_repetition_stream_is_saved_without_automatic_redispatch(tmp_path, monkeypatch, metadata):
+    terminal = {"delta": {"content": "partial answer"}, "finish_reason": "stop", **metadata}
+    raw = ("data: " + json.dumps({"choices": [terminal]}) + "\n\ndata: [DONE]\n\n").encode()
+
+    class Stream(Response):
+        async def iter_chunked(self, size):
+            yield raw[:19]
+            yield raw[19:]
+
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        response = Stream(200, None)
+        response.headers = {"content-type": "text/event-stream"}
+        return response
+
+    monkeypatch.setattr(http_client, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    path = tmp_path / "receipt.json"
+    body = {"model": "synthetic-policy", "stream": True}
+    kwargs = {"endpoint": "http://synthetic.invalid", "key_env": "SYNTHETIC", "path": path}
+    receipt = asyncio.run(wire_call(body, **kwargs))
+    assert receipt["status"] == "generated" and receipt["http_attempt"] == 1
+    assert len(calls) == 1 and len(receipt["raw_attempts"]) == 1
+    [choice] = verified_response(receipt)["choices"]
+    assert choice["finish_reason"] == "stop"
+    for key, value in metadata.items():
+        assert choice[key] == value
+    saved = {file: file.read_bytes() for file in tmp_path.iterdir()}
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: pytest.fail("Saved receipt cannot redispatch"))
+    assert asyncio.run(wire_call(body, **kwargs)) == receipt
+    assert all(file.read_bytes() == content for file, content in saved.items())
+    assert path.with_suffix(".a1.http").read_bytes() == raw
+    with pytest.raises(ValueError, match="Incomplete delivery"):
+        delivered(verified_response(receipt))
+
+
 @pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize("cancel_at", [2, 3])
 def test_interrupted_judge_http_retry_blocks_resume(judge_payload, tmp_path, monkeypatch, status, cancel_at):

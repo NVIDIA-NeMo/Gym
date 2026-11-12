@@ -1,0 +1,18 @@
+# Smoke only: independent policy and judge instances share the NVIDIA gateway.
+policy_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${oc.env:NVIDIA_API_KEY}
+      model: nvidia/nvidia/nemotron-3.5-lightning
+      uses_reasoning_parser: true
+      num_concurrent_requests: 4
+responses_create_params:
+  temperature: 0.7
+  max_output_tokens: 8192
+
+smoke_judge_model_name: azure/openai/gpt-4.1
+judge_base_url: https://inference-api.nvidia.com/v1
+judge_api_key: ${oc.env:NVIDIA_API_KEY}
+judge_model_name: ${smoke_judge_model_name}
