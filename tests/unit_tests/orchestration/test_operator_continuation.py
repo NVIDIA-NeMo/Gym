@@ -400,3 +400,113 @@ def test_an_unidentified_follow_up_claim_is_reconciled_before_any_continuation(t
         assert verdict["action"].startswith("reconcile the scheduler queue with the run's follow-up claims first")
         assert EXPLICIT_BUDGET in _command(verdict) and "`gym eval submit`" not in verdict["action"]
     assert _accounting(job_dir) == before and not (slurm_bin / "env").exists()
+
+
+RERUN = "--rerun-masked-without-artifact --rerun-reason TEXT"
+SCHEDULER_DOWN = "#!/bin/bash\necho 'squeue: error: Unable to contact the controller' >&2\nexit 1\n"
+
+
+def _store_run_with_unknown_accounting(tmp_path, outcomes):
+    """The walltime test run as a Store run (one scored rollout, then one per entry of ``outcomes``) whose infra-retry
+    count is unreadable."""
+    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+
+    job_dir = _timed_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job_dir / "artifacts" / name).unlink(missing_ok=True)
+    output, _ = _run(job_dir, outcomes)
+    (job_dir / ".gym_chain_incomplete").write_text(MARKER)
+    (job_dir / ".gym_infra_retries").write_text("unreadable\n")
+    return job_dir, output
+
+
+def test_mixed_masks_name_the_partial_rerun_with_its_budget_and_never_a_budget_alone(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+    from tests.unit_tests.orchestration.test_rerun_masked_without_artifact import _kept
+
+    # (1, 0) kept its answer without an artifact and reruns on approval; (2, 0) is masked for another reason.
+    job_dir, _ = _store_run_with_unknown_accounting(tmp_path, [[_kept()], [_kept("agent_timeout")]])
+    before = _accounting(job_dir)
+    rerun = {"rerun_masked_without_artifact": True, "rerun_reason": "the patch artifact is missing"}
+    # A budget alone cannot lift the masked stop, so no advice is a budget alone, however often it is followed.
+    for options in ({}, BUDGET, BUDGET, rerun):
+        out = inspect_recovery(*_handle(job_dir)) if not options else recover(*_handle(job_dir), **options)
+        assert (out.decision.action.value, out.dispatched) == ("stop", None), (options, out.decision.reason)
+        verdict = out.operator_verdict
+        assert RERUN in _command(verdict) and EXPLICIT_BUDGET in _command(verdict), (options, verdict)
+        assert "the other 1 masked result(s) stay masked" in verdict["action"], verdict
+        assert "`gym eval submit`" not in verdict["action"]
+        assert _accounting(job_dir) == before
+    # Both in one call rerun (1, 0) only; the other mask is kept, so this is partial progress.
+    out = recover(*_handle(job_dir), **rerun, **BUDGET)
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert [approval.identity for approval in out.decision.rerun_masked] == [(1, 0)]
+    assert out.decision.counts["masked"] == 1
+
+
+def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
+    from tests.unit_tests.orchestration.test_rerun_masked_without_artifact import _kept
+
+    violation = PROTOCOL_VIOLATION | {
+        "_ng_failure_class": "environment_protocol_violation",
+        "_ng_failure_id": "violation-1",
+        "failure_reason": "Environment server replied to an episode request with a list",
+        "reward": 0.0,
+    }
+    job_dir, _ = _store_run_with_unknown_accounting(tmp_path, [[violation], [_kept()]])
+
+    out = inspect_recovery(*_handle(job_dir))
+
+    assert out.decision.counts == {"scored": 1, "terminal": 1, "masked": 1}
+    assert out.decision.masked_without_artifact == [(2, 0)]
+    assert out.operator_verdict["state"] == "needs_action"
+    assert out.operator_verdict["action"] == (
+        "fix the server or the benchmark pairing (a producer bug) then `gym eval submit` again"
+    )
+
+
+def test_an_admitted_rejudgment_waits_for_the_scheduler_before_any_budget(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+    from nemo_gym.rollouts.rollout_store import RolloutStore
+    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _ANSWER
+
+    judge_failure = _ANSWER | {
+        "_ng_failure_class": "judge_failed",
+        "_ng_failure_id": "judge-1",
+        "failure_kind": "judge_failed",
+        "mask_sample": True,
+        "reward": 0.0,
+    }
+    # One scored rollout, one judge failure a killed re-judge pass admitted, one policy rollout never run.
+    job_dir, output = _store_run_with_unknown_accounting(tmp_path, [[judge_failure], []])
+    store = RolloutStore.open_for_rejudgment(output)
+    store.admit_rejudgment(next(iter(store.failures())))
+    (slurm_bin / "squeue").write_text(SCHEDULER_DOWN)
+    before = _accounting(job_dir)
+
+    out = recover(*_handle(job_dir), **BUDGET)
+
+    decision, verdict = out.decision, out.operator_verdict
+    assert (decision.action.value, out.dispatched) == ("stop", None), decision.reason
+    assert decision.counts == {"scored": 1, "judge_recoverable": 1, "missing": 1}
+    assert decision.accounting_unknown == "budget" and decision.continuation_refused == "scheduler_unreachable"
+    assert verdict["state"] == "unknown" and "scheduler" in verdict["reason"]
+    assert verdict["action"].startswith("wait until the scheduler answers and inspect again")
+    assert EXPLICIT_BUDGET in _command(verdict) and "`gym eval submit`" not in verdict["action"]
+    assert RolloutStore.read(output, import_legacy=False).unresolved_rejudgments() == ["1-0"]
+    assert _accounting(job_dir) == before
+
+
+def test_a_missing_results_file_is_no_budget_continuation(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    job_dir = _unknown_run(tmp_path)
+    (job_dir / "artifacts" / "rollouts.jsonl").unlink()
+
+    for out in (inspect_recovery(*_handle(job_dir)), recover(*_handle(job_dir), **BUDGET)):
+        assert (out.decision.action.value, out.dispatched) == ("stop", None)
+        assert "results file is absent" in out.decision.reason and out.decision.accounting_unknown is None
+        assert out.operator_verdict["action"].startswith("restore the results file if it was moved and inspect again")
+        assert EXPLICIT_BUDGET not in out.operator_verdict["action"]

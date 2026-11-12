@@ -542,6 +542,14 @@ def test_reservations_without_an_outcome_wait_for_the_allocation_not_a_fresh_sub
             "authoritative Store reader is unavailable or could not verify these artifacts; recovery stops",
             "inspect again once the run's Store reader can verify its artifacts (completed work is kept)",
         ),
+        (
+            "saved-answer rejudge admission changed; collect the current evidence",
+            "inspect again: the evidence changed after the recovery was planned (completed work is kept)",
+        ),
+        (
+            "saved source or accounting snapshot is unavailable; collect the evidence again",
+            "inspect again to collect the evidence the judge-only job needs (completed work is kept)",
+        ),
     ],
 )
 def test_a_stop_whose_evidence_is_unknown_waits_and_inspects_again_not_a_fresh_submit(reason, action):
@@ -552,3 +560,29 @@ def test_a_stop_whose_evidence_is_unknown_waits_and_inspects_again_not_a_fresh_s
         "reason": f"recovery stopped with 10 unknown: {reason[:160]}",
         "action": action,
     }
+
+
+COMMIT = "b" * 40
+
+
+@pytest.mark.parametrize(
+    "reason,command",
+    [
+        (
+            "saved judge driver and installed recovery source must be the same immutable revision; --repin <this "
+            "launcher's full commit> --repin-reason TEXT runs the judge-only job at it",
+            "gym eval resubmit --recover --repin COMMIT --repin-reason TEXT",
+        ),
+        (
+            f"planned on {COMMIT} for a run pinned at {'a' * 40}: its judge-only job runs the installed recovery "
+            f"source; the pin was kept (--no-auto-repin): recover with --repin {COMMIT} --repin-reason TEXT to move it",
+            f"gym eval resubmit --recover --repin {COMMIT} --repin-reason TEXT",
+        ),
+    ],
+)
+def test_a_stop_that_needs_the_launchers_revision_names_the_repin_not_a_fresh_submit(reason, command):
+    decision = _decision(RecoveryAction.STOP, reason, {IdentityState.JUDGE_RECOVERABLE: 1})
+    verdict = operator_verdict(_failed_task(), decision)
+    assert verdict["state"] == "needs_action"
+    assert verdict["action"].split("`")[1] == command and "`gym eval submit`" not in verdict["action"]
+    assert "every other option of the stopped call" in verdict["action"]

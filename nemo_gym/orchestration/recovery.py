@@ -1552,8 +1552,8 @@ def decide_recovery(
         if counts.get(IdentityState.MASKED):
             return decision(
                 RecoveryAction.STOP,
-                f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
-                f"resume would run nothing; the run is not complete; {populations}"
+                f"{counts[IdentityState.MASKED]} {_MASKED_STOP_TOKEN}: they are kept and a resume would run nothing; "
+                f"the run is not complete; {populations}"
                 + (_chain_blockers_note(budget) if masked_without_artifact else ""),
             )
         if counts.get(IdentityState.SKIPPED):
@@ -1634,6 +1634,10 @@ _EXTEND_RETRIES_SCOPE = (
 )
 
 
+_CHAIN_BLOCKERS_LEAD = "; a resume of them would also stop, as "
+_MASKED_STOP_TOKEN = "completed result(s) are masked and not measured"
+
+
 def _chain_blockers_note(budget: RecoveryBudget) -> str:
     """For a stop on the identities' own states (exhausted, masked): what in the chain's budget would stop the resume
     an extension or a rerun allows, as the stop texts name it, so one call can lift every blocker; else ""."""
@@ -1651,7 +1655,7 @@ def _chain_blockers_note(budget: RecoveryBudget) -> str:
             blockers.append(f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)")
     if not blockers:
         return ""
-    return f"; a resume of them would also stop, as {' and '.join(blockers)}: lift every blocker in one call"
+    return f"{_CHAIN_BLOCKERS_LEAD}{' and '.join(blockers)}: lift every blocker in one call"
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
@@ -2159,6 +2163,8 @@ def _unrecorded_notes(decision: RecoveryDecision, options: Mapping[str, Any]) ->
             options.get("extend_retries"),
         ),
         (f"--max-walltime {getattr(budget, 'max_walltime', '')}", _WALLTIME_USED_TOKEN, budget),
+        # A rerun this call planned and did not queue.
+        (RERUN_MASKED_FLAGS.split()[0], _NOT_RECORDED_TOKEN, bool(decision.rerun_masked)),
     )
     return [f"{flag} {_NOT_RECORDED_TOKEN}" for flag, named, value in asked if value and named not in reason]
 
@@ -2354,6 +2360,8 @@ def _decide_from_collected(
                     f"admitted re-judgment outcome unknown for {collected.unresolved_rejudgments}: "
                     "the scheduler query failed, so the pass that admitted them may still run"
                 ),
+                # The scheduler's answer comes first; the run's accounting state stays for the continuation after.
+                "continuation_refused": "scheduler_unreachable",
             }
         )
     if collected.results is None and not decision.scheduler_live:
@@ -2361,6 +2369,8 @@ def _decide_from_collected(
             update={
                 "action": RecoveryAction.STOP,
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
+                # No budget continues a run without its results file, so unknown accounting is not this stop's cause.
+                "accounting_unknown": None,
             }
         )
     unknown = decision.action == RecoveryAction.STOP and decision.accounting_unknown is not None
@@ -6157,6 +6167,7 @@ _STOP_CAUSES = (
     ("driver_install_failed", "the driver install (ref, network or image)"),
     ("server_spinup_timeout", "the server start-up configuration"),
     ("collection_resume_refused", "the configuration that differs from the saved run"),
+    (ENVIRONMENT_PROTOCOL_VIOLATION, "the server or the benchmark pairing (a producer bug)"),
 )
 _UNVERIFIED_PRODUCERS = {
     "judge_rejudged": "the judge model server or its credentials",
@@ -6202,31 +6213,37 @@ _REPIN_IN_THE_SAME_RESUBMIT = "(--repin COMMIT --repin-reason TEXT) in the same 
 def _continuation_options(decision: RecoveryDecision) -> list[str]:
     """The options of the one ``gym eval resubmit --recover`` call that continues a run this STOP blocks, else [].
 
-    A blocker is a spent budget (attempts, infra retries, walltime), unknown chain accounting (an explicit budget
-    fills it), a masked result without an artifact (an approved rerun), or an extension the run's pinned Gym cannot
-    apply (a repin in the same call). Every option a blocker needs is named, with each one the stopped call asked for
-    and did not record, so following the advice never drops one."""
+    The stop's own cause decides: a spent budget (attempts, infra retries, walltime), unknown chain accounting (an
+    explicit budget fills it), masked results without an artifact (an approved rerun), or an extension the run's
+    pinned Gym cannot apply (a repin in the same call). What in the chain would stop next (``_chain_blockers_note``)
+    counts only once that cause has a continuation, and the note on masked results without an artifact, which any
+    stop carries, is no cause of its own. Every option a blocker needs is named, with each one the stopped call asked
+    for and did not record, so following the advice never drops one."""
     reason = decision.reason
     notes = re.split(r"; |\n", reason)
 
     def asked(flag: str) -> bool:
         return any(note.startswith(f"{flag} ") and note.endswith(_NOT_RECORDED_TOKEN) for note in notes)
 
-    budget_unknown = decision.accounting_unknown == "budget" or UNKNOWN_BUDGET_REASON in reason
-    unknown = budget_unknown or decision.accounting_unknown is not None or UNKNOWN_WALLTIME_REASON in reason
+    rerun_flag = RERUN_MASKED_FLAGS.split()[0]
     # A refused extension or rerun continues only with a repin in the same call; refused for any other reason, it
     # cannot continue the run at all, and the refusal itself says what to do.
-    refused = re.match(rf"(--extend-attempts \d+|{RERUN_MASKED_FLAGS.split()[0]}) is refused: ", reason)
+    refused = re.match(rf"(--extend-attempts \d+|{rerun_flag}) is refused: ", reason)
     repin = _REPIN_IN_THE_SAME_RESUBMIT in reason
     if refused and not repin:
         return []
-    masked = decision.counts.get(IdentityState.MASKED, 0)
-    rerun = (bool(masked) and masked == len(decision.masked_without_artifact)) or bool(
-        refused and refused[1] == RERUN_MASKED_FLAGS.split()[0]
+    cause, _, blockers = reason.split("\n")[0].partition(_CHAIN_BLOCKERS_LEAD)
+    rerun = (
+        (_MASKED_STOP_TOKEN in cause and bool(decision.masked_without_artifact))
+        or bool(refused and refused[1] == rerun_flag)
+        or asked(rerun_flag)
     )
-    attempts = _ATTEMPTS_USED_TOKEN in reason or bool(refused and refused[1].startswith("--extend-attempts"))
-    retries = _INFRA_BUDGET_USED_PREFIX in reason
-    walltime = _WALLTIME_USED_TOKEN in reason or unknown
+    attempts = _ATTEMPTS_USED_TOKEN in cause or bool(refused and refused[1].startswith("--extend-attempts"))
+    stops = cause + (blockers if attempts or rerun else "")
+    budget_unknown = decision.accounting_unknown == "budget" or UNKNOWN_BUDGET_REASON in stops
+    unknown = budget_unknown or decision.accounting_unknown is not None or UNKNOWN_WALLTIME_REASON in stops
+    retries = _INFRA_BUDGET_USED_PREFIX in stops
+    walltime = _WALLTIME_USED_TOKEN in stops or unknown
     if not (attempts or retries or walltime or rerun or repin):
         return []
     options = {
@@ -6238,6 +6255,17 @@ def _continuation_options(decision: RecoveryDecision) -> list[str]:
         "--repin COMMIT --repin-reason TEXT": repin,
     }
     return [option for option, needed in options.items() if needed]
+
+
+def _partial_rerun_note(decision: RecoveryDecision, options: list[str]) -> str:
+    """What a rerun in ``options`` leaves masked: it runs only the results without a gradeable artifact."""
+    others = decision.counts.get(IdentityState.MASKED, 0) - len(decision.masked_without_artifact)
+    if f"{RERUN_MASKED_FLAGS} TEXT" not in options or others <= 0:
+        return ""
+    return (
+        f"; the rerun covers only the masked results without a gradeable artifact: the other {others} masked "
+        "result(s) stay masked (kept, not measured), so the run stays incomplete"
+    )
 
 
 def _continuation_text(options: list[str]) -> str:
@@ -6262,6 +6290,21 @@ _UNKNOWN_EVIDENCE_STOPS = (
     (
         "authoritative Store reader is unavailable",
         "inspect again once the run's Store reader can verify its artifacts",
+    ),
+    (
+        "the results file is absent",
+        "restore the results file if it was moved and inspect again; if it is lost, only `gym eval submit` again "
+        "runs the benchmark",
+    ),
+    # A judge-only job the evidence changed under, or whose snapshot was missing, was not queued.
+    ("collect the current evidence", "inspect again: the evidence changed after the recovery was planned"),
+    ("collect the evidence again", "inspect again to collect the evidence the judge-only job needs"),
+)
+# A recovery whose judge-only job or plan needs the launcher's revision, and the option that moves the run to it.
+_REPIN_STOPS = (
+    re.compile(r"--repin <this launcher's full commit> --repin-reason TEXT runs the judge-only job at it"),
+    re.compile(
+        r"the pin was kept \(--no-auto-repin\): recover with --repin (?P<commit>[0-9a-f]{40}) --repin-reason TEXT"
     ),
 )
 # What clears each guard that refuses an operator continuation, before the continuation itself, and the state of
@@ -6396,7 +6439,8 @@ def operator_verdict(
                 state,
                 f"an operator continuation is refused: {why}",
                 f"{clear}; the saved run then continues (completed work is kept) with "
-                + (_continuation_text(options) if options else f"{_RECOVER}"),
+                + (_continuation_text(options) if options else f"{_RECOVER}")
+                + _partial_rerun_note(decision, options),
             )
         if options:
             return _verdict(
@@ -6407,11 +6451,23 @@ def operator_verdict(
                     "; it is refused while a job of the run is pending or running"
                     if _EXPLICIT_BUDGET in options
                     else ""
-                ),
+                )
+                + _partial_rerun_note(decision, options),
+            )
+        if repinned := next((match for stop in _REPIN_STOPS if (match := stop.search(decision.reason))), None):
+            # Only the launcher's revision runs this recovery: the repin moves the run there and keeps it.
+            commit = repinned.groupdict().get("commit") or "COMMIT"
+            return _verdict(
+                "needs_action",
+                stopped,
+                "your decision: continue the saved run (completed work is kept) at this launcher's revision with "
+                f"`gym eval resubmit --recover --repin {commit} --repin-reason TEXT` and every other option of the "
+                "stopped call" + ("; COMMIT is this launcher's full commit" if commit == "COMMIT" else ""),
             )
         if unread := next((action for token, action in _UNKNOWN_EVIDENCE_STOPS if token in decision.reason), None):
             # What the saved run holds is unknown for now: a fresh submit would discard it, so learn it first.
-            return _verdict("unknown", stopped, f"{unread} (completed work is kept)")
+            kept = "" if _SUBMIT_AGAIN in unread else " (completed work is kept)"
+            return _verdict("unknown", stopped, f"{unread}{kept}")
         if _RESERVATIONS_UNKNOWN in decision.reason and "nobody owns them" not in decision.reason:
             # Whether they ran is unknown until the allocation is known to have ended; then a recovery resumes them.
             return _verdict(
@@ -6422,9 +6478,10 @@ def operator_verdict(
             )
         thing = next((name for token, name in _STOP_CAUSES if token in decision.reason), None)
         if thing is None:
-            kinds = Counter(
-                e.failure_kind for e in decision.evidence if e.failure_kind and e.state != IdentityState.SCORED
-            )
+            # Terminal failures stop a recovery before any other open state, so they name the producer when present.
+            open_rows = [e for e in decision.evidence if e.failure_kind and e.state != IdentityState.SCORED]
+            terminal = [e for e in open_rows if e.state == IdentityState.TERMINAL]
+            kinds = Counter(e.failure_kind for e in terminal or open_rows)
             thing = (
                 f"the producer of the {kinds.most_common(1)[0][0]} failures"
                 if kinds
