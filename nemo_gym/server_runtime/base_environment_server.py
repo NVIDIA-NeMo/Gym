@@ -912,9 +912,11 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
         The stop is registered in ``cleanup`` before the sandbox starts, so the episode's cleanup, or the shutdown
         sweep, also stops a sandbox whose start or first stop failed. ``spec.ttl_s`` is required: the provider
-        reclaims a sandbox that a crashed server never stopped. The spec's metadata goes over the provider's
-        defaults, and the server's name and the episode's rollout label the sandbox. A ``setup`` that fails stops
-        the sandbox before its error propagates. Call it again for a second sandbox or a fresh one.
+        reclaims a sandbox that a crashed server never stopped. Some providers ignore it: Docker when the spec sets
+        an ``entrypoint``, Apptainer, Enroot and ``local``. With them, a crashed server leaves its sandboxes running
+        until they are removed by hand. The spec's metadata goes over the provider's defaults, and the server's name
+        and the episode's rollout label the sandbox. A ``setup`` that fails stops the sandbox, within the cleanup
+        timeout, before its error propagates. Call it again for a second sandbox or a fresh one.
         """
         if spec.ttl_s is None:
             raise ValueError(
@@ -931,13 +933,14 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             },
         )
         sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
-        cleanup.register_cleanup(name, sandbox.stop)
+        stop = cleanup.register_cleanup(name, sandbox.stop)
         await sandbox.start(spec)
         try:
             await setup(sandbox)
         except BaseException:
             try:
-                await sandbox.stop()
+                # Through the handle: the cleanup timeout bounds it, and the episode's cleanup does not stop it again.
+                await stop.close()
             except Exception:
                 LOGGER.exception(
                     f"Could not stop the {name} whose setup failed: episode_id={request.episode_id.capture_key}; "
