@@ -2017,6 +2017,19 @@ class TestSeparateVerifierFields:
 
 
 class TestInstruction:
+    @pytest.mark.parametrize("marker", ["# canary marker", "<!-- canary marker -->", ""])
+    @pytest.mark.parametrize(
+        "separator,blank", [("\n", "\n"), ("\r\n", "\r\n"), ("\r", "\r"), ("\r", "\n"), ("\n", "\r\n")]
+    )
+    def test_canary_boundaries_preserve_exact_body(self, tmp_path, marker, separator, blank):
+        from nemo_gym.data.tasks.harbor.task import read_instruction
+
+        body = "  Solve this task.\r\nKeep  spacing.\rAnd tabs\t.\n\r"
+        prefix = marker + separator + " \t" + blank if marker else blank
+        path = tmp_path / "instruction.md"
+        path.write_bytes((prefix + body).encode("utf-8"))
+        assert read_instruction(path) == (body if marker else prefix + body)
+
     def test_leading_canary_lines_are_dropped_and_the_rest_kept_verbatim(self, tmp_path):
         from nemo_gym.data.tasks.harbor.task import read_instruction
 

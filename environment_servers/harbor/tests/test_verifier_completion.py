@@ -188,3 +188,43 @@ async def test_cleanup_receipt_reports_provider_acknowledgement(tmp_path, monkey
     assert receipt["teardown_confirmed"] is (not fail_stop)
     assert receipt["cleanup_errors"] == (["close:RuntimeError"] if fail_stop else [])
     assert agent.stopped
+
+
+@pytest.mark.parametrize("diagnostic", ["reward", "exit", "file", "directory"])
+@pytest.mark.parametrize("fresh_reward", [None, 0, 1])
+async def test_retry_diagnostics_cannot_supply_fresh_attempt_results(tmp_path, monkeypatch, diagnostic, fresh_reward):
+    files = {"reward.json": '{"reward":0,"evaluation_completed":0}'}
+    if diagnostic == "reward":
+        files["retry-1/reward.json"] = '{"reward":1,"evaluation_completed":1}'
+    elif diagnostic == "exit":
+        files["retry-1/.ng-exit"] = "0 1700000000 1700000001\n"
+    elif diagnostic == "file":
+        files["retry-1"] = "diagnostic file"
+    else:
+        files["retry-1/diagnostic.txt"] = "diagnostic directory"
+    first = FakeSandbox(verifier_files=files)
+    second = FakeSandbox(
+        verifier_files={}
+        if fresh_reward is None
+        else {"reward.json": json.dumps({"reward": fresh_reward, "evaluation_completed": 1})},
+        wrapper_ran=diagnostic != "exit",
+    )
+    server, task, agent, created = prepared(tmp_path, monkeypatch, [first, second])
+    result = (await run_episode(server, task)).result
+    measured = fresh_reward is not None and diagnostic != "exit"
+    assert (result.reward, result.mask_sample, result.evaluation_completed) == (
+        fresh_reward if measured else 0,
+        not measured,
+        measured,
+    )
+    assert len(created) == len(result.verification_attempts) == 2
+    first_logs, second_logs = [Path(attempt.verifier_logs_dir) for attempt in result.verification_attempts]
+    assert not second_logs.is_relative_to(first_logs)
+    assert not first_logs.is_relative_to(second_logs)
+    for name, content in files.items():
+        assert (first_logs / name).read_text() == content
+    if fresh_reward is None:
+        assert not (second_logs / "reward.json").exists()
+    if diagnostic == "exit":
+        assert not (second_logs / ".ng-exit").exists()
+    assert agent.stopped and all(verifier.stopped for verifier in created) and not server._sandboxes

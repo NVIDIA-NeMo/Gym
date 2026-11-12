@@ -682,8 +682,9 @@ class HarborVerificationMixin:
         attempts: list[dict[str, Any]] = []
         try:
             for attempt in range(self.config.inconclusive_verification_retries + 1):
-                attempt_logs = logs_dir if attempt == 0 else logs_dir / f"retry-{attempt}"
-                attempt_logs.mkdir(parents=True, exist_ok=True)
+                # Downloaded diagnostics may contain arbitrary nested files. Reserve retries beside
+                # earlier attempts, never inside a tree populated by another verifier.
+                attempt_logs = logs_dir if attempt == 0 else self._reserve_logs_dir()
                 outcome = await self._verify_separately_once(
                     session,
                     task,
