@@ -461,49 +461,22 @@ def test_a_call_records_the_id_the_agent_sent() -> None:
     assert [call.call_id for call in recorded] == ["call-1", None]
 
 
-def test_a_resent_call_gets_the_reply_of_the_call_it_repeats_and_the_tool_runs_once() -> None:
-    """The agent's client resends a call whose connection dropped; the resend waits behind the call it repeats."""
+def test_a_call_that_repeats_the_last_one_runs_again() -> None:
+    """A model can give two calls the same ID, and only the agent knows whether it resent one, so every call runs."""
     seen: dict[str, Any] = {}
 
     async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
         headers = _headers(served) | {TOOL_CALL_ID_HEADER: "call-1"}
-        first = asyncio.create_task(http.post("/slow_add", json={"amount": 2}, headers=headers))
-        while counter.running == 0:
-            await asyncio.sleep(0.01)
-        resent = asyncio.create_task(http.post("/slow_add", json={"amount": 2}, headers=headers))
-        await asyncio.sleep(0.05)
-        counter.release.set()
-        seen["replies"] = [(reply.status_code, reply.json()) for reply in await asyncio.gather(first, resent)]
-        seen["calls"] = [(call.name, call.call_id) for call in served.calls]
+        replies = [await http.post("/add", json={"amount": 2}, headers=headers) for _ in range(2)]
+        seen["replies"] = [reply.json() for reply in replies]
+        seen["calls"] = [call.call_id for call in served.calls]
 
     server, http = _server(agent)
     response = asyncio.run(server.run_request(_request()))
 
-    assert seen["replies"] == [(200, {"total": 2}), (200, {"total": 2})]
-    assert seen["calls"] == [("slow_add", "call-1")]
-    assert response.result == "total=2 calls=1"
-
-
-@pytest.mark.parametrize(
-    "calls",
-    [
-        pytest.param([("call-1", 2), ("call-1", 3)], id="other-arguments"),
-        pytest.param([("call-1", 2), ("call-2", 3), ("call-1", 2)], id="not-the-last-call"),
-        pytest.param([(None, 2), (None, 2)], id="no-id"),
-    ],
-)
-def test_a_call_that_is_not_a_resend_runs(calls: list[tuple[str | None, int]]) -> None:
-    """A model can reuse an ID, so only the last call, with the same tool and arguments, is a resend."""
-
-    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
-        for call_id, amount in calls:
-            headers = _headers(served) | ({TOOL_CALL_ID_HEADER: call_id} if call_id else {})
-            await http.post("/add", json={"amount": amount}, headers=headers)
-
-    server, http = _server(agent)
-    response = asyncio.run(server.run_request(_request()))
-
-    assert response.result == f"total={sum(amount for _, amount in calls)} calls={len(calls)}"
+    assert seen["replies"] == [{"total": 2}, {"total": 4}]
+    assert seen["calls"] == ["call-1", "call-1"]
+    assert response.result == "total=4 calls=2"
 
 
 def test_a_server_that_exports_checkpoints_is_refused() -> None:
