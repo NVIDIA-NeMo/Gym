@@ -18,12 +18,16 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+from fastapi.testclient import TestClient
 from vllm import platforms
 from vllm.platforms import resolve_obj_by_qualname
 
 import responses_api_models.local_vllm_model.app
+from nemo_gym.client import ServerClient
 from nemo_gym.config import DISALLOWED_PORTS_KEY_NAME
 from nemo_gym.config.global_config import DictConfig
+from nemo_gym.models.token_capture import TokenCaptureStore
 from responses_api_models.local_vllm_model.app import LocalVLLMModel, LocalVLLMModelConfig
 from responses_api_models.local_vllm_model.local_vllm_model_actor import _get_local_dp_ranks
 
@@ -46,6 +50,41 @@ class TestApp:
 
     def test_inner_config_route_is_non_generating(self) -> None:
         assert ("GET", "/get_inner_vllm_config") in LocalVLLMModel.non_generating_model_routes
+
+    @pytest.mark.parametrize(
+        ("method", "path", "incomplete"),
+        [("GET", "/get_inner_vllm_config", False), ("POST", "/context/measure", False), ("POST", "/unlisted", True)],
+    )
+    def test_declared_and_inherited_routes_keep_captured_rollout_complete(
+        self, monkeypatch, tmp_path, method: str, path: str, incomplete: bool
+    ) -> None:
+        """The inner-config declaration extends VLLMModel's routes, so a context measurement is not a generation."""
+        monkeypatch.setattr(LocalVLLMModel, "start_vllm_server", lambda self: None)
+        model = LocalVLLMModel(
+            config=LocalVLLMModelConfig(
+                host="",
+                port=0,
+                entrypoint="",
+                name="test name",
+                model="test model",
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+                vllm_serve_env_vars=dict(),
+                vllm_serve_kwargs=dict(),
+            ),
+            server_client=MagicMock(
+                spec=ServerClient, global_config_dict={"token_id_capture": {"enabled": True, "dir": str(tmp_path)}}
+            ),
+        )
+        app = model.setup_webserver()
+        if path != "/get_inner_vllm_config":
+            # /context/measure is deployed only under source_history capture; a stub isolates the classification.
+            app.add_api_route(path, lambda: {"prompt_token_count": 1}, methods=[method])
+
+        response = TestClient(app).request(method, f"/ng-rollout/measure-roll0/training-token-capture{path}")
+
+        assert response.status_code == 200
+        assert TokenCaptureStore(tmp_path).freeze_now("measure-roll0").incomplete is incomplete
 
     def test_sanity_vllm_import(self) -> None:
         import vllm
