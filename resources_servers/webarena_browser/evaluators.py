@@ -12,6 +12,7 @@ from typing import Protocol
 
 from nemo_gym.web import (
     EvaluatorConfigurationError,
+    EvaluatorInfrastructureError,
     VisualBrowserEvaluationContext,
     WebBenchmark,
     WebObservation,
@@ -248,6 +249,10 @@ class WebArenaFamilyReferenceEvaluator:
                 judge_log_path=judge_log_path,
                 eval_context=eval_context,
             )
+            # The reference wrapper reports exceptions as a zero plus an error
+            # message. An inconclusive evaluation must not become a valid miss.
+            if message.lstrip().startswith("VisualWebArena evaluation error:"):
+                raise EvaluatorInfrastructureError(message)
             verifier_version = "visualwebarena-reference-3b775dc"
         score = max(0.0, min(1.0, float(score)))
         LOG.info(

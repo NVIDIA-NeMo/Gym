@@ -17,7 +17,12 @@ from nemo_gym.web import (
 from resources_servers.webarena_browser.evaluators import WebArenaTaskEvaluator, _reference_task_config
 from resources_servers.webarena_browser.reference_evaluation import classic_evaluation as classic
 from resources_servers.webarena_browser.reference_evaluation import eval_snapshots as snapshots
-from resources_servers.webarena_browser.tests.test_contract import _config, _evaluation_context, _webarena_task
+from resources_servers.webarena_browser.tests.test_contract import (
+    _config,
+    _evaluation_context,
+    _visualwebarena_task,
+    _webarena_task,
+)
 
 
 @pytest.mark.parametrize(
@@ -41,6 +46,33 @@ def test_public_evaluator_propagates_judge_failure(monkeypatch, failure) -> None
             browser_context=_evaluation_context(),
         )
     # An ordinary unanswered task is still a valid scored failure.
+    result = evaluator.evaluate(
+        task=task, observation=WebObservation(), final_answer="", browser_context=_evaluation_context()
+    )
+    assert result.valid_sample and result.reward == 0
+
+
+@pytest.mark.parametrize(
+    "failure", [TimeoutError("judge timeout"), ConnectionError("judge disconnected"), ValueError("bad verdict")]
+)
+def test_visualwebarena_evaluator_propagates_judge_failure(monkeypatch, failure) -> None:
+    monkeypatch.setenv("WEBARENA_JUDGE_API_KEY", "test-only")  # pragma: allowlist secret
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(classic, "_judge_chat", fail)
+    task = _visualwebarena_task(original_metadata=_webarena_task().original_metadata)
+    evaluator = WebArenaTaskEvaluator(config=_config())
+    evaluator.prepare(task=task, observation=WebObservation(), browser_context=_evaluation_context())
+    with pytest.raises(EvaluatorInfrastructureError):
+        evaluator.evaluate(
+            task=task,
+            observation=WebObservation(),
+            final_answer="a different answer",
+            browser_context=_evaluation_context(),
+        )
+
     result = evaluator.evaluate(
         task=task, observation=WebObservation(), final_answer="", browser_context=_evaluation_context()
     )
