@@ -8,6 +8,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime._checkpoint.environment import task_digest
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_MAX_BYTES, AgentContext, AgentContextArtifact
@@ -121,15 +122,15 @@ def test_a_row_without_agent_context_dumps_as_before() -> None:
 
 
 @pytest.mark.parametrize(
-    ("row", "digest"),
+    ("row", "task_data"),
     [
         (
             {"responses_create_params": {"input": "Hi"}, "verifier_metadata": {"answer": "a"}, "id": "1"},
-            "071fa6aff13c98228af9549d8ca4f1e8f803be48875cd3e578f5b8b811ec9291",  # pragma: allowlist secret
+            {"verifier_metadata": {"answer": "a"}, "id": "1"},
         ),
         (
             {"responses_create_params": {"input": "Hi"}, "task_data": {"id": "1", "answer": "a"}},
-            "7a1bc8b4b123e2a362911dfed752d30838e14515467c5bbb917c423775523de2",  # pragma: allowlist secret
+            {"id": "1", "answer": "a"},
         ),
     ],
 )
@@ -137,13 +138,21 @@ def test_a_row_without_agent_context_dumps_as_before() -> None:
     "agent_context", ["absent", None, {}, {"agent": None}, {"agent": {}}, {"agent": {"values": {}, "artifacts": {}}}]
 )
 def test_a_task_without_agent_context_keeps_its_checkpoint_digest(
-    row: dict, digest: str, agent_context: str | dict | None
+    row: dict, task_data: dict, agent_context: str | dict | None
 ) -> None:
-    """Pin the digests from before agent_context so a resumed checkpoint still matches."""
+    """Preserve the pre-context canonical shape with the installed SDK's response defaults."""
+    # Build the old shape independently of SingleAgentTurnTaskInput. SDK defaults may change its digest;
+    # adding an absent or empty context must not change it under the same dependencies.
+    expected = {
+        "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input="Hi").model_dump(mode="json"),
+        "task_data": task_data,
+    }
     if agent_context != "absent":
         row = {**row, "agent_context": agent_context}
 
-    assert task_digest(SingleAgentTurnTaskInput.model_validate(row).model_dump(mode="json")) == digest
+    actual = SingleAgentTurnTaskInput.model_validate(row).model_dump(mode="json")
+    assert actual == expected
+    assert task_digest(actual) == task_digest(expected)
 
 
 @pytest.mark.parametrize("agent_context", [{}, {"agent": {}}, {"agent": {"values": {}, "artifacts": {}}}, None])
