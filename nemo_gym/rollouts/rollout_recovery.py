@@ -61,6 +61,7 @@ from nemo_gym.core.failure_kinds import (
     FailureClassificationConfig,
     FailureStage,
     classify_failure,
+    is_namespaced,
     is_registered,
     is_server_status,
 )
@@ -427,8 +428,9 @@ def _masked_evaluation_side_kind(
 
     The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
-    ``failure_kind`` is registered, evaluation-side through the shared classifier, not one whose saved answer is graded
-    again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
+    ``failure_kind`` is registered (or namespaced, with the ``retry`` action its owner recorded), evaluation-side through
+    the shared classifier, not one whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a
+    ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
@@ -453,10 +455,11 @@ def _masked_evaluation_side_kind(
             http_status=status,
             config=classification,
         )
+    retry_declared = row.get("failure_outcome_action") == OutcomeAction.RETRY
     if (
         not isinstance(kind, str)
-        or not is_registered(kind)
-        or (selected_class != FailureClass.EVALUATION and row.get("failure_outcome_action") != OutcomeAction.RETRY)
+        or not (is_registered(kind) or (is_namespaced(kind) and retry_declared))
+        or (selected_class != FailureClass.EVALUATION and not retry_declared)
         or kind in _MASKED_REGRADE_KINDS
         or kind.startswith("transport_")
     ):
@@ -473,9 +476,10 @@ def masked_infrastructure_kind(
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
     run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action (honored
     whatever the attribution), the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
-    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
-    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
-    saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.
+    model-class kind, no kind, an unregistered kind, a namespaced kind without a recorded ``retry``, and the kinds
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the
+    masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its
+    verifier could grade of it.
     """
     kind = _masked_evaluation_side_kind(row, classification=classification)
     return None if kind is None or _keeps_saved_answer(row) else kind

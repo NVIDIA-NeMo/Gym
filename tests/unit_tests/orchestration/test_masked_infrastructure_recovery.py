@@ -229,6 +229,39 @@ def test_a_masked_infrastructure_result_that_kept_a_saved_answer_is_not_retried(
     assert decision.counts == {"scored": 1, "masked": 1}
 
 
+@pytest.mark.parametrize("kind", ["agentic_turn_simulation:time_cap", "agentic_turn_simulation:simulator_failed"])
+@pytest.mark.parametrize("attribution", ["evaluation", "model", "unknown"])
+def test_a_masked_namespaced_kind_with_a_recorded_retry_is_retried(tmp_path, kind, attribution):
+    row = _masked(kind) | {"failure_outcome_action": "retry", "failure_outcome_attribution": attribution}
+    output, _ = _run(tmp_path, [[row]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert [(r["_ng_task_index"], r["_ng_attempt_index"]) for r in store.pending()] == [(1, 1)]
+    assert (store.coverage()["complete"], store.coverage()["masked_retryable"]) == (False, 1)
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.action.value == "resubmit", decision.reason
+    assert decision.counts == {"scored": 1, "retryable": 1}
+    assert _evidence(decision, (1, 0)).failure_kind == kind
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({}, id="no-recorded-action"),
+        pytest.param({"failure_outcome_action": "count_as_zero", "failure_outcome_attribution": "model"}, id="zero"),
+        pytest.param(
+            {"failure_outcome_action": "retry", "failure_outcome_attribution": "evaluation"} | _ANSWER,
+            id="saved-answer",
+        ),
+    ],
+)
+def test_a_masked_namespaced_kind_without_a_retry_it_may_take_is_kept(tmp_path, fields):
+    output, _ = _run(tmp_path, [[_masked("agentic_turn_simulation:time_cap") | fields]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == [] and store.coverage()["complete"] is True
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert (decision.action.value, decision.counts) == ("stop", {"scored": 1, "masked": 1})
+
+
 def test_a_masked_infrastructure_result_with_only_a_no_generation_placeholder_is_still_retried(tmp_path):
     from nemo_gym.artifacts.rollout_rows import NG_NO_GENERATION_METADATA
 
