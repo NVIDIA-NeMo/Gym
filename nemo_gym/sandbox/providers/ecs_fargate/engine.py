@@ -602,6 +602,7 @@ class SshTunnel:
         self._simple_forward_port = forward_port
         self._forwards = list(forwards or [])
         self._reverses = list(reverses or [])
+        self._fixed_local_port = local_port_override is not None
         self._local_port: int | None = local_port_override
         self._proc: subprocess.Popen[bytes] | None = None
 
@@ -622,7 +623,7 @@ class SshTunnel:
         last_err = ""
         backoff = initial_backoff
         for attempt in range(1, max_retries + 1):
-            if use_simple:
+            if use_simple and not self._fixed_local_port:
                 self._local_port = _free_port()
             cmd = self._build_ssh_cmd()
             logger.info("SSH tunnel attempt %d/%d: %s", attempt, max_retries, " ".join(cmd))
@@ -1590,6 +1591,39 @@ class EcsFargateSandbox:
             await asyncio.to_thread(self._cleanup)
             raise
 
+    @classmethod
+    async def attach_exec_server(
+        cls,
+        spec: SandboxSpec,
+        *,
+        ecs_config: EcsFargateConfig,
+        task_arn: str,
+        port: int,
+    ) -> EcsFargateSandbox:
+        """Borrow the owner's same-host SSH forward; do not launch a task or another tunnel."""
+        sandbox = cls(spec, ecs_config=ecs_config)
+        await asyncio.to_thread(sandbox._init_aws_clients)
+        sandbox._task_arn = task_arn
+        sandbox._exec_client = ExecClient(port=port)
+        sandbox._started = True
+        return sandbox
+
+    async def disconnect_exec_server(self) -> None:
+        """Release a borrowed exec client without stopping the owner's ECS task or tunnel."""
+        if self._exec_client is not None:
+            await self._exec_client.close()
+            self._exec_client = None
+        # Borrowed uploads own their staging objects, but not the task or tunnel.
+        # Do not use _cleanup(), which also tears down the owner's ECS task.
+        keys = list(self._s3_artifacts)
+        # Bound both S3 requests and thread-pool work during concurrent rollouts.
+        for offset in range(0, len(keys), 4):
+            batch = keys[offset : offset + 4]
+            await asyncio.gather(*(asyncio.to_thread(_delete_s3_object, self._cfg, key) for key in batch))
+            for key in batch:
+                self._s3_artifacts.remove(key)
+        self._stopped = True
+
     async def stop(self) -> None:
         if self._stopped:
             return
@@ -1689,10 +1723,13 @@ class EcsFargateSandbox:
         sidecar = self._cfg.ssh_sidecar
         if sidecar is None:
             return
+        # Connected workers borrow this address. Reconnect on the same port or fail;
+        # silently choosing a new port leaves every existing borrower stranded.
+        local_port = self.local_port
         if self._ssh_tunnel:
             self._ssh_tunnel.close()
             self._ssh_tunnel = None
-        await asyncio.to_thread(self._open_tunnel, sidecar)
+        await asyncio.to_thread(self._open_tunnel, sidecar, local_port=local_port)
 
     # ── Sync start (runs via asyncio.to_thread) ──────────────────────
 
@@ -2333,7 +2370,7 @@ class EcsFargateSandbox:
             time.sleep(2.0)
         raise TimeoutError(f"SSH not ready at {host}:{port} after {timeout:.0f}s")
 
-    def _open_tunnel(self, sidecar: SshSidecarConfig) -> None:
+    def _open_tunnel(self, sidecar: SshSidecarConfig, *, local_port: int | None = None) -> None:
         assert self._task_ip is not None and self._ssh_key_file is not None
         if sidecar.exec_server_port is not None:
             self._ssh_tunnel = SshTunnel(
@@ -2342,6 +2379,7 @@ class EcsFargateSandbox:
                 user="root",
                 key_file=self._ssh_key_file,
                 forward_port=sidecar.exec_server_port,
+                local_port_override=local_port,
                 reverses=self._outside_endpoint_routing.reverse_specs,
             )
             self._ssh_tunnel.open()

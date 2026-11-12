@@ -24,6 +24,7 @@ the Gym-facing adapter) by exercising the engine module directly.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import io
@@ -478,17 +479,21 @@ def test_ssh_tunnel_open_success_simple_forward():
     popen.assert_called_once()
 
 
-def test_ssh_tunnel_open_retries_when_forward_port_not_ready():
-    t = engine.SshTunnel(host="h", key_file="/k", forward_port=5000)
+@pytest.mark.parametrize("fixed_port", [None, 18765])
+def test_ssh_tunnel_open_retries_when_forward_port_not_ready(fixed_port):
+    t = engine.SshTunnel(host="h", key_file="/k", forward_port=5000, local_port_override=fixed_port)
     with (
-        patch(f"{_ENG}.subprocess.Popen", side_effect=[_alive_proc(), _alive_proc()]),
+        patch(f"{_ENG}.subprocess.Popen", side_effect=[_alive_proc(), _alive_proc()]) as popen,
         patch(f"{_ENG}._free_port", side_effect=[18001, 18002]),
         patch(f"{_ENG}.time.sleep"),
         patch.object(engine.SshTunnel, "_kill"),
         patch.object(engine.SshTunnel, "_wait_for_local_port", side_effect=[TimeoutError("nope"), None]),
     ):
         t.open(max_retries=3)
-    assert t.local_port == 18002
+    assert t.local_port == (fixed_port or 18002)
+    forwards = [call.args[0][call.args[0].index("-L") + 1] for call in popen.call_args_list]
+    ports = [int(value.split(":")[1]) for value in forwards]
+    assert ports == ([fixed_port, fixed_port] if fixed_port else [18001, 18002])
 
 
 def test_ssh_tunnel_open_retries_on_connection_refused_then_succeeds():
@@ -2173,7 +2178,8 @@ def test_wait_for_ssh_ready_timeout():
 # ── EcsFargateSandbox: _open_tunnel ───────────────────────────────────
 
 
-def test_open_tunnel_exec_server_mode():
+@pytest.mark.parametrize("local_port", [None, 18765])
+def test_open_tunnel_exec_server_mode(local_port: int | None) -> None:
     sb = _make_sandbox()
     sb._task_ip = "1.2.3.4"
     sb._ssh_key_file = "/tmp/key"
@@ -2182,10 +2188,11 @@ def test_open_tunnel_exec_server_mode():
     )
     tunnel = MagicMock()
     with patch(f"{_ENG}.SshTunnel", return_value=tunnel) as ctor:
-        sb._open_tunnel(_exec_sidecar(exec_server_port=5000))
+        sb._open_tunnel(_exec_sidecar(exec_server_port=5000), local_port=local_port)
     kwargs = ctor.call_args.kwargs
     assert kwargs["host"] == "1.2.3.4" and kwargs["port"] == 2222
     assert kwargs["forward_port"] == 5000
+    assert kwargs["local_port_override"] == local_port
     assert any(s.endswith(":10.0.0.1:4000") for s in kwargs["reverses"])
     tunnel.open.assert_called_once()
 
@@ -2302,6 +2309,97 @@ async def test_upload_via_s3_packs_and_extracts(tmp_path):
     s3.put_object.assert_called_once()
     dl_cmd = ec.exec.await_args.args[0]
     assert "tar xzf" in dl_cmd and "/dest" in dl_cmd
+
+
+@pytest.mark.parametrize("extraction_fails", [False, True])
+async def test_borrower_disconnect_deletes_only_its_s3_uploads(tmp_path: Path, extraction_fails: bool) -> None:
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"x" * (1024 * 1024))
+    owner = _make_sandbox(s3_bucket="bkt")
+    owner_client = _attach_exec_client(owner, engine.ExecResult("ok", "", 0))
+    borrower_client = MagicMock(spec=engine.ExecClient)
+    borrower_client.exec.return_value = (
+        engine.ExecResult("", "tar failed", 1) if extraction_fails else engine.ExecResult("ok", "", 0)
+    )
+    ecs, s3 = MagicMock(), MagicMock()
+    s3.generate_presigned_url.return_value = "https://example.invalid/upload"
+    with (
+        _patch_aws(ecs=ecs, ec2=MagicMock(), ssm=MagicMock(), s3=s3),
+        patch(f"{_ENG}.ExecClient", return_value=borrower_client),
+    ):
+        borrower = await engine.EcsFargateSandbox.attach_exec_server(
+            owner.spec, ecs_config=owner._cfg, task_arn="task-arn", port=19000
+        )
+        await owner.upload(payload, "/workspace/owner.bin")
+        owner_key = s3.put_object.call_args.kwargs["Key"]
+        if extraction_fails:
+            with pytest.raises(RuntimeError, match="S3 upload extraction failed"):
+                await borrower.upload(payload, "/workspace/borrower.bin")
+        else:
+            await borrower.upload(payload, "/workspace/borrower.bin")
+        borrower_key = s3.put_object.call_args.kwargs["Key"]
+        assert borrower_key != owner_key
+        await borrower.disconnect_exec_server()
+        await borrower.disconnect_exec_server()
+
+    s3.delete_object.assert_called_once_with(Bucket="bkt", Key=borrower_key)
+    assert owner._s3_artifacts == [owner_key]
+    assert borrower._s3_artifacts == []
+    ecs.stop_task.assert_not_called()
+    owner_client.close.assert_not_awaited()
+    borrower_client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("object_count", [0, 1, 9])
+async def test_borrower_s3_cleanup_bounds_concurrency(object_count: int) -> None:
+    sandbox = _make_sandbox(s3_bucket="bkt")
+    client = _attach_exec_client(sandbox, engine.ExecResult("", "", 0))
+    keys = [f"upload-{index}" for index in range(object_count)]
+    sandbox._s3_artifacts = keys.copy()
+    active = 0
+    peak = 0
+    ready = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_to_thread(function, *args):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active >= min(object_count, 4):
+            ready.set()
+        try:
+            await release.wait()
+            return function(*args)
+        finally:
+            active -= 1
+
+    s3 = MagicMock()
+
+    # One failed deletion must not prevent the remaining best-effort attempts.
+    def delete_object(**kwargs):
+        if kwargs["Key"] == "upload-0":
+            raise RuntimeError("S3 unavailable")
+
+    s3.delete_object.side_effect = delete_object
+    with _patch_aws(s3=s3), patch.object(engine.asyncio, "to_thread", side_effect=controlled_to_thread):
+        cleanup = asyncio.create_task(sandbox.disconnect_exec_server())
+        try:
+            if object_count:
+                await asyncio.wait_for(ready.wait(), timeout=2)
+                assert active == min(object_count, 4)
+                assert sandbox._s3_artifacts == keys
+                assert not sandbox._stopped
+        finally:
+            release.set()
+            await asyncio.wait_for(cleanup, timeout=2)
+        await sandbox.disconnect_exec_server()
+
+    assert peak == min(object_count, 4)
+    assert sorted(call.kwargs["Key"] for call in s3.delete_object.call_args_list) == sorted(keys)
+    assert all(call.kwargs["Bucket"] == "bkt" for call in s3.delete_object.call_args_list)
+    assert sandbox._s3_artifacts == []
+    assert sandbox._stopped
+    client.close.assert_awaited_once()
 
 
 async def test_upload_via_s3_packs_a_directory(tmp_path):
@@ -2642,11 +2740,12 @@ async def test_reconnect_tunnel_reopens():
     sb = _make_sandbox(ssh_sidecar=_exec_sidecar())
     sb._started = True
     old_tunnel = MagicMock()
+    old_tunnel.local_port = 18765
     sb._ssh_tunnel = old_tunnel
     with patch.object(engine.EcsFargateSandbox, "_open_tunnel") as open_tunnel:
         await sb.reconnect_tunnel()
     old_tunnel.close.assert_called_once()
-    open_tunnel.assert_called_once()
+    open_tunnel.assert_called_once_with(sb._cfg.ssh_sidecar, local_port=18765)
 
 
 # ── EcsFargateSandbox: _do_start orchestration ────────────────────────
