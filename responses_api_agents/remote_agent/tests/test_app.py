@@ -736,23 +736,29 @@ class TestRunTimeoutAndSemaphore:
         first_seen = asyncio.Event()
         call_count = 0
 
+        # Each run takes two thirds of its budget, so it finishes with a second to spare on a busy runner.
+        # The second run also waits about as long for the only permit, so queue time counted against its
+        # budget would put it a second over.
+        budget, run_time = 3.0, 2.0
+
         async def gated_request(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 first_seen.set()
                 await release_first.wait()
+            else:
+                await asyncio.sleep(run_time)
             return FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))
 
         agent, _, _ = make_wired_agent(
-            monkeypatch, AsyncMock(side_effect=gated_request), concurrency=1, run_timeout_secs=0.5
+            monkeypatch, AsyncMock(side_effect=gated_request), concurrency=1, run_timeout_secs=budget
         )
 
         first = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
         second = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
         await first_seen.wait()
-        # Hold the only permit for most of the second task's would-be budget
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(run_time)
         release_first.set()
         results = [r.model_dump() for r in await asyncio.gather(first, second)]
 

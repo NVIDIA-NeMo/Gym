@@ -91,6 +91,32 @@ gym eval run --no-serve \
 
 The policy model must accept image inputs.
 
+## Settings and sessions
+
+Two settings share this server and its grading:
+
+| Setting | Config | Harness | Tools |
+| --- | --- | --- | --- |
+| No tools | `configs/chartography.yaml` | `simple_agent` | none |
+| OpenCode | `configs/chartography_opencode.yaml` | `opencode_agent` in a sandbox lent by this server | OpenCode's own (`bash`, `read`, `glob`, `grep`, `write`, `edit`, `todowrite`) |
+
+The server implements the session state hooks, so the base class serves `/seed_session` and `/close_session`.
+In the no-tools setting a session holds nothing. With `sandbox_provider` set (the OpenCode setting), an episode's
+seed starts a sandbox and returns its `sandbox_access` to the harness; a seed from an agent's own `/run` is refused
+(422), since no harness would receive the sandbox. The sandbox reaches only `sandbox_model_server`
+(`sandbox_network_access: model_only`). The OpenCode agent writes the chart, a prompt image, into the sandbox and
+attaches it, so the model can open it with its tools.
+
+`verify()` grades only the request, never the sandbox. It stops the sandbox before it calls the judge, and grades a
+verify that has no seed (`allow_missing`), such as a retry after a judge failure. A verify after the episode's close is
+masked as `session_lost`. A lending server runs with one worker (`num_workers: 1`), as `visual_coding_opencode` does:
+several workers are not tested with lent sandboxes. The no-tools setting runs with any number. A run that does not
+complete (any response status but `completed`: OpenCode's timeout, an output cap, a context limit, or a failed run that
+the outcome policy still sends to verify) scores 0 without a judge call in the OpenCode setting
+(`score_unfinished_as_zero: true`), as in `visual_coding_opencode`. The no-tools setting keeps upstream's behavior and
+grades it on its last assistant message. The sandbox image is `visual_coding_opencode`'s
+(`resources_servers/visual_coding_opencode/sandbox_image`); `benchmarks/chartography_opencode/README.md` covers the run.
+
 ## Licensing
 
 Code: Apache 2.0. Example data: Apache 2.0 (synthetic charts rendered by `make_example_data.py`).

@@ -33,12 +33,33 @@ standalone golden/null validation without an agent.
 
 Configure the sandbox connection and model credentials privately. The model-server
 address must be reachable from the sandbox. The OpenCode configuration is inherited
-from Gym; offline images need its locally cached binary setup.
+from Gym. On providers that enforce the sandbox network policy, the agent sandbox
+denies network except the model host, so OpenCode cannot download its runtime there.
+Pin the whole offline bundle in `opencode_agent`: the binary
+(`sandbox_executable_path`, `sandbox_executable_sha256`), ripgrep
+(`sandbox_ripgrep_path`, `sandbox_ripgrep_sha256`) and the plugin dependencies
+(`sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256`), each a
+file already inside the sandbox, for example on a mounted cache. Alternatively, use
+task images that hold the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
+and `rg` on `PATH`; still set `sandbox_plugin_dependencies_path` and
+`sandbox_plugin_dependencies_sha256` to populate each session's private config directory. See the `opencode_agent` README's
+[Pinned offline runtime bundle](../../responses_api_agents/opencode_agent/README.md#pinned-offline-runtime-bundle).
 The hosted-inference example normalizes structured reasoning for Gym's chat
 contract. Select the model adapter appropriate for your endpoint; training that
 requires token IDs needs a compatible training model server.
-The OpenCode config includes upstream's `legacy_agent` environment server for
-rollout routing; it forwards requests without changing task rows or grading.
+
+`deepswe_external1_opencode.yaml` runs `opencode_agent` through `single_agent_turn`:
+the server seeds an episode session, lends the agent sandbox to the agent session
+through `sandbox_access`, and after the agent closes grades the committed patch in a
+fresh verifier. Rows reach it through the `deepswe_external1` taskset. An episode
+session is verified once; an identical retry replays the verdict, and a verify after
+close is masked as a lost session. Close stops the agent sandbox if verify did not.
+
+`deepswe_external1_opencode_legacy_agent.yaml` is deprecated. It runs
+`opencode_sandboxed_agent` through the `legacy_agent` relay, which seeds with the flat
+row and gets the sandbox handle back, and that agent
+[will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx)
+after the Environment Server migration.
 
 `data/example_rollouts.jsonl` contains one recorded Super/OpenCode attempt per public
 example, run with inline-file provisioning on 2026-10-05. Original task fields and

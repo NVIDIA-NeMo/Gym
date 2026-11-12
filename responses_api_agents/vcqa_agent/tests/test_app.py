@@ -2157,4 +2157,5 @@ async def test_tool_loop_sums_usage_and_details_across_turns(second_usage: dict,
     )
 
     assert steps == 2
+    expected = expected | {"input_tokens_details": expected["input_tokens_details"] | {"cache_write_tokens": None}}
     assert result.usage.model_dump(mode="json") == expected
