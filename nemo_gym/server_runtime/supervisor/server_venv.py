@@ -44,6 +44,7 @@ from nemo_gym.config.global_config import (
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
 )
+from nemo_gym.utils.venv_setup import SETUP_COMPLETE_MARKER
 
 
 NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_ALLOWED_COMPONENT_ROOTS"
@@ -181,6 +182,23 @@ def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
     return (dir_path / ".venv").absolute()
 
 
+def _is_complete_venv(venv_path: Path) -> bool:
+    """Whether skip_venv_if_present may reuse ``venv_path``: it needs the marker written after a successful setup.
+
+    A cancelled install leaves bin/python and bin/activate without its packages, so those alone are not enough.
+    """
+    if not ((venv_path / "bin/python").exists() and (venv_path / "bin/activate").exists()):
+        return False
+    if (venv_path / SETUP_COMPLETE_MARKER).is_file():
+        return True
+    print(
+        f"WARNING: {venv_path} has no {SETUP_COMPLETE_MARKER}, so it may be incomplete. Reinstalling. "
+        f"To reuse a known-good prebuilt venv, run `touch {venv_path / SETUP_COMPLETE_MARKER}` or rebuild the image.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def _python_request_admits(request: str, version: str) -> bool:
     """Whether a uv Python request admits ``version``.
 
@@ -249,11 +267,9 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
     activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
-    if should_skip_venv_setup:
-        # Reuse existing environments, including prebuilt venvs without Gym's
-        # completion marker or writable setup-lock directories.
+    if skip_venv_if_present and _is_complete_venv(venv_path):
+        # Reuse complete environments without taking the setup lock, so prebuilt read-only venvs work.
         return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
 
     python_request_arg = shlex.quote(
@@ -367,11 +383,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         return _legacy_setup_env_command(dir_path, global_config_dict, prefix)
 
     venv_path = get_venv_path(dir_path, global_config_dict)
-    venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
     activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
-    if skip_venv_if_present and venv_python_fpath.exists() and venv_activate_fpath.exists():
+    if skip_venv_if_present and _is_complete_venv(venv_path):
         return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
     if (dir_path / "requirements.txt").is_file():
         raise RuntimeError(f"Found both pyproject.toml and requirements.txt in {dir_path}; use only one.")
