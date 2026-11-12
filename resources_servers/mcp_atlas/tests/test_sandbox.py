@@ -15,6 +15,7 @@ from aiohttp import web
 
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from resources_servers.mcp_atlas import sandbox as sandbox_module
+from resources_servers.mcp_atlas.credentials import SERVICE_ENV_NAMES, CredentialConfigurationError
 from resources_servers.mcp_atlas.sandbox import SandboxError, SandboxPool, call_sandbox_tool, sandbox_tool_names
 from resources_servers.mcp_atlas.tests.fake_agent_environment import FakeAgentEnvironment, free_port
 
@@ -88,7 +89,7 @@ def pool(
     return SandboxPool(
         image="/images/mcp-atlas.sif",
         sandbox_provider={"apptainer": {}},
-        sandbox_env={"EXA_API_KEY": "secret"},
+        sandbox_env={name: "fake service credential" for name in SERVICE_ENV_NAMES},
         sandbox_files={"/root/.npmrc": "before=2026-07-17\n"},
         port_range=(port, port + 20),
         max_concurrency=2,
@@ -124,8 +125,8 @@ async def test_start_call_and_stop(tmp_path) -> None:
     box = await sandboxes.start("s1", servers=["calculator", "whois"], tools=["calculator_calculate"])
     sandbox = FakeSandbox.instances[-1]
     assert sandbox.spec.env["ENABLED_SERVERS"] == "calculator,whois"
-    assert sandbox.spec.env["EXA_API_KEY"] == "secret"
-    assert "secret" not in str(sandbox.spec.provider_options)
+    assert set(sandbox.spec.env) == {"ENABLED_SERVERS"}
+    assert "fake service credential" not in str(sandbox.spec.provider_options)
     assert sandbox.spec.files == {"/root/.npmrc": "before=2026-07-17\n"}
     assert box.missing_tools == []
     assert os.path.isdir(box.scratch_dir)
@@ -149,6 +150,45 @@ async def test_missing_tools_are_reported() -> None:
     box = await sandboxes.start("s1", servers=["calculator", "notion"], tools=["calculator_calculate", "notion_x"])
     assert box.missing_tools == ["notion_x"]
     await sandboxes.close()
+
+
+async def test_model_code_process_cannot_read_an_unrelated_task_service_credential() -> None:
+    sandboxes = pool(["cli-mcp-server_run_command"])
+    sandboxes.sandbox_env["NOTION_TOKEN"] = "fake unrelated notion sentinel"
+    try:
+        await sandboxes.start("s1", servers=["cli-mcp-server"], tools=["cli-mcp-server_run_command"])
+        provider = FakeSandbox.instances[-1]
+        # Run a real local code process with the exact environment delivered at the provider boundary.
+        # This proves credential forwarding, not deployment filesystem/network or cross-process isolation.
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import json,os; print(json.dumps({'unrelated': 'NOTION_TOKEN' in os.environ, "
+            "'enabled': os.environ['ENABLED_SERVERS']}))",
+            env=provider.spec.env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        assert process.returncode == 0, stderr.decode(errors="replace")
+        assert json.loads(stdout) == {"unrelated": False, "enabled": "cli-mcp-server"}
+    finally:
+        await sandboxes.close()
+
+
+async def test_missing_task_credentials_reject_before_provider_allocation_and_leave_capacity_usable() -> None:
+    sandboxes = pool(["calculator_calculate"])
+    sandboxes.sandbox_env.pop("GITHUB_TOKEN")
+    before = len(FakeSandbox.instances)
+    try:
+        with pytest.raises(CredentialConfigurationError, match="GITHUB_TOKEN"):
+            await sandboxes.start("bad", servers=["github"], tools=["github_get_repository"])
+        assert len(FakeSandbox.instances) == before
+        for session in ("good1", "good2"):
+            await asyncio.wait_for(sandboxes.start(session, servers=["calculator"], tools=["calculator_calculate"]), 2)
+        assert len(FakeSandbox.instances) == before + 2
+    finally:
+        await sandboxes.close()
 
 
 async def test_server_exit_at_start_is_a_sandbox_error_and_frees_capacity() -> None:
@@ -420,7 +460,7 @@ async def test_opensandbox_uses_only_exec_and_private_loopback_without_host_leas
             assert provider.spec.ports == ()
             assert provider.spec.provider_options == options
             assert provider.spec.metadata == {"purpose": "atlas"}
-            assert provider.spec.env == {"EXA_API_KEY": "service-only", "ENABLED_SERVERS": "calculator"}
+            assert provider.spec.env == {"ENABLED_SERVERS": "calculator"}
             assert provider.spec.entrypoint == ["/bin/sh", "-c", "exec sleep infinity"]
             assert sandbox_module.HTTP_HELPER_PATH in provider.spec.files
             command, _, env, preserve = provider.commands[0]

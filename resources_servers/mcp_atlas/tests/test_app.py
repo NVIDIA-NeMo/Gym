@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from aiohttp import web
+from fastapi import HTTPException
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
@@ -106,9 +109,10 @@ async def environment():
     await env.stop()
 
 
-async def seed(server: MCPAtlasResourcesServer, session_id: str = "s1") -> None:
+async def seed(server: MCPAtlasResourcesServer, session_id: str = "s1", *, metadata: dict | None = None) -> None:
     body = MCPAtlasSeedSessionRequest(
-        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]), verifier_metadata=META
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata=META if metadata is None else metadata,
     )
     await server.seed_session(http_request(session_id), body)
 
@@ -437,7 +441,6 @@ async def test_model_tool_errors_are_scored_instead_of_masked(environment, statu
     [
         (429, "Too Many Requests"),
         (503, "Service unavailable"),
-        (500, "Failed to call tool: HTTP 403 Forbidden"),
         (500, "Failed to call tool: ConnectionError: connection refused"),
         (500, "Failed to call tool 'github_get_repository': 429 Too Many Requests"),
         (500, "Failed to call tool 'github_get_repository': HTTP 500 Internal Server Error"),
@@ -461,6 +464,169 @@ async def test_explicit_upstream_failures_still_mask(environment, status: int, t
     assert result.failure_kind == "mcp_atlas:service_error"
     assert len(result.service_errors) == 1
     assert text in result.service_errors[0]
+
+
+@pytest.mark.parametrize(
+    ("status", "text"),
+    [
+        (401, "authentication rejected"),
+        (403, "insufficient scope"),
+        (500, "Failed to call tool: HTTP 403 Forbidden"),
+        (500, "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: 401"),
+        (200, "Error: Unauthorized " + "long diagnostic " * 200),
+        (200, "Error: HTTP 401 Unauthorized " + "long diagnostic " * 200),
+    ],
+    ids=["401", "403", "wrapped403", "nested401", "longUnauthorized", "long401"],
+)
+async def test_auth_failure_is_a_sticky_nonretryable_configuration_rejection(environment, status, text) -> None:
+    env, url = environment
+    env.results["github_get_repository"] = (
+        status,
+        [{"type": "text", "text": text}] if status == 200 else {"detail": text},
+    )
+    client = judge_client()
+    server = make_server(url, client)
+    await seed(server)
+    for _ in range(2):
+        with pytest.raises(HTTPException) as rejected:
+            await server.call_tool(http_request(), "github_get_repository", {})
+        assert rejected.value.status_code == 422
+        assert (
+            rejected.value.detail
+            == "MCP-Atlas authentication failed for github_get_repository; check credentials/scopes"
+        )
+        assert text not in rejected.value.detail
+    assert len(env.calls) == 1
+    for _ in range(2):
+        with pytest.raises(HTTPException) as rejected:
+            await judge_failsafe(server.verify)(http_request(), verify_body("answer"))
+        assert rejected.value.status_code == 422
+    client.post.assert_not_awaited()
+    await server.close_resources_session(
+        http_request(),
+        ResourcesCloseSessionRequest(resources_session_id="s1", episode_id=EpisodeId(rollout_id="episode")),
+    )
+    with pytest.raises(HTTPException) as closed:
+        await server.verify(http_request(), verify_body("answer"))
+    assert closed.value.status_code == 422
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["servers", "enabled_tools"])
+@pytest.mark.parametrize("value", [None, 7, "calculator", [7], {}])
+async def test_bad_seed_metadata_is_rejected_before_provider_allocation(field, value) -> None:
+    server = make_server("http://unused", judge_client())
+    provider = AsyncMock()
+    server._pool = provider
+    request = MCPAtlasSeedSessionRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={**META, field: value},
+    )
+    with pytest.raises(HTTPException) as rejected:
+        await server.seed_session(http_request(), request)
+    assert rejected.value.status_code == 422
+    provider.start.assert_not_awaited()
+
+
+async def test_mcp_returned_program_deadline_is_scored_after_real_process_execution() -> None:
+    code_tool = "mcp-code-executor_execute_code"
+
+    class ProgramEnvironment(FakeAgentEnvironment):
+        timed_out = False
+
+        async def _call_tool(self, request: web.Request) -> web.Response:
+            payload = await request.json()
+            self.calls.append(payload)
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                payload["tool_args"]["code"],
+                env={},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                # Confirm execution started before applying the program's runtime budget.
+                assert process.stdout is not None
+                assert await asyncio.wait_for(process.stdout.readline(), 2) == b"running\n"
+                try:
+                    await asyncio.wait_for(process.wait(), 0.05)
+                except asyncio.TimeoutError:
+                    self.timed_out = True
+                    process.kill()
+                    await process.communicate()
+                    # The pinned bridge returns MCP tool errors through HTTP500 text. This stand-in
+                    # supplies a real program timeout, without claiming the pinned package's exact text.
+                    return web.json_response(
+                        {"detail": "Failed to call tool: Timed out running the program"}, status=500
+                    )
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.communicate()
+            raise AssertionError("test program must outlive its configured deadline")
+
+    env = ProgramEnvironment([code_tool], {})
+    url = await env.start()
+    try:
+        client = judge_client("not_fulfilled", "not_fulfilled")
+        server = make_server(url, client)
+        await seed(server, metadata={**META, "enabled_tools": [code_tool], "servers": ["mcp-code-executor"]})
+        await server.call_tool(http_request(), code_tool, {"code": "print('running', flush=True)\nwhile True: pass"})
+        result = await server.verify(http_request(), verify_body("wrong answer"))
+        assert env.timed_out and len(env.calls) == 1
+        assert result.reward == 0 and result.mask_sample is False and result.service_errors == []
+    finally:
+        await env.stop()
+
+
+async def test_bridge_timeout_remains_an_infrastructure_failure_even_for_a_code_tool(environment, monkeypatch) -> None:
+    import resources_servers.mcp_atlas.app as app_module
+
+    _, url = environment
+    code_tool = "mcp-code-executor_execute_code"
+    monkeypatch.setattr(app_module, "call_sandbox_tool", AsyncMock(side_effect=asyncio.TimeoutError))
+    server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"))
+    await seed(server, metadata={**META, "enabled_tools": [code_tool], "servers": ["mcp-code-executor"]})
+    await server.call_tool(http_request(), code_tool, {"code": "print(1)"})
+    result = await server.verify(http_request(), verify_body("answer"))
+    assert result.mask_sample is True
+    assert result.failure_kind == "mcp_atlas:sandbox_unreachable"
+    assert result.service_errors == ["sandbox_unreachable: mcp-code-executor_execute_code: transport timeout"]
+
+
+async def test_legacy_saved_tool_timeout_retains_its_original_environment_attribution() -> None:
+    server = make_server("http://unused", judge_client("not_fulfilled", "not_fulfilled"))
+    body = verify_body("wrong answer")
+    body.__pydantic_extra__ = {"service_errors": ["tool_timeout: legacy bridge deadline"], "tool_calls": 1}
+    result = await server.verify(http_request("reverify"), body)
+    assert result.reward == 0 and result.mask_sample is True
+    assert result.failure_kind == "mcp_atlas:tool_timeout"
+
+
+async def test_closed_auth_session_cannot_bypass_rejection_with_saved_fields_but_fresh_reverify_works(
+    environment,
+) -> None:
+    env, url = environment
+    env.results["github_get_repository"] = (401, {"detail": "Unauthorized"})
+    client = judge_client("not_fulfilled", "not_fulfilled")
+    server = make_server(url, client)
+    await seed(server)
+    with pytest.raises(HTTPException):
+        await server.call_tool(http_request(), "github_get_repository", {})
+    await server.close_resources_session(
+        http_request(),
+        ResourcesCloseSessionRequest(resources_session_id="s1", episode_id=EpisodeId(rollout_id="episode")),
+    )
+    body = verify_body("wrong answer")
+    body.__pydantic_extra__ = {"service_errors": [], "tool_calls": 0}
+    with pytest.raises(HTTPException) as closed:
+        await server.verify(http_request(), body)
+    assert closed.value.status_code == 422
+    client.post.assert_not_awaited()
+    result = await server.verify(http_request("fresh-artifact-reverify"), body)
+    assert result.reward == 0 and result.mask_sample is False and result.service_errors == []
+    assert client.post.await_count == 2
 
 
 @pytest.mark.parametrize("service_failure", [False, True])

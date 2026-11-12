@@ -52,10 +52,12 @@ TOOL_CATALOG = BENCHMARK_DIR.parent.parent / "resources_servers" / "mcp_atlas" /
 REVISION = "8c563b55d7c967755f474299848049834d624617"  # pragma: allowlist secret (public dataset revision)
 PARQUET_URL = f"https://huggingface.co/datasets/ScaleAI/MCP-Atlas/resolve/{REVISION}/MCP-Atlas.parquet"
 EXPECTED_TASKS = 500
-# The pinned package registers list_studies, not search_studies. No server code is copied here.
+# This exact task in REVISION requests search_studies, but the image's pinned 1.0.8 package registers
+# list_studies instead. Keep the task and its other tools, auditing this missing name in dropped_tools;
+# do not alias it or allow the same omission for another task. No server code is copied here.
 # Source (Apache-2.0):
 # https://github.com/cyanheads/clinicaltrialsgov-mcp-server/tree/abd96801b84eaea0b7e1db952d434a393730a5c5
-# Match only the known dataset task/tool pair; preserve the upstream intersection with actually served tools.
+# The exact pair preserves upstream's intersection with actually served tools without hiding catalog gaps.
 UNAVAILABLE_TASK_TOOLS: frozenset[tuple[str, str]] = frozenset(
     {("6887c6d4614f06dc73af2411", "clinicaltrialsgov-mcp-server_clinicaltrials_search_studies")}
 )

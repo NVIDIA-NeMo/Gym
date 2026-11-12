@@ -37,10 +37,12 @@ revision `5c11ac44e96d31b91b92a0affad5f2648255907a`:
 |---|---|---|
 | `services/scoring/score_claims.py` | `benchmarks/mcp_atlas/prepare.py` | Claim normalization and extraction rules. |
 | `services/scoring/score_claims.py` | `resources_servers/mcp_atlas/verifier.py` | Claim prompt, structured verdict schema, response truncation and coverage rules. |
+| `services/agent-environment/src/agent_environment/mcp_server_template.json` | `resources_servers/mcp_atlas/credentials.py` | Server-to-credential variable-name registry. |
 
 The upstream material is MIT licensed, Copyright (c) 2026 Scale. The full upstream permission and warranty
-notice is retained in both affected files. NVIDIA modifications are licensed under Apache-2.0: NeMo Gym
-dataset download, row preparation, catalog validation, response extraction, judge requests and verdict validation.
+notice is retained in all three affected files. NVIDIA modifications are licensed under Apache-2.0: NeMo Gym
+dataset download, row preparation, catalog validation, response extraction, judge requests, verdict validation,
+credential validation, task scoping and dataset preflight.
 
 The dataset and example rows originate from
 [ScaleAI/MCP-Atlas](https://huggingface.co/datasets/ScaleAI/MCP-Atlas/tree/8c563b55d7c967755f474299848049834d624617),

@@ -34,6 +34,12 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import ResourcesSessionLocks
 
 
+if __package__:
+    from .credentials import task_environment, validate_provider_environment
+else:
+    from credentials import task_environment, validate_provider_environment
+
+
 logger = logging.getLogger(__name__)
 
 LOG_PATH = "/tmp/mcp-atlas-sandbox.log"
@@ -241,6 +247,7 @@ class SandboxPool:
         self.sandbox_provider = dict(sandbox_provider)
         if len(self.sandbox_provider) != 1 or next(iter(self.sandbox_provider)) not in {"apptainer", "opensandbox"}:
             raise ValueError("MCP-Atlas requires one resolved opensandbox or apptainer provider")
+        validate_provider_environment(self.sandbox_provider)
         self._exec_transport = next(iter(self.sandbox_provider)) == "opensandbox"
         self.sandbox_env = dict(sandbox_env)
         self.sandbox_files = dict(sandbox_files)
@@ -272,6 +279,8 @@ class SandboxPool:
 
     async def start(self, session_id: str, *, servers: list[str], tools: list[str]) -> AtlasSandbox:
         """Start a sandbox that serves ``servers`` and wait until it lists the task's tools."""
+        # Reject missing credentials before stopping a prior sandbox or allocating any provider resources.
+        environment = task_environment(self.sandbox_env, servers)
         async with self._sessions.locked(session_id):
             await self._stop_locked(session_id)
             await self._capacity.acquire()
@@ -289,7 +298,7 @@ class SandboxPool:
                 spec = SandboxSpec(
                     image=self.image,
                     ttl_s=self.ttl_s,
-                    env={**self.sandbox_env, "ENABLED_SERVERS": ",".join(servers)},
+                    env={**environment, "ENABLED_SERVERS": ",".join(servers)},
                     files=self.sandbox_files,
                     provider_options=options,
                     ports=() if self._exec_transport else (port,),

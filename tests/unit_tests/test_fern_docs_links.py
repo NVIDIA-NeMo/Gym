@@ -252,7 +252,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 canonical_links += line.count("/tutorials/evaluation-tutorials")
 
         self.assertEqual([], broken_links)
-        self.assertGreater(canonical_links, 0)
+        self.assertEqual(23, canonical_links)
         index = read("fern/versions/latest/pages/evaluation-tutorials/index.mdx")
         self.assertIn('<Card title="Evaluate MCP-Atlas" href="/main/tutorials/evaluation-tutorials/mcp-atlas">', index)
         self.assertIn(

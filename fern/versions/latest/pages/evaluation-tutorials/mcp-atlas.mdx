@@ -41,6 +41,12 @@ Provision the service credentials in the runtime environment using the upstream 
 [`SERVICE_ENV_NAMES`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/app.py).
 Airtable, Google Calendar, Notion, MongoDB and Slack also require accounts populated with the upstream
 `data_exports/` fixtures. Use approved secret configuration; do not put credential values in commands or commits.
+Each sandbox receives only known service credentials for its enabled servers, including filtering known
+credential names supplied through `sandbox_env`. Missing credentials needed by available configured inputs
+fail startup. Inputs awaiting a declared preparation script are checked before each sandbox allocation;
+missing credentials or unknown server names reject the seed with HTTP 422.
+Credential presence does not validate scopes, seeded accounts or quotas. Keep model, judge and provider
+credentials host-side rather than adding them to the task's `sandbox_env`.
 
 The default `sandbox_files: null` selects provider-specific package configuration with the existing
 July 17, 2026 resolution cutoff. OpenSandbox keeps the image's private uv and npm cache locations;
@@ -116,6 +122,8 @@ field) and must not be used for scores. The resources-server README documents th
 
 Tool calls within one rollout run serially under its session lock. Verification and close wait for an
 active call, up to `tool_call_timeout_s` (60 s by default). Different rollouts can run concurrently.
+The upstream harness stops each task after 1800 s of wall-clock time. This resources server sets no
+per-task wall-clock deadline; the tool timeout and sandbox TTL do not reproduce the upstream deadline.
 
 ## Inspect results and failures
 
@@ -126,9 +134,30 @@ claim coverage; neither is a percentage unless multiplied by 100 for display.
 
 Read the saved trajectories, `verdicts`, `coverage`, `reward`, `tool_calls` and `service_errors` alongside
 the [rollout-health artifacts](/main/evaluation/rollout-health). Environment or judge failures are masked
-separately from model failures. Confirm the complete expected task set and inspect failed rows before
+separately from model failures. An execution-deadline error actually returned by an MCP tool for
+model-written code is scored, while a bridge/provider transport timeout is an infrastructure failure.
+Legacy saved `tool_timeout` markers do not establish a model-program timeout; re-verification preserves
+their historical service-failure masking policy rather than relabeling them as model outcomes.
+Authentication failures such as HTTP 401/403 cause the resources server's tool and verify routes to return
+HTTP 422 before judging or producing a reward; they are configuration errors, not masked verification
+results. This does not establish that an enclosing collection run or chain stops automatically: callers
+may wrap the error or write failure artifacts. Inspect those artifacts and fix credentials and scopes
+before using results. Confirm the complete expected task set and inspect failed rows before
 reporting an aggregate. The integration has not yet been baselined; retain `verified: false` until review
 and representative real model rollouts support it.
+
+Before committing actual rollout artifacts, scan them using the service credential values used for
+collection, supplied through approved environment configuration:
+
+```bash
+python -m resources_servers.mcp_atlas.validate_rollouts results/mcp_atlas/rollouts.jsonl
+```
+
+The scanner checks raw JSONL and decoded JSON strings for exact nonblank values. Output contains only
+file/line locations, credential names and counts. Check the reported number of credential values:
+a zero-value scan does not establish that credentials are absent from the artifacts. This check cannot
+detect arbitrary encoded exfiltration and does not replace scoped credentials or network isolation.
+Absent or synthetic example rollouts are not genuine artifacts to publish.
 
 Use the generated materialized inputs and rollout files for repeat analysis:
 

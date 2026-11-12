@@ -12,11 +12,12 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
 - **Sandbox.** Every rollout gets a private agent-environment sandbox that serves only the task's servers, so
   stateful servers (filesystem, memory, git, desktop-commander) start clean. Tool calls go to its `/call-tool`
   on sandbox-local loopback through the host's OpenSandbox exec connection, with no declared MCP port and
-  caching off. This transport alone does not establish outbound network isolation. A tool error reaches
-  the model as the sandbox's error text, an empty result as `success`,
-  and a call that takes more than 60 s as `Tool call timed out after 60s`, as in the upstream harness.
+  caching off. This transport alone does not establish outbound network isolation. Except for configuration
+  failures described below, a tool error reaches the model as the sandbox's error text and an empty result
+  as `success`. Bridge/provider transport timeouts are infrastructure failures.
 - **Limits.** 256 model turns (`max_steps`) and 100 tool calls; calls past the 100th return an error that asks
-  for the final answer.
+  for the final answer. Upstream also stops a task after 1800 s of wall-clock time. This resources server
+  sets no per-task wall-clock deadline; its 60 s tool timeout and sandbox TTL do not enforce that deadline.
 - **Concurrency.** Tool calls within one rollout are serialized under its session lock. Verification and
   close wait for an active call, up to `tool_call_timeout_s` (60 s by default), before stopping its sandbox.
   Different rollouts can run concurrently.
@@ -32,7 +33,8 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
 
 ## Who failed
 
-The verify response sets `mask_sample` and a `failure_kind` when the environment failed, not the model:
+The verify response records `mask_sample` and `failure_kind` to separate environment failures from
+model outcomes:
 
 | `failure_kind` | Meaning | Masked |
 |---|---|---|
@@ -40,13 +42,40 @@ The verify response sets `mask_sample` and a `failure_kind` when the environment
 | `mcp_atlas:sandbox_unreachable` | A tool call could not reach the sandbox. | always |
 | `mcp_atlas:tools_missing` | A server of the task did not come up, so some task tools were missing. | always |
 | `mcp_atlas:session_lost` | Verify found no seeded session. | always |
-| `mcp_atlas:service_error` | A service answered with an auth, quota, rate-limit, TLS or server error. | if `mask_service_errors` |
-| `mcp_atlas:tool_timeout` | A tool call took longer than `tool_call_timeout_s`. | if `mask_service_errors` |
+| `mcp_atlas:service_error` | A service answered with a quota, rate-limit, TLS or server error. | if `mask_service_errors` |
+| `mcp_atlas:tool_timeout` | Legacy saved timeout marker whose origin was not established. | if `mask_service_errors` |
 | `judge_failed` | A judge call failed, or `judge_max_attempts` calls gave no readable verdict for a claim (set by Gym's `judge_failsafe`; upstream scores such a claim 0). | always |
 
-`service_errors` in the verify response lists every failure the rollout met. `gym eval reverify` judges the
-saved final answers again; the saved `service_errors` and `tool_calls` take the place of the live rollout state,
-so the masks stay the same.
+An HTTP 401/403 or recognized authentication-error diagnostic is a configuration failure. The resources
+server's tool route returns HTTP 422 with
+`detail: "MCP-Atlas authentication failed for <tool_name>; check credentials/scopes"`.
+Later direct tool calls and verification return the same rejection until the session is closed, without
+judging the answer or producing a reward or masked result. This resource-level rejection does not guarantee
+that an enclosing collection run or resumable chain stops automatically: caller layers may wrap the error
+or write failure artifacts. Inspect those artifacts and fix the credentials/scopes before using results.
+
+An execution-deadline error actually returned by an MCP tool for model-written code remains a model
+observation and is scored normally. A bridge or provider transport timeout is instead
+`mcp_atlas:sandbox_unreachable`, an infrastructure failure. A legacy saved `tool_timeout` marker does not
+establish that a model program timed out; it retains its historical service-failure masking policy.
+`service_errors` in a scored verify response lists its recorded failures. `gym eval reverify` recomputes
+the score and mask from saved `service_errors` and `tool_calls`, preserving that legacy attribution.
+
+### Check rollouts before publishing
+
+Before committing genuine rollout artifacts, use the service credential values used for collection,
+provided through approved environment configuration, and run from the repository root:
+
+```bash
+python -m resources_servers.mcp_atlas.validate_rollouts results/mcp_atlas/rollouts.jsonl
+```
+
+The scanner checks raw JSONL and decoded JSON strings for exact nonblank service credential values.
+It reports only file/line locations, credential names and counts, never values or surrounding text.
+It exits 1 for a match and 2 for missing or malformed inputs. A successful scan reports how many
+credential values were checked: zero checked values is not a credential-leak audit. This check does not
+detect arbitrary encoded exfiltration or replace credential scoping and enforced network isolation.
+Run it on the actual artifacts; absent or synthetic example rollouts do not establish publication readiness.
 
 ## Setup
 
@@ -71,10 +100,15 @@ An evaluated Python tool must be unable to reach other rollouts or the Gym contr
    access from evaluated code. Prove this with concurrent A/B private-marker tests and host-proxy positive
    controls before benchmark scoring. No network or isolation acceptance is claimed by unit tests.
 3. Export the service credentials under the upstream names (`service_env_names`, for example `EXA_API_KEY`,
-   `GITHUB_TOKEN`, `NOTION_TOKEN`). Only the credentials that are set reach the sandbox, through the provider's
-   private env file. 411 of the 500 ground-truth trajectories call at least one key-gated server; five servers
-   (Airtable, Google Calendar, Notion, MongoDB, Slack) also need the upstream `data_exports/` seeded into the
-   accounts. Management, model and judge credentials must not be forwarded as workload credentials.
+   `GITHUB_TOKEN`, `NOTION_TOKEN`). Each sandbox receives only known service credentials required by its
+   `ENABLED_SERVERS`; unrelated known credential names are removed even when supplied through `sandbox_env`.
+   Missing credentials for servers in the configured, available dataset fail startup with
+   `CredentialConfigurationError`. Inputs awaiting a declared preparation script are checked at each seed:
+   missing credentials or unknown server names reject the seed with HTTP 422 before provider allocation.
+   Nonblank values establish presence, not valid scopes or account state.
+   411 of the 500 ground-truth trajectories call at least one key-gated server; five servers (Airtable,
+   Google Calendar, Notion, MongoDB, Slack) also need the upstream `data_exports/` seeded into the accounts.
+   Keep management, model and judge credentials host-side; do not put them in `sandbox_env`.
 4. Allow the task's service endpoints and any bootstrap hosts needed when a server misses its image cache.
    `sandbox_files` pins package resolution to the image date (2026-07-17). OpenSandbox defaults preserve
    the image's private uv/npm caches; Apptainer development keeps writable scratch caches. An explicit
@@ -121,6 +155,11 @@ at upstream revision `5c11ac44e96d31b91b92a0affad5f2648255907a`, under the
 Copyright (c) 2026 Scale. Those files retain the MIT notice; NVIDIA modifications and the local NeMo Gym
 integration are Apache-2.0. The component and source-to-file mapping are recorded in
 [`ATTRIBUTIONS.md`](../../ATTRIBUTIONS.md#mcp-atlas).
+
+The server-to-credential-name registry in `credentials.py` is derived from upstream's
+[`mcp_server_template.json`](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/services/agent-environment/src/agent_environment/mcp_server_template.json)
+at the same revision, under MIT, Copyright (c) 2026 Scale. The file retains that notice; credential
+validation, per-task scoping and dataset preflight are independently implemented NVIDIA modifications.
 
 The public dataset and the example tasks are from Scale AI's
 [`ScaleAI/MCP-Atlas`](https://huggingface.co/datasets/ScaleAI/MCP-Atlas/tree/8c563b55d7c967755f474299848049834d624617)
