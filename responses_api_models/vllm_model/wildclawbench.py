@@ -4,8 +4,8 @@
 
 from fastapi import Body, Request
 
-from nemo_gym.core.responses_api_types import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
 

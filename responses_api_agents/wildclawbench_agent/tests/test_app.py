@@ -14,7 +14,7 @@ import pytest
 from fastapi import HTTPException
 
 from benchmarks.wildclawbench.merge import merge
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.wildclawbench_agent import data
 from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawConfig, WildClawRunRequest
 from responses_api_agents.wildclawbench_agent.enroot_docker import (
