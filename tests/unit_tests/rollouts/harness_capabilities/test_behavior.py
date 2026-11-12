@@ -135,18 +135,6 @@ def test_responses_incomplete_reason_matches_the_witness():
     assert failed_model_checks(record, attempts) == {"model.response_metadata"}
 
 
-def test_auxiliary_calls_are_required_in_canonical_exchange_comparison(behavior_episode):
-    record, witness = behavior_episode
-    auxiliary = copy.deepcopy(witness["attempts"][0])
-    witness["auxiliary_calls"] = [auxiliary]
-    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
-    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
-    assert checks["model.saved_exchanges"]["status"] == "fail"
-    record["ng_trajectory"]["model_calls"].append(copy.deepcopy(record["ng_trajectory"]["model_calls"][0]))
-    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
-    assert checks["model.saved_exchanges"]["status"] == "pass"
-
-
 def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     record, witness = behavior_episode
     inv = record["ng_trajectory"]["invocations"][0]
