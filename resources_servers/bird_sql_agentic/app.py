@@ -23,13 +23,13 @@ from typing import Any, Dict, List, Optional, Union
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.bird_sql.app import (
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
