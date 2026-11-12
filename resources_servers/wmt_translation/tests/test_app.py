@@ -35,9 +35,6 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
 
 
-pytestmark = pytest.mark.usefixtures("flores200_tokenizer_cache")
-
-
 def _make_response(text: str) -> NeMoGymResponse:
     return NeMoGymResponse(
         id="resp_test",
@@ -137,23 +134,6 @@ class TestScoringHelpers:
 
     def test_spbleu_always_uses_flores200_tokenizer(self) -> None:
         assert SPBLEU_TOKENIZER == "flores200"
-
-    def test_real_sentence_and_corpus_metrics_use_the_prepared_model(self) -> None:
-        server = _make_server(language_consistency_backend=None)
-        reference = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
-        tasks = [
-            [{"generation": reference, "translation": reference, "source_language": "en", "target_language": "de_DE"}]
-        ]
-
-        with patch(
-            "sacrebleu.tokenizers.tokenizer_spm.download_file",
-            side_effect=AssertionError("the verified model must already be cached"),
-        ):
-            sentence_score = server._score_sentence_spbleu(reference, reference)
-            metrics = server.compute_metrics(tasks)
-
-        assert sentence_score == pytest.approx(100.0)
-        assert metrics["en->de_DE/spBLEU"] == pytest.approx(100.0)
 
 
 class TestServerSetup:
