@@ -414,9 +414,10 @@ def run_validation(
 ) -> dict[str, object]:
     """Stage a complete audit before publishing its outputs.
 
-    Failed checks preserve previous outputs. Publishing replaces generated
-    files only, with completion markers last; publication errors remove those
-    markers so partial outputs cannot appear to be a completed audit.
+    The output directory and hidden staging directory are created before checks
+    run. Failed checks preserve previous files. Publishing replaces or removes
+    known generated files only, with completion markers last; publication errors
+    remove those markers so partial outputs cannot appear to be a completed audit.
     """
     output.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=f".{output.name}-", dir=output) as directory:

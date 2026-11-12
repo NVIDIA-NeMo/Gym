@@ -529,6 +529,10 @@ def test_checked_in_examples_reproduce_documented_allocations(
     assert result.allocation.statistics.power == pytest.approx(power, rel=1e-12, abs=1e-12)
     assert result.simulation is not None
     assert result.simulation.trials == 10000
+    if name == "benchmark":
+        rate = result.simulation.power
+        assert rate.successes == 8066
+        assert (round(rate.ci_low, 4), round(rate.ci_high, 4)) == (0.7987, 0.8142)
     assert plan.read_bytes() == original
 
 
