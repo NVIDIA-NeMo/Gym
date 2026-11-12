@@ -198,3 +198,217 @@ def test_events_mode_forwards_term_and_ignores_a_detached_stdout_holder(tmp_path
                 os.kill(int((tmp_path / "holder.pid").read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+# -- the model relay ---------------------------------------------------------------------------------------------
+
+RELAY_CHECK = r"""
+import json, os, socket, sys
+status = json.load(open(sys.argv[1]))
+socket.create_connection(("127.0.0.1", status["port"]), timeout=5).close()
+comm = open("/proc/%d/comm" % status["pid"]).read().strip()
+cmdline = open("/proc/%d/cmdline" % status["pid"]).read().replace("\0", " ")
+print(os.environ.get("NEMO_GYM_MODEL_RELAY"), comm, "python" in cmdline.lower())
+"""
+
+RELAY_RESTART = r"""
+import json, os, signal, sys, time
+path = sys.argv[1]
+first = json.load(open(path))
+os.kill(first["pid"], signal.SIGKILL)
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        now = json.load(open(path))
+    except (OSError, ValueError):
+        now = {}
+    if now.get("pid") not in (None, first["pid"]) and now.get("port") == first["port"]:
+        print("restarted on", now["port"])
+        break
+    time.sleep(0.1)
+"""
+
+
+# A stand-in relay for the runner's tests, so they need no JavaScript runtime: it listens on the port it is given and
+# writes the relay's status layout, which is all the runner reads.
+STUB_RELAY = r"""
+import argparse, os, signal, socket
+parser = argparse.ArgumentParser()
+for name in ("--port", "--endpoint", "--session-dir", "--status"):
+    parser.add_argument(name)
+args = parser.parse_args()
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", int(args.port)))
+server.listen()
+stat = open("/proc/self/stat").read()
+status = {"pid": os.getpid(), "start": int(stat[stat.rindex(")") + 2 :].split()[19]), "port": server.getsockname()[1]}
+with open(args.status + ".tmp", "w") as handle:
+    handle.write("{" + ", ".join('"%s": %d' % item for item in status.items()) + "}")
+os.replace(args.status + ".tmp", args.status)
+signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+while True:
+    server.accept()[0].close()
+"""
+
+
+def _relay_params(tmp_path: Path, script: str, **values) -> tuple[Path, Path]:
+    (tmp_path / "relay").mkdir()
+    status = tmp_path / "relay" / "status.json"
+    stub = tmp_path / "stub_relay.py"
+    stub.write_text(STUB_RELAY)
+    (tmp_path / "endpoint.json").write_text(json.dumps({"gen": 1, "upstream": "http://127.0.0.1:9/v1"}))
+    defaults = {
+        "command": [sys.executable, "-c", script, str(status)],
+        "MODEL_RELAY_PORT": "0",
+        "MODEL_RELAY_ENDPOINT": str(tmp_path / "endpoint.json"),
+        "MODEL_RELAY_STATUS": str(status),
+        "MODEL_RELAY_COMMAND": [sys.executable, str(stub)],
+    }
+    return _params(tmp_path, **(defaults | values)), status
+
+
+def _process_ends(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1][0]
+        except (OSError, IndexError):
+            return True
+        if state in "ZX":
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_the_runner_starts_the_model_relay_under_a_neutral_name(tmp_path: Path) -> None:
+    params, status = _relay_params(tmp_path, RELAY_CHECK)
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().split() == ["1", "gym-model-relay", "False"]
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_a_relay_that_dies_is_restarted_on_the_same_port(tmp_path: Path) -> None:
+    params, _ = _relay_params(tmp_path, RELAY_RESTART)
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().startswith("restarted on ")
+    assert "restarting it on port" in (tmp_path / "relay" / "relay.log").read_text()
+
+
+@pytest.mark.skipif(not Path("/proc/uptime").exists(), reason="the runner times the relay start from /proc/uptime")
+def test_a_freeze_while_the_relay_starts_does_not_use_up_its_wait(tmp_path: Path) -> None:
+    # A checkpoint can stop the runner while it starts the relay, for longer than the wait. The relay must still
+    # come up once the runner runs again, not leave the command on the fallback environment.
+    script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
+    entered = tmp_path / "entered"
+    slow_python = tmp_path / "slow-python"
+    slow_python.write_text(f'#!/bin/sh\n: >{entered}\nsleep 1\nexec {sys.executable} "$@"\n')
+    slow_python.chmod(0o755)
+    params, _ = _relay_params(
+        tmp_path,
+        script,
+        MODEL_RELAY_COMMAND=[str(slow_python), str(tmp_path / "stub_relay.py")],
+        MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
+    )
+    runner = subprocess.Popen(
+        ["bash", str(HARNESS_RUNNER_SCRIPT), str(params)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not entered.exists():
+            assert time.monotonic() < deadline, "the runner never started the relay"
+            time.sleep(0.01)
+        os.killpg(runner.pid, signal.SIGSTOP)
+        time.sleep(11)
+        os.killpg(runner.pid, signal.SIGCONT)
+        _, stderr = runner.communicate(timeout=20)
+    finally:
+        if runner.poll() is None:
+            os.killpg(runner.pid, signal.SIGKILL)
+            runner.wait()
+
+    assert runner.returncode == 0, stderr
+    assert (tmp_path / "stdout.log").read_text().split() == ["1", "None"]
+    assert not (tmp_path / "relay" / "unavailable").exists()
+
+
+RELAY_COMMAND_CHECK = r"""
+import json, os, socket, sys
+status = json.load(open(sys.argv[1]))
+socket.create_connection(("127.0.0.1", status["port"]), timeout=5).close()
+comm = open("/proc/%d/comm" % status["pid"]).read().strip()
+relay_env = open("/proc/%d/environ" % status["pid"], "rb").read().split(b"\0")
+print(os.environ.get("NEMO_GYM_MODEL_RELAY"), comm, b"RELAY_ONLY=1" in relay_env, os.environ.get("RELAY_ONLY"))
+"""
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_a_relay_command_runs_under_a_neutral_name_with_an_environment_of_its_own(tmp_path: Path) -> None:
+    # A harness binary that runs the relay (OpenCode as Bun) needs a switch that must not reach the harness itself.
+    params, status = _relay_params(tmp_path, RELAY_COMMAND_CHECK, MODEL_RELAY_COMMAND_ENV={"RELAY_ONLY": "1"})
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().split() == ["1", "gym-model-relay", "True", "None"]
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_a_relay_command_that_cannot_run_leaves_the_command_on_the_fallback_environment(tmp_path: Path) -> None:
+    script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
+    params, _ = _relay_params(
+        tmp_path,
+        script,
+        MODEL_RELAY_COMMAND=[str(tmp_path / "missing" / "opencode"), "model_relay.mjs"],
+        MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
+    )
+
+    result = _run(params)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "stdout.log").read_text().split() == ["None", "http://model.example/v1"]
+    assert (tmp_path / "relay" / "unavailable").exists()
+
+
+JS_RUNTIME = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME") or shutil.which("node") or shutil.which("bun")
+
+JS_RELAY_CHECK = r"""
+import json, os, socket, sys
+status = json.load(open(sys.argv[1]))
+socket.create_connection(("127.0.0.1", status["port"]), timeout=5).close()
+argv0 = open("/proc/%d/cmdline" % status["pid"]).read().split("\0")[0]
+comm = open("/proc/%d/comm" % status["pid"]).read().strip()
+print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.path.basename(argv0), comm)
+"""
+
+
+@pytest.mark.skipif(JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) on this machine")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_the_runner_starts_the_javascript_relay(tmp_path: Path) -> None:
+    params, status = _relay_params(
+        tmp_path,
+        JS_RELAY_CHECK,
+        MODEL_RELAY_COMMAND=[JS_RUNTIME, str(HARNESS_RUNNER_SCRIPT.with_name("model_relay.mjs"))],
+    )
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    relayed, argv0, comm = (tmp_path / "stdout.log").read_text().split()
+    # Kills that match the runtime's name miss the relay. Bun keeps the link's name as the process name; Node names
+    # its main thread, so only the command line shows the link there.
+    assert relayed == "1" and argv0 == "gym-model-relay" and comm != Path(JS_RUNTIME).name
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"

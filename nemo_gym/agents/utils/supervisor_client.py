@@ -25,7 +25,8 @@ continued.json        Supervisor           Acknowledges continue N once the proc
 
 A supervisor launched with ``pause_mode="hold"``, for a sandbox whose snapshot keeps its processes,
 acknowledges a pause without stopping anything; the harness keeps running and its model calls are held
-instead.
+instead. After a restore of such a snapshot, ``check_restored`` tells whether the launch can be taken over
+where it was, and ``abandon_launch`` ends it for good when it cannot.
 
 Pause and continue are re-armable: each checkpoint writes a sequence number greater than the last,
 and an acknowledgement names the number it answers, so a request is never mistaken for an earlier
@@ -46,9 +47,11 @@ group, passes TERM on to it and exits with its status.
 
 import json
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from shlex import join, quote
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
@@ -102,6 +105,7 @@ class CleanupReceipt(TypedDict):
     error: str | None
     timed_out: bool
     stopped: NotRequired[bool]
+    abandoned: NotRequired[bool]
 
 
 class PauseAcknowledgement(TypedDict):
@@ -199,8 +203,9 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
         "timed_out": payload.get("timed_out") is True,
         "error": payload.get("error") if isinstance(payload.get("error"), str) else None,
     }
-    if isinstance(payload.get("stopped"), bool):
-        receipt["stopped"] = payload["stopped"]
+    for flag in ("stopped", "abandoned"):
+        if isinstance(payload.get(flag), bool):
+            receipt[flag] = payload[flag]
     return receipt
 
 
@@ -414,3 +419,132 @@ async def request_continue(
         seq=seq,
         timeout=timeout,
     )
+
+
+# Why a launch that a restore of a process-keeping snapshot brought back cannot be taken over:
+# ``supervisor_gone`` - no process with the supervisor's PID runs; ``identity_mismatch`` - a different process
+# holds that PID; ``pause_mismatch`` - the supervisor does not hold the recorded pause in hold mode;
+# ``launch_finished`` - the cleanup receipt exists; ``relay_gone`` - the model relay's process is gone;
+# ``relay_unavailable`` - the launch ran without a relay; ``check_failed`` - the check itself could not run.
+NotResumableReason = Literal[
+    "supervisor_gone",
+    "identity_mismatch",
+    "pause_mismatch",
+    "launch_finished",
+    "relay_gone",
+    "relay_unavailable",
+    "check_failed",
+]
+_NOT_RESUMABLE_REASONS = frozenset(NotResumableReason.__args__)  # type: ignore[attr-defined]
+_IDENTITY = re.compile(r"[0-9]+\.[0-9]+")
+
+
+@dataclass(frozen=True)
+class RestoredLaunch:
+    """A launch that a restore brought back with its supervisor holding pause ``pause_seq``; ``adopt`` takes it."""
+
+    pause_seq: int
+    identity: str
+
+
+@dataclass(frozen=True)
+class NotResumable:
+    """A restored launch that cannot be taken over, and why; ``detail`` adds what the check saw."""
+
+    reason: NotResumableReason
+    detail: str | None = None
+
+
+# The check, as one bash script: prints the first reason that applies, or "ok". Needs only bash and /proc, as the
+# supervisor does. $1 session dir, $2 identity, $3 pause sequence, $4 relay status file or "".
+_CHECK_RESTORED = r"""
+d=$1 id=$2 seq=$3 relay=$4
+start_of() {
+    local stat=
+    IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || [[ -n $stat ]] || return 1
+    [[ $stat == *') '* ]] || return 1
+    while [[ $stat == *') '* ]]; do stat=${stat#*) }; done
+    set -- $stat
+    [[ $1 != [ZX] ]] || return 1
+    echo "${20}"
+}
+[[ -e $d/cleanup.json ]] && { echo launch_finished; exit 0; }
+pid=${id%%.*}
+started=$(start_of "$pid") || { echo supervisor_gone; exit 0; }
+[[ $started == "${id#*.}" ]] || { echo identity_mismatch; exit 0; }
+ack=
+IFS= read -r -d '' ack 2>/dev/null <"$d/paused.json"
+[[ $ack == *"\"seq\": $seq,"* && $ack == *'"confirmed": true'* && $ack == *'"mode": "hold"'* && $ack == *"\"identity\": \"$id\""* ]] ||
+    { echo pause_mismatch; exit 0; }
+continued=
+IFS= read -r continued 2>/dev/null <"$d/continue.request"
+[[ $continued =~ ^[0-9]+$ ]] && ((10#$continued >= seq)) && { echo pause_mismatch; exit 0; }
+if [[ -n $relay ]]; then
+    [[ -e ${relay%/*}/unavailable ]] && { echo relay_unavailable; exit 0; }
+    status=
+    IFS= read -r -d '' status 2>/dev/null <"$relay"
+    [[ $status =~ \"pid\":\ *([0-9]+) ]] && relay_pid=${BASH_REMATCH[1]} || { echo relay_gone; exit 0; }
+    [[ $status =~ \"start\":\ *([0-9]+) ]] && relay_start=${BASH_REMATCH[1]} || { echo relay_gone; exit 0; }
+    [[ $(start_of "$relay_pid") == "$relay_start" ]] || { echo relay_gone; exit 0; }
+fi
+echo ok
+"""
+
+
+async def check_restored(
+    sandbox: AsyncSandbox,
+    session_dir: str,
+    *,
+    pause_seq: int,
+    identity: str,
+    relay_status_path: str | None,
+    timeout: float,
+) -> RestoredLaunch | NotResumable:
+    """Whether a restore brought back the launch in ``session_dir`` so that ``SandboxSession.adopt`` can take it over.
+
+    The launch qualifies when its supervisor still runs as ``identity`` (``PID.START``), holds pause ``pause_seq`` in
+    hold mode with no continue for it yet, and has written no cleanup receipt; and, with ``relay_status_path``, when
+    the model relay whose status file that is still runs (its ``pid`` and ``start``). One command in the sandbox.
+    """
+    if not _IDENTITY.fullmatch(identity):
+        return NotResumable("identity_mismatch", f"malformed supervisor identity {identity!r}")
+    result = await sandbox.exec(
+        f"bash -c {quote(_CHECK_RESTORED)} check {quote(session_dir)} {quote(identity)} {int(pause_seq)} "
+        f"{quote(relay_status_path or '')}",
+        timeout_s=timeout,
+    )
+    verdict = (result.stdout or "").strip()
+    if result.return_code != 0 or result.error_type or (verdict != "ok" and verdict not in _NOT_RESUMABLE_REASONS):
+        detail = result.error_type or (result.stderr or verdict or f"exit {result.return_code}").strip()
+        return NotResumable("check_failed", detail[:500])
+    if verdict == "ok":
+        return RestoredLaunch(pause_seq=pause_seq, identity=identity)
+    return NotResumable(cast(NotResumableReason, verdict))
+
+
+async def abandon_launch(
+    sandbox: AsyncSandbox, session_dir: str, *, identity: str, timeout: float, harness: str
+) -> CleanupReceipt:
+    """End a restored launch for good: KILL, never CONT, its supervisor and every process it marked.
+
+    For a launch a restore brought back that will not be taken over, so that nothing of it (a harness still
+    pointed at a dead model server, say) runs again before a relaunch. Uses the supervisor script the launch
+    uploaded to ``session_dir``. Returns the receipt: the supervisor's own if it had finished, else a stopped,
+    ``abandoned`` one. Raises the harness termination failure if a process it killed did not exit.
+    """
+    if not _IDENTITY.fullmatch(identity):
+        raise ValueError(f"malformed supervisor identity {identity!r}")
+    receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
+    result = await sandbox.exec(
+        f"bash {quote(f'{session_dir}/{SUPERVISOR_FILE}')} --abandon {quote(identity)} "
+        f"--receipt {quote(receipt_path)} --cleanup-timeout {_seconds(timeout)}",
+        timeout_s=timeout + 10,
+    )
+    if result.error_type:
+        raise RuntimeError(f"{harness} launch could not be abandoned: {result.error_type}: {result.stderr}")
+    try:
+        receipt = json.loads(await read_text(sandbox, path=receipt_path))
+    except Exception as error:
+        raise RuntimeError(f"{harness} abandoned launch left no receipt") from error
+    _raise_terminal_failure(receipt, harness=harness)
+    return parse_cleanup_receipt(receipt)

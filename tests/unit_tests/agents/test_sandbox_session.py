@@ -32,6 +32,8 @@ from nemo_gym.sandbox.providers.registry import get_provider_class
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
 OK = SandboxExecResult(stdout="", stderr="", return_code=0)
+# The answer to the check a session runs after its launch command raised: the launch's supervisor never started.
+NOT_STARTED = SandboxExecResult(stdout="", stderr="", return_code=1)
 EXPIRE_MARKER = "/session/expire.request"
 
 
@@ -320,7 +322,7 @@ async def test_close_during_input_preparation_prevents_launch(session, receipt_r
 @pytest.mark.parametrize("failure", [OSError("transport failed"), "timeout", "unavailable"])
 async def test_transport_failure_preserves_partial_output_and_original_error(session, failure):
     if isinstance(failure, Exception):
-        session.sandbox.exec.side_effect = [failure, OK]
+        session.sandbox.exec.side_effect = [failure, NOT_STARTED, OK]
     else:
         session.sandbox.exec.side_effect = [SandboxExecResult("", "transport", 1, failure), OK]
     expected = OSError if isinstance(failure, Exception) else TimeoutError if failure == "timeout" else RuntimeError
@@ -379,7 +381,7 @@ async def test_oom_outside_supervised_execution_is_not_classified_as_agent_oom(s
 
 
 async def test_capture_failure_does_not_hide_execution_failure(session):
-    session.sandbox.exec.side_effect = [OSError("transport failed"), OK]
+    session.sandbox.exec.side_effect = [OSError("transport failed"), NOT_STARTED, OK]
     collector = AsyncMock(side_effect=ValueError("malformed snapshot"))
     with pytest.raises(OSError, match="transport failed"):
         await execute(session, collect=collector)
@@ -425,7 +427,7 @@ async def test_missing_borrowed_receipt_retains_state_and_retries_capture(sessio
 
 async def test_transport_error_survives_failed_cleanup_until_receipt_arrives(session, receipt_reader):
     failure = OSError("transport failed")
-    session.sandbox.exec.side_effect = [failure, OK, OK, OK]
+    session.sandbox.exec.side_effect = [failure, NOT_STARTED, OK, OK, OK]
     receipt_reader.side_effect = FileNotFoundError("no receipt yet")
     collector = AsyncMock(return_value="recovered transcript")
 

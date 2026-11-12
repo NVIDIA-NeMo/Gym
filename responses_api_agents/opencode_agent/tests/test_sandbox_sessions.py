@@ -170,6 +170,9 @@ class Sandbox:
             return await self.launch(command=command, **kwargs)
         if "opencode.db-wal" in command:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
+        if "supervisor.pid" in command and "launch.claim" in command:
+            # The check after a launch command raised: this fake never starts a supervisor of its own.
+            return SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
         if command.startswith("{ [ ! -d /tmp/nemo-gym-media/"):
