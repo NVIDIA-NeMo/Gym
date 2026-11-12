@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Swap only the harness. Gym carries the dataset and judge binding to hle_diamond_pi_agent;
+# the Environment Server retains ownership of the same hle_tools MCP session.
+config_paths:
+- benchmarks/hle_diamond/opencode_hle_tools.yaml
+- responses_api_agents/pi_agent/configs/profiles/benchmark.yaml
+hle_diamond_pi_image: ${oc.env:PI_SANDBOX_IMAGE}
+hle_diamond_pi_runtime_dir: ${oc.env:PI_SANDBOX_RUNTIME_DIR}
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      pi_version: 0.85.1
+      timeout: 14400
+      network_access: model_and_tools
+      thinking: high
+      system_prompt: ${hle_diamond_web_tools_instructions}
+      sandbox_runtime_dir: ${hle_diamond_pi_runtime_dir}
+      sandbox_config:
+        image: ${hle_diamond_pi_image}
+        workdir: /workspace
+        resources:
+          cpu: 2
+          memory_mib: 8192

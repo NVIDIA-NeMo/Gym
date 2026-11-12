@@ -391,6 +391,11 @@ LISTED_BENCHMARKS = {
         "hle_diamond_opencode_agent",
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
+    "hle_diamond/opencode_hle_tools": (
+        "hle_diamond_text",
+        "hle_diamond_opencode_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
     "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle_diamond/prompts/opencode.yaml"),
     "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_agent", None),
     # Restates the dataset (Gym's _inherit_from is a single-step rename), so it is listed unlike opencode_search.
@@ -455,20 +460,32 @@ class TestConfigs:
         tavily = get_first_server_config_dict(_resolve(f"{variant}.yaml"), "tavily")
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
-    def test_hle_tools_preset_wires_exactly_the_upstream_tool_server(self):
-        """opencode_hle_tools: one tool server, the hle_web_tools instance over MCP, and no Tavily resource."""
-        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / "opencode_hle_tools.yaml", strict=False)
+    @pytest.mark.parametrize("harness", ["opencode", "pi"])
+    def test_hle_tools_preset_wires_exactly_the_upstream_tool_server(self, harness):
+        """Both session harnesses receive the same MCP tools from the Environment Server."""
+        config_file = f"{harness}_hle_tools.yaml"
+        agent_name = f"hle_diamond_{harness}_agent"
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / config_file, strict=False)
         assert (benchmark.name, benchmark.agent_name, benchmark.num_repeats) == (
             "hle_diamond_text",
-            "hle_diamond_opencode_agent",
+            agent_name,
             1,
         )
 
-        resolved = _resolve("opencode_hle_tools.yaml")
-        agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
-        assert agent["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
+        resolved = _resolve(config_file)
+        assert list(resolved[agent_name]["responses_api_agents"]) == [f"{harness}_agent"]
+        agent = get_first_server_config_dict(resolved, agent_name)
+        assert "tool_servers" not in agent
+        environment = get_first_server_config_dict(resolved, "hle_diamond_equivalence_llm_judge_environment_server")
+        assert list(resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]) == [
+            "single_agent_turn_legacy"
+        ]
+        assert environment["agent_server"]["name"] == agent_name
+        assert environment["resources_server"]["name"] == JUDGE_SERVER
+        assert environment["resources_tool_transports"] == []
+        assert environment["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
         assert agent["network_access"] == "model_and_tools"
-        note = agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+        note = agent["system_prompt"]
         assert "web_search" in note and "web_fetch" in note and "disabled" in note and "Tavily" not in note
         assert list(resolved["hle_tools"]["resources_servers"]) == ["hle_web_tools"]
         tools = get_first_server_config_dict(resolved, "hle_tools")
@@ -514,6 +531,7 @@ class TestConfigs:
             "opencode_full.yaml",
             "opencode_search_full.yaml",
             "opencode_hle_tools.yaml",
+            "pi_hle_tools.yaml",
             "pi.yaml",
             "pi_search.yaml",
         ],
@@ -587,7 +605,7 @@ class TestReasoningEffort:
     """D4 on the sandboxed path: Gym's ++responses_create_params.reasoning.effort decorates only Gym's run
     request, so each harness has to request high effort in its own model call."""
 
-    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_search.yaml", "opencode_hle_tools.yaml"])
+    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_search.yaml"])
     def test_opencode_presets_make_opencode_request_high_reasoning_effort(self, config_file):
         opencode_config = get_first_server_config_dict(_resolve(config_file), "hle_diamond_opencode_agent")[
             "opencode_config"
@@ -598,7 +616,13 @@ class TestReasoningEffort:
         assert list(opencode_config["instructions"]) == ["/tmp/nemo-gym-environment.txt"]
         assert opencode_config["permission"]["webfetch"] == "deny"
 
-    @pytest.mark.parametrize("config_file", ["pi.yaml", "pi_search.yaml"])
+    def test_opencode_hle_tools_keeps_high_effort_and_disables_other_web_tools(self):
+        agent = get_first_server_config_dict(_resolve("opencode_hle_tools.yaml"), "hle_diamond_opencode_agent")
+        assert agent["sandbox_reasoning_effort"] == "high"
+        permission = agent["opencode_config"]["permission"]
+        assert all(permission[tool] == "deny" for tool in ("webfetch", "websearch", "task"))
+
+    @pytest.mark.parametrize("config_file", ["pi.yaml", "pi_search.yaml", "pi_hle_tools.yaml"])
     def test_pi_presets_pass_thinking_high(self, config_file):
         agent = get_first_server_config_dict(_resolve(config_file), "hle_diamond_pi_agent")
 
@@ -612,6 +636,16 @@ class TestLocalDockerOverride:
 
     OVERRIDE = HLE_DIAMOND_DIR / "sandbox_docker_local.yaml"
 
+    @pytest.mark.parametrize("harness", ["opencode", "pi"])
+    def test_hle_tools_session_harness_docker_override_preserves_the_tool_grant(self, harness):
+        resolved = _resolve(f"{harness}_hle_tools.yaml", "hle_tools_docker_local.yaml")
+        agent = get_first_server_config_dict(resolved, f"hle_diamond_{harness}_agent")
+        assert (agent["sandbox_provider"], agent["network_access"]) == ("sandbox_docker", "inherit")
+        assert list(resolve_provider_config(agent["sandbox_provider"], resolved)) == ["docker"]
+        assert "NOT restricted" in agent["system_prompt"]
+        environment = get_first_server_config_dict(resolved, "hle_diamond_equivalence_llm_judge_environment_server")
+        assert environment["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
+
     @pytest.mark.parametrize(
         ("config_file", "agent", "other_agent"),
         [
@@ -619,7 +653,6 @@ class TestLocalDockerOverride:
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
-            ("opencode_hle_tools.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
         ],
@@ -674,6 +707,7 @@ class TestLocalDockerOverride:
             "config.yaml",
             "text.yaml",
             "opencode.yaml",
+            "opencode_hle_tools.yaml",
             "opencode_full.yaml",
             "pi.yaml",
             "opencode_reference.yaml",

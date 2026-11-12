@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Local smoke tests only: Docker does not enforce the benchmark's egress policy.
+# Compose after opencode_hle_tools.yaml or pi_hle_tools.yaml using a raw +config_paths override.
+sandbox_docker:
+  docker:
+    create:
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+
+hle_diamond_web_tools_instructions: |
+  Direct internet access from this machine is NOT restricted (local Docker sandbox). The web_search and web_fetch tools are available for external information.
+  Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+
+hle_diamond_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_provider: sandbox_docker
+      network_access: inherit
+
+# The Pi profile is swapped onto the benchmark after config merging. Override its source instance.
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      sandbox_provider: sandbox_docker
+      network_access: inherit

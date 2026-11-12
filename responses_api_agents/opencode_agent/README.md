@@ -326,6 +326,11 @@ exist; the sandbox owner supplies mounts or image contents.
 family-specific prompts, tools and defaults behind a Gym model route; the route
 still controls the actual provider/model. Native ID changes can affect scores.
 
+`sandbox_reasoning_effort` sets the model's `reasoningEffort` option for sandbox sessions,
+for example `high` in HLE-Diamond's web-tools preset. Unset, OpenCode keeps its default.
+This is independent of `thinking`, which controls reasoning output, and does not enable
+request-level `reasoning` overrides.
+
 ## Owner extensions
 
 These sandbox-session settings are off by default; unset, sessions behave as described

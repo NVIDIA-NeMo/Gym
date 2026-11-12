@@ -34,6 +34,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from openai.types.responses.response import IncompleteDetails
+from openai.types.shared import ReasoningEffort
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
@@ -449,6 +450,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # The native model ID affects OpenCode's model-family prompts and tools.
     # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
     sandbox_model_id: str = "dummy_model"
+    sandbox_reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description="Reasoning effort sent by OpenCode for sandbox-session model calls; unset keeps its default.",
+    )
 
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
@@ -1764,6 +1769,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 else {}
                             ),
                             "interleaved": {"field": "reasoning_content"},
+                            **(
+                                {"options": {"reasoningEffort": self.config.sandbox_reasoning_effort}}
+                                if self.config.sandbox_reasoning_effort is not None
+                                else {}
+                            ),
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,

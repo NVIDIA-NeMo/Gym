@@ -22,7 +22,7 @@ of the `test` split and downloads it at run time. Nothing from the dataset is co
 | `hle_diamond/text` | 728 (no image) | `prompts/default.yaml` at rollout time | text-only policy models |
 | `hle_diamond/opencode`, `hle_diamond/pi` | 728 | `prompts/opencode.yaml` | sandboxed code tools, no search |
 | `hle_diamond/opencode_search`, `hle_diamond/pi_search` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus Tavily search |
-| `hle_diamond/opencode_hle_tools` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus upstream's `web_search` and `web_fetch` behind its blocklist (`resources_servers/hle_web_tools`, Tavily backend; see Upstream web tools) |
+| `hle_diamond/opencode_hle_tools`, `hle_diamond/pi_hle_tools` | 728 | `prompts/opencode.yaml` | session harnesses with upstream's `web_search` and `web_fetch` behind its blocklist (`resources_servers/hle_web_tools`, Tavily backend; see Upstream web tools) |
 | `hle_diamond/opencode_full`, `hle_diamond/opencode_search_full` | 1000 (272 with an image) | `prompts/opencode.yaml`, baked at prepare time by `prepare_opencode.py` | the OpenCode presets over the full set, images attached through `opencode run -f`; needs a vision-capable policy model |
 | `hle_diamond/opencode_reference` | 728 | `prompts/opencode.yaml` | `opencode_search` on the reference sandbox image (upstream's Python 3.11.16 environment) under upstream's egress policy; needs the OpenSandbox provider (see Reference preset) |
 
@@ -37,17 +37,17 @@ HLE-Diamond's published numbers are over all 1000 questions, images included, so
 the default and the text subset is the variant. A `hle_diamond/text` run covers 728/1000 questions
 (347 reasoning, 381 knowledge) and is not comparable with the published table; report that coverage.
 
-**Text and full sandboxed presets.** `opencode`, `opencode_search`, `opencode_hle_tools`, `pi` and
+**Text and full sandboxed presets.** `opencode`, `opencode_search`, `opencode_hle_tools`, `pi_hle_tools`, `pi` and
 `pi_search` run the 728 text rows, as `benchmarks/hle`'s presets do, so with-tools numbers from them
 cover 728/1000 questions.
 `opencode_full` and `opencode_search_full` run all 1000: the OpenCode adapter uploads each
 `input_image` data URI of the user turn into the sandbox and attaches it with `opencode run -f`, so
 the image reaches the model call as an `image_url` part (Sandboxed agents (with tools) > Image
 questions through OpenCode). The Pi adapter still accepts `input_text` parts only, so no Pi preset
-covers the image rows. The search presets, `opencode_hle_tools` and `opencode_search_full` are
+covers the image rows. The search presets, `pi_hle_tools` and `opencode_search_full` are
 selectable with `--benchmark` but, exactly like `hle/opencode_search` and `hle/pi_search`, do not
 appear in `gym list benchmarks` because they extend another preset without redeclaring the dataset;
-`hle_diamond/opencode_reference` restates it (its header says why) and is listed.
+`hle_diamond/opencode_reference` and `hle_diamond/opencode_hle_tools` restate it and are listed.
 
 Dropped at prepare time: `rationale`, `author_name`, `canary`, `image_preview`, `rationale_image`.
 The `image` data URI appears only inside the materialized `input_image` block of the default set and
@@ -140,12 +140,15 @@ and Pi build their own model calls inside the sandbox (a model-call capture of t
 showed no `reasoning_effort`, so the gateway default, medium, applied). The presets therefore carry
 each harness's own knob:
 
-- `opencode.yaml` (inherited by `opencode_search.yaml`, `opencode_hle_tools.yaml`, `opencode_full.yaml`
+- `opencode.yaml` (inherited by `opencode_search.yaml`, `opencode_full.yaml`
   and `opencode_search_full.yaml`):
   `opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort: high`, which
   OpenCode 1.17.11 maps to `reasoning_effort: high` in its chat-completions body (verified in a
   capture). Override per run with
   `++hle_diamond_opencode_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>`.
+- `opencode_hle_tools.yaml` uses `opencode_agent` with `sandbox_reasoning_effort: high`, which sets
+  the same model option on the session path. Override with
+  `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.sandbox_reasoning_effort=<level>`.
 - `pi.yaml` (inherited by `pi_search.yaml`): `thinking: high`, passed to Pi as `--thinking high`
   (Pi's levels: `off, minimal, low, medium, high, xhigh, max`). **Caveat:** the Pi adapter registers
   its provider with `compat.supportsReasoningEffort: false`, and Pi's `openai-completions` path emits
@@ -383,7 +386,7 @@ multipleChoice):
   answering "None" on them is right, so an `Answer: None` control over the whole set has a floor of
   about 11/1000, and the two false positives of the 100-row control were two of these rows. The
   carried `answer_type` and `uuid` let you separate them.
-- On the sandboxed presets (every OpenCode and Pi preset) the aggregate carries
+- On the presets using `opencode_sandboxed_agent` or `pi_sandboxed_agent`, the aggregate carries
   neither the partition slices nor `judgement_parsing_issue_rate`: the adapters' inherited
   `aggregate_metrics` never calls the judge resources server's `compute_metrics`. The rollouts carry
   `partition` and `judge_evaluations`, so compute both post hoc (Reading sandboxed results); the
@@ -616,6 +619,10 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   host's network namespace). Reference preset below records the run.
 
 ### Reading sandboxed results
+
+The notes below describe the older `opencode_sandboxed_agent` and `pi_sandboxed_agent` presets.
+`opencode_hle_tools` and `pi_hle_tools` use agent sessions instead: their Environment Server forwards
+aggregation to the HLE judge, and their response and agent observations carry execution status.
 
 - `response.status` is `null` on sandboxed rows (the adapter synthesises the response) unless the
   output limit was hit, when the adapter sets `incomplete` with
@@ -907,12 +914,46 @@ at tag `v1.17.11` (`packages/opencode/src/cli/cmd/run.ts`, `session/prompt.ts`, 
   keeps text parts only) and the harness transcript under the artifacts directory keeps the synthetic
   Read-tool text; the model-call capture is where the `image_url` part is visible.
 
-### Upstream web tools (`opencode_hle_tools`)
+### Upstream web tools (`opencode_hle_tools`, `pi_hle_tools`)
 
-`hle_diamond/opencode_hle_tools` replaces the Tavily search and page tools of `opencode_search` with
+`hle_diamond/opencode_hle_tools` and `hle_diamond/pi_hle_tools` use `opencode_agent` and `pi_agent`
+respectively, with
 [`resources_servers/hle_web_tools`](../../resources_servers/hle_web_tools/README.md), a tool server
 that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
-`22ed3074b1e7b134bcbc09028d0ba320839b0655`) and is the only tool server of the preset:
+`22ed3074b1e7b134bcbc09028d0ba320839b0655`) and is the only tool server of each preset.
+
+The `single_agent_turn_legacy` Environment Server adapts the existing flat dataset rows to agent
+sessions. It seeds the HLE judge and `hle_tools` with the task, gives the agent the required MCP
+grant, runs the agent, grades with the HLE judge, and closes both resources sessions and the agent
+session. The judge grants no direct HTTP tools (`resources_tool_transports: []`). The Pi preset
+uses Gym's agent composition to replace only the harness; the dataset, tool-session ownership,
+blocklist and grading stay the same.
+
+These presets do not call either deprecated sandboxed agent's `/run`. They use the session
+adapters' output limits, compaction and failure reporting; the earlier pilot below does not
+establish score parity after this migration. OpenCode still denies `webfetch`, `websearch` and
+`task`, and requests high reasoning effort. Pi keeps `thinking: high` and the effort-transmission
+limitation described above.
+
+For restricted runs, prepare the offline runtime in the selected image before starting Gym:
+
+- OpenCode: set `OPENCODE_SANDBOX_IMAGE`. The preset pins `/usr/local/bin/opencode` to the binary
+  in `offline_science_image/Dockerfile`. Also set `OPENCODE_PLUGIN_DEPENDENCIES_PATH` to the
+  sandbox path of the plugin-dependency archive and `OPENCODE_PLUGIN_DEPENDENCIES_SHA256` to its
+  digest, following [OpenCode's offline bundle instructions](../../responses_api_agents/opencode_agent/README.md#pinned-offline-runtime-bundle).
+  The unextended science image does not include that archive. Keep ripgrep installed in the image.
+- Pi: set `PI_SANDBOX_IMAGE` and `PI_SANDBOX_RUNTIME_DIR` to a complete Pi 0.85.1 runtime inside
+  that image, prepared with [Pi's runtime installer](../../responses_api_agents/pi_agent/README.md#runtime-and-model-requirements).
+- Both need `TAVILY_API_KEY` in the environment of the process that starts the servers.
+
+Select `--benchmark hle_diamond/opencode_hle_tools` or `--benchmark hle_diamond/pi_hle_tools`.
+For local Docker smoke tests, compose `hle_tools_docker_local.yaml` after the preset using
+`'+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/hle_tools_docker_local.yaml]'`.
+Use this override instead of `sandbox_docker_local.yaml`, which targets the older harnesses.
+It keeps MCP tools but removes egress restrictions and tells the model so; label those runs
+"local Docker; egress not restricted; comparison infrastructure only".
+
+The web tools provide:
 
 - Exactly two tools over MCP, `web_search(query)` (URL, title and snippet of at most 20 results after
   filtering) and `web_fetch(url)` (main content as Markdown, capped at 60,000 characters with a
@@ -955,7 +996,7 @@ should state all three:
 Everything else that departs from upstream in this section (harness, sandbox image and Python version,
 text rows only, effort transmission, and on the Docker provider the open egress) still applies.
 
-Pilot evidence (2026-10-26, 5 text rows, GPT-6 Astra, judge o3-mini, local Docker with host
+Historical pilot with `opencode_sandboxed_agent` (2026-10-26, 5 text rows, GPT-6 Astra, judge o3-mini, local Docker with host
 networking and `++use_absolute_ip=false`, egress unrestricted; comparison infrastructure only): exit 0,
 5/5 rows scored (3 correct), 4/5 rows made tool calls, among them two `web_search` calls that returned
 20 and 16 results with no Tavily error. All 14 captured OpenCode requests carried
@@ -964,9 +1005,15 @@ tools next to OpenCode's native file and shell tools. A manual `web_search` thro
 endpoint, in a session seeded with a real question and quoting ten consecutive words of it, was
 refused with the span message and logged as
 `family=question_span rule='8 consecutive words of the question' where=query subject='8 words'`; a
-manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. Run it with the
-Quickstart's Docker recipe, `--benchmark hle_diamond/opencode_hle_tools` and `TAVILY_API_KEY`
-exported in the shell that starts the servers.
+manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. This pilot predates
+the session-harness migration; use the setup above for the current presets.
+
+Migration smoke (2026-11-10, workstation Docker with unrestricted egress): one synthetic validation
+question per preset, using `nvidia/nemotron-3.5-super-vl-120b-a12b` for both policy and HLE-format
+grading, and a deterministic Tavily API fixture. Both `opencode_agent` and `pi_agent` called
+`web_search` and `web_fetch`, returned the fixture's code, received reward 1, and removed their
+containers on cleanup. This checks session orchestration, tool access and grading, not HLE accuracy,
+live Tavily behavior or restricted-network operation.
 
 ### Search exclusions
 
