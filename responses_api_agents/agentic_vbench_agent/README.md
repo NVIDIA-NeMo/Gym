@@ -19,3 +19,7 @@ remote Podman) and judge credentials. Module map:
 | `hub_judge.py` | Optional Repurpose rubric judge over the NVIDIA Inference Hub |
 
 Tests: `gym env test +entrypoint=responses_api_agents/agentic_vbench_agent`.
+
+For running the tasks with other session harnesses through Gym's `harbor` environment server, see
+[`environments/harbor/agentic_vbench/`](../../environments/harbor/agentic_vbench/README.md); `benchmarks/agentic_vbench/prepare_harbor_env.py`
+reuses this agent's `stage_*` task adjustments so both paths grade alike.

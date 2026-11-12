@@ -87,3 +87,23 @@ report a subset or a single-seed result as the benchmark score.
 Avg is the unweighted mean of the four family means in percent; ± is the population standard
 deviation across the three seeds; failed rollouts score 0. Measured through NVIDIA Eval Factory
 on an internal Slurm cluster with this agent (2026-10).
+
+## Multi-harness: the Harbor path
+
+The same 100 pinned tasks also run as plain Harbor task folders through Gym's generic
+[`harbor` environment server](../../environment_servers/harbor/README.md), where Gym seeds each task's image as a
+sandbox, a sandboxed session harness (`opencode_agent` today) works on the clips inside it, and the task's own
+`tests/test.sh` writes the reward. That is the harness-swappable path for evaluation and for NeMo-RL training through
+the Environment Server; this adapter stays the published baseline (Harbor's own runtime with OpenCode 1.14.39) and
+the training variant with token capture. The committed entry is
+[`environments/harbor/agentic_vbench/`](../../environments/harbor/agentic_vbench/README.md):
+
+```sh
+python -m benchmarks.agentic_vbench.prepare_harbor_env
+gym dataset validate agentic_vbench --sandbox docker
+gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
+  --config environments/harbor/agentic_vbench/harbor_sandbox.yaml --model-type openai_model --model <model> ...
+```
+
+`prepare_harbor_env.py` applies the same per-task adjustments this adapter applies to a trial (Hub judge protocol,
+assembly judge guard, longer golden-asset retries) and records them under the entry's `.records/`.
