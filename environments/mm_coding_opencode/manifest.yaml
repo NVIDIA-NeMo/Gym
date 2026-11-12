@@ -1,0 +1,28 @@
+name: mm_coding_opencode
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: Opencode visual coding with resource-owned task sandboxes and independent
+  quality grading.
+modality: image,text
+licensing: Apache-2.0
+authors:
+- Fuxiao Liu
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: mm_coding_training
+agent_server: opencode_agent
+model_server: policy_model
+prompt_source: prepared
+dataset_owner: mm_coding_opencode_resources
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/mm_coding_opencode/data/example.jsonl
+  num_repeats: 1

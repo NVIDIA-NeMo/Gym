@@ -1,0 +1,25 @@
+name: mm_coding_single
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: coding
+description: Single-answer training for Chart2Code, MMSVG Img2SVG/Text2SVG, Image2Struct LaTeX and Design2Code.
+modality: image,text
+licensing: Apache-2.0
+authors:
+- Fuxiao Liu
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: mm_coding_training
+agent_server: simple_agent
+model_server: policy_model
+prompt_source: prepared
+dataset_owner: mm_coding_training
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/mm_coding_training/data/example.jsonl
+  num_repeats: 1
