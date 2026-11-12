@@ -34,8 +34,9 @@ The reward is 1.0 when every criterion passes, else 0.0 (the benchmark metric, a
 The criteria are the entries the judge returns: nothing splits the golden answer into parts beforehand.
 
 The grade is recorded for ``gym eval submit`` (grading path A): the judge call and its parse run inside
-``observe_llm_judge_grading``, and ``record_parsed_judge_verdict()`` marks a reply once it parses. A row that
-needed a parse retry keeps an unknown grading outcome, since its first reply produced no verdict.
+``observe_llm_judge_grading``, and ``record_parsed_judge_verdict()`` marks a reply once it parses. A reply that
+does not parse and is asked again is marked with ``record_rejected_judge_reply()``, so a row that needed a parse
+retry still completes its one grading.
 
 Two deliberate divergences from upstream, as in ``gdp_pdf``: an empty answer scores 0 without a judge call;
 and output that stays unparseable raises ``JudgeError`` for the whole row (upstream marks it "unscored"), so
@@ -65,6 +66,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -88,7 +90,13 @@ from nemo_gym.server_runtime import (
     reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
+from nemo_gym.verification import (
+    JudgeError,
+    VerifierFixture,
+    call_judge,
+    record_parsed_judge_verdict,
+    record_rejected_judge_reply,
+)
 from resources_servers.chartography import scorer
 from resources_servers.chartography.verifier_fixture import create_chartography_server, invoke_chartography
 
@@ -334,6 +342,12 @@ class ChartographyResourcesServer(SimpleResourcesServer):
             result.failure_reason = "verifier_metadata needs a non-empty prompt and golden_answer"
             return result
 
+        # The vLLM model server answers a context-window rejection with an empty message and this flag: a final 0.
+        if (body.response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true":
+            result.failure_kind = MODEL_CONTEXT_LIMIT
+            result.failure_reason = "the policy model rejected the prompt for its context window"
+            return result
+
         if self.config.score_unfinished_as_zero and body.response.status != "completed":
             return result
         generated = extract_final_answer(body.response)
@@ -388,6 +402,9 @@ class ChartographyResourcesServer(SimpleResourcesServer):
                 verdicts = scorer.parse_verdict(raw)
             except (scorer.ParseError, IndexError, AttributeError) as e:
                 last_error = e
+                if attempt < cfg.judge_max_attempts:
+                    # Asked again: the reply that replaces this one carries the verdict, so the grading can complete.
+                    record_rejected_judge_reply()
                 continue
             record_parsed_judge_verdict()
             return verdicts, raw, attempt

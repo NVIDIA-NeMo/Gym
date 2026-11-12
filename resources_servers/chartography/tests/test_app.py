@@ -28,6 +28,7 @@ from pytest import fixture, raises
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -283,6 +284,15 @@ class TestVerify:
         assert result.reward == 0.0 and mock.await_count == 0 and not result.mask_sample
 
     @pytest.mark.asyncio
+    async def test_context_rejection_is_a_typed_final_zero(self, server: ChartographyResourcesServer) -> None:
+        mock = _mock_judge(server, _judge_content(1))
+        overflow = _request([_assistant_msg("")])
+        overflow.response.metadata = {"nemo_gym_context_window_exceeded": "true"}
+        result = await server.verify(verify_http_request(), overflow)
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, MODEL_CONTEXT_LIMIT)
+        assert mock.await_count == 0
+
+    @pytest.mark.asyncio
     async def test_parse_failure_is_retried(self, server: ChartographyResourcesServer) -> None:
         mock = _mock_judge(server, "not json", _judge_content(1))
         result = await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
@@ -352,11 +362,12 @@ class TestGradingRecord:
         assert operation.result_binding_sha256 == grading_result_binding(result)
 
     @pytest.mark.asyncio
-    async def test_a_parse_retry_leaves_the_grading_unknown(self, server: ChartographyResourcesServer) -> None:
+    async def test_a_parse_retry_completes_the_grading(self, server: ChartographyResourcesServer) -> None:
         _mock_judge(server, "not json", _judge_content(1))
         result, operations = await self._verify(server, _request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0
-        assert [(o.outcome, len(o.dependencies)) for o in operations] == [("unknown", 2)]
+        # The unparsed reply is rejected before the re-ask, so the one grading completes and names both judge calls.
+        assert [(o.outcome, len(o.dependencies)) for o in operations] == [("completed", 2)]
 
     @pytest.mark.asyncio
     async def test_unparseable_output_fails_the_grading(self, server: ChartographyResourcesServer) -> None:
