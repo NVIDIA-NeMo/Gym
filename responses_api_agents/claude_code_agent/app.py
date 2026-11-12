@@ -129,6 +129,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
     disallowed_tools: Optional[str] = None
+    tools: Optional[str] = None
+    session_name: Optional[str] = None
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
@@ -141,7 +143,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
     bare: bool = True
     mcp_config: Optional[str] = None
-    settings: Optional[str] = None
+    settings: str | dict[str, Any] | None = None
 
     # Used only when an episode does not supply a borrowed SandboxAccess.
     sandbox_provider: str | None = None
@@ -242,8 +244,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
 
-        The base settings disable telemetry/attribution. When ``config.settings`` points at a
-        JSON file, its contents are layered on top: top-level keys override, and the ``env`` block
+        The base settings disable telemetry/attribution. ``config.settings`` accepts a JSON file
+        path or an inline mapping: top-level keys override, and the ``env`` block
         is shallow-merged so the telemetry defaults are preserved unless explicitly overridden.
         """
         settings: dict[str, Any] = {
@@ -254,7 +256,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             }
         }
         if self.config.settings:
-            user_settings = json.loads(Path(self.config.settings).expanduser().read_text())
+            user_settings = self.config.settings
+            if isinstance(user_settings, str):
+                user_settings = json.loads(Path(user_settings).expanduser().read_text())
             user_env = user_settings.get("env") or {}
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
         return settings
@@ -325,6 +329,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--allowedTools", self.config.allowed_tools]
         if self.config.disallowed_tools:
             cmd += ["--disallowedTools", self.config.disallowed_tools]
+        if self.config.tools is not None:
+            cmd += ["--tools", self.config.tools]
+        if self.config.session_name:
+            cmd += ["--name", self.config.session_name]
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:

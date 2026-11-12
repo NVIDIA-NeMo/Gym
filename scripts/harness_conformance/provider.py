@@ -34,7 +34,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import call_judge
 
-from .messages import is_title_request, messages_response
+from .messages import messages_response
 from .scenarios import Scenario
 
 
@@ -62,7 +62,6 @@ class Probe:
     responses: list[dict] | None = None
     final_responses: int = 1
     attempts: list[dict] = field(default_factory=list)
-    auxiliary_calls: list[dict] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
@@ -86,7 +85,6 @@ class Probe:
         """Persist independent observations even if collection fails."""
         witness = {
             "attempts": self.attempts,
-            "auxiliary_calls": self.auxiliary_calls,
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
@@ -259,33 +257,6 @@ class Probe:
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()
         messages_api = request.url.path.endswith("/messages")
-        if messages_api and is_title_request(body):
-            # Titles do not consume task replies or the prescribed task failures,
-            # but remain in the witness and every canonical exchange comparison.
-            payload = messages_response(
-                body["model"],
-                f"resp_{uuid4().hex}",
-                [
-                    {
-                        "type": "message",
-                        "id": f"msg_{uuid4().hex}",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [
-                            {"type": "output_text", "text": '{"title":"Conformance check"}', "annotations": []}
-                        ],
-                    }
-                ],
-                usage=self.scenario.usage,
-                index=len(self.auxiliary_calls),
-            )
-            self.auxiliary_calls.append({"request": body, "response": payload, "status_code": 200})
-            self.save()
-            if body.get("stream"):
-                return StreamingResponse(
-                    AnthropicConverter().anthropic_response_to_sse(payload), media_type="text/event-stream"
-                )
-            return JSONResponse(payload)
         protocol_body = (
             AnthropicConverter().anthropic_request_to_responses(body).model_dump(mode="json", exclude_none=True)
             if messages_api

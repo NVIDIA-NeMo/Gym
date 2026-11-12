@@ -136,6 +136,8 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
                 "timeout": int(timeout),
                 "max_turns": 6,
                 "allowed_tools": "Bash",
+                "tools": "Bash",
+                "session_name": "Conformance check",
                 "thinking": "disabled",
             },
         },
@@ -287,7 +289,28 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 ],
             },
         },
-        "claude_code": {"harness_overrides": {"max_turns": steps}},
+        "claude_code": {
+            "harness_overrides": {
+                "max_turns": steps,
+                "settings": {
+                    "autoCompactWindow": 100000,
+                    "autoMemoryEnabled": False,
+                    "promptSuggestionEnabled": False,
+                    "env": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096"},
+                },
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 90000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
         "miniswe_sandboxed": {"harness_overrides": {"harness": {"step_limit": steps}}},
         "terminus_2_sandboxed": {
             "harness_overrides": {

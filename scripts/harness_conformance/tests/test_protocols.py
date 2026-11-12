@@ -62,28 +62,6 @@ def test_messages_protocol_keeps_raw_exchanges_and_executes_tools(tmp_path, stre
         assert all("usage" not in c["response"] for c in captures)
 
 
-def test_auxiliary_title_does_not_consume_retry_sequence_but_is_captured(tmp_path):
-    probe = Probe(SCENARIOS_BY_NAME["retry_429"], tmp_path, harness="claude_code")
-    title = {
-        "model": "probe",
-        "messages": [],
-        "tools": [],
-        "stream": True,
-        "output_config": {"format": {"type": "json_schema", "schema": {"properties": {"title": {"type": "string"}}}}},
-    }
-    policy = {"model": "probe", "messages": [], "tools": [BASH]}
-    with TestClient(probe.model_app()) as client:
-        assert client.post("/ng-rollout/0-0/v1/messages", json=title).status_code == 200
-        assert client.post("/ng-rollout/0-0/v1/messages", json=policy).status_code == 429
-        assert client.post("/ng-rollout/0-0/v1/messages", json=policy).status_code == 429
-        assert client.post("/ng-rollout/0-0/v1/messages", json=policy).status_code == 200
-    witness = json.loads((tmp_path / "witness.json").read_text())
-    assert len(witness["auxiliary_calls"]) == 1
-    assert len(witness["attempts"]) == 3
-    assert len((tmp_path / "capture/0-0.capture.jsonl").read_text().splitlines()) == 4
-    assert not probe.finished and not probe.violations
-
-
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure"])
 @pytest.mark.parametrize("stdout_visible", [False, True])
 def test_terminus_requires_stdout_not_just_echoed_keystrokes(tmp_path, scenario_name, stdout_visible):

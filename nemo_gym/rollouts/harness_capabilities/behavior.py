@@ -369,7 +369,7 @@ def inspect_behavior(
         results.dump()
         + model_checks(
             record,
-            attempts + judges + (witness or {}).get("auxiliary_calls", []),
+            attempts + judges,
             fingerprint=fingerprint,
             available=available,
         )
