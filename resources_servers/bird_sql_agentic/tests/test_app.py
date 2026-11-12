@@ -133,16 +133,28 @@ class TestCheckSqlAllowed:
 
 class TestFormatRows:
     def test_truncates_rows_and_reports_total(self) -> None:
-        # TODO(Sally): write this test.
-        # Call format_rows(['n'], three rows, total_rows=50, max_rows=3, max_cell_chars=100).
-        # Check rows == [[0], [1], [2]], total_rows == 50, truncated is True, error is None.
-        pytest.skip("TODO: write this test")
+        out = format_rows(
+            ["n"],
+            [(0,), (1,), (2,)],
+            total_rows=50,
+            max_rows=3,
+            max_cell_chars=100,
+        )
+        assert out["rows"] == [[0], [1], [2]]
+        assert out["total_rows"] == 50
+        assert out["truncated"] is True
+        assert out["error"] is None
 
     def test_shortens_long_cells(self) -> None:
-        # TODO(Sally): write this test.
-        # A single cell of 'x' * 150 with max_cell_chars=100 should come back as 'x' * 100 + '...'.
-        # And truncated should be False (only 1 row).
-        pytest.skip("TODO: write this test")
+        out = format_rows(
+            ["n"],
+            [("x" * 150,)],
+            total_rows=1,
+            max_rows=3,
+            max_cell_chars=100,
+        )
+        assert out["rows"] == [["x" * 100 + "..."]]
+        assert out["truncated"] is False
 
 
 class TestRunReadonlyQuery:
@@ -154,10 +166,10 @@ class TestRunReadonlyQuery:
         assert out["error"] is None
 
     def test_truncates_large_results(self, db_path) -> None:
-        # TODO(Sally): write this test.
-        # The fixture's `numbers` table has 50 rows. Use _run(db_path, ..., max_rows=20).
-        # Check you get 20 rows, total_rows == 50, truncated is True.
-        pytest.skip("TODO: write this test")
+        out = _run(db_path, "SELECT * FROM numbers", max_rows=20)
+        assert len(out["rows"]) == 20
+        assert out["total_rows"] == 50
+        assert out["truncated"] is True
 
     def test_sql_error_is_returned_not_raised(self, db_path) -> None:
         out = _run(db_path, "SELECT nme FROM students")
@@ -175,12 +187,13 @@ class TestRunReadonlyQuery:
         conn.close()
 
     def test_timeout_stops_long_query(self, db_path) -> None:
-        # TODO(Sally): write this test.
-        # This query never ends on its own:
-        #   "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT COUNT(*) FROM c"
-        # Run it with timeout_s=0.5. Check the error mentions 'timed out',
-        # and that it returned in well under 5 seconds (use time.monotonic()).
-        pytest.skip("TODO: write this test")
+        # Recursive query with no stop condition: runs forever unless the timeout fires.
+        sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT COUNT(*) FROM c"
+        start = time.monotonic()
+        out = _run(db_path, sql, timeout_s=0.5)
+        elapsed = time.monotonic() - start
+        assert "timed out" in out["error"]
+        assert elapsed < 5
 
 
 # ---------------------------------------------------------------------------
