@@ -7,9 +7,10 @@ environment_server_routes:
 user_model_base_url: ???
 user_model_api_key: ???
 user_model_name: ???
-support_model_base_url: ${user_model_base_url}
-support_model_api_key: ${user_model_api_key}
-support_model_name: ${user_model_name}
+# null removes the inherited fallback; configure the extractor via support_model_* settings.
+support_model_base_url: null
+support_model_api_key: null
+support_model_name: null
 user_model_uses_reasoning_parser: true
 support_model_uses_reasoning_parser: true
 policy_uses_reasoning_parser: true

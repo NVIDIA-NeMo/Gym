@@ -12,11 +12,11 @@ from pathlib import Path
 
 
 DIMENSIONS = ("tactic", "tactic_kind", "strategy", "locale", "mode")
-# Five kinds of other mistake (scoring.OTHER_MISTAKE_KINDS) and samples with a model name nothing
-# recognizes (counted neither way); listed here so the report runs without UserSim installed.
+CORRECTNESS_METRICS = ("correct_developer", "correct_model")
+# Keep metric names here so reporting does not need to import the UserSim-dependent scorer.
 METRICS = (
     "passed",
-    "correct_identity",
+    *CORRECTNESS_METRICS,
     "false_attribution",
     "other_mistake",
     "contradiction",
@@ -26,17 +26,28 @@ METRICS = (
     "uncertain",
     "unrecognized_name",
 )
-# TODO: use the row's identity_asks_identity once Gym pins NVIDIA-NeMo/UserSim#137.
-# UserSim openings that do not ask who the model is ("What is your knowledge cutoff?"). They test
-# unprompted false attribution, so correct identity is neither required nor rated on them.
+# TODO: Replace this list if UserSim labels whether each opening asks for the developer or model identity.
+# UserSim openings that do not ask who the model is ("What is your knowledge cutoff?").
+# Identity disclosure is optional, but any identity claims must still be correct.
 OPENINGS_NOT_ASKING_IDENTITY = frozenset(
     {"indirect_knowledge", "indirect_version", "indirect_open_source", "human_or_machine"}
 )
 
 
-# A policy failure (the model broke the episode, e.g. called a disabled tool) scores 0 in Gym
-# and has no claims to judge: it fails these rates and is left out of the others.
-FAILED_BY_POLICY_FAILURE = ("passed", "correct_identity")
+# A policy failure (e.g. a disabled-tool call) has no scoring result: count it as 0 in
+# pass/correctness rates and exclude it from mistake rates. A graded reply with no identity
+# claim is different: it has 0 correctness but can pass an indirect question.
+FAILED_BY_POLICY_FAILURE = ("passed", *CORRECTNESS_METRICS)
+
+
+def validate_correctness_metrics(outcome: dict) -> None:
+    """Reject incomplete scoring results instead of silently reporting zero correctness."""
+    missing = [metric for metric in CORRECTNESS_METRICS if metric not in (outcome.get("metrics") or {})]
+    if missing:
+        raise ValueError(
+            f"Missing correctness metrics: {', '.join(missing)}. "
+            "Rescore stored rollouts with python -m benchmarks.model_identity.scoring <rollouts.jsonl>."
+        )
 
 
 def _summarize(records: list[dict]) -> dict:
@@ -52,9 +63,6 @@ def _summarize(records: list[dict]) -> dict:
 
     def rate(metric: str) -> float | None:
         pool = scored + failed if metric in FAILED_BY_POLICY_FAILURE else scored
-        if metric == "correct_identity":
-            pool = [r for r in pool if r["identity_asked"]]
-        # Rollouts graded before a kind of mistake existed lack it; count them as not having it.
         return (
             sum(r["metrics"].get(metric, 0.0) for r in pool if r["status"] == "scored") / len(pool) if pool else None
         )
@@ -150,7 +158,6 @@ def build_report(
                 "task_id": task_id,
                 "repeat": repeat,
                 "status": "missing",
-                "identity_asked": task.get("identity_tactic_id") not in OPENINGS_NOT_ASKING_IDENTITY,
             }
             if row is not None:
                 verification = row.get("verification") or {}
@@ -166,6 +173,7 @@ def build_report(
                 elif data.get("scorer_state") != "ok" or not outcome:
                     record["status"] = "policy_failure"
                 else:
+                    validate_correctness_metrics(outcome)
                     if expected_identity is not None and outcome.get("expected") != expected_identity:
                         raise ValueError(
                             f"Rollout {task_id!r} was graded against {outcome.get('expected')}, "
@@ -179,7 +187,6 @@ def build_report(
                         metrics=outcome["metrics"],
                         false_attributions=outcome["false_attributions"],
                         other_mistakes=outcome["other_mistakes"],
-                        # Graded before unrecognized names were listed: none recorded.
                         unrecognized_names=outcome.get("unrecognized_names") or [],
                     )
             records.append(record)
@@ -205,7 +212,7 @@ def build_report(
             for r in records
             for found in r.get("other_mistakes") or []
         ],
-        # Model names nothing recognizes, which count neither way, with their quotes to check.
+        # Model names outside UserSim's vocabulary, with their quotes to check.
         "unrecognized_names": [
             {"task_id": r["task_id"], "repeat": r["repeat"], **found}
             for r in records
@@ -244,7 +251,8 @@ def _per_row(records: list[dict], num_repeats: int) -> dict:
 
 
 def _load(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    with path.open() as source:
+        return [json.loads(line) for line in source if line.strip()]
 
 
 def main() -> None:

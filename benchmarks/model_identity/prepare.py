@@ -19,6 +19,7 @@ import sys
 import tempfile
 from collections import Counter
 from contextlib import contextmanager
+from itertools import cycle
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,7 +27,7 @@ import yaml
 
 from benchmarks.model_identity.report import DIMENSIONS, OPENINGS_NOT_ASKING_IDENTITY
 from environments.nemo_user_sim.prepare import ENVIRONMENT_DIR as PREPARE_PROJECT
-from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_SHA256, NEMOTRON_PERSONAS_VERSION, USERSIM_REVISION
+from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_SHA256, NEMOTRON_PERSONAS_VERSIONS, USERSIM_REVISION
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -112,8 +113,8 @@ def _write_spec(
 ) -> None:
     """Layer the expected identity over UserSim's packaged spec, keeping its tactics and strategies.
 
-    ``expected_lineage`` lists the developers whose base model the evaluated model is built on
-    (Meta for a Llama-based Nemotron), so a reply naming them as its base is not a false attribution.
+    ``expected_lineage`` lists the developers whose base model the evaluated model is built on,
+    so a reply naming them as its base is not a false attribution.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     spec = {
@@ -122,8 +123,10 @@ def _write_spec(
         "bank_id": "model_identity",
         "bank_version": VERSION,
         "placeholder": True,
-        # UserSim picks the expected identity by matching the evaluated model's name against `match`.
-        # "*" matches any name, so every endpoint is graded as Nemotron, whatever it is called.
+        # Endpoint model names can be arbitrary (e.g. "checkpoint-123"); "*" maps any name
+        # to the configured expected identity. UserSim also applies this rule to the judge's
+        # developer lookup, which scoring.py corrects when checking judge independence.
+        # TODO: Replace "*" if UserSim can set the tested model's expected identity without affecting the judge.
         "expected_identities": [
             {
                 "match": "*",
@@ -167,25 +170,41 @@ def _cells(
     return cells
 
 
-def _personas(*, seed: int, count: int, synthetic: bool) -> list[dict]:
-    """``count`` distinct en_US personas in a seeded random order (one synthetic persona for tests)."""
+def _check_persona_assets(locales: list[str], *, synthetic: bool) -> None:
+    """Reject unsupported locales and report every missing dataset before sampling."""
+    unsupported = [locale for locale in locales if locale not in NEMOTRON_PERSONAS_VERSIONS]
+    if unsupported:
+        raise ValueError(f"Unsupported persona locales: {', '.join(unsupported)}")
+    if synthetic:
+        return
+    from environments.nemo_user_sim.prepare import _managed_assets_path
+
+    datasets = _managed_assets_path() / "datasets"
+    missing = [locale for locale in locales if not (datasets / f"{locale}.parquet").is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Pinned personas are not cached for: {', '.join(missing)}. Run gym eval prepare "
+            "--config environments/nemo_user_sim/config.yaml "
+            f"'++prepare_script_args.locales=[{','.join(missing)}]' with NGC and user-model settings configured, "
+            "then retry model_identity preparation."
+        )
+
+
+def _personas(*, locale: str, seed: int, count: int, synthetic: bool) -> list[dict]:
+    """Sample the locale's personas in a seeded order (one synthetic persona for tests)."""
+    _check_persona_assets([locale], synthetic=synthetic)
     if synthetic:
         example = ROOT / "resources_servers/nemo_user_sim/data/example.jsonl"
         return [json.loads(example.read_text().splitlines()[0])["resolved_row"]["persona"]]
     import pyarrow.parquet as pq
 
-    # Honor the same cache settings as the canonical UserSim preparer.
     from environments.nemo_user_sim.prepare import _managed_assets_path
 
-    # TODO: sample from each row's own locale once Gym's UserSim preparer downloads every locale's personas.
-    path = _managed_assets_path() / "datasets/en_US.parquet"
-    if not path.is_file():
-        raise FileNotFoundError(
-            "Pinned personas are not cached. Run environments/nemo_user_sim/prepare.py "
-            "with NGC configured, then retry model_identity preparation."
+    path = _managed_assets_path() / "datasets" / f"{locale}.parquet"
+    if _digest(path) != NEMOTRON_PERSONAS_SHA256[locale]:
+        raise ValueError(
+            f"Persona asset does not match pinned Nemotron-Personas {locale} {NEMOTRON_PERSONAS_VERSIONS[locale]}"
         )
-    if _digest(path) != NEMOTRON_PERSONAS_SHA256:
-        raise ValueError(f"Persona asset does not match pinned Nemotron-Personas {NEMOTRON_PERSONAS_VERSION}")
     parquet = pq.ParquetFile(path)
     indices = sorted(
         random.Random(seed).sample(range(parquet.metadata.num_rows), min(count, parquet.metadata.num_rows))
@@ -235,10 +254,8 @@ def _build(
     expected_lineage: list[str] | None = None,
 ) -> dict:
     from usersim.engine.config import ConversationSimulatorConfig
-
-    # TODO: import from usersim.engine.probes.identity_disclosure.spec once Gym pins NVIDIA-NeMo/UserSim#124.
-    from usersim.engine.core.identity_spec import load_identity_spec, reset_identity_spec_cache
     from usersim.engine.external import construct_probe_episode
+    from usersim.engine.probes.identity_disclosure.spec import load_identity_spec, reset_identity_spec_cache
 
     settings = _settings(
         single_per_tactic=single_per_tactic,
@@ -261,9 +278,12 @@ def _build(
     spec = load_identity_spec(spec_path)
     if settings["locales"] is None:
         settings["locales"] = _written_locales(spec)
+    _check_persona_assets(settings["locales"], synthetic=synthetic)
     by_id = {tactic.id: tactic for tactic in spec.tactics}
-    # The report's list of openings that do not ask who the model is names UserSim tactic ids; a
-    # renamed or removed one would silently be graded as asking.
+    # The identity probe also tests indirect identity errors (e.g. knowledge-cutoff questions).
+    # These answers need not name the developer or model family, but any identity claims must be correct.
+    # Guard the list of these tactics: a renamed or removed id would silently require identity disclosure.
+    # TODO: Replace this list and guard if UserSim adds a flag indicating whether a tactic asks for identity.
     stale = sorted(OPENINGS_NOT_ASKING_IDENTITY - set(by_id))
     if stale:
         raise ValueError(f"OPENINGS_NOT_ASKING_IDENTITY names tactics UserSim no longer has: {stale}")
@@ -280,7 +300,10 @@ def _build(
         single_per_tactic=single_per_tactic,
         multi_per_strategy=multi_per_strategy,
     )
-    personas = _personas(seed=seed, count=len(cells), synthetic=synthetic)
+    personas = {
+        locale: cycle(_personas(locale=locale, seed=seed, count=count, synthetic=synthetic))
+        for locale, count in Counter(locale for locale, *_ in cells).items()
+    }
     models = {
         alias: SimpleNamespace(model_name=name)
         for alias, name in (
@@ -296,7 +319,7 @@ def _build(
     with _use_spec(spec_path), output.open("w") as destination:
         # The spec is cached per path; drop any earlier version of this one.
         reset_identity_spec_cache()
-        for number, (locale, tactic, strategy, index) in enumerate(cells):
+        for locale, tactic, strategy, index in cells:
             task_id = f"model-identity-v{VERSION}-{locale}-{tactic.id}-{strategy}-{index}"
             case = {
                 "tactic": tactic.id,
@@ -316,7 +339,7 @@ def _build(
             )
             episode = construct_probe_episode(
                 {
-                    "persona": personas[number % len(personas)],
+                    "persona": next(personas[locale]),
                     "probe_type": "identity_disclosure",
                     "identity_tactic_id": tactic.id,
                     "identity_strategy_id": strategy,
@@ -332,7 +355,7 @@ def _build(
             provenance = json.loads(row["usersim_provenance"])
             provenance.update(
                 code_sha=USERSIM_REVISION,
-                nemotron_personas_version="synthetic" if synthetic else NEMOTRON_PERSONAS_VERSION,
+                nemotron_personas_version="synthetic" if synthetic else NEMOTRON_PERSONAS_VERSIONS[locale],
             )
             row["usersim_provenance"] = json.dumps(provenance, sort_keys=True)
             # A flat row: Gym adds the dataset's taskset and passes the rest to UserSim as the task input.
@@ -363,8 +386,12 @@ def _build(
         "version": VERSION,
         "usersim_revision": USERSIM_REVISION,
         "usersim_spec": spec.version,
-        "personas_version": "synthetic" if synthetic else NEMOTRON_PERSONAS_VERSION,
-        "personas_sha256": None if synthetic else NEMOTRON_PERSONAS_SHA256,
+        "personas_versions": {
+            locale: "synthetic" if synthetic else NEMOTRON_PERSONAS_VERSIONS[locale] for locale in settings["locales"]
+        },
+        "personas_sha256": (
+            None if synthetic else {locale: NEMOTRON_PERSONAS_SHA256[locale] for locale in settings["locales"]}
+        ),
         "dataset_sha256": _digest(output),
         "spec_sha256": _digest(spec_path),
         "generator_sha256": _digest(Path(__file__)),
@@ -415,8 +442,7 @@ def prepare(
     a cell are samples of its answers rather than copies of one; None leaves one to the endpoint.
     `expected_model_aliases` lists other spellings that also count as the expected model.
     When omitted, it defaults to `DEFAULT_MODEL_ALIASES` for that model, if any.
-    `expected_lineage` lists UserSim developer ids whose base model the evaluated model is built on
-    (e.g. `["meta"]` for a Llama-based Nemotron).
+    `expected_lineage` lists UserSim developer ids whose base model the evaluated model is built on.
     """
     options = {
         "single_per_tactic": single_per_tactic,
@@ -459,7 +485,6 @@ def prepare(
                 "UV_PROJECT_ENVIRONMENT": str(Path(working_dir) / ".venv"),
                 "PYTHONPATH": str(ROOT),
                 "USERSIM_CODE_SHA": USERSIM_REVISION,
-                "USERSIM_NEMOTRON_PERSONAS_VERSION": NEMOTRON_PERSONAS_VERSION,
             },
             timeout=3600,
         )

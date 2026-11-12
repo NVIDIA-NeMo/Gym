@@ -31,9 +31,8 @@ from resources_servers.nemo_user_sim.episode_contracts import UserSimVerificatio
 )
 @pytest.mark.asyncio
 async def test_identity_reward_and_masking(monkeypatch, judgment, reward, masked):
-    source = Path(__file__).parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
+    source = Path(__file__).parents[1] / "data/example.jsonl"
     row = json.loads(source.read_text().splitlines()[0])["resolved_row"]
-    row["probe_type"] = "identity_disclosure"
     server = identity_app.ModelIdentityResourcesServer(
         config=UserSimResourcesServerConfig(
             host="127.0.0.1",
@@ -103,3 +102,70 @@ def test_identity_rates_reach_the_run_summary():
     )
     assert list(key)[: 1 + len(KEY_METRICS)] == ["mean/reward", *KEY_METRICS]
     assert "mean/uncertain" not in key
+
+
+def test_extractor_settings_do_not_fall_back_to_the_policy_or_simulator():
+    from omegaconf import OmegaConf
+
+    root = Path(__file__).parents[3]
+    config = OmegaConf.merge(
+        OmegaConf.load(root / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml"),
+        OmegaConf.load(root / "benchmarks/model_identity/config.yaml"),
+        {
+            "policy_base_url": "https://policy.example.invalid/v1",
+            "policy_api_key": "policy-key",
+            "policy_model_name": "tested-model",
+            "user_model_base_url": "https://simulator.example.invalid/v1",
+            "user_model_api_key": "simulator-key",
+            "user_model_name": "simulator-model",
+        },
+    )
+    extractor = config.support_model.responses_api_models.vllm_model
+    assert (extractor.base_url, extractor.api_key, extractor.model) == (None, None, None)
+    config.merge_with(
+        {
+            "support_model_base_url": "https://extractor.example.invalid/v1",
+            "support_model_api_key": "extractor-key",
+            "support_model_name": "extractor-model",
+        }
+    )
+    assert (extractor.base_url, extractor.api_key, extractor.model) == (
+        "https://extractor.example.invalid/v1",
+        "extractor-key",
+        "extractor-model",
+    )
+
+
+@pytest.mark.parametrize("missing", ["correct_developer", "correct_model"])
+def test_identity_metrics_reject_missing_correctness_metrics(missing):
+    metrics = {"correct_developer": 1, "correct_model": 1}
+    del metrics[missing]
+    row = {"verifier_data": {"scorer_result": {"identity_outcome": {"metrics": metrics}}}}
+    with pytest.raises(ValueError, match=rf"{missing}.*Rescore.*benchmarks.model_identity.scoring"):
+        identity_app.identity_metrics([[row]])
+
+
+def test_correct_developer_and_model_have_separate_averages():
+    rollouts = [
+        {
+            "verifier_data": {
+                "scorer_result": {
+                    "identity_outcome": {
+                        "identity_asked": True,
+                        "metrics": {
+                            "correct_developer": developer,
+                            "correct_model": model,
+                            "false_attribution": 0,
+                            "other_mistake": 0,
+                        },
+                    }
+                }
+            }
+        }
+        for developer, model in [(1, 0), (1, 1), (0, 0)]
+    ]
+    metrics = identity_app.identity_metrics([rollouts])
+    assert metrics["mean/correct_developer"] == pytest.approx(2 / 3)
+    assert metrics["mean/correct_model"] == pytest.approx(1 / 3)
+    assert "mean/correct_identity" not in metrics
+    assert not any("on_identity_openings" in key for key in metrics)

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import Request
 from usersim.taxonomy.eval_cell import scorer_state
 
+from benchmarks.model_identity.report import CORRECTNESS_METRICS, validate_correctness_metrics
 from benchmarks.model_identity.scoring import OTHER_MISTAKE_KINDS, score_model_identity
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, _ResourcesModelFacade
 from resources_servers.nemo_user_sim.episode_contracts import (
@@ -19,8 +20,8 @@ from resources_servers.nemo_user_sim.episode_contracts import (
 
 # The identity rates shown in Gym's run summary; the other-mistake kinds go to the full metrics only.
 KEY_METRICS = (
-    "mean/correct_identity",
-    "mean/correct_identity_on_identity_openings",
+    "mean/correct_developer",
+    "mean/correct_model",
     "mean/false_attribution",
     "mean/other_mistake",
 )
@@ -34,28 +35,26 @@ def _outcome(rollout: dict[str, Any]) -> dict[str, Any] | None:
 def identity_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
     """Identity rates over the unmasked rollouts, as report.py computes them.
 
-    A rollout without an identity outcome (a policy failure) fails correct identity and is left
-    out of the other rates. Correct identity on identity openings counts only rollouts whose
-    opening asks who the model is.
+    No identity claim means 0 correctness; indirect questions can still pass.
+    Missing scoring results count as 0 correctness and are excluded from mistake rates.
     """
     outcomes = [_outcome(rollout) for task in tasks for rollout in task]
     graded = [o for o in outcomes if o]
-    asked = [o for o in graded if o.get("identity_asked", True)]
+    for result in graded:
+        validate_correctness_metrics(result)
     if not outcomes:
         return {}
 
     def mean(metric: str, pool: list[dict[str, Any]], total: int | None = None) -> float | None:
         size = len(pool) if total is None else total
-        # Rollouts graded before a kind existed lack it; count them as not having it.
         return sum(o["metrics"].get(metric, 0.0) for o in pool) / size if size else None
 
     metrics = {
-        "mean/correct_identity": mean("correct_identity", graded, len(outcomes)),
-        "mean/correct_identity_on_identity_openings": mean("correct_identity", asked),
+        **{f"mean/{metric}": mean(metric, graded, len(outcomes)) for metric in CORRECTNESS_METRICS},
         "mean/false_attribution": mean("false_attribution", graded),
         "mean/other_mistake": mean("other_mistake", graded),
         **{f"mean/{kind}": mean(kind, graded) for kind in OTHER_MISTAKE_KINDS},
-        # Samples with a model name nothing recognizes, which counts neither way.
+        # Samples with a model name outside UserSim's vocabulary.
         "mean/unrecognized_name": mean("unrecognized_name", graded),
     }
     return {key: value for key, value in metrics.items() if value is not None}
