@@ -12,23 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from app import (
     EVAL_FUNCTIONS,
+    ORACLE_NOT_CONFIGURED,
     Ether0ResourcesServer,
+    Ether0ResourcesServerConfig,
     Ether0VerifyRequest,
 )
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_runtime import BaseResourcesServerConfig
-from resources_servers.ether0 import graders
+from nemo_gym.core.failure_kinds import VERIFIER_ERROR
+from resources_servers.ether0 import graders, local_oracles
 
 
 def _make_server() -> Ether0ResourcesServer:
-    config = BaseResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+    config = Ether0ResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="", local_oracles=False)
     return Ether0ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -229,3 +231,64 @@ class TestVerify:
         )
         result = await server.verify(req)
         assert result.reward == 1.0
+
+
+class TestOracleRows:
+    SOLUTION = "sol_eval!:!('scaffold', 'CC', '-3.0', 'increase')!:!oracle-solubility/scaffold"
+
+    @pytest.mark.parametrize("eval_function", sorted(local_oracles.ORACLE_EVAL_FUNCTIONS))
+    async def test_masked_when_no_oracle_is_configured(
+        self, eval_function: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(local_oracles.REMOTE_ORACLES_ENV_VAR, raising=False)
+        grader = MagicMock()
+        with patch.dict(EVAL_FUNCTIONS, {eval_function: grader}):
+            result = await _make_server().verify(
+                _make_request("<answer>CCO</answer>", f"{eval_function}!:!CCO!:!oracle-row", "oracle-row")
+            )
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, ORACLE_NOT_CONFIGURED)
+        grader.assert_not_called()
+
+    async def test_graded_when_a_remote_oracle_is_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(local_oracles.REMOTE_ORACLES_ENV_VAR, "http://example.invalid")
+        with (
+            patch.object(graders.rewards, "is_reasonable_molecule", return_value=True),
+            patch.object(graders.rewards, "fetch_solubility", return_value={"solubility": -3.0}),
+        ):
+            result = await _make_server().verify(
+                _make_request("<answer>CCO</answer>", self.SOLUTION, "oracle-solubility/scaffold")
+            )
+        assert (result.reward, result.mask_sample) == (1.0, False)
+
+    async def test_masked_when_the_oracle_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(local_oracles.REMOTE_ORACLES_ENV_VAR, "http://example.invalid")
+        with (
+            patch.object(graders.rewards, "is_reasonable_molecule", return_value=True),
+            patch.object(graders.rewards, "fetch_solubility", side_effect=local_oracles.OracleError("model failed")),
+        ):
+            result = await _make_server().verify(
+                _make_request("<answer>CCO</answer>", self.SOLUTION, "oracle-solubility/scaffold")
+            )
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
+        assert result.failure_reason == "model failed"
+
+    @pytest.mark.parametrize(("remote", "installs"), [(None, 1), ("http://example.invalid", 0)])
+    def test_local_oracles_are_installed_by_default_unless_a_remote_is_configured(
+        self, remote: str | None, installs: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(local_oracles.REMOTE_ORACLES_ENV_VAR, raising=False)
+        if remote:
+            monkeypatch.setenv(local_oracles.REMOTE_ORACLES_ENV_VAR, remote)
+        config = Ether0ResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            moltrans_model_path="/assets/model.pt",
+            zinc20_bloom_path="/assets/zinc20.bloom",
+        )
+        with patch.object(local_oracles, "install") as install:
+            Ether0ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert install.call_count == installs
+        if installs:
+            install.assert_called_once_with("/assets/model.pt", "/assets/zinc20.bloom")
