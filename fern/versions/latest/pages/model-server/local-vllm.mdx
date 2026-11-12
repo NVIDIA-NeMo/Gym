@@ -61,6 +61,24 @@ Two inherited fields are auto-populated by LocalVLLMModel after vLLM spawns and 
 - `base_url`: assigned to the URL of the vLLM process once it binds a port. Defaults to `[]`.
 - `api_key`: defaults to `"dummy"`. vLLM does not authenticate local connections.
 
+### Serve an external vLLM endpoint without Ray
+
+When vLLM already runs elsewhere, such as a judge pool your launcher starts, set `base_url` to that endpoint and `entrypoint: external_app.py`. That entrypoint launches no vLLM and does not use Ray, so Gym doesn't start or join a Ray cluster for it.
+It accepts the same keys as `app.py`, with `vllm_serve_kwargs` and `vllm_serve_env_vars` optional, so one config block can switch between a local launch and an external endpoint by changing `entrypoint` and `base_url`:
+
+```yaml
+judge_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: external_app.py
+      base_url: http://judge-pool:8000/v1
+      model: Qwen/Qwen3-235B-A22B-Instruct-2507
+      return_token_id_information: false
+      uses_reasoning_parser: false
+```
+
+`app.py` still accepts `base_url` and skips the local launch, but it joins Ray regardless, because Gym decides whether a server uses Ray from its entrypoint before reading the config.
+
 ### `vllm_serve_kwargs`
 
 Required keys (asserted at startup):
