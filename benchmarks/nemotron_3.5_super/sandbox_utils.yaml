@@ -13,11 +13,14 @@ swebench_multilingual_opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-deepswe_opencode_sandboxed_agent:
+# DeepSWE's agent sandbox has no internet access, so OpenCode runs the mounted binary instead of downloading one. The
+# digest is that of `package/bin/opencode` in npm's opencode-linux-x64@1.17.11 (the x86_64 glibc build); session setup
+# refuses any other file.
+deepswe_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+    opencode_agent:
+      sandbox_executable_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
 
 swebench_pro_opencode_sandboxed_agent:
   responses_api_agents:

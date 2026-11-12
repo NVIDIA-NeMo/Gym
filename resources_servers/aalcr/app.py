@@ -25,6 +25,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
@@ -253,3 +254,6 @@ def _validate_protocol_metadata(body: AALCRVerifyRequest, judge_protocol: JudgeP
 
 if __name__ == "__main__":
     AalcrResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AalcrResourcesServer.run_webserver()  # noqa: F401
