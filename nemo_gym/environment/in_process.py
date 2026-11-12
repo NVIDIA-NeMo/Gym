@@ -317,7 +317,8 @@ class TaskRunner:
     The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row, sends it
     through the agent's `/run`, or a materialized row through the environment server its taskset routes to, and
     returns the rollout's outcome. The running servers' configuration is read from the registry server once and shared
-    by every call. Concurrent calls in one event loop are supported.
+    by every call, flat or materialized, so build a new `TaskRunner` after the deployment's servers change.
+    Concurrent calls in one event loop are supported.
     """
 
     @experimental(once=True)
