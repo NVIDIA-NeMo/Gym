@@ -54,6 +54,9 @@ def scenario_count(scenarios: list[dict], *, tier: PriorityTier) -> str:
 
 def scenario_details(scenarios: list[dict]) -> str:
     lines = []
+    unsupported = [f"`{s['scenario']}`" for s in scenarios if s.get("unsupported_reason")]
+    if unsupported:
+        lines += ["**Declared unsupported (not run):** " + ", ".join(unsupported), ""]
     for tier in ("P0", "P1", "P2"):
         passing, not_passing = scenario_results(scenarios, tier=tier)
         if not passing and not not_passing:

@@ -112,16 +112,6 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
 
 
-def test_compaction_overrides_preserve_tool_timeout(tmp_path):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], tool_steps=9)
-    ports = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
-    config = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True, scenario=scenario)
-    agent = config["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]
-    assert agent["harness"] == {"step_limit": 13, "step_timeout_sec": 10}
-    ordinary = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True)
-    assert ordinary["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]["harness"]["step_limit"] == 6
-
-
 def test_session_runtime_does_not_require_host_cli(monkeypatch):
     from scripts.harness_conformance import episode
 
@@ -944,7 +934,7 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("gate_tier", ["P0", "P1"])
-def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained_episode, monkeypatch, gate_tier):
+def test_compaction_runs_or_declares_failure_at_its_own_priority(retained_episode, monkeypatch, gate_tier):
     from scripts.harness_conformance import runner
 
     source, _ = retained_episode
@@ -970,13 +960,29 @@ def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained
     summary, code = run_suite(
         harnesses=list(HARNESSES), scenarios=scenarios, output=source / "run", timeout=1, gate_tier=gate_tier
     )
-    assert set(launched) == {(h, s.name) for h in HARNESSES for s in scenarios}
+    unsupported = {"simple", "miniswe_sandboxed"}
+    assert set(launched) == {
+        (h, s.name) for h in HARNESSES for s in scenarios if h not in unsupported or s.name != "context_compaction"
+    }
     assert code == (0 if gate_tier == "P0" else 1)
-    for row in summary["harnesses"].values():
+    from scripts.harness_conformance.rendering import scenario_count, scenario_details
+
+    for harness, row in summary["harnesses"].items():
         assert row["verdict"] == ("fulfilled" if gate_tier == "P0" else "not_fulfilled")
         result = row["scenarios"][1]
-        assert result["p0_verdict"] == "fulfilled" and result["verdict"] == "not_fulfilled"
-        assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
+        assert result["verdict"] == "not_fulfilled"
+        if harness in unsupported:
+            assert result["exercised"] is False and result["execution"] == {"skipped": True}
+            assert result["model_attempts"] == 0 and result["evidence"] == {}
+            assert result["checks"][0]["id"] == "scenario.supported"
+            assert result["checks"][0]["status"] == "fail"
+            assert "does not implement compaction" in result["issues"][0]
+            assert scenario_count([result], tier="P0") == "—"
+            assert "0/1</Badge>" in scenario_count([result], tier="P1")
+            assert "Declared unsupported (not run)" in scenario_details([result])
+        else:
+            assert result["p0_verdict"] == "fulfilled"
+            assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
 
 
 def test_compaction_only_run_cannot_pass_an_empty_p0_gate(tmp_path):

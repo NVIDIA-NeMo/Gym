@@ -200,7 +200,7 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
     steps = scenario.tool_steps + 4
     context = {"context_window": 32768, "max_output_tokens": 8192}
     settings = {
-        "simple": {"harness_overrides": {"max_steps": steps}},
+        "simple": {"unsupported_reason": "Simple Agent does not implement compaction."},
         "opencode": {
             "harness_overrides": context,
             "probe_overrides": {
@@ -323,7 +323,7 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 ],
             },
         },
-        "miniswe_sandboxed": {"harness_overrides": {"harness": {"step_limit": steps}}},
+        "miniswe_sandboxed": {"unsupported_reason": "Mini-SWE does not implement compaction."},
         "terminus_2_sandboxed": {
             "harness_overrides": {
                 "max_turns": steps,
