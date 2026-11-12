@@ -1505,6 +1505,89 @@ async def test_background_submit_failure_is_not_replayed(
     assert commands.submits == 1
 
 
+def _sdk_transport_failure(*chain: BaseException) -> Exception:
+    """``chain`` (outermost first) wrapped the way the OpenSandbox SDK wraps its HTTP client's error."""
+    from opensandbox.exceptions import SandboxInternalException
+
+    for outer, inner in zip(chain, chain[1:]):
+        outer.__cause__ = inner
+    return SandboxInternalException("Network connectivity error", cause=chain[0])
+
+
+def _aiohttp_connect_timeout() -> list[BaseException]:
+    import aiohttp
+
+    os_error = TimeoutError(110, "Connection timed out")
+    connector = aiohttp.ClientConnectorError(SimpleNamespace(host="sandbox.invalid", port=80, ssl="default"), os_error)
+    return [httpx.ConnectError(str(connector)), connector, os_error]
+
+
+def _aiohttp_reset_after_send() -> list[BaseException]:
+    import aiohttp
+
+    client_error = aiohttp.ClientOSError(104, "Connection reset by peer")
+    return [httpx.ConnectError(str(client_error)), client_error, ConnectionResetError(104, "Connection reset by peer")]
+
+
+@pytest.mark.parametrize(
+    ("chain", "resent"),
+    [
+        pytest.param(lambda: [httpx.ConnectError("[Errno 110] Connection timed out")], True, id="connect"),
+        pytest.param(lambda: [httpx.ConnectTimeout("connect")], True, id="connect-timeout"),
+        pytest.param(lambda: [httpx.PoolTimeout("pool")], True, id="pool-timeout"),
+        pytest.param(_aiohttp_connect_timeout, True, id="aiohttp-connect"),
+        pytest.param(_aiohttp_reset_after_send, False, id="aiohttp-reset-after-send"),
+        pytest.param(lambda: [httpx.ReadTimeout("read")], False, id="read-timeout"),
+        pytest.param(lambda: [httpx.RemoteProtocolError("disconnected")], False, id="dropped"),
+    ],
+)
+async def test_background_submit_is_sent_again_only_when_it_never_left_the_client(
+    monkeypatch: pytest.MonkeyPatch, chain: Any, resent: bool
+) -> None:
+    class FakeCommands:
+        submits = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.submits += 1
+            if self.submits == 1:
+                raise _sdk_transport_failure(*chain())
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(running=False, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="done", cursor=None)
+
+    commands = FakeCommands()
+    provider, handle = _background_provider(monkeypatch, commands, retries=3, retry_delay_s=0, retry_max_delay_s=0)
+
+    if resent:
+        result = await provider.exec(handle, "bash solve.sh", timeout_s=5)
+        assert result.return_code == 0
+        assert commands.submits == 2
+    else:
+        with pytest.raises(NgFailureEvent):
+            await provider.exec(handle, "bash solve.sh", timeout_s=5)
+        assert commands.submits == 1
+
+
+async def test_unsent_submit_stops_at_the_operation_retry_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCommands:
+        submits = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.submits += 1
+            raise _sdk_transport_failure(httpx.ConnectError("[Errno 110] Connection timed out"))
+
+    commands = FakeCommands()
+    provider, handle = _background_provider(monkeypatch, commands, retries=2, retry_delay_s=0, retry_max_delay_s=0)
+
+    with raises_failure(PROVIDER_UNAVAILABLE):
+        await provider.exec(handle, "bash solve.sh", timeout_s=5)
+    assert commands.submits == 3
+
+
 async def test_background_signal_exit_near_deadline_keeps_unknown_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1524,6 +1607,113 @@ async def test_background_signal_exit_near_deadline_keeps_unknown_cause(
 
     result = await provider.exec(handle, "bash solve.sh", timeout_s=0.25)
 
+    assert (result.return_code, result.error_type) == (-1, None)
+    assert result.stderr == "signal: killed"
+
+
+class _DeadlineCommands:
+    """A background command that runs until it is interrupted, or for ``runs_s`` on its own."""
+
+    def __init__(self, *, runs_s: float = 60.0, interrupt_error: Exception | None = None) -> None:
+        self.runs_s = runs_s
+        self.interrupt_error = interrupt_error
+        self.interrupts: list[str] = []
+        self.opts: Any = None
+        self.killed = False
+
+    async def run(self, command: str, *, opts: Any) -> Any:
+        self.opts = opts
+        self.submitted = asyncio.get_running_loop().time()
+        return SimpleNamespace(id="exec-42")
+
+    async def interrupt(self, execution_id: str) -> None:
+        self.interrupts.append(execution_id)
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+        self.killed = True
+
+    async def get_command_status(self, execution_id: str) -> Any:
+        if self.killed:
+            return SimpleNamespace(running=False, exit_code=-1, error="signal: killed")
+        if asyncio.get_running_loop().time() - self.submitted < self.runs_s:
+            return SimpleNamespace(running=True, exit_code=None, error=None)
+        return SimpleNamespace(running=False, exit_code=-1, error="signal: killed")
+
+    async def get_background_command_logs(self, execution_id: str) -> Any:
+        return SimpleNamespace(content="partial output", cursor=None)
+
+
+# execd reports its own timeout kill only as a signal death, so Gym enforces the deadline and owns the outcome.
+async def test_background_command_running_at_gym_deadline_is_interrupted_and_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = _DeadlineCommands()
+    provider, handle = _background_provider(monkeypatch, commands, command_timeout_headroom_s=2.0)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.2)
+
+    assert commands.interrupts == ["exec-42"]
+    # execd's own timer is a backstop past Gym's deadline.
+    assert commands.opts.kwargs["timeout"] == timedelta(seconds=1.2)
+    assert (result.return_code, result.error_type) == (124, "timeout")
+    assert result.stdout == "partial output"
+    assert result.stderr == "signal: killed\nCommand timed out after 0.2s; Gym interrupted it"
+
+
+async def test_background_command_finishing_before_gym_deadline_is_not_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = _DeadlineCommands(runs_s=0.05)
+    provider, handle = _background_provider(monkeypatch, commands)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=5)
+
+    assert commands.interrupts == []
+    assert (result.return_code, result.error_type) == (-1, None)
+    assert result.stderr == "signal: killed"
+
+
+# A status outage that spans Gym's deadline keeps the polling cadence and backoff; it does not busy-poll.
+async def test_background_status_outage_across_gym_deadline_keeps_polling_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Backend503Error(Exception):
+        status_code = 503
+
+    class OutageCommands(_DeadlineCommands):
+        status_calls = 0
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls += 1
+            if asyncio.get_running_loop().time() - self.submitted >= 0.08:
+                raise Backend503Error("Get command status failed. Status code: 503")
+            return await super().get_command_status(execution_id)
+
+    commands = OutageCommands()
+    provider, handle = _background_provider(
+        monkeypatch,
+        commands,
+        command_timeout_headroom_s=0.5,
+        status_recovery_timeout_s=0.2,
+        retry_delay_s=0.01,
+    )
+
+    with pytest.raises(NgFailureEvent):
+        await provider.exec(handle, "bash solve.sh", timeout_s=0.1)
+
+    assert commands.interrupts == []
+    # ~0.2 s of outage at the 0.01-0.02 s cadence is a few dozen reads at most, not thousands.
+    assert commands.status_calls < 60
+
+
+# A refused interrupt (e.g. the command finished just before it) proves nothing; the reported exit is kept.
+async def test_background_refused_interrupt_keeps_the_reported_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = _DeadlineCommands(runs_s=0.4, interrupt_error=RuntimeError("Interrupt command failed: 404"))
+    provider, handle = _background_provider(monkeypatch, commands, command_timeout_headroom_s=2.0)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.2)
+
+    assert commands.interrupts == ["exec-42"]
     assert (result.return_code, result.error_type) == (-1, None)
     assert result.stderr == "signal: killed"
 
@@ -4472,8 +4662,13 @@ async def test_a_cancelled_create_still_cleans_up_the_new_sandbox(
 
 
 async def test_direct_create_clamps_requests_above_the_sandbox_limits(
-    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture
+    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture, monkeypatch
 ) -> None:
+    from nemo_gym.telemetry import _fallbacks
+
+    submitted = {}
+    monkeypatch.setattr(opensandbox_provider, "is_span_group_enabled", lambda group: True)
+    monkeypatch.setattr(_fallbacks, "safe_set_span_attributes", lambda span, values: submitted.update(values))
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
     with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
         await provider.create(
@@ -4488,6 +4683,14 @@ async def test_direct_create_clamps_requests_above_the_sandbox_limits(
         "cpu": "0.5",
         "memory": "512Mi",
         "ephemeral-storage": "4Gi",
+    }
+    assert submitted == {
+        "nemo.gym.sandbox.submitted.requests.cpu": 0.5,
+        "nemo.gym.sandbox.submitted.requests.memory_mib": 512,
+        "nemo.gym.sandbox.submitted.requests.disk_gib": 4,
+        "nemo.gym.sandbox.submitted.limits.cpu": 1,
+        "nemo.gym.sandbox.submitted.limits.memory_mib": 2048,
+        "nemo.gym.sandbox.submitted.limits.disk_gib": 4,
     }
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "disk_gib=10" in warnings[0] and "limit 4" in warnings[0]

@@ -23,6 +23,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.utils.exception_inspection import bounded_text, explicit_causes
+    from nemo_gym.utils.gym_commit import installed_gym_commit
     from nemo_gym.utils.path_utils import (
         aggregation_sources_path_for,
         failures_path_for,
@@ -46,6 +47,7 @@ _PUBLIC_API = {
     "bounded_text": "exception_inspection",
     "explicit_causes": "exception_inspection",
     "failures_path_for": "path_utils",
+    "installed_gym_commit": "gym_commit",
     "is_nemo_gym_fastapi_entrypoint": "server_process",
     "is_nemo_gym_fastapi_worker": "server_process",
     "materialized_path_for": "path_utils",
