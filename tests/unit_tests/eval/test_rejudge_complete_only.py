@@ -128,3 +128,20 @@ def test_completion_files_follow_the_recomputed_metrics_or_are_removed(
 
     assert refreshed == ([output] if failing_step is None else [])
     assert complete_dir.exists() is (failing_step is None)
+
+
+def test_a_strict_run_left_incomplete_by_the_pass_removes_its_completion_files(
+    tmp_path, monkeypatch, pass_settles_one_row
+) -> None:
+    """No run-wide metrics follow the pass, so files written during collection would keep the scores from before it."""
+    complete_dir = tmp_path / "rollouts_agent_complete"
+    complete_dir.mkdir()
+    (complete_dir / "alpha.json").write_text("{}")
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: False)
+
+    eval_cli._rejudge_saved_judge_failures(
+        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=True
+    )
+
+    assert pass_settles_one_row == []
+    assert not complete_dir.exists()

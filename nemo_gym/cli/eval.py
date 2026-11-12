@@ -939,12 +939,7 @@ def _rejudge_saved_judge_failures(
     during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
-    from nemo_gym.rollouts.rollout_collection import (
-        RolloutAggregationConfig,
-        RolloutAggregationHelper,
-        refresh_agent_complete_files,
-    )
-    from nemo_gym.utils.path_utils import agent_complete_dir_for
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
     if isinstance(global_config_dict, DictConfig):
@@ -966,6 +961,8 @@ def _rejudge_saved_judge_failures(
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
+        # The pass changed grades but no run-wide metrics follow it, so no completion file can be brought up to date.
+        _remove_completion_files(output)
         return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
@@ -978,8 +975,17 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
-        shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
+        _remove_completion_files(output)
         return complete
+    _refresh_completion_files(output, run_config)
+    return complete
+
+
+def _refresh_completion_files(output: Path, run_config: Mapping[str, Any]) -> None:
+    """Bring the per-agent completion files in line with the run-wide metrics just recomputed in place, or remove them
+    when they cannot be refreshed, rather than leave them with the scores from before the re-judgment."""
+    from nemo_gym.rollouts.rollout_collection import refresh_agent_complete_files
+
     try:
         refresh_agent_complete_files(output, OmegaConf.create(run_config))
     except Exception as error:  # the recomputed run-wide metrics stand; only the per-agent copies are behind them
@@ -988,8 +994,14 @@ def _rejudge_saved_judge_failures(
             f"they are removed, and {output.stem}_aggregate_metrics.json holds every agent's metrics.",
             flush=True,
         )
-        shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
-    return complete
+        _remove_completion_files(output)
+
+
+def _remove_completion_files(output: Path) -> None:
+    """Remove the per-agent completion files of a run whose grades changed after they were written."""
+    from nemo_gym.utils.path_utils import agent_complete_dir_for
+
+    shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
 
 
 class _SettledHealthSettings(RunHealthConfig):
@@ -1005,6 +1017,8 @@ def _refresh_settled_source(
 ) -> dict[str, bool]:
     """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
     as the run's own completion does after its saved-answer pass.
+
+    The per-agent completion files follow the recomputed metrics, or are removed when they cannot.
 
     A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
     check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
@@ -1029,12 +1043,14 @@ def _refresh_settled_source(
         )
         asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
         refreshed["metrics_recomputed"] = True
+        _refresh_completion_files(output, run_config)
     except Exception as error:
         print(
             f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+        _remove_completion_files(output)
     projection = None
     try:
         settings = _SettledHealthSettings.model_validate(run_config)
