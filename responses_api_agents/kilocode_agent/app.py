@@ -389,7 +389,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
     Kilo runs its own tools internally; we parse its JSON event stream into Gym format and use the
     resources server to verify. Kilo's model calls go through ``model_server`` when one is set — see
-    that field. Eval-only either way: token IDs and logprobs are not wired up.
+    that field, under the rollout's prefix, so ``token_id_capture`` applies to them.
     """
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
