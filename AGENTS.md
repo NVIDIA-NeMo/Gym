@@ -108,7 +108,9 @@ The typical workflow is to create your own environments tailored to your evaluat
 2. **Resources Server** — implements verification logic, environment-specific tools, and per-task state isolation
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
-5. **YAML config** — wires the resources server, agent, and model server together
+5. **YAML config** — wires an Environment Server, which runs each episode, to the resources server and agent, and the
+   agent to its model server. Use `single_agent_turn` with a typed `taskset` dataset, or `single_agent_turn_legacy`
+   for flat rows
 
 The second way to define tasks is task folders in the Harbor format (`task.toml` and usually `instruction.md`, `environment/`, `tests/`, `solution/`), run by the `harbor` Environment Server: it seeds a sandbox from the folder, runs the agent, then runs the task's own verifier, with no Resources Server. Copy `environments/hello_world`, then read `fern/versions/latest/pages/data/task-folders/harbor-tasks.mdx` (tutorial), `data/task-folders/task-folder-format.mdx` (canonical spec), `data/task-folders/task-folder-verifiers.mdx` and `agent-interactions/harbor.mdx`. For where a new task-folder benchmark goes, its name and the checks before a PR, follow "Task-folder benchmarks" in `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`; `gym dataset validate <folder>`, the oracle run of every `solution/`, must pass, apart from known upstream failures the README lists (leave those out with `--exclude-tasks`).
 
@@ -119,15 +121,31 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 - **Use NeMo Gym's Model Server for inference** — standardizes different model providers behind a common format and manages token IDs needed for training.
 - **Hydra YAML for configuration** — pass configuration through Gym's Hydra config system so it's composable and reproducible across runs.
 - **Graceful error handling** — environments must handle tool failures and bad model outputs with meaningful error responses, not crash the server.
-- **Async endpoints** — the `/run` endpoint must be async. Use `asyncio.Semaphore` for concurrency control if shelling out to external processes.
+- **Async endpoints** — every server endpoint must be async: the resources server's seed, verify, close and tool
+  endpoints, the agent's session endpoints and `/v1/responses`, and an Environment Server's `run()`. An agent's own
+  `/run` runs only behind the `legacy_agent` relay. Use `asyncio.Semaphore` for concurrency control if shelling out to
+  external processes.
 - **Test skip guards** — tests should skip gracefully if external tools aren't installed (e.g. `pytest.mark.skipif(shutil.which("tool") is None, ...)`).
 
 ## Communication & Async Patterns
 
-Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
+Servers communicate via `ServerClient`, which sends every call through Gym's shared aiohttp client
+(`nemo_gym.client.http_client.request()`) for connection pooling. Each retry waits a fixed 0.5 s. A call that raises
+retries until the caller's bound (`_max_num_tries`, `_max_connection_retries`) runs out. With no bound, `ServerClient`
+calls between Gym servers retry without limit; other `request()` calls stop after 3 tries, except that a refused or
+dropped connection retries without limit. An HTTP error status is never retried: the caller gets the response and must
+check it.
 
 - **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.client.http_client.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
-- **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
+- **Propagate session cookies** for stateful environments. On agent sessions the Environment Server keeps the cookies
+  from the resources server's seed reply, sends them with verify and close, and grants them to the agent in its tool
+  access; the agent sends those on its tool calls. `cookies=request.cookies` is the fallback for a call outside an
+  agent session, such as an agent's own `/run`.
+- **Status codes decide retries.** A failed call to another server with 408, 425, 429 or any 5xx, a refused or dropped
+  connection, or a timeout is retryable (the episode is attempted again); any other 4xx is terminal. A resources
+  server therefore refuses a seed that no retry can fix with `ResourcesSeedRejectedError` (422) and a seed or close
+  that conflicts with the session it recorded with `ResourcesSessionConflictError` (409), and answers a tool call on a
+  session it no longer holds with `ResourcesSessionLostError` (404). Do not answer bad input with a 5xx.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8
@@ -167,12 +185,15 @@ Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sand
   command, and `shlex.quote` every value that does go into a command.
 - **Stop every sandbox you start, on every path.** Wrap use in `try/finally` and call `stop()`. For sandboxes kept per
   session, key them by session ID, pop the entry only after `stop()` succeeds (so a later close can retry), and stop
-  any remaining sandboxes in the server's lifespan shutdown. Set `ttl_s` so the provider reclaims leaked sandboxes.
+  any remaining sandboxes in the server's lifespan shutdown. Set `ttl_s` so the provider reclaims leaked sandboxes; it
+  defaults to `None`, so set it explicitly.
 - **Check `return_code` and `error_type` on every `exec` result.** A non-`None` `error_type` (for example a timeout)
   means the sandbox did not report a process exit code. Treat `stdout`/`stderr` as optional (`result.stdout or ""`).
 - **Separate infrastructure failures from task failures.** When verification is inconclusive (sandbox start, exec,
-  or provider error), retry on a fresh sandbox a bounded, configurable number of times
-  (`inconclusive_verification_retries`), and report `evaluation_completed=False` instead of a silent reward of 0.
+  or provider error), retry on a fresh sandbox a bounded number of times, set in the server's own config (often a field
+  named `inconclusive_verification_retries`; there is no shared setting). If it stays inconclusive, return
+  `mask_sample: true`, optionally with `evaluation_completed: false`. Only `mask_sample` removes a row from the score;
+  `evaluation_completed: false` alone is scored as a reward of 0.
 
 ## Common Commands for Building & Testing Environments
 
@@ -292,7 +313,9 @@ gym env resolve --config ...
 ## Pre-commit Hooks
 
 Notable custom hooks that auto-modify files:
-- `add-verified-flag`: Adds `verified: false` to new resources server YAML configs (`verified: true` means the benchmark has been baselined and reviewed; new servers start as `false`)
+- `add-verified-flag`: Adds `verified: false` to new resources server YAML configs. The author sets `verified: true`
+  in their own PR once the `add-benchmark` skill's exit checks pass, and links the run folder, its
+  `quality_summary.json` and the baselining numbers in the PR description.
 - `update-readme-table`: Updates the resources server table in root README.md
 - `ruff-format`: Auto-formats code
 
