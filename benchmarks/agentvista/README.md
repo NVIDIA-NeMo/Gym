@@ -155,9 +155,45 @@ uses at most eight turns/steps per episode and does not retry failed episodes.
 
 The existing NeMo RL adapters retain OpenCode-only sampling/token-capture
 compatibility. The default harness is evaluation-only. No training, GPU optimizer
-qualification, certified score or completed live smoke is claimed by this PR.
+qualification or certified score is claimed by this PR. Live integration evidence
+is recorded separately from accuracy qualification.
 
 Episode outputs preserve the launcher-mounted path instead of resolving filesystem
 aliases. Slurm exports `NEMO_GYM_BENCH_DIR` as the actual bound benchmark directory
 for native and custom-command runs, so inputs, episode logs and result files survive
 container exit.
+
+## Completed 32K integration evaluations
+
+[Completed evaluation evidence](smoke-results/svg-20261111-32k.json) records the
+corrected runtime at `10f5459ed8c33f527c61f577488e1747e9e1cb7c` with Factory
+`794bd75abf5496c3a72801a81f35b41d050c705d`. The full local Super/OpenCode run
+collected all 209 tasks: 184 scored, 47 passed, and 25 actor timeouts remained
+masked. Its 25.54% mean is over the scored subset, not a qualified full score.
+All episode artifacts survived container exit.
+
+The matching first 25 tasks were also evaluated with 32,768 output tokens:
+
+| Model and harness | Collected | Scored | Passed | Mean over scored |
+|---|---:|---:|---:|---:|
+| Super GA, default | 25 | 25 | 7 | 28% |
+| Kimi K3 API, OpenCode | 25 | 24 | 11 | 45.83% |
+| Kimi K3 API, default | 25 | 25 | 12 | 48% |
+
+The Kimi/OpenCode masked case reached the 5,400-second actor timeout. The default
+harness retains its 16-turn limit; OpenCode retains its 150-step limit. These
+results demonstrate integration and judging, not equivalent evaluation protocols.
+OpenCode sent an effective `max_tokens=32000` with the configured 32,768-token
+budget; startup admission must inspect the actual request instead of assuming
+exact equality to the configured limit. Clean length endings and timeouts retain
+the distinct scoring behavior described above.
+
+For SVG GPU launches, the site wrapper must acknowledge real per-GPU monitoring
+on every allocated node before model startup, fail closed on missing telemetry,
+and release the allocation after 25 idle minutes, measured from allocation start
+before first activity. Use a 20-minute model-readiness deadline and admit at most
+two pending/warming replicas on the submission side. The tested matrix used one
+TP8 replica on each of two nodes; it did not leave allocated GPUs waiting on a
+startup lock. Generic Gym recipes do not install this site guard automatically.
+CPU-short currently admits four submitted/running jobs per user; check actual
+Slurm admission and keep credentials private when launching hosted evaluations.
