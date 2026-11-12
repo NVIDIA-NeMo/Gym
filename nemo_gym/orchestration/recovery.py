@@ -67,7 +67,10 @@ from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
+    COLLECTION_RESUME_REFUSED,
+    DRIVER_INSTALL_FAILED,
     EMPTY_ANSWER,
+    ENVIRONMENT_PREPARE_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     EPISODE_FAILED,
     GRADING_WITHOUT_VERDICT,
@@ -88,6 +91,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
+    SERVER_SPINUP_TIMEOUT,
     SERVER_START_FAILED,
     TRUNCATED_ANSWER,
     VERIFIER_ERROR,
@@ -521,6 +525,9 @@ class RecoveryDecision(BaseModel):
     continuation_refused: (
         Literal["scheduler_unreachable", "job_live", "claim_unidentified", "counters_changed", "no_retry_cap"] | None
     ) = Field(default=None, exclude=True)
+    # The options of the call this plan was made for, spelled as `gym eval resubmit --recover` takes them (reasons as
+    # TEXT), so the operator verdict's command repeats them.
+    requested: list[str] = Field(default_factory=list, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None
@@ -6007,7 +6014,7 @@ def gate_summary_from_collected(
     task["criteria"] = criteria.report(classification=decision_classification(decision))
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
-        task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
+        task["errors"].append(f"{UNREADABLE_ARTIFACTS_ERROR}: {collected.unreadable_files[:20]}")
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     task["trial_counts"] = trial_counts(decision, collected)
@@ -6162,15 +6169,51 @@ def rollout_quality_facts(quality: Mapping[str, Any] | None) -> dict[str, Any] |
 
 _RECOVER = "`gym eval resubmit --recover`"
 _SUBMIT_AGAIN = "`gym eval submit` again"
-_STOP_CAUSES = (
-    ("provider_credentials_rejected", "the provider credentials"),
-    ("driver_install_failed", "the driver install (ref, network or image)"),
-    ("server_spinup_timeout", "the server start-up configuration"),
-    ("collection_resume_refused", "the configuration that differs from the saved run"),
-    (ENVIRONMENT_PROTOCOL_VIOLATION, "the server or the benchmark pairing (a producer bug)"),
+UNREADABLE_ARTIFACTS_ERROR = "unreadable artifacts, read as unknown"
+_NO_KNOWN_COMMAND = "read the stop reason; no recovery command is known for it"
+# The remedy of each typed stop, as Gym's own stop texts give it: what to fix, then the recovery (with the options
+# it needs), or the fresh run a producer bug or a refused resume needs.
+_TYPED_REMEDIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (PROVIDER_CREDENTIALS_REJECTED, "fix the credentials, then", ()),
+    (
+        DRIVER_INSTALL_FAILED,
+        "fix the driver install (the ref, the network or the image; logs/driver-<job id>.log has the installer's "
+        "output), then",
+        (),
+    ),
+    (ENVIRONMENT_PREPARE_FAILED, "fix the benchmark's preparation, then", ()),
+    (
+        SERVER_SPINUP_TIMEOUT,
+        "raise the server start-up limit above the recorded one:",
+        ("--server-spinup-timeout-seconds N", "--spinup-timeout-reason TEXT"),
+    ),
+)
+_FRESH_RUN_REMEDIES = (
+    (
+        COLLECTION_RESUME_REFUSED,
+        "start a fresh run with `gym eval submit` again; only to accept that exact difference, "
+        "`gym eval resubmit --recover --allow-unsafe-resume --unsafe-resume-reason TEXT`",
+    ),
+    (
+        ENVIRONMENT_PROTOCOL_VIOLATION,
+        "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again",
+    ),
+)
+# Stops of a judge-only job that a judge placement option clears, and the options.
+_JUDGE_PLACEMENT_STOPS = (
+    ("no CPU partition is known", ("--judge-partition PARTITION",), "name a CPU partition of the cluster"),
+    (
+        "judge-only job was not queued",
+        ("--judge-partition PARTITION", "--judge-qos QOS"),
+        "correct the partition or QOS the scheduler refused (a GPU QOS can require GPUs: QOSMinGRES)",
+    ),
+    (
+        "judge-only job was not admitted",
+        ("--judge-partition PARTITION", "--judge-qos QOS"),
+        "correct the partition or QOS the scheduler refused",
+    ),
 )
 _UNVERIFIED_PRODUCERS = {
-    "judge_rejudged": "the judge model server or its credentials",
     "grading_unobserved": "the verifier that saves no grading record",
     "unclassified_failures": "the producer of the unclassified failures",
     "recovered_not_joined": "the producer that records recovered attempts",
@@ -6188,6 +6231,21 @@ _OPEN_STATES = (
 
 def _verdict(state: str, reason: str, action: str) -> dict[str, str]:
     return {"state": state, "reason": reason, "action": action}
+
+
+def _recover_command(requested: Sequence[str], *extra: str) -> str:
+    """`gym eval resubmit --recover` with the options the call asked for and ``extra``; an option named in both is
+    named once, as ``extra`` spells it."""
+    flags = [flag for flag in requested if flag.split()[0] not in {option.split()[0] for option in extra}]
+    return "`" + " ".join(["gym eval resubmit --recover", *flags, *extra]) + "`"
+
+
+def _typed_remedy(text: str, requested: Sequence[str]) -> str | None:
+    """The remedy of the typed stop ``text`` names, as Gym's own stop texts give it, else None."""
+    for kind, fix, options in _TYPED_REMEDIES:
+        if kind in text:
+            return f"{fix} {_recover_command(requested, *options)}"
+    return next((remedy for kind, remedy in _FRESH_RUN_REMEDIES if kind in text), None)
 
 
 def _flagged_everything(
@@ -6360,9 +6418,12 @@ def operator_verdict(
     """The one verdict an operator acts on, derived from the gate and the decision only.
 
     ``state`` is ``accept`` (gate SUCCESS, coverage complete, run health PASS, decision noop), ``needs_action`` (a
-    STOP, FAILED, incomplete coverage, failed run health, or UNVERIFIED with a known cause) or ``unknown`` (UNVERIFIED
-    without a known cause, a live job, or evidence missing). ``reason`` is one sentence naming the dominant cause with
-    counts; ``action`` is the one thing to do. Rollout quality never changes the state: an accepted run whose every
+    STOP, FAILED, incomplete coverage, failed run health, or UNVERIFIED with a cause an operator can fix) or
+    ``unknown`` (UNVERIFIED without a known cause, by configuration or after a re-judgment whose grading was not
+    recorded, a live job, or evidence missing or unreadable). ``reason`` is one sentence naming the dominant cause
+    with counts; ``action`` is the one thing to do: the recovery command with the options this call asked for
+    (``decision.requested``) and any typed failure's fix first, never a fresh submit for a stop no rule knows. An
+    accepted run whose MLflow delivery is not closed names the export. Rollout quality never changes the state: an accepted run whose every
     rollout is flagged says so in its reason and points at the quality read. A scheduler refusal of the resubmit and
     a walltime raise the partition cannot take (refused before any evidence is read) are known dispatch failures:
     they need the operator's correction, never a plain recover-now or a reader retry.
@@ -6403,15 +6464,29 @@ def operator_verdict(
             else f"{read}, then `gym eval resubmit --recover {ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT` allows one more "
             "judge-only job",
         )
+    if unreadable := next((str(e) for e in errors if str(e).startswith(UNREADABLE_ARTIFACTS_ERROR)), None):
+        # What an unreadable artifact holds is unknown, whatever the decision read around it.
+        return _verdict("unknown", unreadable, "make those files readable again and inspect again")
     open_text = ", ".join(f"{counts[s]} {s.value}" for s in _OPEN_STATES if counts.get(s))
+    requested = decision.requested
     if decision.action == RecoveryAction.FRESH_RESTART:
-        return _verdict("needs_action", f"the run saved no task inventory ({decision.reason})", _SUBMIT_AGAIN)
+        named = re.search(r"--max-walltime is required: (gym eval resubmit \S+ \S+ --recover .*)$", decision.reason)
+        command = (
+            f"`{named[1]}`" if named else _recover_command([], "--max-walltime HH:MM:SS", "--walltime-reason TEXT")
+        )
+        return _verdict(
+            "needs_action",
+            f"the run saved no task inventory ({decision.reason.split('; --max-walltime is required')[0]})",
+            f"queue it again as a fresh run with a longer walltime (the walltime is yours to choose): {command}",
+        )
     if decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
         settled = expected - sum(counts.get(s, 0) for s in _OPEN_STATES)
+        # A chain that stopped on a typed failure needs its remedy before the resume, or the resume stops the same way.
+        chain = decision.reason.partition("the chain recorded: ")[2]
         return _verdict(
             "needs_action",
             f"{settled} of {expected} rollouts are settled; {open_text or 'recovery work'} remain",
-            f"{_RECOVER} now",
+            (chain and _typed_remedy(chain, requested)) or f"{_recover_command(requested)} now",
         )
     if decision.action == RecoveryAction.STOP:
         if PROVIDER_QUOTA_EXHAUSTED in decision.reason:
@@ -6476,22 +6551,17 @@ def operator_verdict(
                 "confirm with the scheduler that the allocation that made the reservations has ended, then inspect "
                 "again: a recovery resumes them once that is known (completed work is kept)",
             )
-        thing = next((name for token, name in _STOP_CAUSES if token in decision.reason), None)
-        if thing is None:
-            # Terminal failures stop a recovery before any other open state, so they name the producer when present.
-            open_rows = [e for e in decision.evidence if e.failure_kind and e.state != IdentityState.SCORED]
-            terminal = [e for e in open_rows if e.state == IdentityState.TERMINAL]
-            kinds = Counter(e.failure_kind for e in terminal or open_rows)
-            thing = (
-                f"the producer of the {kinds.most_common(1)[0][0]} failures"
-                if kinds
-                else "the cause the inspect names"
-            )
-        return _verdict(
-            "needs_action",
-            f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason[:160]}",
-            f"fix {thing} then {_SUBMIT_AGAIN}",
-        )
+        for token, options, fix in _JUDGE_PLACEMENT_STOPS:
+            if token in decision.reason:
+                return _verdict(
+                    "needs_action",
+                    stopped,
+                    f"{fix}: {_recover_command(requested, *options)} queues the judge-only job (completed work is kept)",
+                )
+        if remedy := _typed_remedy(decision.reason, requested):
+            return _verdict("needs_action", stopped, remedy)
+        # A stop no rule here knows: its reason is the only guide, and a fresh submit would discard the saved run.
+        return _verdict("needs_action", stopped, _NO_KNOWN_COMMAND)
     if status == "FAILED" or errors:
         health = gate_task.get("evaluation_health") or {}
         if health.get("status") == "FAIL":
@@ -6513,7 +6583,7 @@ def operator_verdict(
             (known[:200] + ("; the score was not read either" if unread else ""))
             if known
             else (str(errors[0])[:200] if errors else "the gate failed"),
-            f"fix the configuration or producer that error names then {_SUBMIT_AGAIN}",
+            "read the error; no recovery command is known for it",
         )
     if not decision.complete or decision.action != RecoveryAction.NOOP:
         return _verdict(
@@ -6522,11 +6592,22 @@ def operator_verdict(
     if status == "UNVERIFIED":
         cause = gate_task.get("unverified_cause")
         if decision.unverified:
+            # Verification was configured off: the run is complete and unverified by design, nothing to do.
             skipped = counts.get(IdentityState.SKIPPED, 0)
             return _verdict(
-                "needs_action",
-                f"{skipped} of {expected} rows were not verified (verification skipped by configuration)",
-                f"enable verification then {_SUBMIT_AGAIN}",
+                "unknown",
+                f"unverified by configuration: {skipped} of {expected} rows were not verified (verification skipped "
+                "by configuration)",
+                "none: report the run as unverified by configuration",
+            )
+        if cause and cause.get("kind") == "judge_rejudged":
+            # The judge answered the re-judgment: what is missing is the grading record of the re-judged rows, which
+            # no recovery writes, and a fresh run would sample every policy rollout again.
+            return _verdict(
+                "unknown",
+                f"unverified: {cause['reason']}",
+                "report the run as unverified: the re-judged rows were graded but their grading was not recorded, "
+                "and no recovery command records it",
             )
         if cause and cause.get("kind") in _UNVERIFIED_PRODUCERS:
             return _verdict(
@@ -6553,6 +6634,20 @@ def operator_verdict(
         + (f", {omitted} omitted by an accepted stage" if omitted else "")
         + ", run health PASS, nothing to recover"
     )
+    delivery = gate_task.get("mlflow_delivery") or {}
+    if delivery.get("state") in ("pending", "unverified"):
+        # The results are accepted; their MLflow delivery is a fact beside them that is not closed yet.
+        reasons = "; ".join(delivery.get("reasons") or []) or "no reason recorded"
+        exported = not any(str(r).startswith("no MLflow run evidence") for r in delivery.get("reasons") or [])
+        return _verdict(
+            "accept",
+            f"{reason}; MLflow delivery {delivery['state']}: {reasons}",
+            "confirm the MLflow export: inspect again with --mlflow-run-id ID --mlflow-status STATUS as you observed "
+            "them on the tracking server, or repair the export the reason names"
+            if exported
+            else f"export the results to MLflow: {_RECOVER} runs the export of a complete run without a receipt (no "
+            "model calls)",
+        )
     return _verdict("accept", reason, "none")
 
 

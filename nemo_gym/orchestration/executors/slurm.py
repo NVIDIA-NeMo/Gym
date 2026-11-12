@@ -1839,7 +1839,7 @@ class SlurmExecutor(BaseExecutor):
                 "|| fail 'cannot stage judge driver'",
                 "_gym_submit_started=1",
                 _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
-                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
                 "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1); [[ $jid =~ ^[0-9]+$ ]] || { printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge submission acknowledgement unknown' > .gym_chain_incomplete; fail 'unknown job identity'; }",
                 'printf "%s\\n" "$jid" >> .gym_job_chain || fail "cannot preserve judge allocation accounting"',
                 "_gym_submit_confirmed=1",
@@ -2101,7 +2101,7 @@ class SlurmExecutor(BaseExecutor):
             f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
             "|| fail 'cannot stage the judge driver'",
             _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
-            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
             # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
             # reports it and the next recovery's scheduler check finds the job by its working directory.

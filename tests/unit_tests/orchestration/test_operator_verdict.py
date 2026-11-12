@@ -175,7 +175,7 @@ def test_a_quota_stop_waits_for_the_reset_then_recovers():
     assert verdict["action"] == "wait until 2026-01-02 03:04 UTC then `gym eval resubmit --recover` (quota)"
 
 
-def test_a_credentials_stop_names_the_fix_and_a_new_submit():
+def test_a_credentials_stop_names_the_fix_then_the_recovery_as_gyms_own_stop_text_does():
     decision = _decision(
         RecoveryAction.STOP,
         "10 failure(s) typed provider_credentials_rejected: the sandbox provider answered 401",
@@ -183,10 +183,10 @@ def test_a_credentials_stop_names_the_fix_and_a_new_submit():
     )
     verdict = operator_verdict(_failed_task(), decision)
     assert verdict["state"] == "needs_action"
-    assert verdict["action"] == "fix the provider credentials then `gym eval submit` again"
+    assert verdict["action"] == "fix the credentials, then `gym eval resubmit --recover`"
 
 
-def test_an_unowned_failure_stop_names_the_dominant_failure_kind():
+def test_a_stop_no_rule_knows_names_no_command_and_never_a_fresh_submit():
     decision = _decision(RecoveryAction.STOP, "96 failure(s) have no registered kind", {IdentityState.UNKNOWN: 10})
     decision.evidence = [
         IdentityEvidence(identity=(i, 0), state=IdentityState.UNKNOWN, failure_kind="collection_dispatch_failed")
@@ -194,9 +194,7 @@ def test_an_unowned_failure_stop_names_the_dominant_failure_kind():
     ]
     verdict = operator_verdict(_failed_task(), decision)
     assert verdict["state"] == "needs_action"
-    assert (
-        verdict["action"] == "fix the producer of the collection_dispatch_failed failures then `gym eval submit` again"
-    )
+    assert verdict["action"] == "read the stop reason; no recovery command is known for it"
 
 
 def test_incomplete_coverage_needs_action():
@@ -254,10 +252,12 @@ def test_unverified_after_a_judge_outage_names_the_cause_with_counts():
     [warning] = [w for w in task["warnings"] if w.startswith("response/trial health unknown")]
     assert warning == f"response/trial health unknown: ['{cause}']"
     assert "trial: UNOBSERVED 59 of 64" in task["evaluation_health"]["detail"]
+    # The judge answered the re-judgment; a fresh submit would sample every policy rollout again.
     assert verdict == {
-        "state": "needs_action",
+        "state": "unknown",
         "reason": f"unverified: {cause}",
-        "action": "fix the judge model server or its credentials then `gym eval submit` again",
+        "action": "report the run as unverified: the re-judged rows were graded but their grading was not recorded, "
+        "and no recovery command records it",
     }
 
 
@@ -313,7 +313,7 @@ def test_an_unread_score_with_a_failed_summary_validity_is_not_score_only_unknow
     assert verdict == {
         "state": "needs_action",
         "reason": "summary validity failed; the score was not read either",
-        "action": "fix the configuration or producer that error names then `gym eval submit` again",
+        "action": "read the error; no recovery command is known for it",
     }
 
 
@@ -353,11 +353,11 @@ def test_spent_infra_retries_and_walltime_name_their_options():
     assert "fresh" not in action and "`gym eval submit`" not in action
 
 
-def test_non_budget_stops_keep_their_fix_then_submit_actions():
+def test_non_budget_stops_keep_their_typed_remedy():
     decision = _decision(
         RecoveryAction.STOP, "10 failure(s) typed provider_credentials_rejected", {IdentityState.TERMINAL: 10}
     )
-    assert operator_verdict(_failed_task(), decision)["action"].endswith("then `gym eval submit` again")
+    assert operator_verdict(_failed_task(), decision)["action"].startswith("fix the credentials, then")
 
 
 def _refused_outcome(refusal):
@@ -586,3 +586,15 @@ def test_a_stop_that_needs_the_launchers_revision_names_the_repin_not_a_fresh_su
     assert verdict["state"] == "needs_action"
     assert verdict["action"].split("`")[1] == command and "`gym eval submit`" not in verdict["action"]
     assert "every other option of the stopped call" in verdict["action"]
+
+
+def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
+    collected = _run(100)
+    collected.score = 0.9  # tracking is required and the run has no MLflow evidence yet
+    verdict, task, _ = _verdict(collected)
+    assert task["status"] == "SUCCESS" and task["mlflow_delivery"]["state"] == "pending"
+    assert verdict["state"] == "accept" and "MLflow delivery pending" in verdict["reason"]
+    assert verdict["action"] == (
+        "export the results to MLflow: `gym eval resubmit --recover` runs the export of a complete run without a "
+        "receipt (no model calls)"
+    )

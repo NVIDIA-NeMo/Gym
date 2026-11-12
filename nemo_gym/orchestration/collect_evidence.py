@@ -30,6 +30,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CANCELLED_FOLLOWUP_MARKER,
     FOLLOW_UP_SUBMISSION_REFUSED,
+    GUARDED_DRIVER_FAILURE_KINDS,
     PROVISIONAL_MARKER_PREFIX,
 )
 
@@ -66,6 +67,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
+    + "\n"
+    + "GUARDED_DRIVER_FAILURE_KINDS = "
+    + repr(GUARDED_DRIVER_FAILURE_KINDS)
     + "\n"
     + "ENVIRONMENT_PROTOCOL_VIOLATION = "
     + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
@@ -914,8 +918,9 @@ def resume_drift_keys():
 collected["resume_drift_keys"] = resume_drift_keys()
 def chain_continuation_note():
     # A continuation's provisional line, left when it ended before queuing its follow-up, or a sentinel's line for a
-    # follow-up cancelled before it started, or the guard's stop on rejected sandbox credentials or on a follow-up
-    # submission the scheduler refused (see resume_script).
+    # follow-up cancelled before it started, or the guard's stop on a typed driver failure (rejected credentials, a
+    # server start-up timeout, a failed install or preparation, a refused resume, ...) or on a follow-up submission the
+    # scheduler refused (see resume_script): the typed stop carries the remedy the next recovery needs first.
     try:
         text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
     except OSError:
@@ -924,9 +929,7 @@ def chain_continuation_note():
     named = (
         line.startswith(PROVISIONAL_MARKER_PREFIX)
         or CANCELLED_FOLLOWUP_MARKER in line
-        or PROVIDER_CREDENTIALS_REJECTED in line
-        or PROVIDER_QUOTA_EXHAUSTED in line
-        or ENVIRONMENT_PROTOCOL_VIOLATION in line
+        or any(kind in line for kind in GUARDED_DRIVER_FAILURE_KINDS)
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
     return line[:500] if named else None

@@ -3190,6 +3190,19 @@ def test_inspect_prints_the_unverified_reading_of_an_all_skipped_run(tmp_path, f
     assert out.gate_task["errors"] == [] and out.dispatched is None
 
 
+def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuration_with_no_action(
+    tmp_path, fake_executor
+) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.inspect_recovery("gym-job-skip3", "bench")
+    assert out.gate_task["status"] == "UNVERIFIED"
+    assert out.operator_verdict == {
+        "state": "unknown",
+        "reason": "unverified by configuration: 5 of 5 rows were not verified (verification skipped by configuration)",
+        "action": "none: report the run as unverified by configuration",
+    }
+
+
 def test_a_masked_result_of_any_other_kind_still_stops_the_run(tmp_path) -> None:
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 

@@ -524,3 +524,35 @@ def test_the_judge_only_job_skips_the_policy_endpoint_readiness_wait(tmp_path, j
     assert line.rstrip().endswith("++model_endpoint_readiness_timeout_seconds=0") or (
         "++model_endpoint_readiness_timeout_seconds=0 " in line
     )
+
+
+def test_without_a_cpu_partition_the_verdict_names_the_judge_partition_not_a_fresh_submit(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+
+    refused = recover(*_handle(job_dir))
+
+    assert refused.dispatched is None and refused.decision.action == RecoveryAction.STOP
+    verdict = refused.operator_verdict
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert "`gym eval resubmit --recover --judge-partition PARTITION`" in verdict["action"]
+    # The option the verdict names queues the judge-only job.
+    assert recover(*_handle(job_dir), judge_partition="cpu").job_id == "4242"
+
+
+def test_a_judge_only_job_the_scheduler_refuses_names_the_judge_qos_not_a_fresh_submit(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Job violates accounting/QOS policy (QOSMinGRES)' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "QOSMinGRES" in out.unsupported and _journal(job_dir) == []
+    verdict = out.operator_verdict
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert "--judge-qos QOS" in verdict["action"] and "--judge-partition PARTITION" in verdict["action"]

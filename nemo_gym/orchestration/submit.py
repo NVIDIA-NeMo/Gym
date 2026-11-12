@@ -30,7 +30,9 @@ from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.orchestration.recovery import (
+    ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
     MLFLOW_NOT_REQUIRED_NOTE,
+    RERUN_MASKED_FLAGS,
     GateCriteria,
     OperatorBudget,
     RecoveryAction,
@@ -174,6 +176,8 @@ def recover(
         acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
         acknowledge_reason=acknowledge_reason,
     )
+    # The verdict's command repeats the options this call asked for (its own parameters).
+    outcome = _with_requested(outcome, locals())
     return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
 
 
@@ -237,7 +241,51 @@ def inspect_recovery(
         acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
         acknowledge_reason=acknowledge_reason,
     )
+    # The verdict's command repeats the options this call asked for (its own parameters).
+    outcome = _with_requested(outcome, locals())
     return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
+
+
+def _requested(
+    *,
+    extend_retries: int = 0,
+    extend_attempts: int = 0,
+    max_walltime: str | None = None,
+    repin: str | None = None,
+    unsafe_resume_reason: str | None = None,
+    server_spinup_timeout_seconds: int | None = None,
+    judge_partition: str | None = None,
+    judge_qos: str | None = None,
+    rerun_masked_without_artifact: bool = False,
+    acknowledge_failed_judge_jobs: bool = False,
+    **_: Any,
+) -> list[str]:
+    """The options of a recovery call as `gym eval resubmit --recover` takes them, each reason as TEXT, so the
+    operator verdict's command repeats them."""
+    flags = [
+        (extend_attempts, f"--extend-attempts {extend_attempts}"),
+        (extend_retries, f"--extend-retries {extend_retries}"),
+        (max_walltime, f"--max-walltime {max_walltime} --walltime-reason TEXT"),
+        (repin, f"--repin {repin} --repin-reason TEXT"),
+        (unsafe_resume_reason, "--allow-unsafe-resume --unsafe-resume-reason TEXT"),
+        (
+            server_spinup_timeout_seconds is not None,
+            f"--server-spinup-timeout-seconds {server_spinup_timeout_seconds} --spinup-timeout-reason TEXT",
+        ),
+        (judge_partition, f"--judge-partition {judge_partition}"),
+        (judge_qos, f"--judge-qos {judge_qos}"),
+        (rerun_masked_without_artifact, f"{RERUN_MASKED_FLAGS} TEXT"),
+        (acknowledge_failed_judge_jobs, f"{ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT"),
+    ]
+    return [flag for given, flag in flags if given]
+
+
+def _with_requested(outcome: RecoveryOutcome, options: dict[str, Any]) -> RecoveryOutcome:
+    """The outcome whose decision names the options of the call that planned it (see ``_requested``)."""
+    if outcome.decision is None:
+        return outcome
+    decision = outcome.decision.model_copy(update={"requested": _requested(**options)})
+    return outcome.model_copy(update={"decision": decision})
 
 
 def _spinup_timeout_raise(seconds: int | None, reason: str | None) -> dict[str, Any]:

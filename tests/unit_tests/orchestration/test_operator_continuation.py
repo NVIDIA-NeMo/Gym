@@ -463,7 +463,7 @@ def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_pat
     assert out.decision.masked_without_artifact == [(2, 0)]
     assert out.operator_verdict["state"] == "needs_action"
     assert out.operator_verdict["action"] == (
-        "fix the server or the benchmark pairing (a producer bug) then `gym eval submit` again"
+        "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again"
     )
 
 
@@ -510,3 +510,47 @@ def test_a_missing_results_file_is_no_budget_continuation(tmp_path, slurm_bin):
         assert "results file is absent" in out.decision.reason and out.decision.accounting_unknown is None
         assert out.operator_verdict["action"].startswith("restore the results file if it was moved and inspect again")
         assert EXPLICIT_BUDGET not in out.operator_verdict["action"]
+
+
+@pytest.mark.parametrize(
+    ("reason", "action"),
+    [
+        ("CREDENTIALS_REJECTED_REASON", "fix the credentials, then `gym eval resubmit --recover`"),
+        (
+            "SPINUP_TIMEOUT_REASON",
+            "raise the server start-up limit above the recorded one: `gym eval resubmit --recover "
+            "--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT`",
+        ),
+        (
+            "PREPARE_FAILED_REASON",
+            "fix the benchmark's preparation, then `gym eval resubmit --recover`",
+        ),
+    ],
+)
+def test_a_chain_stopped_on_a_typed_failure_names_its_remedy_before_the_resume(tmp_path, slurm_bin, reason, action):
+    from nemo_gym.orchestration.executors import resume_script
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    job_dir = _timed_run(tmp_path)  # one row missing, budget known
+    (job_dir / ".gym_infra_retries").write_text("1\n")
+    line = f"Previous job 100 ended FAILED: {getattr(resume_script, reason)}"
+    (job_dir / resume_script.INCOMPLETE_MARKER_NAME).write_text(line + "\n")
+
+    out = inspect_recovery(*_handle(job_dir))
+
+    assert out.decision.action.value == "resubmit" and f"the chain recorded: {line}" in out.decision.reason
+    assert out.operator_verdict["action"] == action
+
+
+def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery
+    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+
+    job_dir = _timed_run(tmp_path)
+    (job_dir / ".gym_infra_retries").write_text("1\n")
+    prepare_managed(job_dir, "exhausted", n=2)  # one rollout used every attempt
+
+    out = inspect_recovery(*_handle(job_dir), extend_attempts=1)
+
+    assert out.decision.action.value == "resubmit", out.decision.reason
+    assert out.operator_verdict["action"] == "`gym eval resubmit --recover --extend-attempts 1` now"
