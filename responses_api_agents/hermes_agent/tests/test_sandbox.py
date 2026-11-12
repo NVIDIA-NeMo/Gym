@@ -94,6 +94,14 @@ def state():
     )
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+async def test_gzip_helper_is_uploaded_only_when_enabled(state, gzip_enabled):
+    await state.stage_activation({"gzip_requests_enabled": gzip_enabled})
+
+    uploaded = {call.args[0].name for call in state.session.sandbox.upload.await_args_list}
+    assert ("request_gzip.py" in uploaded) is gzip_enabled
+
+
 def mock_json_download(sandbox, **kwargs):
     """Supply files through the real text utility's sandbox download boundary."""
     download = AsyncMock(**kwargs)

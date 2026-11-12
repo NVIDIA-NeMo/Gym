@@ -30,7 +30,9 @@ def install_request_gzip(base_url: str) -> None:
 
     def matches(request: httpx.Request) -> bool:
         url = urlsplit(str(request.url))
-        return request.method == "POST" and (url.scheme, url.netloc) == (base.scheme, base.netloc) and url.path in paths
+        return (
+            request.method == "POST" and (url.scheme, url.netloc) == (base.scheme, base.netloc) and url.path in paths
+        )
 
     def compress_request(request: httpx.Request) -> None:
         if matches(request):
