@@ -32,10 +32,10 @@ copies the files to a separate staging directory, applies the checked-in patch,
 verifies all resulting file hashes, and writes a provenance record. It does
 not fetch source or modify the input. The resulting export needs an explicitly
 provisioned Python 3.10 environment with the benchmark dependencies.
-Dependency building and ROM installation are supplied by the companion
-`vs-bench-runtime-provisioning-20261110` change (currently a local branch,
-not yet published). After applying both changes to the same checkout, follow
-the [runtime instructions](runtime/README.md). Provision that runtime before
+Dependency building and ROM installation are supplied by the
+[companion provisioning change](https://github.com/aroshanghias-nvd/Gym/tree/vs-bench-runtime-provisioning-20261110/benchmarks/vs_bench/runtime).
+After applying both changes to the same checkout, follow the
+[runtime instructions](runtime/README.md). Provision that runtime before
 starting Gym; the adapter does not install packages or download game assets.
 
 ## Isolation and configuration
