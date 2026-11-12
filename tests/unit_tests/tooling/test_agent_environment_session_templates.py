@@ -43,6 +43,7 @@ migration = load_migration()
         "opencode_agent",
         "kilocode_agent",
         "claude_code_agent",
+        "cline_agent",
         "osworld_agent",
         "harbor_oracle_agent",
         "terminus_2_sandboxed_agent",
