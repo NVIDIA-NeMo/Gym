@@ -6,7 +6,7 @@ position: 7
 
 # Plan Repeats
 
-Use `gym eval plan-repeats` before collecting a comparison to choose repeat counts from historical standard deviations. Plan one benchmark, a model's selected benchmarks, or a suite average. The command reads a small YAML file; it does not start evaluations or access a cluster.
+Use `gym eval plan-repeats` before running evaluation benchmarks with NeMo Gym. Its goal is to choose appropriate repeat counts for your statistical requirements, such as acceptable loss and target power. Historical standard deviations can inform this planning. Plan one benchmark, a model's selected benchmarks, or a suite average. The command reads a small YAML file; it does not start evaluations or access a cluster.
 
 For a step-by-step example with expected counts, reports, baseline reuse, and multiple metrics, follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats).
 
