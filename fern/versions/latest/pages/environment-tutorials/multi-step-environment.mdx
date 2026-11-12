@@ -33,12 +33,12 @@ What does synonym_value mean?
   - `synonym_value` is the numeric output returned by the tool `/get_synonym_value`.
   - In this example implementation, it's computed as the sum of character code points for the synonym string (e.g., "Warm" -> 407).
 
-+--------------------------- ResponsesAPIAgent (/run) ---------------------------+
++-------------------- Environment Server (single_agent_turn) --------------------+
 |                                                                                |
 |  1) Initialize episode state                                                   |
-|     POST ResourcesServer /seed_session                                         |
+|     POST ResourcesServer /seed_session (resources_session_id, task_data, ...)  |
 |                                                                                |
-|  2) Interaction loop (repeat up to max_steps)                                  |
+|  2) Agent turn: simple_agent loop (repeat up to max_steps)                     |
 |     POST ModelServer /v1/responses                                             |
 |       +- if output contains text: keep it in the conversation                  |
 |       +- if output contains function_call(name=TOOL, arguments=...):           |
@@ -55,10 +55,13 @@ What does synonym_value mean?
 |       - parse the final extract_synonym_values(...) arguments from the response|
 |       - compare to expected_synonym_values                                     |
 |       - reward = 1.0 if exact match else 0.0 (plus extra metrics)              |
+|                                                                                |
+|  4) Clean up                                                                   |
+|     POST ResourcesServer /close_session                                        |
 +--------------------------------------------------------------------------------+
 ```
 
-This is the `simple_agent` loop from the [single-step tutorial](/environment-tutorials/single-step-environment) in action: the model is called, it emits a `function_call`, the tool executes, the result is appended back into the conversation, and the model is called again with the updated context. This cycle repeats until the model produces a final text response or hits `max_steps`. In a multi-step environment, this iterative loop is where the agent learns to chain tool calls correctly.
+Step 2 is the `simple_agent` loop from the [single-step tutorial](/environment-tutorials/single-step-environment) in action; the `single_agent_turn` Environment Server makes the seed, verify, and close calls around it: the model is called, it emits a `function_call`, the tool executes, the result is appended back into the conversation, and the model is called again with the updated context. This cycle repeats until the model produces a final text response or hits `max_steps`. In a multi-step environment, this iterative loop is where the agent learns to chain tool calls correctly.
 
 ---
 
@@ -199,7 +202,7 @@ Multi-step environments where tool outputs depend on earlier calls pair naturall
 ```text
 [Episode start]
 
-Agent -> ResourcesServer: POST /seed_session
+EnvironmentServer -> ResourcesServer: POST /seed_session
   (environment is initialized for this episode)
 
 User: "For the synonyms ['Warm', 'Blazing'], look up each synonym_value and then submit the list."
@@ -226,11 +229,13 @@ Model submits final answer via the "submit" tool:
 
 [Episode end -> grading]
 
-Agent -> ResourcesServer: POST /verify (includes the full response trace + ground truth fields)
+EnvironmentServer -> ResourcesServer: POST /verify (includes the full response trace + ground truth fields)
 ResourcesServer:
   - parses the extract_synonym_values(...) arguments -> actual=[407, 711]
   - compares to expected_synonym_values from the dataset row
   - returns reward: 1.0 if exact match else 0.0
+
+EnvironmentServer -> ResourcesServer: POST /close_session
 ```
 
 ---

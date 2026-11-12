@@ -21,16 +21,18 @@ Inputs
   - user instruction + tool schemas (company_directory + email/calendar/analytics/...)
   - ground truth calls (or other grading metadata) for verify()
 
-Flow (state is stored per session_id inside the ResourcesServer)
-  1) POST ResourcesServer /seed_session
-     - initializes toolkits + in-memory data for this session_id
-  2) POST ModelServer /v1/responses
+Flow (state is stored per session ID inside the ResourcesServer)
+  1) EnvironmentServer -> ResourcesServer POST /seed_session (resources_session_id, episode_id, task_id, task_data)
+     - initialize_session_state creates toolkits + in-memory data for this session
+  2) Agent -> ModelServer POST /v1/responses
      - model emits one or more function_call tool invocations (e.g., email_search_emails, email_reply_email)
-  3) POST ResourcesServer /{tool_name}
+  3) Agent -> ResourcesServer POST /{tool_name}
      - executes the tool against the session's state and returns output/errors
      - agent appends tool outputs back into the conversation
-  4) POST ResourcesServer /verify
+  4) EnvironmentServer -> ResourcesServer POST /verify
      - extracts predicted function calls from the response and grades the replayed outcome, returning reward in [0, 1]
+  5) EnvironmentServer -> ResourcesServer POST /close_session
+     - release_session_state drops the session's toolkits
 ```
 
 ---
@@ -40,24 +42,28 @@ Flow (state is stored per session_id inside the ResourcesServer)
 This Resources Server introduces three patterns not seen in the earlier tutorials:
 
 - **Dynamic routing** — a single `/{path}` catch-all endpoint dispatches to any tool function, so you don't need to register each tool individually.
-- **Per-session toolkit initialization** — `seed_session()` creates an independent set of toolkits and data for each episode, so concurrent rollouts don't interfere.
+- **Per-session toolkit initialization** — the session state hooks create an independent set of toolkits and data for each episode and release it at close, so concurrent rollouts don't interfere.
 - **State-based verification** — `verify()` extracts the agent's function calls, replays them in a fresh environment alongside the ground truth, and compares the resulting state rather than the exact call sequence.
 
-**File (simplified from [`resources_servers/workplace_assistant/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant/app.py)):**
+**File (adapted from [`resources_servers/workplace_assistant/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant/app.py)):**
+
+<Note>
+The shipped server still overrides `seed_session` with a cookie seed, which an Environment Server's typed seed cannot use. The excerpt below creates the toolkits through the session state hooks instead, as new servers should.
+</Note>
 
 ```python
 # simplified
 from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
 )
 from nemo_gym.client import SESSION_ID_KEY
@@ -92,13 +98,11 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         app.post("/{path}")(self.route_to_python_function)
         return app
 
-    async def seed_session(
-        self,
-        request: Request,
-        body: BaseSeedSessionRequest
-    ) -> BaseSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
+    # Session state hooks: the base serves /seed_session and /close_session through them
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.session_id_to_tool_env
 
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
         # Initialize multiple toolkits for this session
         toolkits = [
             "email",
@@ -108,7 +112,9 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             "customer_relationship_manager",
         ]
         self.session_id_to_tool_env[session_id] = get_tools(toolkits)
-        return BaseSeedSessionResponse()
+
+    async def release_session_state(self, session_id: str) -> None:
+        self.session_id_to_tool_env.pop(session_id, None)
 
     # Generic tool router - dispatches to Python functions dynamically
     async def route_to_python_function(
@@ -120,10 +126,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
 
         if session_id not in self.session_id_to_tool_env:
-            raise HTTPException(
-                status_code=400,
-                detail="Session not initialized. Please call seed_session first.",
-            )
+            # Never seeded, or already closed: answer 404 rather than an ordinary tool output
+            raise ResourcesSessionLostError(f"No open workplace session {session_id}")
 
         tool_env = self.session_id_to_tool_env[session_id]
         args = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
@@ -136,6 +140,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             # Return error to model so it can self-correct
             return WorkbenchResponse(output=f"Error executing tool '{path}': {str(e)}")
 
+    # Scores from the request alone, so it needs no session state; /close_session releases the toolkits
     async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         ground_truth = body.ground_truth
         response = body.response.output
@@ -163,7 +168,7 @@ elif is_nemo_gym_fastapi_entrypoint(__file__):
 Dynamic routing with `/{path}` allows the environment to expose an arbitrary number of tools without hardcoding each endpoint. The `route_to_python_function` method dispatches incoming requests to Python functions in the per-session `tool_env["functions"]` dictionary.
 
 <Warning>
-The `/{path}` catch-all route **must be registered after** `super().setup_webserver()`. The parent method registers `/seed_session` and `/verify` — if your catch-all is registered first, it will intercept those requests and break the server lifecycle.
+The `/{path}` catch-all route **must be registered after** `super().setup_webserver()`. The parent method registers `/seed_session`, `/close_session`, and `/verify` — if your catch-all is registered first, it will intercept those requests and break the server lifecycle.
 
 </Warning>
 
@@ -194,8 +199,8 @@ This is more flexible than trajectory matching because it rewards correct outcom
 ```text
 [Episode start]
 
-Agent -> ResourcesServer: POST /seed_session
-  (ResourcesServer initializes a fresh in-memory "workbench" for this session_id:
+EnvironmentServer -> ResourcesServer: POST /seed_session {"resources_session_id": "...", ..., "task_data": {...}}
+  (initialize_session_state creates a fresh in-memory "workbench" for this session:
    company_directory + email/calendar/analytics/project_management/crm toolkits + their data)
 
 User: "Reply to Carlos's last email about 'Task Update' with 'Thanks, I'll follow up tomorrow.'"
@@ -218,11 +223,14 @@ ResourcesServer -> Agent:
 
 [Episode end -> grading]
 
-Agent -> ResourcesServer: POST /verify (includes response + ground truth calls for this task)
+EnvironmentServer -> ResourcesServer: POST /verify (includes response + ground truth calls for this task)
 ResourcesServer:
   - extracts predicted function calls from the response (ignores text output)
   - replays predicted and ground-truth calls, compares final state
   - returns reward 1.0 or 0.0
+
+EnvironmentServer -> ResourcesServer: POST /close_session
+  (release_session_state drops this session's workbench)
 ```
 
 ---
