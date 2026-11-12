@@ -1,0 +1,31 @@
+name: eqbench4
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: rlhf
+description: EQ-Bench 4 applied emotional and social intelligence; the policy roleplays with a simulated persona
+  for up to eight turns per side, and a judge panel compares its transcripts with published leaderboard transcripts
+  to place it on the leaderboard's Bradley-Terry rating scale.
+modality: text
+licensing: Apache-2.0 AND BSD-3-Clause AND LicenseRef-Commons-Clause-1.0
+authors:
+- Daniel Egert
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: eqbench4
+agent_server: eqbench4_agent
+datasets:
+- name: eqbench4
+  type: benchmark
+  jsonl_fpath: benchmarks/eqbench4/data/eqbench4_benchmark.jsonl
+  prepare_script: benchmarks/eqbench4/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
