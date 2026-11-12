@@ -318,6 +318,9 @@ def build_openclaw_observations(
         )
 
     bundle.gaps = [gap for gap in bundle.gaps if gap.code != "context_compaction_unavailable"]
+    # Verified against OpenClaw 2026.6.11 (the adapter runtime pin). This is a
+    # diagnostic log format, not a stable API; recheck it on runtime upgrades.
+    # Unmatched logs leave the trigger unknown rather than assuming automatic.
     completed = re.findall(
         r"embedded run auto-compaction complete: runId=(\S+) reason=(?:overflow|threshold) "
         r"compactionCount=(\d+) willRetry=(?:true|false)",
