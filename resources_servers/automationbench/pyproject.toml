@@ -10,6 +10,8 @@ dependencies = [
     # The verifiers commit verifiers_agent pins: the tools are called through Gym's verifiers environment.
     "verifiers@ git+https://github.com/PrimeIntellect-ai/verifiers.git@b2e4e8157783b2c0dffc7821044c87f29f1c3ccf",
     "automationbench-env",
+    # tool_env() builds its placeholder dataset with it.
+    "datasets",
 ]
 
 [tool.uv]

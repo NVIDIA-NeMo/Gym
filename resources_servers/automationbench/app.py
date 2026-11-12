@@ -168,6 +168,9 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         # Importing AutomationBench takes minutes on a cold filesystem; do it before serving, not in a tool call.
         tool_env()
+        # api_search writes its schema index into site-packages on first use, and not atomically. Write it here: the
+        # main process sets up the app before uvicorn starts any worker, so workers only read it.
+        run_tool("api_search", {"query": "gmail"}, new_world_state({"initial_state": {}, "assertions": []}))
         # Last, so the routes registered above win over a tool of the same name.
         app.post("/{tool_name}")(self.call_tool)
         return app

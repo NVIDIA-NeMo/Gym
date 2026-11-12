@@ -20,8 +20,9 @@ automationbench:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
-      # verifiers' max_turns: 50 model calls per task.
-      max_steps: 50
+      # verifiers' max_turns is 50 model calls, but it never runs the 50th call's tool calls, and the score reads only
+      # the final world. simple_agent runs a call's tool calls before it checks max_steps, so 49 caps both at 49 rounds.
+      max_steps: 49
       # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
       resources_server:
         type: resources_servers

@@ -152,9 +152,14 @@ def test_tool_calls_change_the_session_world_that_verify_scores(client):
 def test_sessions_hold_separate_worlds(client):
     _post_seed(client, _seed("first"))
     _win_the_deal(client)
+    first = dict(client.cookies)
     _post_seed(client, _seed("second"))
 
     assert _verify(client)["objectives_passed"] == 0.0
+    # A seed that replaced one shared world would have lost the first session's won deal.
+    client.cookies.clear()
+    client.cookies.update(first)
+    assert _verify(client)["objectives_passed"] == 1.0
 
 
 def test_tool_errors_reach_the_model_as_verifiers_words_them(client):

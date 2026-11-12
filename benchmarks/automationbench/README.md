@@ -11,7 +11,10 @@ AutomationBench scored with the Artificial Analysis headline metric by default.
 
 Both run the same tasks, prompts, tools and rubric. `config.yaml` keeps each
 task's world in a resources server session and runs the tool loop in
-`simple_agent`, capped at 50 model calls as verifiers' `max_turns` is.
+`simple_agent`. Its `max_steps` is 49, not verifiers' `max_turns` of 50:
+verifiers stops before running the 50th call's tool calls, while `simple_agent`
+runs a call's tool calls before it checks the cap, so both change the world in
+at most 49 tool rounds. The score reads only that world.
 `config_legacy_agent.yaml` hands the whole episode to verifiers and stays to
 reproduce existing results; the relay will be removed after the Environment
 Server migration. The two manifests carry different versions because a

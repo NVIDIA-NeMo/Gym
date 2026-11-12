@@ -1127,6 +1127,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "automationbench-env" },
+    { name = "datasets" },
     { name = "nemo-gym", extra = ["dev"] },
     { name = "verifiers" },
 ]
@@ -1139,6 +1140,7 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "automationbench-env", editable = "../../benchmarks/automationbench" },
+    { name = "datasets" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
     { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=b2e4e8157783b2c0dffc7821044c87f29f1c3ccf" },
