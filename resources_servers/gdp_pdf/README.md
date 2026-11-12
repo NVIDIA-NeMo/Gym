@@ -2,7 +2,8 @@
 
 ## Overview
 
-[GDP.pdf](https://huggingface.co/datasets/surgeai/GDP.pdf) (Surge AI, MIT) measures professional
+[GDP.pdf](https://huggingface.co/datasets/surgeai/GDP.pdf) (Surge AI, MIT; data is downloaded from the
+public mirror [Oitaaa/GDP.pdf](https://huggingface.co/datasets/Oitaaa/GDP.pdf)) measures professional
 multimodal reasoning over the documents the economy actually runs on: dense reports, contracts,
 filings, and records in the messy real-world formats professionals work from. The 100 prompts were
 written by domain experts who do this work professionally — practicing physicians, attorneys,
@@ -99,10 +100,12 @@ the agent raises an error naming the exact command to run.
 | Field | Default | Meaning |
 |---|---|---|
 | `judge_model_server` | `judge_model` | Model server used for grading |
-| `judge_chat_create_params` | `max_tokens: 1024` | Judge sampling params (Chat Completions) |
+| `judge_chat_create_params` | `reasoning_effort: medium`, `max_completion_tokens: 16384` | Judge sampling params (Chat Completions); the budget covers the judge's reasoning and its verdict |
 | `judge_prompt_template_fpath` | `prompt_templates/judge.txt` | Per-criterion judge prompt |
 | `judge_max_attempts` | 5 | Attempts on parse failure before the row is excluded (see Grading) |
 | `judge_endpoint_max_concurrency` | 64 | Caps concurrent judge calls; a single task fans out to up to 30 |
+| `reward_mode` | `mean_criteria` | Training reward: `mean_criteria`, `strict_pass` or `mixed` (see Training rewards) |
+| `mixed_reward_alpha` | 0.5 | All-pass weight in the `mixed` reward; range [0, 1] |
 
 ## Grading
 
@@ -153,11 +156,25 @@ directly interchangeable across implementations.
 
 ## Metrics
 
-Every verified rollout serializes both `all_pass` and `mean_criterion_pass`; `reward` is the latter.
+Every verified rollout serializes both `all_pass` and `mean_criterion_pass`; with the default
+`reward_mode`, `reward` is the latter.
 `compute_metrics` reports both metrics overall (plus `judge_no_verdict`, the
 share of criteria where no verdict token could be parsed — watch this, a non-trivial value means the
 judge is not following the output format), with a per-domain breakdown keyed on
 `verifier_metadata.domain`.
+
+### Training rewards
+
+For training on your own GDP.pdf-style tasks, `reward_mode` chooses what `reward` is:
+`mean_criteria` (default) uses the fraction of criteria passed, `strict_pass` uses all-pass, and
+`mixed` uses `(1 - alpha) * mean_criterion_pass + alpha * all_pass` with `alpha =
+mixed_reward_alpha`. All three report `all_pass` and `mean_criterion_pass` unchanged, and the
+response records the mode in `reward_mode`. In NeMo RL, set it through the environment config, e.g.
+`env.nemo_gym.gdp_pdf.resources_servers.gdp_pdf.reward_mode=mixed`. Keep benchmark evaluation on the
+default.
+
+The agent's `mask_failed_attempts` (off by default) leaves attempts that end without a gradable
+answer out of the training loss; see `responses_api_agents/gdp_pdf_agent/README.md`.
 
 ## Data Download
 

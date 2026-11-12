@@ -40,14 +40,14 @@ from pydantic import ValidationError
 from pytest import approx
 from yarl import URL
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.longmemeval import app as lme_app
 from resources_servers.longmemeval import prepare_longmemeval as prepare_lme
 from resources_servers.longmemeval.app import (

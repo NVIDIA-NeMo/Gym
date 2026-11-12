@@ -27,20 +27,24 @@ Source: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
 import json
 from pathlib import Path
 
-from nemo_gym.global_config import get_hf_token
+from nemo_gym.config import get_hf_token
 
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "omniscience_benchmark.jsonl"
 
+HF_REPO_ID = "ArtificialAnalysis/AA-Omniscience-Public"
+# Pin to the v1 revision so a new upstream version does not silently change scores.
+HF_REVISION = "e4883edbb9f5ccf2b2a8fdc6fb65e01a58e99849"  # pragma: allowlist secret
+
 
 def prepare() -> Path:
     """Download AA-Omniscience data and convert to Gym JSONL format."""
     from datasets import load_dataset
 
-    print("Downloading AA-Omniscience-Public from HuggingFace...")
-    ds = load_dataset("ArtificialAnalysis/AA-Omniscience-Public", split="train", token=get_hf_token())
+    print(f"Downloading {HF_REPO_ID} (revision {HF_REVISION[:7]}) from HuggingFace...")
+    ds = load_dataset(HF_REPO_ID, split="train", revision=HF_REVISION, token=get_hf_token())
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 

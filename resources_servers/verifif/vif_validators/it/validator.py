@@ -216,6 +216,12 @@ def keyword_frequency(response: str, keyword: str, language: str = "it") -> int:
         pattern = rf"(?<![\w]){re.escape(keyword_normalized)}(?![\w])"
         return len(re.findall(pattern, response_normalized, flags=re.UNICODE))
 
+    keyword_parts = keyword_normalized.split()
+    if len(keyword_parts) > 1:
+        phrase_pattern = r"\s+".join(re.escape(part) for part in keyword_parts)
+        pattern = rf"(?<![\w]){phrase_pattern}(?![\w])"
+        return len(re.findall(pattern, response_normalized, flags=re.UNICODE))
+
     # For Italian, handle elisions: apostrophes act as word separators
     # Tokenize the response to handle elisions properly
     # Tokenization splits "dell'Italia" into ["dell", "Italia"], so we can count "Italia" directly

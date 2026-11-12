@@ -17,7 +17,17 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -25,11 +35,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.judge import JudgeError
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 from resources_servers.job_bench.dataset import resolve_task_path
 from resources_servers.job_bench.vendor import judge
 
@@ -42,6 +49,9 @@ class JobBenchConfig(BaseResourcesServerConfig):
     judge_base_url: str
     judge_api_key: str
     judge_model: str
+    # Upstream asks every judge call for 200000 completion tokens. A judge whose context is not
+    # much larger than that (a self-hosted 262k model) rejects every prompt over the remainder.
+    judge_max_completion_tokens: int = 200000
     max_judge_workers: int = 10
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -75,11 +85,14 @@ class JobBenchVerifyResponse(BaseVerifyResponse):
     passed_count: int
     total_count: int
     judge_model: str
+    judge_max_completion_tokens: int | None = None
     rubrics: list[dict[str, Any]]
 
 
 class JobBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: JobBenchConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -168,6 +181,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                     300,
                     3,
                     images,
+                    self.config.judge_max_completion_tokens,
                 )
                 for index, rubric in enumerate(rubrics)
             ]
@@ -283,6 +297,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
             passed_count=int(scorecard["passed_count"]),
             total_count=int(scorecard["total_count"]),
             judge_model=self.config.judge_model,
+            judge_max_completion_tokens=self.config.judge_max_completion_tokens,
             grading_protocol=judge.INPUT_PROTOCOL,
             rubrics=rubrics,
         )

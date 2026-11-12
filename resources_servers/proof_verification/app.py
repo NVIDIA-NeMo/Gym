@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -14,20 +15,21 @@ from typing import Any, Optional
 import yaml
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import reraise_judge_errors
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import reraise_judge_errors
 
 
 LOG = logging.getLogger(__name__)
@@ -178,7 +180,9 @@ class ProofVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class ProofVerificationResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: ProofVerificationResourcesServerConfig
 
     _ext_clients: Optional[list] = PrivateAttr(default=None)
@@ -234,6 +238,16 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
             }
             async with self._log_lock:
                 with open(log_path, "a", encoding="utf-8") as f:
+                    # The asyncio lock covers this worker only.
+                    # With num_workers > 1, every worker appends to this file,
+                    # and a long record can reach it in several writes.
+                    # The file lock keeps records from different workers from interleaving.
+                    # A filesystem without file locks (NFS without lockd, Lustre mounted noflock) raises here;
+                    # the record is still written, unlocked, as it was before workers shared the file.
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX)
+                    except OSError:
+                        pass
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             LOG.warning("[proof_verification] Failed to append log_jsonl %s: %s", log_path, e)
@@ -313,7 +327,7 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
 
     async def _call_judge_internal(self, user_content: str) -> tuple[str, int]:
         """Call judge through Gym's server_client (judge model managed by Gym/Ray)."""
-        from nemo_gym.server_utils import raise_for_status
+        from nemo_gym.client import raise_for_status
 
         server_name = self.config.judge_model_server.name
         model = self.config.judge_model_name or server_name
@@ -398,3 +412,6 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ProofVerificationResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ProofVerificationResourcesServer.run_webserver()  # noqa: F401

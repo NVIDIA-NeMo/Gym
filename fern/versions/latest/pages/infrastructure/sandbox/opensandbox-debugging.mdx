@@ -47,7 +47,8 @@ cat /sys/fs/cgroup/memory.events
 ```
 
 `memory.peak == memory.max` with a large `max` count means you are living at the ceiling even if
-nothing has died yet. `oom_kill > 0` with the sandbox still alive means a child process was killed.
+nothing has died yet. An `oom_kill` count that increased during the command means a process in the
+cgroup was OOM-killed; a nonzero count alone may describe an earlier command.
 If the whole sandbox died you will not get to read this file — see
 [detecting OOM from the client](#detecting-oom-from-the-client).
 
@@ -73,47 +74,59 @@ From the client this is an ordinary command failure:
 
 - `exec()` returns normally with `return_code == 137` (or `-9`), usually `Killed` in stderr and
   truncated output.
-- Confirm from inside: `memory.events` shows `oom_kill > 0`, and `memory.peak` is at or near
-  `memory.max`.
-- The sandbox is fine to keep using; the agent can retry a smaller step.
+- Check whether `memory.events`'s `oom_kill` counter increased during the command. A nonzero historical
+  count or high `memory.peak` alone does not establish this command's cause.
+- The sandbox can remain usable. Check partial command effects before rerunning a smaller step.
 
 ### The whole sandbox died
 
-Kubernetes group-OOM kills the entire cgroup, so the next operation cannot reach the exec daemon.
-The provider recognises this, polls the sandbox status for up to 5 seconds to learn *why*, and
-raises a typed error with the reason attached:
+When an OOM kill terminates the whole sandbox container, its exec daemon also stops.
+The next command request cannot reach it, and an attached PTY can lose its connection. Those symptoms
+also occur for other reasons, such as node loss or sandbox expiry.
 
-```python
-from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
+On command execution failure or PTY loss, Gym checks the sandbox's lifecycle status within the remaining
+diagnostic budget. A terminal lifecycle `OOMKilled` reason alone does not identify the affected container.
+Gym confirms OOM when the control-plane response identifies the current sandbox and contains the recognized
+single-pod report of its `sandbox` container terminating with `OOMKilled`. The report must describe the
+current container state; sidecars, init containers, historical states and ambiguous reports do not qualify.
 
-try:
-    result = await sandbox.exec(cmd, timeout_s=120)
-except SandboxBackendUnreachableError as e:
-    if "OOM-killed" in str(e):
-        # message quotes the server's record: state=..., reason='OOMKilled', message=..., sandbox_id=...
-        ...  # record as OOM; recreate the sandbox or fail the rollout
-    else:
-        ...  # backend gone for another reason (node loss, TTL); same handling, different tag
-```
+A confirmed OOM becomes a `provider_oom_killed` event. Its diagnostic reason retains the evidence source
+and any reported container exit code. `details.exit_code` stays unset because the command's own exit was not observed.
+The controller can retain this report after the pod disappears, so a later pod lookup returning 404 does not
+erase the recorded cause. Command-status HTTP 410 bodies alone never establish OOM: even through the server
+proxy, a response body can originate in the sandbox's exec daemon.
 
-Afterwards `await sandbox.status()` returns `SandboxStatus.ERROR` or `SandboxStatus.STOPPED` — that
-is the provider-neutral check if you do not want to import the provider's exception type. The same
-notice surfaces on the PTY path as
-`SandboxPtyError("PTY attach takeover kept being refused: Sandbox was OOM-killed. ...")`.
+If the lifecycle report is unrecognized, the optional inspect fallback below may provide evidence.
+Without either source, Gym retains the observed request or command-outcome failure. A confirmed stopped or
+failed sandbox without OOM evidence is `provider_unavailable`, retaining the original request failure as its cause.
+The caller's outcome policy chooses retries, scoring and health attribution from that evidence and the execution stage.
+See [Failure reporting and recovery](./opensandbox#failure-reporting-and-recovery) for timeout and retry settings,
+and [Error Handling](./index#error-handling) for the shared contract.
 
-<Note>
-Do not confuse OOM with a timeout. A command that exceeds its `timeout_s` raises `TimeoutError`; a
-wedged command raises `TimeoutError` mentioning the hard cap. Neither is an OOM — when in doubt,
-read `memory.events` before deciding.
-</Note>
+### Inspect fallback
+
+`diagnostics.inspect_oom` defaults to `false`. Enable it only for a deployment with the OpenSandbox **1.1.0**
+plain-text `/sandboxes/{id}/diagnostics/inspect` format. This deprecated endpoint is a compatibility fallback,
+not a supported structured API: Kubernetes requires the unique `sandbox` container's current `State` to be
+`Terminated (..., reason=OOMKilled)`; Docker requires one container, `Running: False` and `OOMKilled: True`.
+Unknown layouts, duplicate states, failed requests and bodies over 64 KiB provide no OOM evidence.
+
+Lifecycle reads and optional inspect requests share the remaining diagnostic/recovery budget. A failed diagnostic
+lookup cannot replace the original failure. Confirm support with the deployment operator before enabling this route.
+
+### Lifecycle report compatibility
+
+Gym recognizes the control-plane status shape `state="Failed"`, `reason="FAILED"` with a matching sandbox ID
+and the complete `1/1 observed pods failed` report naming its `<sandbox-id>-0` pod and `sandbox` container.
+This compatibility parser is deliberately narrow: pooled pods, multiple pods, mismatched IDs, extra termination
+text and unknown report layouts provide no OOM evidence. A generic `FAILED` or `OOMKilled` reason is insufficient.
+Recognition uses the existing bounded lifecycle lookup; no additional option or request is required.
 
 ### Counting OOMs across a run
 
-Rollout records carry sandbox observations under `ng_agent_observations`: each record has
-`outcome` (`completed`, `failed`, `timeout`, `sandbox_error`), `exit_code`, and `error_type`.
-`outcome: sandbox_error` with `error_type: SandboxBackendUnreachableError`, or `exit_code: 137`, is
-your OOM census. Join it on the task id: OOMs clustered on a few tasks mean fan-out or runaway code
-in those repos; OOMs spread evenly mean the limit is genuinely too small.
+Use the saved reports described in [Failure observations](/observability/rollout-failures).
+Count each event ID with kind `provider_oom_killed` once, grouping by task ID to locate repeated OOMs.
+Exit code 137 alone does not confirm OOM; counting a failure does not choose its score or health outcome.
 
 ## Cluster-side checks
 
@@ -124,8 +137,8 @@ returned with `-0` appended; sandboxes also carry the `opensandbox.io/id` label.
 kubectl top pod <sandbox-id>-0 -n <namespace>          # live CPU/memory as the node sees it
 kubectl get pod <sandbox-id>-0 -n <namespace> \
   -o jsonpath='{.spec.containers[0].resources}'        # requests AND limits actually applied
-kubectl describe pod <sandbox-id>-0 -n <namespace> | grep -A3 'Last State'
-#   "Reason: OOMKilled, Exit Code: 137" = whole-sandbox OOM
+kubectl describe pod <sandbox-id>-0 -n <namespace>
+#   Confirm Reason: OOMKilled on the current sandbox user container, not a sidecar or old state.
 ```
 
 The `resources` jsonpath is the fastest way to confirm you did not accidentally set the same map
@@ -137,6 +150,6 @@ for requests and limits.
 | --- | --- | --- |
 | `throttled_usec` ≫ 0, memory fine | CPU limit binding — usually fan-out | Fix parallelism caps before raising the limit. |
 | `memory.peak` near `memory.max`, many `max` events | Memory ceiling, thrashing | Find the fan-out or runaway code; raise the limit only if the peak is legitimate. |
-| `oom_kill > 0`, sandbox alive | A child process was killed | Command output is probably truncated; safe to retry a smaller step. |
-| Pod `OOMKilled` / `137`, no in-sandbox data | Group OOM kill | Same causes; add a bash timeout so the agent fails fast. |
+| `oom_kill` increased, sandbox alive | A process in the cgroup was OOM-killed | Inspect affected processes and partial effects before rerunning. |
+| Current sandbox user container terminated with `OOMKilled` | Confirmed sandbox OOM | Inspect memory use and parallelism before rerunning. |
 | `nproc` ≠ CPUs in `cpu.max` | This cluster does not overlay CPU counts | Rely on `derive_cpu_env`; cap environment-blind runners in the image. |

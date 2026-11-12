@@ -27,21 +27,17 @@ from typing import Any, Dict
 from fastapi import Request
 from pydantic import Field
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.client import NeMoGymAsyncOpenAI
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_rollout_id,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
+from nemo_gym.models.model_call_capture import note_finish_reason
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class InferenceProviderConfig(BaseResponsesAPIModelConfig):
@@ -54,7 +50,7 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
     correlate_via_user_field: bool = False
-    """Forward the current rollout id (see ``nemo_gym.rollout_correlation``) as
+    """Forward the current rollout id (see ``nemo_gym.core.episode_context``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
     provider that inspects it can correlate per-turn calls back to the same
     rollout. A no-op for any provider that ignores ``user``. Never overrides
@@ -62,20 +58,26 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
 
 
 class InferenceProvider(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: InferenceProviderConfig
 
     def model_post_init(self, context):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
         )
-        self._converter = ResponsesConverter(
+        self._converter = ChatCompletionsConverter(
             return_token_id_information=False,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
         )
         self._semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
+
+    def _mints_response_ids(self) -> bool:
+        # responses() builds each response from a chat completion.
+        return True
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -89,6 +91,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
             responses_create_params=body,
             chat_completion=chat_completion_response,
         )
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return response.model_copy(update={"created_at": int(time())})
 
     async def chat_completions(
@@ -130,6 +133,12 @@ class InferenceProvider(SimpleResponsesAPIModel):
                 ) + (choice_dict["message"].get("content") or "")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def embeddings(self, body: dict = Body()) -> dict:
+        """Pass an OpenAI-compatible embeddings request through to the provider; the configured model replaces the request's model."""
+        body_dict = self.config.extra_body | body | {"model": self.config.model}
+        async with self._semaphore:
+            return await self._client.create_embeddings(**body_dict)
 
 
 if __name__ == "__main__":

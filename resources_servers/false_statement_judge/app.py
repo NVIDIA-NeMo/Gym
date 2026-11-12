@@ -36,24 +36,26 @@ from typing import List, Optional
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+    observe_llm_judge_grading,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
@@ -164,8 +166,6 @@ class FalseStatementVerifyResponse(BaseVerifyResponse):
 class FalseStatementJudgeServer(SimpleResourcesServer):
     """LLM-judge grader for prove-the-false-statement benchmarks."""
 
-    ray_enabled = False
-
     config: FalseStatementJudgeConfig
 
     def model_post_init(self, context):
@@ -203,6 +203,12 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
         return key
 
     async def _call_judge(self, judge_prompt: str) -> str:
+        def observed_text(text: str, *, completed: bool) -> str:
+            # Preserve the scientific parser while keeping a truncated verdict unconfirmed.
+            if completed and (parse_points(strip_thinking_traces(text)) is not None or parse_points(text) is not None):
+                record_parsed_judge_verdict()
+            return text
+
         judge_params = self.config.judge_responses_create_params
         if self.config.use_chat_completions_for_judge:
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
@@ -211,24 +217,41 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
                 temperature=judge_params.temperature,
                 top_p=judge_params.top_p,
             )
-            response_obj = await self.server_client.post(
+            chat_response = await call_judge(
+                self.server_client,
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/chat/completions",
                 json=chat_params,
+                response_model=NeMoGymChatCompletion,
             )
-            chat_response = NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
             content = chat_response.choices[0].message.content if chat_response.choices else None
-            return content.strip() if content else ""
+            return observed_text(
+                content.strip() if content else "",
+                completed=(
+                    bool(chat_response.choices)
+                    and chat_response.choices[0].finish_reason == "stop"
+                    and getattr(chat_response.choices[0], "native_finish_reason", None) != "repetition"
+                    and getattr(chat_response.choices[0], "stop_reason", None) != "repetition_detected"
+                ),
+            )
 
         request_params = judge_params.model_copy(deep=True)
         request_params.input = [NeMoGymEasyInputMessage(role="user", content=judge_prompt)]
-        response_obj = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=request_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response_obj))
-        return raw_message_text(judge_response)
+        return observed_text(
+            raw_message_text(judge_response),
+            completed=(
+                judge_response.status in (None, "completed")
+                and judge_response.incomplete_details is None
+                and judge_response.error is None
+            ),
+        )
 
     async def verify(self, body: FalseStatementVerifyRequest) -> FalseStatementVerifyResponse:
         # The whole reply is the judged artifact: the rubric turns on hedging,
@@ -243,27 +266,34 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
                 "predicted_answer": extract_text_from_response(body.response),
             },
         )
-        judge_text = await self._call_judge(message_dicts[-1]["content"])
 
-        # Grade the post-think verdict, so a tentative `<points>` inside the
-        # judge's own reasoning can't win `_POINTS_RE`'s first-match. Fall back
-        # to the raw text when stripping leaves nothing parsable — a truncated
-        # or unpaired trace would otherwise turn a real verdict into a 0.
-        points = parse_points(strip_thinking_traces(judge_text))
-        if points is None:
-            points = parse_points(judge_text)
+        async def grade() -> FalseStatementVerifyResponse:
+            judge_text = await self._call_judge(message_dicts[-1]["content"])
 
-        return FalseStatementVerifyResponse(
-            **body.model_dump(exclude={"reward"}),
-            # An unparsable judge scores 0 and is surfaced via `no_judge_score`;
-            # upstream instead drops the run from the aggregate.
-            reward=0.0 if points is None else points / _POINTS_MAX,
-            # Stored unstripped: the assessment is what you read back when a
-            # grade is disputed.
-            judge_output=judge_text,
-            judge_points=points,
-        )
+            # Grade the post-think verdict, so a tentative `<points>` inside the
+            # judge's own reasoning can't win `_POINTS_RE`'s first-match. Fall back
+            # to the raw text when stripping leaves nothing parsable — a truncated
+            # or unpaired trace would otherwise turn a real verdict into a 0.
+            points = parse_points(strip_thinking_traces(judge_text))
+            if points is None:
+                points = parse_points(judge_text)
+
+            if points is None:
+                raise JudgeError("judge response has no parsable <points> verdict")
+            return FalseStatementVerifyResponse(
+                **body.model_dump(exclude={"reward"}),
+                reward=points / _POINTS_MAX,
+                # Stored unstripped: the assessment is what you read back when a
+                # grade is disputed.
+                judge_output=judge_text,
+                judge_points=points,
+            )
+
+        return await observe_llm_judge_grading(grade)
 
 
 if __name__ == "__main__":
     FalseStatementJudgeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FalseStatementJudgeServer.run_webserver()  # noqa: F401

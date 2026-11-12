@@ -10,6 +10,8 @@ Arena-Hard-style bidirectional judge whose prompt is filled from ``question`` an
 ``expected_answer``. Rows carry both fields at the top level; no ``verifier_metadata`` bucket.
 """
 
+from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -26,4 +28,9 @@ class TaskData(BaseModel):
             "before math-verify); also fills the judge prompt."
         ),
         json_schema_extra={"consumed_by": ["verify"]},
+    )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one.",
+        json_schema_extra={"consumed_by": ["provenance"]},
     )

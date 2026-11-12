@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from importlib import metadata
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -18,23 +19,30 @@ from typing import Any
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_VERSIONS
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    SESSION_EXPIRED,
+    VERIFIER_ERROR,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    TaskId,
+    is_namespaced,
+    is_registered,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR, is_namespaced, is_registered
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessage,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,
     UserSimSimulationResult,
@@ -59,17 +67,45 @@ PROBE_SCORERS = {
     "tool_calling": "tool_use",
 }
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
+# A failed simulation whose outcome names no failure_class.
+SIMULATION_FAILED = "usersim:simulation_failed"
+# UserSim records commits in git's 12-character short form.
+USERSIM_REVISION_LENGTH = 12
+# A revision is either that short form or the full 40-character commit.
+REVISION_PATTERN = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{28})?")
 logger = logging.getLogger(__name__)
+
+
+def installed_usersim_revision() -> str:
+    """Return the commit the installed UserSim was built from, in UserSim's 12-character form.
+
+    A git install records its commit in ``direct_url.json`` (PEP 610), so the
+    ``pyproject.toml`` pin is the only place the revision is written down.
+    """
+    # Read only the declared distribution. An environment upgraded in place can still hold the
+    # superseded nemo-usersim distribution, which provides the same import package.
+    try:
+        raw = metadata.distribution("usersim").read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        raw = None
+    commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+    if isinstance(commit, str) and commit:
+        return commit[:USERSIM_REVISION_LENGTH]
+    raise RuntimeError(
+        "The installed UserSim records no git commit. Install it from the pinned git revision "
+        "or set usersim_revision in the Resources Server config."
+    )
 
 
 class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     """Configure materialized-row validation and trajectory verification."""
 
     usersim_revision: str = Field(
-        "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
-        pattern=r"^[0-9a-f]{40}$",
+        default_factory=installed_usersim_revision,
+        pattern=rf"^[0-9a-f]{{{USERSIM_REVISION_LENGTH}}}$",
     )
-    nemotron_personas_version: str = "0.0.2"
+    # Locale -> Nemotron-Personas version that prepared rows of that locale must record.
+    nemotron_personas_versions: dict[str, str] = Field(default_factory=lambda: dict(NEMOTRON_PERSONAS_VERSIONS))
     probe_scorer_model: ModelServerRef
     judge_max_output_tokens: int = Field(16_384, gt=0)
     judge_max_output_tokens_non_ascii: int = Field(32_768, gt=0)
@@ -181,10 +217,27 @@ def _create_evaluator(config: Any, models: Mapping[str, Any]) -> Any:
 class UserSimResourcesServer(SimpleResourcesServer):
     """Validate task identity and verify the Environment-owned UserSim result."""
 
-    ray_enabled = False
     config: UserSimResourcesServerConfig
+
+    def owned_session_routing(self) -> dict[str, Any]:
+        # A closed session's tombstone lasts session_ttl_seconds.
+        # With several workers, the session must keep its owner at least as long,
+        # so a delayed seed reaches the worker that holds the tombstone and is refused there.
+        routing = super().owned_session_routing()
+        routing["close_retry_window_seconds"] = max(
+            self.config.session_close_retry_window_seconds, self.config.session_ttl_seconds
+        )
+        return routing
+
     session_id_to_seed: dict[str, SeededUserSimEpisode] = {}
-    closed_resources_session_ids: dict[str, float] = {}
+    # The cookie session each resources session was seeded under, so a close that carries no cookie, as after a
+    # lost seed reply, still finds and releases the seed.
+    resources_session_id_to_session_id: dict[str, str] = {}
+    # The fence of each closed resources session: the episode that closed it and when the fence expires.
+    fenced_resources_session_ids: dict[str, tuple[EpisodeId, float]] = {}
+    # The cookie sessions whose seed outlived session_ttl_seconds, so their verify reports session_expired. Expires
+    # like a fence.
+    expired_session_ids: dict[str, float] = {}
 
     async def seed_session(
         self,
@@ -196,7 +249,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             _validate_resolved_row(
                 task.resolved_row,
                 expected_revision=self.config.usersim_revision,
-                expected_personas_version=self.config.nemotron_personas_version,
+                expected_personas_versions=self.config.nemotron_personas_versions,
             )
         except (ValidationError, ValueError) as error:
             detail = error.errors() if isinstance(error, ValidationError) else str(error)
@@ -204,9 +257,14 @@ class UserSimResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         self._expire_sessions()
         resolved_row = task.resolved_row
-        if body.resources_session_id in self.closed_resources_session_ids:
+        if body.resources_session_id in self.fenced_resources_session_ids:
             raise HTTPException(status_code=409, detail="Resources session is already closed")
-        existing = self.session_id_to_seed.get(session_id)
+        existing_session_id = (
+            session_id
+            if session_id in self.session_id_to_seed
+            else self.resources_session_id_to_session_id.get(body.resources_session_id, session_id)
+        )
+        existing = self.session_id_to_seed.get(existing_session_id)
         if existing is not None:
             if (
                 existing.resources_session_id != body.resources_session_id
@@ -215,10 +273,15 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 or existing.resolved_row_sha256 != _row_digest(resolved_row)
             ):
                 raise HTTPException(status_code=409, detail="Resources session is already seeded for another task")
+            if existing_session_id != session_id:
+                # A seed retried after its reply was lost carries a new cookie; move the record to it.
+                self.session_id_to_seed[session_id] = self.session_id_to_seed.pop(existing_session_id)
+                self.resources_session_id_to_session_id[body.resources_session_id] = session_id
             return UserSimSeedResponse(
                 resources_session_id=existing.resources_session_id,
                 sandbox_access=None,
             )
+        self.expired_session_ids.pop(session_id, None)
         self.session_id_to_seed[session_id] = SeededUserSimEpisode(
             resources_session_id=body.resources_session_id,
             episode_id=body.episode_id,
@@ -227,6 +290,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             resolved_row_sha256=_row_digest(resolved_row),
             expires_at=monotonic() + self.config.session_ttl_seconds,
         )
+        self.resources_session_id_to_session_id[body.resources_session_id] = session_id
         return UserSimSeedResponse(
             resources_session_id=body.resources_session_id,
             sandbox_access=None,
@@ -238,6 +302,15 @@ class UserSimResourcesServer(SimpleResourcesServer):
         body: UserSimVerifyRequest,
     ) -> UserSimVerification:
         seeded = self._seeded_episode(request)
+        if seeded is None:
+            # The seed expired, was closed, or this process restarted, so there is no task to score against.
+            if request.session[SESSION_ID_KEY] in self.expired_session_ids:
+                lost = lost_session_verification(
+                    "The NeMo UserSim task outlived session_ttl_seconds", failure_kind=SESSION_EXPIRED
+                )
+            else:
+                lost = lost_session_verification("No active NeMo UserSim task for this request")
+            return UserSimVerification(**lost, reward_components={}, scenario_completed=False)
         verification_input = body.verification_input
         if body.episode_id != seeded.episode_id or body.task_id != seeded.task_id:
             raise HTTPException(status_code=409, detail="Verification identity does not match the seeded episode")
@@ -257,7 +330,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 mask_sample=False,
                 failure_kind=_usersim_failure_kind(outcome.get("failure_class")),
-                failure_reason=outcome.get("failure_detail") or outcome.get("failure_reason"),
+                failure_reason=_usersim_failure_reason(outcome),
                 reward_components={
                     "participants_completed": float(participants_completed),
                     "conversation_status": float(usersim_result.conversation_status),
@@ -337,8 +410,10 @@ class UserSimResourcesServer(SimpleResourcesServer):
         mask_sample = (simulation_failed and failure_attribution != "assistant_model") or bool(
             scorer_error or evaluator_error or quality_missing or scorer_inconclusive
         )
-        failure_kind = _usersim_failure_kind(outcome.get("failure_class")) if simulation_failed else None
-        failure_reason = outcome.get("failure_detail") if simulation_failed else None
+        failure_kind = (
+            (_usersim_failure_kind(outcome.get("failure_class")) or SIMULATION_FAILED) if simulation_failed else None
+        )
+        failure_reason = _usersim_failure_reason(outcome) if simulation_failed else None
         if scorer_error:
             failure_kind = VERIFIER_ERROR
             failure_reason = str(scorer_error)
@@ -430,26 +505,29 @@ class UserSimResourcesServer(SimpleResourcesServer):
         request: Request,
         body: ResourcesCloseSessionRequest,
     ) -> ResourcesCloseSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
         self._expire_sessions()
+        fenced = self.fenced_resources_session_ids.get(body.resources_session_id)
+        if fenced is not None and fenced[0] != body.episode_id:
+            raise HTTPException(status_code=409, detail="Resources session was closed by another episode")
+        # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
+        session_id = self.resources_session_id_to_session_id.get(
+            body.resources_session_id, request.session[SESSION_ID_KEY]
+        )
         seeded = self.session_id_to_seed.get(session_id)
         if seeded is not None:
             if body.resources_session_id != seeded.resources_session_id or body.episode_id != seeded.episode_id:
                 raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
             del self.session_id_to_seed[session_id]
-        self.closed_resources_session_ids.setdefault(
+            self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
+        self.fenced_resources_session_ids.setdefault(
             body.resources_session_id,
-            monotonic() + self.config.session_ttl_seconds,
+            (body.episode_id, monotonic() + self.config.session_ttl_seconds),
         )
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
-    def _seeded_episode(self, request: Request) -> SeededUserSimEpisode:
+    def _seeded_episode(self, request: Request) -> SeededUserSimEpisode | None:
         self._expire_sessions()
-        session_id = request.session[SESSION_ID_KEY]
-        seeded = self.session_id_to_seed.get(session_id)
-        if seeded is None:
-            raise HTTPException(status_code=404, detail="No active NeMo UserSim task. Call /seed_session first.")
-        return seeded
+        return self.session_id_to_seed.get(request.session[SESSION_ID_KEY])
 
     def _expire_sessions(self) -> None:
         """Discard sessions older than the configured episode and cleanup window."""
@@ -457,16 +535,21 @@ class UserSimResourcesServer(SimpleResourcesServer):
         for session_id, seeded in tuple(self.session_id_to_seed.items()):
             if seeded.expires_at <= now:
                 del self.session_id_to_seed[session_id]
-        for resources_session_id, expires_at in tuple(self.closed_resources_session_ids.items()):
+                self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
+                self.expired_session_ids[session_id] = now + self.config.session_ttl_seconds
+        for session_id, expires_at in tuple(self.expired_session_ids.items()):
             if expires_at <= now:
-                del self.closed_resources_session_ids[resources_session_id]
+                del self.expired_session_ids[session_id]
+        for resources_session_id, (_, expires_at) in tuple(self.fenced_resources_session_ids.items()):
+            if expires_at <= now:
+                del self.fenced_resources_session_ids[resources_session_id]
 
 
 def _validate_resolved_row(
     row: Mapping[str, Any],
     *,
     expected_revision: str,
-    expected_personas_version: str,
+    expected_personas_versions: Mapping[str, str],
 ) -> None:
     required = ("persona", "probe_type", "conversation_language", "trajectory_id", "usersim_config")
     missing = [name for name in required if not row.get(name)]
@@ -475,14 +558,22 @@ def _validate_resolved_row(
     if row.get("probe_variant") == "guarded":
         raise ValueError("Guarded health probes are unsupported by the pinned UserSim revision")
     provenance = _decode_provenance(row.get("usersim_provenance"))
-    if provenance.get("code_sha") != expected_revision:
-        raise ValueError(
-            f"Resolved UserSim row revision {provenance.get('code_sha')!r} does not match {expected_revision!r}"
-        )
+    # Rows record either the full commit or UserSim's short form; both start with the expected revision.
+    code_sha = provenance.get("code_sha")
+    if (
+        not isinstance(code_sha, str)
+        or REVISION_PATTERN.fullmatch(code_sha) is None
+        or not code_sha.startswith(expected_revision)
+    ):
+        raise ValueError(f"Resolved UserSim row revision {code_sha!r} does not match {expected_revision!r}")
     personas_version = provenance.get("nemotron_personas_version")
-    if personas_version != "synthetic" and personas_version != expected_personas_version:
+    locale = row.get("locale")
+    expected_personas_version = expected_personas_versions.get(locale) if isinstance(locale, str) else None
+    if personas_version != "synthetic" and (
+        expected_personas_version is None or personas_version != expected_personas_version
+    ):
         raise ValueError(
-            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} "
+            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} for locale {locale!r} "
             f"is neither 'synthetic' nor the configured version {expected_personas_version!r}"
         )
 
@@ -518,6 +609,10 @@ def _usersim_failure_kind(value: Any) -> str | None:
         return name
     normalized = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "simulation_failed"
     return f"usersim:{normalized}"
+
+
+def _usersim_failure_reason(outcome: Mapping[str, Any]) -> str | None:
+    return outcome.get("failure_detail") or outcome.get("failure_reason")
 
 
 def _conversation_roles(result: UserSimSimulationResult) -> set[str]:
@@ -559,3 +654,6 @@ def _response_text(response: NeMoGymResponse) -> str:
 
 if __name__ == "__main__":
     UserSimResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UserSimResourcesServer.run_webserver()  # noqa: F401

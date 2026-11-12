@@ -1,0 +1,39 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/agentic_turn_simulation/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 4,
+        "Average": 4.25,
+        "Min": 4.0,
+        "Max": 5.0,
+        "Standard deviation": 0.5
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 121.0,
+        "Min": 71.0,
+        "Max": 150.0,
+        "Standard deviation": 32.25
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.4,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Standard deviation": 0.548
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}

@@ -35,17 +35,18 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class GraphWalksResourcesServerConfig(BaseResourcesServerConfig):
@@ -66,7 +67,6 @@ class GraphWalksVerifyResponse(GraphWalksVerifyRequest, BaseVerifyResponse):
 
 
 class GraphWalksResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GraphWalksResourcesServerConfig
 
     async def verify(self, body: GraphWalksVerifyRequest) -> GraphWalksVerifyResponse:
@@ -169,3 +169,6 @@ def _f1_score(predicted: set, expected: set, parse_failed: bool) -> float:
 
 if __name__ == "__main__":
     GraphWalksResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GraphWalksResourcesServer.run_webserver()  # noqa: F401

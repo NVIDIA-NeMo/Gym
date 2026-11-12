@@ -14,30 +14,30 @@
 # limitations under the License.
 import asyncio
 import json
+import socket
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
+import httpx
 import pytest
 from aiohttp import ClientResponseError
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym.base_responses_api_model import (
-    CaptureStore,
-    _CaptureMiddleware,
-    aggregate_model_call_metrics,
-    read_model_call_records,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.client import PermanentEndpointError, ServerClient
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.models import CaptureStore
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.rollouts import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.server_runtime import ModelSamplingMiddleware
+from nemo_gym.telemetry import MeteredSemaphore, concurrency
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -103,6 +103,10 @@ class TestApp:
     async def test_sanity(self) -> None:
         self._setup_server()
 
+    async def test_session_key_headers_reach_the_upstream_client(self):
+        assert self._setup_server(session_key_headers=["X-Session"])._client.session_key_headers == ["X-Session"]
+        assert self._setup_server()._client.session_key_headers == []
+
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
         policy = self._setup_server()
@@ -146,10 +150,50 @@ class TestApp:
 
         assert response.status_code == status
         assert response.headers["content-type"] == "application/json"
-        assert response.json() == {"detail": payload}
+        assert response.json() == payload
         calls = read_model_call_records(CaptureStore(tmp_path), "upstream-error")
         assert len(calls) == 1
         assert calls[0].status_code == status
+
+    @pytest.mark.parametrize("status", [400, 503])
+    @pytest.mark.parametrize("propagate", [False, True])
+    @pytest.mark.parametrize("body_format", ["bytes", "text", "absent"])
+    async def test_late_chat_error_preserves_selected_provider_details(
+        self, monkeypatch: MonkeyPatch, status: int, propagate: bool, body_format: str
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+        server = self._setup_server(propagate_upstream_http_status_codes=[status] if propagate else [])
+        message = "Provider rejected the request"
+        error = ClientResponseError(MagicMock(), (), status=status, message=message)
+        detail = json.dumps({"error": {"message": message, "code": "provider_code"}})
+        if body_format != "absent":
+            error.response_content = detail.encode() if body_format == "bytes" else detail
+        release = asyncio.Event()
+
+        async def reject(**kwargs):
+            await release.wait()
+            raise error
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=reject)
+        response = await server.chat_completions_dispatch(
+            MagicMock(), {"stream": True, "messages": [{"role": "user", "content": "hello"}]}
+        )
+        stream = response.body_iterator
+        assert await anext(stream) == b": keep-alive\n\n"
+        release.set()
+        events = [event async for event in stream]
+        assert len(events) == 1
+        assert events[0].startswith("event: error\ndata: ")
+        saved_error = json.loads(events[0].split("data: ", 1)[1])["error"]
+        expected_status = status if propagate else 500
+        expected_detail = (message if body_format == "absent" else detail) if propagate else "Model request failed"
+        assert saved_error == {
+            "message": f"HTTP {expected_status}: {expected_detail}",
+            "type": "server_error" if expected_status >= 500 else "invalid_request_error",
+            "code": expected_status,
+        }
+        server._client.create_chat_completion.assert_awaited_once()
 
     @pytest.mark.parametrize("allowed", [[], [401]])
     @pytest.mark.parametrize("status", [400, 429, 503])
@@ -335,7 +379,9 @@ class TestApp:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
         app = server.setup_webserver()
-        assert app.user_middleware[0].cls is _CaptureMiddleware
+        middleware_classes = [middleware.cls for middleware in app.user_middleware]
+        # Sampling values are applied before capture records the request.
+        assert middleware_classes.index(ModelSamplingMiddleware) < middleware_classes.index(_CaptureMiddleware)
         assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
         client = TestClient(app)
 
@@ -400,6 +446,43 @@ class TestApp:
         assert res.status_code == 200
         assert res.json()["output"][0]["type"] == "mcp_call"
 
+    async def test_provider_specific_service_tier_returns_200(self) -> None:
+        """A provider tier outside the SDK's ``Literal`` must validate (200), not 500."""
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(
+            return_value={
+                "id": "resp_tier",
+                "created_at": 1753983920.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "service_tier": "on-demand",
+            }
+        )
+        server._client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-tier",
+                "choices": [{"finish_reason": "stop", "index": 0, "message": {"content": "hi", "role": "assistant"}}],
+                "created": 1753983922,
+                "model": "dummy_model",
+                "object": "chat.completion",
+                "service_tier": "on-demand",
+            }
+        )
+
+        res = client.post("/v1/responses", json={"input": "hi"})
+        assert res.status_code == 200
+        assert res.json()["service_tier"] == "on-demand"
+
+        res = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert res.status_code == 200
+        assert res.json()["service_tier"] == "on-demand"
+
     async def test_drop_input_reasoning_items_strips_reasoning(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(drop_input_reasoning_items=True)
         client = TestClient(server.setup_webserver())
@@ -436,6 +519,68 @@ class TestApp:
         sent_types = [item.get("type") for item in called_args["input"]]
         assert "reasoning" not in sent_types
         assert "message" in sent_types
+
+    async def test_embeddings(self) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+
+        # A minimal OpenAI-compatible reply: base64 vectors, no usage or object fields.
+        provider_json = {"data": [{"embedding": "AACAPwAAAEA=", "index": 0}], "model": "dummy_model"}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value=provider_json)
+
+        response = client.post(
+            "/v1/embeddings",
+            json={"input": "hello world", "model": "override_model", "encoding_format": "base64"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hello world", model="dummy_model", encoding_format="base64"
+        )
+
+    async def test_embeddings_retry_through_upstream_policy(self) -> None:
+        server = self._setup_server(
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(side_effect=[TimeoutError("transient"), {"data": []}])
+
+        assert await server.embeddings({"input": "hi"}) == {"data": []}
+        assert server._client.create_embeddings.await_count == 2
+
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_reasoning_replayed_without_id_is_forwarded_without_id(self, stream: bool) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        called_args = {}
+
+        async def mock_create_response(**kwargs):
+            called_args.update(kwargs)
+            return {
+                "id": "resp_1",
+                "created_at": 0.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
+        reasoning = {"type": "reasoning", "summary": [], "encrypted_content": "opaque-content"}
+        body = {"input": [{"role": "user", "content": "hi", "type": "message"}, reasoning]}
+        if stream:
+            body["stream"] = True
+
+        res = client.post("/v1/responses", json=body)
+
+        assert res.status_code == 200
+        assert called_args["input"][1] == reasoning
 
     @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
@@ -502,6 +647,31 @@ class TestApp:
             }
         assert body.input[0].type == "reasoning"
         assert response_data["reasoning"]["effort"] == "none"
+
+    async def test_embeddings_extra_body_request_wins_and_config_not_mutated(self) -> None:
+        extra_body = {"dimensions": 256, "truncate": "END"}
+        server = self._setup_server(extra_body=dict(extra_body))
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(
+            return_value={
+                "data": [{"embedding": [0.0], "index": 0, "object": "embedding"}],
+                "model": "dummy_model",
+                "object": "list",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            }
+        )
+
+        response = client.post("/v1/embeddings", json={"input": ["a", "b"], "dimensions": 64})
+
+        assert response.status_code == 200
+        assert server._client.create_embeddings.await_args.kwargs == {
+            "input": ["a", "b"],
+            "dimensions": 64,
+            "truncate": "END",
+            "model": "dummy_model",
+        }
+        assert server.config.extra_body == extra_body
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()
@@ -589,6 +759,7 @@ class TestApp:
             operation_called = True
             return "completed"
 
+        timeouts_before = sum(concurrency._ADMISSION_TIMEOUTS.values())
         try:
             with pytest.raises(TimeoutError, match="acquiring an upstream provider slot"):
                 await server._call_upstream(operation)
@@ -596,6 +767,34 @@ class TestApp:
             server._semaphore.release()
 
         assert operation_called is False
+        assert sum(concurrency._ADMISSION_TIMEOUTS.values()) - timeouts_before == 1, "the slot limit counts it once"
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            pytest.param({}, None, id="no limit reports no limit"),
+            pytest.param({"max_concurrent_requests": 4}, (4, None), id="limit without a pool timeout"),
+            pytest.param(
+                {"max_concurrent_requests": 4, "upstream_pool_timeout_seconds": 30.0},
+                (4, 30.0),
+                id="limit with a pool timeout",
+            ),
+        ],
+    )
+    def test_the_upstream_limit_reports_under_the_server_name(
+        self, config: dict, expected: tuple[int, float | None] | None
+    ) -> None:
+        server = self._setup_server(**config)
+
+        if expected is None:
+            assert not isinstance(server._semaphore, MeteredSemaphore)
+            return
+        assert (server._semaphore.limit, server._semaphore.admission_timeout_s) == expected
+        assert server._semaphore.attributes == {
+            "nemo.gym.concurrency.component": "model_server",
+            "nemo.gym.concurrency.limit_name": "upstream_requests",
+            "nemo.gym.server.name": "test_model_server",
+        }
 
     @pytest.mark.asyncio
     async def test_retry_backoff_releases_concurrency_slot(
@@ -707,7 +906,13 @@ class TestApp:
             ValueError,
             match=("upstream_connect_timeout_seconds requires upstream_request_timeout_seconds"),
         ):
-            self._setup_server(upstream_connect_timeout_seconds=60)
+            self._setup_server(upstream_request_timeout_seconds=None, upstream_connect_timeout_seconds=60)
+
+    def test_provider_attempts_time_out_after_1800_seconds_by_default(self) -> None:
+        assert self._setup_server()._client.request_timeout_seconds == 1800.0
+
+    def test_a_busy_provider_is_waited_out_for_up_to_an_hour_by_default(self) -> None:
+        assert self._setup_server()._client.max_rate_limit_wait_seconds == 3600.0
 
     def test_propagated_status_codes_must_be_http_errors(self) -> None:
         with pytest.raises(
@@ -765,8 +970,8 @@ class TestApp:
         async def record_sleep(seconds):
             backoff_sleeps.append(seconds)
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", transport)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
         monkeypatch.setattr(openai_model_module.asyncio, "sleep", record_sleep)
         server = self._setup_server(
             upstream_max_num_tries=1,
@@ -803,8 +1008,8 @@ class TestApp:
                 status, body = reply.status_code, reply.content
             return SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", transport)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
         receiving_client = NeMoGymAsyncOpenAI(base_url="http://model-server/v1", api_key="dummy", internal=True)
 
         # The first call stops after one model-server reply; the second never reaches the model server.
@@ -819,7 +1024,7 @@ class TestApp:
         assert (provider_calls, model_server_replies) == (1, 1)
 
     @pytest.mark.asyncio
-    async def test_responses_preserves_provider_http_400_across_server_hop(
+    async def test_responses_raises_terminal_provider_error_without_retry(
         self,
         monkeypatch: MonkeyPatch,
     ) -> None:
@@ -842,11 +1047,11 @@ class TestApp:
             )
         )
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ClientResponseError) as exc_info:
             await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail == "Upstream provider request failed with HTTP 400"
+        assert exc_info.value.status == 400
+        assert exc_info.value.message == "bad request"
         assert server._client.create_response.await_count == 1
 
     @pytest.mark.asyncio
@@ -909,11 +1114,11 @@ class TestApp:
 
         # Callers such as Harbor's Terminus 2 agent recognize the provider's error code in the body.
         assert response.status_code == 400
-        assert response.json() == {"detail": provider_body}
+        assert response.json() == provider_body
         operation.assert_awaited_once()
         [call] = read_model_call_records(CaptureStore(tmp_path), "propagated")
         assert (call.status_code, call.error_category) == (400, "client_error")
-        assert call.response == {"detail": provider_body}
+        assert call.response == provider_body
 
     def test_opt_in_propagation_applies_to_streaming_responses(self) -> None:
         provider_error = ClientResponseError(
@@ -932,7 +1137,7 @@ class TestApp:
         response = TestClient(app).post("/v1/responses", json={"input": "hello", "stream": True})
 
         assert response.status_code == 400
-        assert response.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+        assert response.json() == {"error": {"code": "context_length_exceeded"}}
 
     @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
     @pytest.mark.parametrize("status_code", [429, 503])
@@ -1083,3 +1288,79 @@ class TestApp:
             UpstreamRetryPolicy(
                 pre_request_jitter_seconds=pre_request_jitter_seconds,
             )
+
+
+class TestRefusedProviderConnection:
+    """A provider endpoint that refuses connections must fail the call, not retry it forever."""
+
+    @staticmethod
+    def _closed_port() -> int:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            return listener.getsockname()[1]
+
+    @pytest.fixture
+    async def attempts(self, monkeypatch: MonkeyPatch):
+        """Route Gym's outbound requests through a real aiohttp session that records each attempt.
+
+        Past 10 attempts it fails the test, so a retry loop that never stops fails instead of hanging. `fail()`
+        raises a BaseException, which the retry loop's `except Exception` cannot catch.
+        """
+        attempts: list[str] = []
+        session = aiohttp.ClientSession()
+        send = session.request
+
+        async def request(method: str, url: str, **kwargs):
+            attempts.append(url)
+            if len(attempts) > 10:
+                pytest.fail("connection retry loop did not stop")
+            return await send(method, url, **kwargs)
+
+        session.request = request
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: session)
+        yield attempts
+        await session.close()
+
+    def _setup_server(self, port: int, **kwargs) -> SimpleModelServer:
+        config = SimpleModelServerConfig(
+            host="0.0.0.0",
+            port=8081,
+            openai_base_url=f"http://127.0.0.1:{port}/v1",
+            openai_api_key="dummy_key",  # pragma: allowlist secret
+            openai_model="dummy_model",
+            entrypoint="",
+            name="judge_model_server",
+            **kwargs,
+        )
+        return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    @pytest.mark.parametrize("max_http_attempts", [3, 5])
+    async def test_refused_connection_stops_after_max_http_attempts(
+        self, attempts: list[str], max_http_attempts: int
+    ) -> None:
+        server = self._setup_server(self._closed_port(), max_http_attempts=max_http_attempts)
+
+        with pytest.raises(aiohttp.ClientConnectorError):
+            await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert len(attempts) == max_http_attempts
+
+    async def test_single_attempt_mode_still_makes_one_connection_attempt(self, attempts: list[str]) -> None:
+        server = self._setup_server(self._closed_port(), upstream_max_num_tries=1)
+
+        with pytest.raises(aiohttp.ClientConnectorError):
+            await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert len(attempts) == 1
+
+    async def test_refused_connection_returns_server_error_with_the_cause(self, attempts: list[str]) -> None:
+        server = self._setup_server(self._closed_port())
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://judge") as client:
+            response = await client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 500
+        assert "ClientConnectorError" in response.text
+        assert len(attempts) == 3

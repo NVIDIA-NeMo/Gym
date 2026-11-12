@@ -235,10 +235,44 @@ env.yaml
 # Claude Code agent runtime artifacts
 **/.claude_node/
 
+# Install lock and install record of the Node.js toolchains that CLI agents install on first local use
+responses_api_agents/*/.*_node.lock
+responses_api_agents/*/.*_node.installed
+
 # cvdp generic agent provisioned harness deps (portable python/node + CLIs, built at runtime)
 responses_api_agents/cvdp_agent/deps/
 resources_servers/cvdp/data/gym_agentic_code_generation_no_commercial.jsonl
 resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.jsonl
 
+# Node.js that codex_agent/setup_codex.py installs for local Codex and the launcher tests
+responses_api_agents/codex_agent/.codex_node/
+
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
+
+# The default pulled datasets folder before environments/harbor/ (see below); kept ignored for checkouts that
+# still hold datasets there. Move one with `mv datasets/<dataset> environments/harbor/<dataset>` before the next
+# fetch, or keep the old folder for every pull with NEMO_GYM_DATASETS_DIR=datasets.
+datasets/
+
+# Pulled Harbor datasets (nemo_gym/data/tasks/harbor/hub.py) land in environments/harbor/<dataset>/ next to the
+# committed per-dataset entries, which keep only their README, YAML files and dataset.toml (whose [gym] source
+# names the dataset `gym dataset pull <entry>` fetches into the entry's folder). The three names are kept in every
+# folder here, a pulled hub folder included: a dataset.toml written into one by hand shows as untracked, on purpose.
+environments/harbor/*/*
+!environments/harbor/*/README.md
+!environments/harbor/*/*.yaml
+!environments/harbor/*/dataset.toml
+environments/harbor/.harbor/
+
+# Files prepare writes beside the example Harbor datasets under environments/ (recorded image configurations,
+# built images, the local manifest); the datasets' sources are tracked, the records are not.
+environments/compose-images.json
+environments/compose-images.json.lock
+environments/built-images.json
+environments/built-images.json.lock
+environments/hello_*/compose-images.json
+environments/hello_*/compose-images.json.lock
+environments/hello_*/built-images.json
+environments/hello_*/built-images.json.lock
+environments/hello_*/manifest.toml

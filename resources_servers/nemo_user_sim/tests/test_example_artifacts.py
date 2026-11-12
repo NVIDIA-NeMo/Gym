@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 from pathlib import Path
 
-from nemo_gym.task_materialization import materialize_task
-from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _row_digest, _validate_resolved_row
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from environments.nemo_user_sim.prepare import DEFAULT_LOCALES
+from nemo_gym.data import materialize_task
+from resources_servers.nemo_user_sim.app import (
+    UserSimResourcesServerConfig,
+    _row_digest,
+    _validate_resolved_row,
+    installed_usersim_revision,
+)
+from resources_servers.nemo_user_sim.task_data import TaskData
 
 
 DATA_DIR = Path(__file__).parents[1] / "data"
@@ -16,35 +23,38 @@ def _jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def test_examples_are_safe_task_rows_that_materialize_as_episode_requests() -> None:
+def test_examples_are_safe_task_rows_that_materialize_as_task_data() -> None:
     rows = _jsonl(DATA_DIR / "example.jsonl")
 
     assert len(rows) == 5
+    # Each example covers a different probe, and together they cover every default preparation locale.
+    assert len({row["resolved_row"]["probe_type"] for row in rows}) == 5
+    assert {row["resolved_row"]["locale"] for row in rows} == set(DEFAULT_LOCALES)
     for index, row in enumerate(rows):
         task_id = row["task_id"]
         resolved_row = row["resolved_row"]
         persona = resolved_row["persona"]
         assert isinstance(task_id, str)
         assert task_id == resolved_row["trajectory_id"]
-        assert persona["first_name"] == f"Example{index + 1}"
+        assert re.fullmatch(r"Example\d+", persona["first_name"])
         assert persona["last_name"] == "User"
-        assert persona["email_address"] == f"example{index + 1}@example.invalid"
+        assert persona["email_address"] == f"{persona['first_name'].lower()}@example.invalid"
+        assert persona["locale"] == resolved_row["locale"]
         assert persona["national_id"] == "000-00-0000"
         assert "assets_dir" not in resolved_row["usersim_config"]
 
         task = materialize_task(row, taskset="nemo_user_sim:example", task_index=index)
-        request = UserSimEpisodeRequest.model_validate(
-            {"episode_id": {"rollout_id": f"{index}-0", "attempt": 0}, "task": task}
-        )
-        assert request.task.task_id.task_id == task_id
-        expected_revision = UserSimResourcesServerConfig.model_fields["usersim_revision"].default
-        expected_personas_version = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
+        assert task["task_id"] == {"taskset": "nemo_user_sim:example", "task_id": task_id}
+        task_input = TaskData.model_validate(task["task_input"])
+        expected_revision = installed_usersim_revision()
+        expected_personas_versions = UserSimResourcesServerConfig.model_fields[
+            "nemotron_personas_versions"
+        ].default_factory()
         assert isinstance(expected_revision, str)
-        assert isinstance(expected_personas_version, str)
         _validate_resolved_row(
-            request.task.task_input.resolved_row,
+            task_input.resolved_row,
             expected_revision=expected_revision,
-            expected_personas_version=expected_personas_version,
+            expected_personas_versions=expected_personas_versions,
         )
         provenance = json.loads(resolved_row["usersim_provenance"])
         assert provenance["nemotron_personas_version"] == "synthetic"

@@ -191,6 +191,13 @@ class TestVerificationFiles:
         assert MAVEN_SETTINGS_PATH in files
         assert GRADLE_INIT_PATH in files
 
+    def test_skips_only_maven_settings_when_overwrite_disabled(self) -> None:
+        # Some providers mount their own read-only ~/.m2/settings.xml; the Gradle script still ships.
+        files = verification_files(_inputs(), overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in files
+        assert GRADLE_INIT_PATH in files
+        assert "/tmp/nemo_gym_eval.sh" in files
+
     def test_omits_blank_patch(self) -> None:
         files = verification_files(_inputs(patch="   "))
         assert "/tmp/nemo_gym_patch.diff" not in files
@@ -201,6 +208,36 @@ class TestVerificationFiles:
         # row's framework ahead of time either.
         files = verification_files(_inputs(test_framework="go", test_command="go test ./..."))
         assert MAVEN_SETTINGS_PATH in files
+        assert GRADLE_INIT_PATH in files
+
+
+class TestSeedSessionMavenSettings:
+    """The agent sandbox is created on the same provider as the eval sandbox, so it must honor
+    overwrite_maven_settings too or a read-only ~/.m2/settings.xml still fails every rollout."""
+
+    class _Stop(Exception):
+        pass
+
+    @pytest.mark.parametrize("overwrite", [True, False])
+    async def test_seed_sandbox_follows_config(self, overwrite: bool) -> None:
+        from unittest.mock import AsyncMock
+
+        from resources_servers.swemer_ultra.app import SwemerUltraResourcesServer
+
+        create_sandbox = AsyncMock(side_effect=self._Stop)
+        server = SimpleNamespace(
+            config=SimpleNamespace(overwrite_maven_settings=overwrite),
+            _forget_task_sandbox_state=lambda session_id: None,
+            _create_sandbox=create_sandbox,
+            _session_id_to_sandbox={},
+            _session_id_to_pristine_untracked={},
+            _session_id_to_base_commit={},
+        )
+        with pytest.raises(self._Stop):
+            await SwemerUltraResourcesServer._start_task_sandbox(server, "s", SimpleNamespace())
+
+        files = create_sandbox.await_args.kwargs["files"]
+        assert (MAVEN_SETTINGS_PATH in files) is overwrite
         assert GRADLE_INIT_PATH in files
 
 
@@ -302,7 +339,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):

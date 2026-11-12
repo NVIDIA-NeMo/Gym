@@ -1,0 +1,20 @@
+# Modelled on grafana/o11y-bench: the sidecars share a named network with the agent's service.
+services:
+  main:
+    image: ${MAIN_IMAGE_NAME}
+    networks:
+      - harbor-shared
+  grafana:
+    image: org/grafana:1
+    expose:
+      - "3000"
+    networks:
+      - harbor-shared
+  loki:
+    image: org/loki:1
+    networks:
+      - harbor-shared
+
+networks:
+  harbor-shared:
+    name: harbor-shared

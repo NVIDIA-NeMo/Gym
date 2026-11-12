@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 from pytest import approx, fixture
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.generative_reward_model.app import (
     GenerativeRewardModelResourcesServer,
     GenerativeRewardModelResourcesServerConfig,

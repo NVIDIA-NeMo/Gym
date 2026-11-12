@@ -43,13 +43,14 @@ from typing import Any, Optional
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Reuse the exact parser and IoU the image-tools agent uses at rollout time, so
@@ -443,7 +444,6 @@ def _strip_ignored(args: dict) -> dict:
 
 
 class ImageToolsPivotResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ImageToolsPivotResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -582,3 +582,6 @@ class ImageToolsPivotResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ImageToolsPivotResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ImageToolsPivotResourcesServer.run_webserver()  # noqa: F401

@@ -17,7 +17,7 @@
 Diagnostic instrumentation, added because a full-400 eval lost 6 samples to
 `ClientResponseError: 500` from the agent's own /v1/responses and **the log contained no
 traceback at all** — no `🚨` marker, no app.py frame, nothing. The malformed-JSON bug
-printed a full ExceptionGroup via exception_handling_middleware, so the absence here means
+printed a full ExceptionGroup via the exception middleware, so the absence here means
 the failure does not surface as an ordinary application exception.
 
 Without a traceback the cause can only be bounded, not named. These tests pin the
@@ -29,14 +29,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
 
 
 def _make_agent() -> BrowsecompAgent:
     config = BrowsecompAgentConfig(
+        allow_host_execution=True,
         host="0.0.0.0",
         port=8080,
         entrypoint="",

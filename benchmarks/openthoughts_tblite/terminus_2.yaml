@@ -1,0 +1,38 @@
+config_paths:
+- responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml
+- resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+
+
+# The Terminal-Bench 2.1 resources server runs any Harbor task folder's tests/test.sh. It applies one limit to
+# every task, not each task.toml's own; these are TB-Lite's longest.
+openthoughts_tblite_terminus_2_sandboxed_resources_server:
+  _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      evaluation_timeout: 3600
+      sandbox_config:
+        metadata:
+          benchmark: openthoughts-tblite
+
+openthoughts_tblite_terminus_2_sandboxed_agent:
+  _inherit_from: terminus_2_sandboxed_agent
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: openthoughts_tblite_terminus_2_sandboxed_resources_server
+      sandbox_timeout: 3600
+      datasets:
+        - name: openthoughts_tblite
+          type: benchmark
+          jsonl_fpath: benchmarks/openthoughts_tblite/data/benchmark.jsonl
+          prepare_script: benchmarks/openthoughts_tblite/prepare.py
+          num_repeats: 3
+
+openthoughts_tblite_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: openthoughts_tblite_terminus_2_sandboxed_agent

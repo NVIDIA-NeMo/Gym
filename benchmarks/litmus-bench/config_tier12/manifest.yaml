@@ -1,13 +1,13 @@
 name: litmus-bench/config_tier12
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
-description: Paired direct and Python-tool Litmus Tier 1/2 chemistry examples with
-  matched questions and answer verification.
+description: Litmus-Bench Tier 1/2 held-out molecular-property questions, scored
+  with per-question answer extraction and comparison rules.
 modality: text
-licensing: CC-BY-4.0
+licensing: CC-BY-SA-4.0
 authors:
 - Olivia Viessmann
 reward:
@@ -20,11 +20,11 @@ config_path: ../config_tier12.yaml
 resources_server: litmus_agent
 agent_server: simple_agent
 datasets:
-- name: litmus-tier12-paired
+- name: litmus-tier12
   type: benchmark
-  jsonl_fpath: benchmarks/litmus-bench/data/litmus-tier12-paired_benchmark.jsonl
-  prepare_script: benchmarks/litmus-bench/prepare_tier12.py
-  num_repeats: 1
+  jsonl_fpath: benchmarks/litmus-bench/data/litmus-tier12_benchmark.jsonl
+  prepare_script: benchmarks/litmus-bench/prepare.py
+  num_repeats: 5
 model_server: policy_model
 canonical_split: benchmark
 prompt_source: prepared

@@ -11,9 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .app import (
-    StirrupAgentWrapper,
-    StirrupAgentWrapperConfig,
-    StirrupRunRequest,
-)
-from .task_strategy import TaskStrategy
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from .app import StirrupAgentWrapper, StirrupAgentWrapperConfig
+
+_APP_EXPORTS = {"StirrupAgentWrapper", "StirrupAgentWrapperConfig"}
+
+
+def __getattr__(name: str) -> object:
+    # Load the agent (and Ray) only when its classes are used, so importing a helper module does not need Ray.
+    if name in _APP_EXPORTS:
+        from . import app
+
+        return getattr(app, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = ["StirrupAgentWrapper", "StirrupAgentWrapperConfig"]

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+from pathlib import Path
 from typing import List, Literal
 
 # Pre-import packages that nltk pulls in during its init so they are already in
@@ -24,13 +25,14 @@ import defusedxml.ElementTree  # noqa: F401
 import regex  # noqa: F401
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 try:
@@ -48,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 class IFBenchResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int = 32
+    ifbench_source_dir: Path | None = None
 
 
 class IFBenchRunRequest(BaseRunRequest):
@@ -93,12 +96,11 @@ def _loose_response_variants(response: str) -> List[str]:
 
 
 class IFBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: IFBenchResourcesServerConfig
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        ensure_ifbench()
+        ensure_ifbench(source_dir=self.config.ifbench_source_dir)
         import instructions_registry
 
         self._instructions_registry = instructions_registry
@@ -204,3 +206,6 @@ class IFBenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     IFBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = IFBenchResourcesServer.run_webserver()  # noqa: F401

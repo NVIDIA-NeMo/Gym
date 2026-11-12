@@ -24,17 +24,21 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
-from nemo_gym import server_utils
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ResourcesServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
     RemoteAgent,
     RemoteAgentConfig,
+    RemoteAgentDeadlineError,
     RemoteAgentRunRequest,
+    RemoteAgentTerminalError,
+    _raised_class_name,
     normalize_remote_url,
 )
 
@@ -123,6 +127,15 @@ def make_row(tools=None, **extras) -> dict:
     return row
 
 
+def test_failure_placeholder_is_marked_as_no_generation() -> None:
+    """The empty assistant message the failure path returns is a placeholder, never a saved answer."""
+    agent = RemoteAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+    result = agent._failure_response(make_row(), "remote service unreachable").model_dump(mode="json")
+    assert result["response"]["metadata"] == NG_NO_GENERATION_METADATA
+    assert not has_saved_generation(result)
+    assert not has_saved_generation({"_ng_failure_response": result["response"]})
+
+
 def make_request(cookies=None) -> MagicMock:
     request = MagicMock()
     request.cookies = cookies or {}
@@ -154,7 +167,7 @@ class FakeRemoteResponse:
 class FakeServerClientResponse:
     """Stands in for an aiohttp ClientResponse from a Gym server via ServerClient."""
 
-    def __init__(self, body: dict, cookies=None, status: int = 200):
+    def __init__(self, body: dict | str, cookies=None, status: int = 200):
         self._body = body
         self.cookies = cookies or {}
         self.status = status
@@ -186,8 +199,8 @@ class FakeServerClientResponse:
 def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> MagicMock:
     client = MagicMock()
     client.request = request_mock
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: client)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(remote_agent_app, "_REMOTE_RETRY_SLEEP_SECS", 0)
     return client
 
@@ -226,7 +239,7 @@ def wire_gym(
     """A ServerClient mock that emulates the Gym side: seed_session and verify on the
     resources server, tool routes via tool_handler, and — the load-bearing part — the
     /v1/responses self-post routed into the agent's REAL responses() with the exception
-    middleware emulated (exceptions become a 500 body carrying repr(e))."""
+    middleware emulated (exceptions become a 500 body that is the JSON string repr(e))."""
     calls = []
 
     async def _post(server_name, url_path, json=None, cookies=None, **kwargs):
@@ -243,7 +256,7 @@ def wire_gym(
             try:
                 result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
             except Exception as e:  # noqa: BLE001 -- emulate SimpleServer's exception middleware
-                return FakeServerClientResponse({"error": repr(e)}, status=500)
+                return FakeServerClientResponse(repr(e), status=500)
             out_cookies = SimpleCookie()
             for header_value in fastapi_response.headers.getlist("set-cookie"):
                 out_cookies.load(header_value)
@@ -348,7 +361,7 @@ class TestRunHappyPath:
             return await service(*args, **kwargs)
 
         agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=labelled))
-        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
 
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
 
@@ -723,23 +736,29 @@ class TestRunTimeoutAndSemaphore:
         first_seen = asyncio.Event()
         call_count = 0
 
+        # Each run takes two thirds of its budget, so it finishes with a second to spare on a busy runner.
+        # The second run also waits about as long for the only permit, so queue time counted against its
+        # budget would put it a second over.
+        budget, run_time = 3.0, 2.0
+
         async def gated_request(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 first_seen.set()
                 await release_first.wait()
+            else:
+                await asyncio.sleep(run_time)
             return FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))
 
         agent, _, _ = make_wired_agent(
-            monkeypatch, AsyncMock(side_effect=gated_request), concurrency=1, run_timeout_secs=0.5
+            monkeypatch, AsyncMock(side_effect=gated_request), concurrency=1, run_timeout_secs=budget
         )
 
         first = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
         second = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
         await first_seen.wait()
-        # Hold the only permit for most of the second task's would-be budget
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(run_time)
         release_first.set()
         results = [r.model_dump() for r in await asyncio.gather(first, second)]
 
@@ -827,7 +846,7 @@ class TestStatefulToolsEndToEnd:
                 try:
                     result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
                 except Exception as e:  # noqa: BLE001
-                    return FakeServerClientResponse({"error": repr(e)}, status=500)
+                    return FakeServerClientResponse(repr(e), status=500)
                 out_cookies = SimpleCookie()
                 for header_value in fastapi_response.headers.getlist("set-cookie"):
                     out_cookies.load(header_value)
@@ -873,12 +892,12 @@ class TestCollectorRoundTrip:
     async def test_success_and_failure_routing(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         from fastapi.testclient import TestClient
 
-        import nemo_gym.rollout_collection
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        import nemo_gym.rollouts.rollout_collection
+        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         # The collector reads the global config for model-call capture dirs; neutralize the
         # Hydra CLI parse it would otherwise attempt under pytest (same as the core tests).
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
 
         async def remote_service(method, url, data=None, headers=None, cookies=None, **kwargs):
             params = orjson.loads(data)
@@ -936,6 +955,9 @@ class TestCollectorRoundTrip:
         assert len(sidecar_rows) == 1
         assert sidecar_rows[0][NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert "HTTP 500" in sidecar_rows[0]["error"]
+        assert sidecar_rows[0]["failure_reason"] == sidecar_rows[0]["error"]
+        assert sidecar_rows[0]["_ng_failure_record"]["failure"]["failure_reason"] == sidecar_rows[0]["error"]
+        assert "reward" not in sidecar_rows[0]
 
 
 class TestReviewFindingPins:
@@ -945,6 +967,7 @@ class TestReviewFindingPins:
         "reward": 0.75,
         "response": {"stale": True},
         "error": "stale error",
+        "failure_reason": "stale failure reason",
         NG_FAILURE_CLASS_KEY: "stale_class",
         NG_NO_PERSIST_KEY: True,
         NG_TERMINAL_KEY: True,
@@ -962,6 +985,7 @@ class TestReviewFindingPins:
         assert result["reward"] == 0.0
         assert result["response"]["output"][0]["type"] == "message"
         assert "remote exploded" in result["error"]
+        assert result["failure_reason"] == result["error"]
         # Stale no-persist/terminal flags from the input row must not survive
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
@@ -986,6 +1010,7 @@ class TestReviewFindingPins:
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))).model_dump()
 
         assert result["reward"] == 1.0
+        assert result["failure_reason"] is None
         assert NG_FAILURE_CLASS_KEY not in result
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
@@ -1018,7 +1043,7 @@ class TestReviewFindingPins:
         server_client.post = AsyncMock(side_effect=_post)
         agent = make_agent(server_client=server_client)
 
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
         assert result.key_metrics == {"mean/reward": 1.0}
@@ -1037,6 +1062,173 @@ class TestReviewFindingPins:
         with pytest.raises(asyncio.TimeoutError):
             await agent.aggregate_metrics(
                 __import__(
-                    "nemo_gym.base_resources_server", fromlist=["AggregateMetricsRequest"]
+                    "nemo_gym.server_runtime.base_resources_server", fromlist=["AggregateMetricsRequest"]
                 ).AggregateMetricsRequest(verify_responses=[])
             )
+
+
+class TestRaisedClassName:
+    """run() recovers the class the exception middleware serialized into the self-post's 500 body, by exact name."""
+
+    @pytest.mark.parametrize("error_class", [RemoteAgentTerminalError, RemoteAgentDeadlineError])
+    def test_the_leading_class_name_of_the_json_string_body(self, error_class) -> None:
+        body = json.dumps(repr(error_class("it failed")))
+        assert _raised_class_name(body) == error_class.__name__
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (repr(RemoteAgentDeadlineError("raw text")), "RemoteAgentDeadlineError"),
+            (
+                json.dumps({"detail": repr(RemoteAgentTerminalError("x")), "ng_trajectory": {}}),
+                "RemoteAgentTerminalError",
+            ),
+            (json.dumps(repr(RuntimeError("saw RemoteAgentDeadlineError upstream"))), "RuntimeError"),
+            (json.dumps("saw RemoteAgentTerminalError(x) upstream"), None),
+            (json.dumps("Hit an exception in agent calling an inner server: boom"), None),
+            (json.dumps({"detail": None}), None),
+            ("", None),
+            ("null", None),
+        ],
+    )
+    def test_other_bodies(self, body: str, expected) -> None:
+        assert _raised_class_name(body) == expected
+
+    @pytest.mark.parametrize("name", ["RemoteAgentDeadlineError", "RemoteAgentTerminalError"])
+    async def test_an_error_that_only_mentions_the_name_is_not_classified_by_it(self, monkeypatch, name) -> None:
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=RuntimeError(f"saw {name} upstream")))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert name in result["error"]
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
+        assert NG_TERMINAL_KEY not in result and "timeouts" not in result
+
+
+class TestDeadlineEvidence:
+    """Each limit RemoteAgent enforces leaves typed deadline evidence the timeout reader counts, naming the limit, its
+    enforcer and the active operation, with the error that ended it; ordinary failures leave none."""
+
+    @staticmethod
+    def _observed(monkeypatch):
+        observed = []
+        monkeypatch.setattr(remote_agent_app, "observe_failure", observed.append)
+        return observed
+
+    @staticmethod
+    def _deadline(result, observed, *, limit, kind, operation, stage, configured_s):
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        [timeout] = result["timeouts"]
+        assert (timeout["limit"], timeout["enforcer"], timeout["evidence"]) == (limit, "remote_agent", "internal")
+        assert timeout["configured_s"] == configured_s
+        if limit == "remote_responses_timeout_secs":
+            # The expired request's own duration does not cross the self-post; the loop's would overstate it.
+            assert "elapsed_s" not in timeout
+        else:
+            assert timeout["elapsed_s"] >= 0
+        timed_out = classify_timeout(result)
+        assert (timed_out.evidence, timed_out.limit, timed_out.enforcer) == ("typed", limit, "remote_agent")
+        [failure] = observed
+        assert failure.event_id == timeout["event_id"] and failure.failure_kind == kind
+        assert (failure.operation, failure.stage) == (operation, stage)
+        assert failure.__cause__ is not None  # the error that ended the step is kept
+        # Recorded, not routed differently: the row is the same retryable sentinel as before.
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS and NG_TERMINAL_KEY not in result
+
+    async def test_a_remote_request_past_its_deadline_names_the_request_limit(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=asyncio.TimeoutError()))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        self._deadline(
+            result,
+            observed,
+            limit="remote_responses_timeout_secs",
+            kind="remote_agent:request_deadline",
+            operation="remote_agent.agent",
+            stage="agent",
+            configured_s=1800.0,
+        )
+
+    async def test_a_remote_body_read_past_its_deadline_names_the_request_limit(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        response = FakeRemoteResponse(200, b"", read_exc=asyncio.TimeoutError())
+        agent, _, server_client = make_wired_agent(monkeypatch, AsyncMock(return_value=response))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "reading the response body failed" in result["error"] and result["reward"] == 0.0
+        assert "/verify" not in [c["url_path"] for c in server_client.calls]
+        self._deadline(
+            result,
+            observed,
+            limit="remote_responses_timeout_secs",
+            kind="remote_agent:request_deadline",
+            operation="remote_agent.agent",
+            stage="agent",
+            configured_s=1800.0,
+        )
+
+    async def test_a_body_read_disconnect_leaves_no_deadline(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        response = FakeRemoteResponse(200, b"", read_exc=ClientPayloadError("Response payload is not completed"))
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(return_value=response))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "reading the response body failed" in result["error"]
+        assert "timeouts" not in result and observed == []
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS and NG_TERMINAL_KEY not in result
+
+    async def test_a_run_past_its_deadline_while_waiting_on_the_model_names_that_wait(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+
+        async def slow_request(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=slow_request), run_timeout_secs=0.05)
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        # The message is the one consumers already match; the operation rides on the typed evidence.
+        assert result["error"] == "/run exceeded run_timeout_secs=0.05s (seed + agent/tool loop + verify)"
+        self._deadline(
+            result,
+            observed,
+            limit="run_timeout_secs",
+            kind="remote_agent:run_deadline",
+            operation="remote_agent.agent",
+            stage="agent",
+            configured_s=0.05,
+        )
+
+    async def test_a_run_past_its_deadline_during_verification_names_the_verification(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        agent, _, server_client = make_wired_agent(
+            monkeypatch, scripted_service(_MINIMAL_TRAJECTORY), run_timeout_secs=0.2
+        )
+        wired = server_client.post.side_effect
+
+        async def slow_verify(server_name, url_path, **kwargs):
+            if url_path == "/verify":
+                await asyncio.sleep(30)
+            return await wired(server_name, url_path, **kwargs)
+
+        server_client.post.side_effect = slow_verify
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        # The message is the one consumers already match; the operation rides on the typed evidence.
+        assert result["error"] == "/run exceeded run_timeout_secs=0.2s (seed + agent/tool loop + verify)"
+        self._deadline(
+            result,
+            observed,
+            limit="run_timeout_secs",
+            kind="remote_agent:run_deadline",
+            operation="remote_agent.verify",
+            stage="verification",
+            configured_s=0.2,
+        )
+
+    async def test_a_healthy_run_and_an_http_error_carry_no_deadline(self, monkeypatch) -> None:
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        observed = self._observed(monkeypatch)
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY))
+        healthy = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "timeouts" not in healthy and classify_timeout(healthy) is None
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(500, b"kaboom")))
+        failed = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert failed[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
+        assert "timeouts" not in failed and classify_timeout(failed) is None
+        assert observed == []

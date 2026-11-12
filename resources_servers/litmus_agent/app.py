@@ -75,13 +75,6 @@ rules are added by registering a new entry in ``REWARD_RULES``.
 
 Reward is 0.0 for an unextractable (None) or NaN prediction.
 
-Legacy numeric-property rows
-----------------------------
-Rows without an explicit ``answer_type`` may instead carry ``property_type``.
-For compatibility, ``count``, ``fragment``, ``bool``, and ``presence`` captures
-are parsed numerically and default to rounded exact matching; ``float`` defaults
-to ``isclose``. An explicit ``answer_type`` selects the modern parsing policy,
-and an explicit ``match`` always selects the comparison rule.
 """
 
 from __future__ import annotations
@@ -101,17 +94,18 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.judge import judge_failsafe
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import judge_failsafe
 
 
 # ---------------------------------------------------------------------------
@@ -122,18 +116,6 @@ FLOAT = "float"
 BOOL = "bool"
 STRING = "string"
 _SUPPORTED_ANSWER_TYPES = {FLOAT, BOOL, STRING}
-
-# Back-compat: map legacy ``property_type`` values onto the generic answer-type
-# taxonomy. Verification applies the legacy numeric parsing and reward policy
-# separately when no explicit ``answer_type`` is present.
-_PROPERTY_TYPE_TO_ANSWER_TYPE = {
-    "float": FLOAT,
-    "count": FLOAT,
-    "fragment": FLOAT,
-    "bool": BOOL,
-    "presence": BOOL,
-}
-_LEGACY_DISCRETE_PROPERTY_TYPES = {"count", "fragment", "bool", "presence"}
 
 _TRUE_TOKENS = {"1", "1.0", "true", "yes", "present", "t", "y"}
 _FALSE_TOKENS = {"0", "0.0", "false", "no", "absent", "f", "n"}
@@ -300,15 +282,13 @@ class LitmusAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     expected_answer: Union[str, float, int]
-    # Selects how the answer is parsed. Optional so legacy rows carrying only
-    # ``property_type`` still resolve via _PROPERTY_TYPE_TO_ANSWER_TYPE.
-    answer_type: Optional[str] = None
+    # Selects how the captured answer is parsed.
+    answer_type: str
     # Preferred parser: a regex string carried directly on the row (exactly one
     # capture group). When present it wins over ``answer_format``; see
     # extract_predicted_value for the full resolution order.
     output_regex: Optional[str] = None
     answer_format: Optional[str] = None
-    use_box_format: bool = False
     # Per-row reward-rule override: {"rule": <name>, **params}. When absent, the
     # default rule for the resolved answer_type (_DEFAULT_RULE) applies.
     match: Optional[Dict[str, Any]] = None
@@ -325,8 +305,7 @@ class LitmusAgentVerifyResponse(BaseVerifyResponse):
     correct: bool = False
     resolved_answer_type: str = ""
     resolved_reward_rule: str = ""
-    # |predicted - expected|, set only for continuous property types
-    # (_MAE_PROPERTY_TYPES) with a parseable prediction; None otherwise.
+    # |predicted - expected| for float answers with a parseable prediction.
     abs_error: Optional[float] = None
 
 
@@ -335,13 +314,6 @@ class LitmusAgentVerifyResponse(BaseVerifyResponse):
 _RESERVED_RESPONSE_FIELDS = frozenset(
     {"reward", "predicted_value", "correct", "resolved_answer_type", "resolved_reward_rule", "abs_error"}
 )
-
-# Property types where absolute error is meaningful. `fragment` is numeric but
-# excluded; `bool`/`presence` are 0/1, where MAE just restates accuracy.
-# Rows carrying no `property_type` fall back to the resolved `answer_type`,
-# where `float` is the continuous case.
-_MAE_PROPERTY_TYPES = frozenset({"float", "count"})
-
 
 # ---------------------------------------------------------------------------
 # Helpers: response text extraction
@@ -369,50 +341,11 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 # ---------------------------------------------------------------------------
 
 
-def resolve_answer_type(answer_type: Optional[str], extra: Dict[str, Any]) -> str:
-    """Resolve the effective answer_type, falling back to legacy property_type.
-
-    Raises ValueError if neither yields a supported type, so misconfigured rows
-    fail loudly rather than scoring as 0.0 silently.
-    """
-    if answer_type:
-        if answer_type not in _SUPPORTED_ANSWER_TYPES:
-            raise ValueError(f"Unsupported answer_type={answer_type!r}")
-        return answer_type
-
-    legacy = extra.get("property_type")
-    mapped = _PROPERTY_TYPE_TO_ANSWER_TYPE.get(legacy) if isinstance(legacy, str) else None
-    if mapped is None:
-        raise ValueError(
-            f"No answer_type given and property_type={legacy!r} is not mappable; "
-            f"set one of {sorted(_SUPPORTED_ANSWER_TYPES)}"
-        )
-    return mapped
-
-
-def _resolve_verification_policy(
-    answer_type: Optional[str],
-    extra: Dict[str, Any],
-    match: Optional[Dict[str, Any]],
-) -> tuple[str, str, Optional[Dict[str, Any]]]:
-    """Resolve reported type, parsing type, and comparison policy for a row.
-
-    Explicit modern fields retain precedence. Legacy rows have no
-    ``answer_type`` and historically treated every property as numeric: the
-    four discrete property kinds used rounded exact matching, while ``float``
-    used tight numeric equality. In particular, legacy bool/presence captures
-    must remain numeric so values such as ``2`` are not coerced to true.
-    """
-    resolved_answer_type = resolve_answer_type(answer_type, extra)
-    parsing_answer_type = resolved_answer_type
-    effective_match = match
-
-    if answer_type is None and extra.get("property_type") in _LEGACY_DISCRETE_PROPERTY_TYPES:
-        parsing_answer_type = FLOAT
-        if match is None:
-            effective_match = {"rule": "exact"}
-
-    return resolved_answer_type, parsing_answer_type, effective_match
+def resolve_answer_type(answer_type: str) -> str:
+    """Validate the row's explicit answer type before scoring."""
+    if answer_type not in _SUPPORTED_ANSWER_TYPES:
+        raise ValueError(f"Unsupported answer_type={answer_type!r}")
+    return answer_type
 
 
 def _capture_with_pattern(text: str, pattern: re.Pattern[str]) -> Optional[str]:
@@ -489,7 +422,6 @@ def extract_predicted_value(
     *,
     output_regex: Optional[str] = None,
     answer_format: Optional[str] = None,
-    use_box_format: bool = False,
 ) -> Optional[Union[float, str]]:
     """Extract the model's predicted value from its response text.
 
@@ -503,8 +435,7 @@ def extract_predicted_value(
     2. ``answer_format``: look up a regex by ``fmt_XX`` name in the registry
        kept for rows exported without an ``output_regex``. Unknown names raise
        ``ValueError`` so bad data fails loudly.
-    3. ``use_box_format``: very-legacy fallback -- boxed when true, double
-       parentheses when false.
+    3. Double parentheses (``fmt_00``) when neither extractor is specified.
 
     Returns None when nothing can be extracted.
     """
@@ -515,7 +446,7 @@ def extract_predicted_value(
     if output_regex is not None:
         raw = _capture_with_pattern(text, _compile_output_regex(output_regex))
     else:
-        fmt = answer_format or ("fmt_07" if use_box_format else "fmt_00")
+        fmt = answer_format or "fmt_00"
         raw = _raw_capture(text, fmt)
     if raw is None:
         return None
@@ -591,19 +522,14 @@ def _normalize_str(value: object) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _compute_abs_error(predicted: Any, expected: Any, property_type: Any, answer_type: str) -> Optional[float]:
+def _compute_abs_error(predicted: Any, expected: Any, answer_type: str) -> Optional[float]:
     """|predicted - expected| for continuous rows, else None.
-
-    A row's `property_type` decides when it carries one, so a legacy `fragment`
-    row stays excluded even though it resolves to the `float` answer type.
-    Modern rows carry no `property_type` and are judged on `answer_type`.
 
     None also covers an unparseable prediction or a non-numeric expected value,
     so a rollout that produced no answer is excluded from the mean rather than
     scoring an error of 0.
     """
-    continuous = property_type in _MAE_PROPERTY_TYPES if property_type is not None else answer_type == FLOAT
-    if not continuous or predicted is None:
+    if answer_type != FLOAT or predicted is None:
         return None
     try:
         error = abs(float(predicted) - float(expected))
@@ -662,7 +588,6 @@ def compute_reward(
 
 
 class LitmusAgentResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: LitmusAgentConfig
 
     # Per-instance sandbox state. _session_locks serializes calls within a
@@ -816,27 +741,21 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             await self._cleanup_session(request.session.get(SESSION_ID_KEY))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
-        extra = body.model_extra or {}
-        answer_type, parsing_answer_type, effective_match = _resolve_verification_policy(
-            body.answer_type,
-            extra,
-            body.match,
-        )
+        answer_type = resolve_answer_type(body.answer_type)
 
         text = _extract_last_assistant_text(body)
         predicted = extract_predicted_value(
             text,
-            parsing_answer_type,
+            answer_type,
             output_regex=body.output_regex,
             answer_format=body.answer_format,
-            use_box_format=body.use_box_format,
         )
-        rule_name, _ = resolve_reward_rule(answer_type, effective_match)
+        rule_name, _ = resolve_reward_rule(answer_type, body.match)
         reward = compute_reward(
             predicted,
             body.expected_answer,
             answer_type,
-            match=effective_match,
+            match=body.match,
             float_rel_tol=self.config.float_rel_tol,
             float_abs_tol=self.config.float_abs_tol,
         )
@@ -855,7 +774,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             correct=reward == 1.0,
             resolved_answer_type=answer_type,
             resolved_reward_rule=rule_name,
-            abs_error=_compute_abs_error(predicted, body.expected_answer, extra.get("property_type"), answer_type),
+            abs_error=_compute_abs_error(predicted, body.expected_answer, answer_type),
         )
 
     @staticmethod
@@ -922,3 +841,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LitmusAgentResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LitmusAgentResourcesServer.run_webserver()  # noqa: F401

@@ -21,17 +21,20 @@ import yaml
 from fastapi import Request, Response
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -49,6 +52,9 @@ class CritPtAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class CritPtAgentRunRequest(BaseRunRequest):
+    # extra="allow" so extra row fields reach the resources server's seed and verify payloads unchanged.
+    model_config = ConfigDict(extra="allow")
+
     problem_id: str
     code_template: str
 
@@ -58,7 +64,6 @@ class CritPtAgentVerifyResponse(BaseVerifyResponse):
 
 
 class CritPtAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: CritPtAgentConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -146,14 +151,25 @@ class CritPtAgent(SimpleResponsesAPIAgent):
 
         # Verify Turn 2 output against the Artificial Analysis API
         verify_request_data = body.model_dump() | {"response": turn2_json}
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request_data,
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return CritPtAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+        async def verify() -> dict[str, Any]:
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request_data,
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            return await get_response_json(verify_response)
+
+        try:
+            result = await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
+            )
+        except NgFailureEvent as failure:
+            # The grader failed, not the model: keep the answer and mask the row with the typed failure.
+            result = masked_verify_failure(verify_request_data, failure, regradable=False)
+        return CritPtAgentVerifyResponse.model_validate(result)
 
 
 def _strip_thinking_blocks(text: str) -> str:
@@ -173,3 +189,6 @@ def _extract_output_text(response_json: dict) -> str:
 
 if __name__ == "__main__":
     CritPtAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CritPtAgent.run_webserver()  # noqa: F401

@@ -1,0 +1,7 @@
+channels:
+  - conda-forge
+dependencies:
+  - rdkit
+  - pubchempy
+  - chempy    # [linux64]
+  - pyodesys  # [linux64]

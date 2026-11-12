@@ -20,19 +20,19 @@ from typing import Literal
 from openai.types.responses import FunctionToolParam
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
 )
 
 
@@ -42,6 +42,8 @@ class AviaryResourcesServerConfig(BaseResourcesServerConfig):
 
 class AviarySeedSessionRequest(BaseSeedSessionRequest):
     task_idx: int
+    # Hypotest can hide answer correctness when the policy continues after submission.
+    suppress_answer_feedback: bool = False
 
 
 class AviaryEnvStateEasyInputMessage(NeMoGymEasyInputMessage):

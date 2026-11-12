@@ -32,7 +32,7 @@ def get_hf_token(explicit_token: str | bool | None = None) -> str | bool | None:
     if explicit_token is not None:
         return explicit_token
     try:
-        from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+        from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
         configured_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
     except Exception:

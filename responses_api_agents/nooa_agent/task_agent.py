@@ -10,7 +10,7 @@ from typing import Any
 from nooa import Agent, CodeActStrategy, strategy
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 class TaskAgent(Agent):

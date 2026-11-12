@@ -11,7 +11,9 @@ import dateparser
 import pandas as pd
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -19,9 +21,8 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge
 
 
 class WideSearchConfig(BaseResourcesServerConfig):
@@ -138,7 +139,6 @@ def deterministic_metric(response: str, target: str, name: str, criterion: Any) 
 
 
 class WideSearchServer(SimpleResourcesServer):
-    ray_enabled = False
     config: WideSearchConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -279,3 +279,6 @@ class WideSearchServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     WideSearchServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = WideSearchServer.run_webserver()  # noqa: F401

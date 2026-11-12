@@ -14,17 +14,28 @@ arrives while, or before, the seed that opens the browser.
 """
 
 import asyncio
+import json
+from base64 import b64decode
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import app as app_module
 import pytest
 from app import InteractiveBrowserConfig, InteractiveBrowserResourcesServer
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
+from pytest import MonkeyPatch
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 
 
 class _Browser:
@@ -93,7 +104,7 @@ def _close_json(session_id: str = "resources-session", episode=_EPISODE) -> dict
 
 
 class TestTypedSessionsOverHttp:
-    def test_a_typed_seed_opens_the_browser_under_the_callers_id(self, browsers) -> None:
+    def test_an_episode_seed_opens_the_browser_under_the_callers_id(self, browsers) -> None:
         server = _server()
         client = TestClient(server.setup_webserver())
 
@@ -128,8 +139,10 @@ class TestTypedSessionsOverHttp:
         client = TestClient(_server().setup_webserver())
         client.post("/seed_session", json=_seed_json())
 
-        with pytest.raises(ValueError, match="already bound"):
-            client.post("/seed_session", json=_seed_json(episode={"rollout_id": "other", "attempt": 0}))
+        refused = client.post("/seed_session", json=_seed_json(episode={"rollout_id": "other", "attempt": 0}))
+
+        assert refused.status_code == 409, "a conflict no retry can fix is refused as final"
+        assert "already bound" in refused.json()["detail"]
         assert len(browsers.created) == 1
 
     def test_closing_an_episode_that_never_reached_verify_releases_its_browser(self, browsers) -> None:
@@ -154,13 +167,92 @@ class TestTypedSessionsOverHttp:
         assert again.status_code == 200
         assert browsers.created[0].closed == 1
 
+    @pytest.mark.parametrize(
+        "tool,arguments",
+        [
+            ("browser_navigate", {"url": "https://example.com"}),
+            ("browser_click", {"element_id": 0}),
+            ("browser_type", {"element_id": 0, "text": "hi"}),
+            ("browser_observe", None),
+            ("browser_finish", {"answer": "42"}),
+        ],
+    )
+    def test_a_tool_call_without_a_browser_is_a_lost_session(self, browsers, tool, arguments) -> None:
+        """A tool call with no browser gets 404 session_lost, so the trajectory records it as a failed call."""
+        client = TestClient(_server().setup_webserver())
+        client.post("/seed_session", json=_seed_json())
+        client.post("/close_session", json=_close_json())
+
+        response = client.post(f"/{tool}", json=arguments)
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == SESSION_LOST
+
     def test_a_close_for_another_episode_is_refused(self, browsers) -> None:
         client = TestClient(_server().setup_webserver())
         client.post("/seed_session", json=_seed_json())
 
-        with pytest.raises(ValueError, match="does not match"):
-            client.post("/close_session", json=_close_json(episode={"rollout_id": "other", "attempt": 0}))
+        refused = client.post("/close_session", json=_close_json(episode={"rollout_id": "other", "attempt": 0}))
+
+        assert refused.status_code == 409
+        assert "does not match" in refused.json()["detail"]
         assert browsers.created[0].closed == 0
+
+    def test_a_close_for_another_episode_is_refused_after_the_close_too(self, browsers) -> None:
+        client = TestClient(_server().setup_webserver())
+        client.post("/seed_session", json=_seed_json())
+        client.post("/close_session", json=_close_json())
+
+        refused = client.post("/close_session", json=_close_json(episode={"rollout_id": "other", "attempt": 0}))
+
+        assert refused.status_code == 409
+        assert "does not match the closed" in refused.json()["detail"]
+
+    def test_task_data_that_is_not_a_browser_task_is_refused_as_final(self, browsers) -> None:
+        client = TestClient(_server().setup_webserver())
+        body = _seed_json()
+        body["task_data"] = {"initial_url": 5}
+
+        refused = client.post("/seed_session", json=body)
+
+        assert refused.status_code == 422, "a task no retry can fix is refused as final"
+        assert "task_data is not an interactive_browser task" in refused.json()["detail"]
+        assert browsers.created == []
+
+    def test_a_refused_seed_leaves_the_clients_cookie_alone(self, browsers, monkeypatch: MonkeyPatch) -> None:
+        """A refused seed must not rebind the client to the session it was refused, which another episode owns."""
+        # Session middleware may renew the signature without changing the client's session.
+        timestamps = count(1_000_000)
+        monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda self: next(timestamps))
+        server = _server()
+        app = server.setup_webserver()
+        owner, other = TestClient(app), TestClient(app)
+        assert owner.post("/seed_session", json=_seed_json("owner")).status_code == 200
+        assert (
+            other.post(
+                "/seed_session", json=_seed_json("other", episode={"rollout_id": "other", "attempt": 0})
+            ).status_code
+            == 200
+        )
+        cookie_key = server.get_session_middleware_key()
+        signer = TimestampSigner(cookie_key)
+        bad_task = _seed_json("third", episode={"rollout_id": "other", "attempt": 0})
+        bad_task["task_data"] = {"initial_url": 5}
+
+        for body, status_code in (
+            (_seed_json("owner", episode={"rollout_id": "other", "attempt": 0}), 409),
+            (bad_task, 422),
+        ):
+            response = other.post("/seed_session", json=body)
+            assert response.status_code == status_code
+            session = json.loads(b64decode(signer.unsign(other.cookies[cookie_key])))
+            assert session == {SESSION_ID_KEY: "other"}
+
+        # The tool call still reaches this client's own browser, not the owner's.
+        finished = other.post("/browser_finish", json={"answer": "42"})
+        assert finished.status_code == 200
+        assert server._session_id_to_state["other"].answer == "42"
+        assert server._session_id_to_state["owner"].answer is None
 
     def test_a_malformed_close_is_a_validation_error_not_a_silent_success(self, browsers) -> None:
         client = TestClient(_server().setup_webserver())
@@ -193,7 +285,7 @@ def _request() -> SimpleNamespace:
     return SimpleNamespace(session={})
 
 
-def _typed_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
+def _episode_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(**_EPISODE),
@@ -202,7 +294,7 @@ def _typed_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRe
     )
 
 
-def _typed_close(session_id: str = "resources-session") -> dict:
+def _episode_close(session_id: str = "resources-session") -> dict:
     return ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=EpisodeId(**_EPISODE)).model_dump(
         mode="json"
     )
@@ -216,9 +308,9 @@ class TestCloseRacingTheSeed:
         server = _server()
 
         async def run():
-            seed = asyncio.create_task(server.seed_session(_request(), _typed_seed()))
+            seed = asyncio.create_task(server.seed_session(_request(), _episode_seed()))
             await asyncio.sleep(0.05)  # the browser is still opening
-            await server.close_resources_session(_request(), _typed_close())
+            await server.close_resources_session(_request(), _episode_close())
             await seed
 
         asyncio.run(run())
@@ -232,41 +324,71 @@ class TestCloseRacingTheSeed:
         server = _server()
 
         async def run():
-            await server.close_resources_session(_request(), _typed_close())
-            with pytest.raises(ValueError, match="already closed"):
-                await server.seed_session(_request(), _typed_seed())
+            await server.close_resources_session(_request(), _episode_close())
+            with pytest.raises(HTTPException, match="already closed") as refused:
+                await server.seed_session(_request(), _episode_seed())
+            assert refused.value.status_code == 409
 
         asyncio.run(run())
 
         assert browsers.created == []
 
 
-def test_more_than_one_worker_is_refused() -> None:
-    """Browsers live in this process; a second worker would get tool calls for browsers it lacks."""
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(num_workers=2)
+def test_episode_sessions_follow_the_session_contract(browsers) -> None:
+    from test_verify_reporting import _body
+
+    server = _server()
+    check_resources_session_contract(
+        server.setup_webserver(),
+        _episode_seed("contract-session"),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: (
+            resources_session_id in server._session_id_to_state or resources_session_id in server._episode_identity
+        ),
+        verify_body=_body().model_dump(mode="json"),
+    )
+    assert all(browser.closed == 1 for browser in browsers.created)
 
 
-def test_verify_after_close_reports_the_missing_browser(browsers) -> None:
-    """A verify that arrives after the close has nothing to score, and says so rather than scoring zero."""
+def test_several_workers_are_allowed() -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the browser."""
+    refuse_unsupported_num_workers(_server(num_workers=2))
+
+
+def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:
+    """A verify that arrives after the close has nothing to score, so the sample is masked rather than scored 0."""
     from test_verify_reporting import _body
 
     server = _server()
 
     async def run():
         request = _request()
-        await server.seed_session(request, _typed_seed())
-        await server.close_resources_session(request, _typed_close())
+        await server.seed_session(request, _episode_seed())
+        await server.close_resources_session(request, _episode_close())
         return await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body())
 
     response = asyncio.run(run())
 
+    assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, SESSION_LOST)
+    assert response.failure_reason == "browser session not found at verify"
+
+
+def test_a_lost_verify_ignores_response_fields_the_caller_sent(browsers) -> None:
+    """The request allows extra fields; a caller's reward or mask must not override the lost-session verdict."""
+    from test_verify_reporting import _body
+
+    sent = {"reward": 1.0, "mask_sample": False, "failure_kind": "judge_error", "failure_reason": "sent by caller"}
+    response = asyncio.run(
+        _server().verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body(**sent))
+    )
+
+    assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, SESSION_LOST)
     assert response.failure_reason == "browser session not found at verify"
 
 
 def test_mcp_tool_calls_reach_the_browser_opened_under_the_callers_id(browsers) -> None:
     """With MCP exposure on, the token minted at seed must name the caller's id, not a fresh one."""
-    from nemo_gym.mcp_auto_exposure import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, maybe_auto_expose
+    from nemo_gym.server_runtime import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, maybe_auto_expose
 
     server = _server(expose_tools_over_mcp=True)
     app = server.setup_webserver()

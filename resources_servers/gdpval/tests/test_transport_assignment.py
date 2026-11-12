@@ -24,22 +24,12 @@ from resources_servers.gdpval.multistage_orchestrator import (
 from resources_servers.gdpval.transport_assignment import PairCost, _solve_capacity_assignment, make_assignment_repair
 
 
-def _global_config(candidate_root, references, *, agent_extra=None) -> dict:
+def _global_config(candidate_root, references) -> dict:
     """A resolved config shaped like benchmarks/gdpval/config.yaml."""
-    agent = {"resources_server": {"type": "resources_servers", "name": "gdpval_resources_server"}}
+    gdpval = {"reference_models": {name: {"deliverables_dir": str(root)} for name, root in references.items()}}
     if candidate_root is not None:
-        agent["persist_deliverables_dir"] = str(candidate_root)
-    agent.update(agent_extra or {})
-    return {
-        "gdpval_resources_server": {
-            "resources_servers": {
-                "gdpval": {
-                    "reference_models": {name: {"deliverables_dir": str(root)} for name, root in references.items()},
-                }
-            }
-        },
-        "gdpval_stirrup_agent": {"responses_api_agents": {"stirrup_agent": agent}},
-    }
+        gdpval["persist_deliverables_dir"] = str(candidate_root)
+    return {"gdpval_resources_server": {"resources_servers": {"gdpval": gdpval}}}
 
 
 def _write_task(root, task_id: str, *, payload: bytes = b"x", finished: bool = True) -> None:
@@ -159,7 +149,7 @@ class TestFingerprintTransportRepair:
 
 
 class TestAssignmentRepairConfig:
-    def test_candidate_root_is_the_linked_agents_persist_dir(self, tmp_path) -> None:
+    def test_candidate_root_is_the_resources_servers_persist_dir(self, tmp_path) -> None:
         candidate, ra, rb = (tmp_path / name for name in ("candidate", "ra", "rb"))
         for root in (candidate, ra, rb):
             _write_task(root, "t0")
@@ -170,26 +160,12 @@ class TestAssignmentRepairConfig:
         # The candidate deliverable was found, so the task was costed, not pinned.
         assert receipt["unrepairable_tasks"] == []
 
-    def test_resources_server_persist_dir_is_not_a_candidate_root(self, tmp_path) -> None:
+    def test_a_missing_persist_dir_is_rejected(self, tmp_path) -> None:
         references = {"ra": tmp_path / "ra"}
         references["ra"].mkdir()
-        config = _global_config(None, references)
-        config["gdpval_resources_server"]["resources_servers"]["gdpval"]["persist_deliverables_dir"] = str(tmp_path)
 
-        with pytest.raises(ValueError, match="exactly one persist_deliverables_dir"):
-            make_assignment_repair(config, {})
-
-    def test_agent_of_another_resources_server_is_ignored(self, tmp_path) -> None:
-        references = {"ra": tmp_path / "ra"}
-        references["ra"].mkdir()
-        config = _global_config(
-            tmp_path / "candidate",
-            references,
-            agent_extra={"resources_server": {"type": "resources_servers", "name": "other_server"}},
-        )
-
-        with pytest.raises(ValueError, match="exactly one persist_deliverables_dir"):
-            make_assignment_repair(config, {})
+        with pytest.raises(ValueError, match="needs the GDPVal persist_deliverables_dir"):
+            make_assignment_repair(_global_config(None, references), {})
 
     def test_relative_candidate_root_is_rejected(self, tmp_path) -> None:
         references = {"ra": tmp_path / "ra"}

@@ -17,6 +17,10 @@ gym env start \
     +math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model
 ```
 
+The OpenMathReasoning download below and `--download` under "Prepare for trajectory collection" fetch from the
+GitLab model registry. They need the `mlflow` extra (`uv sync --extra mlflow`) and `mlflow_tracking_uri` and
+`mlflow_tracking_token` in `env.yaml`.
+
 To download the OpenMathReasoning dataset, the following command can be run:
 ```bash
 gym dataset download --storage gitlab \
@@ -36,6 +40,9 @@ gym eval run --no-serve \
 ```
 
 ## Prepare for trajectory collection
+This writes `validation.jsonl` with each DAPO17k train problem repeated 16 times. NeMo RL reads only the
+validation split when `is_trajectory_collection: true`. `--download` fetches `dapo17k` 0.0.1 from the GitLab
+model registry.
 ```bash
 gym dataset collate \
     --config resources_servers/math_with_judge/configs/dapo17k_trajectory_collection.yaml \

@@ -13,8 +13,10 @@
 # limitations under the License.
 import asyncio
 import base64
+import dataclasses
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import tarfile
@@ -30,14 +32,30 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_UNAVAILABLE,
+    FailureBoundary,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    observe_failure,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxCreateError,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class SWEBenchMetrics(BaseModel):
@@ -50,6 +68,8 @@ class SWEBenchMetrics(BaseModel):
     eval_timed_out: Optional[bool] = None
     error_kind: Optional[str] = None
     mask_sample: Optional[bool] = None
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     agent_run_time: Optional[float] = None
 
@@ -65,7 +85,16 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
-    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
+    return apply_rollout_prefix(model_url, rollout_id) if model_url else model_url
+
+
+def _model_name(params: "AnySweInstanceConfig") -> str:
+    """The model name the harness is given and the response reports.
+
+    ``model`` is optional in a ``/run`` body (rows from ``prepare.py`` omit it), but ``NeMoGymResponse.model`` is a
+    required string. Both places use the same fallback so the reported name is the one the harness actually sent.
+    """
+    return params.body.model or "model"
 
 
 def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
@@ -87,6 +116,34 @@ def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = No
     d.pop("agent_runtime_source", None)
     d.pop("agent_deps_url", None)
     return json.dumps(redact(d), indent=indent)
+
+
+def _resolve_sandbox_provider(sandbox_provider: str | Dict[str, Any], named_configs: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve the provider config; Apptainer sandboxes always start with ``--no-home``.
+
+    By default ``apptainer instance start`` bind-mounts the invoking user's home into every instance. When the Gym
+    server runs as root, the usual case inside a training container, that home is ``/root``, so the server's ``/root``
+    replaces the task image's ``/root`` in every sandbox on the node. Task images keep toolchains there: R2E-Gym
+    images symlink ``/testbed/.venv/bin/python`` into ``/root/.local/share/uv/python/...``, which then dangles for
+    both the agent and the grader ("No such file or directory"). Files the agent or grader writes under ``/root`` also
+    land in the server's home and are visible to every other sandbox on the node. anyswe never needs the host home
+    (the agent runs with ``HOME=/sandbox/home``), so ``--no-home`` is added to ``create.extra_start_args``. Other
+    providers are returned unchanged.
+    """
+    provider = resolve_provider_config(sandbox_provider, named_configs)
+    if "apptainer" not in provider:
+        return provider
+    apptainer = dict(provider["apptainer"] or {})
+    create = apptainer.get("create") or {}
+    if dataclasses.is_dataclass(create):
+        create = dataclasses.asdict(create)
+    create = dict(create)
+    start_args = list(create.get("extra_start_args") or [])
+    if "--no-home" not in start_args:
+        start_args.append("--no-home")
+    create["extra_start_args"] = start_args
+    apptainer["create"] = create
+    return {"apptainer": apptainer}
 
 
 def _classify_agent_error(error: str) -> Optional[str]:
@@ -113,6 +170,53 @@ def _should_mask_sample(
     )
 
 
+RUNTIME_MISSING = "anyswe_agent:runtime_missing"
+SETUP_FAILED = "anyswe_agent:setup_failed"
+
+
+class _RuntimeMissingError(RuntimeError):
+    """The task image lacks the agent runtime: a configuration error, not a provider failure."""
+
+
+class _RuntimeSetupError(RuntimeError):
+    """A completed setup command reported that the agent runtime cannot be set up (for example a bad archive)."""
+
+
+def _setup_command_failed(result: Any) -> bool:
+    """Whether a setup ``exec`` completed and reported a failure.
+
+    An ``error_type`` (timeout, sandbox) means the command did not complete, so its exit code says nothing about
+    the setup; that is a sandbox failure, raised as a plain error that keeps the ``provider_unavailable`` default.
+    """
+    if result.error_type is not None:
+        raise RuntimeError(f"the sandbox could not run the setup command ({result.error_type})")
+    return result.return_code != 0
+
+
+def _masked_failure_kind(
+    resolved: bool,
+    agent_error_kind: Optional[str],
+    agent_timed_out: bool,
+    error_kind: Optional[str],
+    sandbox_failure_kind: Optional[str] = None,
+) -> Optional[str]:
+    """The ``failure_kind`` of a masked sample, or None when ``_should_mask_sample`` does not mask it.
+
+    A sandbox failure keeps the kind its event carried and is a ``provider_unavailable`` otherwise.
+    """
+    if error_kind == "sandbox":
+        return sandbox_failure_kind or PROVIDER_UNAVAILABLE
+    if agent_timed_out:
+        return AGENT_TIMEOUT
+    if error_kind == "eval_timeout":
+        return "anyswe_agent:eval_timeout"
+    if resolved and agent_error_kind == "max_iteration":
+        return AGENT_LIMIT
+    if resolved and agent_error_kind == "context_window":
+        return MODEL_CONTEXT_LIMIT
+    return None
+
+
 def _dataset_family(dataset_name: str) -> str:
     if "R2E-Gym" in dataset_name:
         return "r2e"
@@ -130,15 +234,141 @@ def _as_list(value: Any) -> list[str]:
     return list(value or [])
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_TEST_STATUSES = ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED")
+_VERBOSE_TEST_LINE = re.compile(r"^(\S+::\S.*?)\s+(PASSED|FAILED|ERROR|XFAIL|SKIPPED)(?:\s+\[\s*\d+%\])?$")
+
+
+def _r2e_test_aliases(name: str) -> list[str]:
+    """Return the spellings under which one test may be listed.
+
+    pytest's ``-rA`` summary prints node ids (``r2e_tests/test_core.py::TestMaskedArray::test_basic``) while R2E's
+    expected-output maps (and FAIL_TO_PASS lists derived from them) use unittest-style ``TestMaskedArray.test_basic``.
+    Expose the node id, the ``file::Class::method`` form without the directory, the ``Class.method`` form, and the
+    bare method name. These are aliases of the recorded test, not permission to discard a required test's class or
+    file. Parameter IDs stay intact even when they contain dots, spaces, or ``::``.
+    """
+    name = _ANSI_ESCAPE.sub("", name).strip()
+    aliases = [name]
+    test, bracket, parameter = name.partition("[")
+    suffix = bracket + parameter
+    if "::" in test:
+        parts = test.split("::")
+        aliases.append("::".join([parts[0].rsplit("/", 1)[-1], *parts[1:]]) + suffix)
+        aliases.append(".".join(parts[1:]) + suffix)
+        aliases.append(parts[-1] + suffix)
+    elif "." in test:
+        aliases.append(test.rsplit(".", 1)[-1] + suffix)
+    return list(dict.fromkeys(aliases))
+
+
+def _record_test_status(statuses: Dict[str, Dict[str, str]], test: str, status: str) -> None:
+    test = _ANSI_ESCAPE.sub("", test).strip()
+    for alias in _r2e_test_aliases(test):
+        matches = statuses.setdefault(alias, {})
+        # Keep concrete identities separate so a shortened name cannot hide mixed outcomes. A failing result for the
+        # same identity takes precedence over PASSED/XFAIL in either verbose output or the later summary.
+        # SKIPPED is the weakest record: pytest prints one node id twice when a data-driven case exists in two
+        # files (mypy's suites), once SKIPPED and once PASSED in either order, and a SKIPPED that stuck graded
+        # such passing patches 0.
+        current = matches.get(test)
+        if current is None or current == "SKIPPED" or (current in ("PASSED", "XFAIL") and status != "SKIPPED"):
+            matches[test] = status
+
+
+def _r2e_summary_test_name(text: str, known_tests: set[str]) -> str:
+    """Remove pytest's failure explanation without truncating a parameter ID containing `` - ``."""
+    # PASSED and verbose lines expose the complete identity without a diagnostic suffix.
+    # Prefer those identities: arbitrary parameter IDs need not have balanced brackets.
+    if text in known_tests:
+        return text
+    end = len(text)
+    while (separator := text.rfind(" - ", 0, end)) >= 0:
+        candidate = text[:separator].strip()
+        if candidate in known_tests:
+            return candidate
+        end = separator
+    depth = 0
+    for i, character in enumerate(text):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text.startswith(" - ", i):
+            return text[:i].strip()
+    return text.strip()
+
+
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
-    statuses: Dict[str, str] = {}
-    for line in log.splitlines():
-        fields = line.strip().replace(" - ", " ").split()
-        if len(fields) > 1 and fields[0] in ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED"):
-            statuses[fields[1]] = fields[0]
+    statuses: Dict[str, Dict[str, str]] = {}
+    lines = [_ANSI_ESCAPE.sub("", line).strip() for line in log.splitlines()]
+    known_tests = set()
+    for line in lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) == 2 and fields[0] == "PASSED":
+            known_tests.add(fields[1])
+        if verbose := _VERBOSE_TEST_LINE.match(line):
+            known_tests.add(verbose.group(1))
+    for line in lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) > 1 and fields[0] in _TEST_STATUSES:
+            # PASSED lines have no diagnostic suffix. Parameter IDs are arbitrary text, including unmatched
+            # brackets and " - ", so parsing them as a failure explanation loses valid identities.
+            name = fields[1] if fields[0] == "PASSED" else _r2e_summary_test_name(fields[1], known_tests)
+            _record_test_status(statuses, name, fields[0])
+            continue
+        # pytest's verbose per-test line "<node id> STATUS [ 42%]", for runners that suppress the -rA summary.
+        verbose = _VERBOSE_TEST_LINE.match(line)
+        if verbose:
+            _record_test_status(statuses, verbose.group(1), verbose.group(2))
     required = _as_list(instance.get("FAIL_TO_PASS") or instance.get("fail_to_pass"))
     required += _as_list(instance.get("PASS_TO_PASS") or instance.get("pass_to_pass"))
-    return bool(required) and all(statuses.get(test) == "PASSED" for test in required)
+
+    def status_of(test: str) -> Optional[str]:
+        # Match the requirement as supplied. Falling back from TestA.test_x to test_x could reward a different
+        # class's passing test even when the required test never ran.
+        matches = statuses.get(_ANSI_ESCAPE.sub("", test).strip(), {})
+        outcomes = set(matches.values())
+        return next(iter(outcomes)) if len(outcomes) == 1 else None
+
+    # Like swebench's grading, an expected failure (XFAIL) counts as passing.
+    return bool(required) and all(status_of(test) in ("PASSED", "XFAIL") for test in required)
+
+
+def _r2e_parse_log_pytest(log: str) -> Dict[str, str]:
+    """Read R2E's short-summary map using its established, lossy key encoding.
+
+    File names are dropped, all ``::`` separators become dots (including inside parameter IDs), and failure
+    explanations are truncated at `` - ``. Keep the last reported phase, including a teardown ERROR after PASSED.
+    """
+    statuses: Dict[str, str] = {}
+    if not log or "short test summary info" not in log:
+        return statuses
+    for line in log.split("short test summary info")[1].splitlines():
+        fields = _ANSI_ESCAPE.sub("", line).strip().split(maxsplit=1)
+        if len(fields) != 2 or fields[0] not in ("PASSED", "FAILED", "ERROR"):
+            continue
+        status, text = fields
+        name = ".".join(text.split("::")[1:])
+        if status != "PASSED":
+            name = name.split(" - ")[0]
+        statuses[name] = status
+    return statuses
+
+
+def _r2e_expected_resolved(expected_output_json: Any, log: str) -> bool:
+    """R2E-Gym's expected-map reward rule, including expected FAILED and ERROR outcomes.
+
+    Preserve the upstream serialized key schema on both sides. Its truncation can alias parameter IDs;
+    recovering those identities requires a dataset format change, not a different observed-log normalization.
+    """
+    if isinstance(expected_output_json, str):
+        expected_output_json = json.loads(expected_output_json)
+    parsed = {_ANSI_ESCAPE.sub("", k): v for k, v in _r2e_parse_log_pytest(log).items()}
+    expected = {_ANSI_ESCAPE.sub("", k): v for k, v in dict(expected_output_json or {}).items()}
+    parsed = {k.split(" - ")[0]: parsed[k] for k in sorted(parsed)}
+    expected = {k.split(" - ")[0]: expected[k] for k in sorted(expected)}
+    return bool(expected) and "" not in expected and parsed == expected
 
 
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
@@ -151,13 +381,24 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     agent_config_class: str = Field(description="Agent config class name, e.g. HermesAgentConfig")
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
-    container_formatter: str = Field(description="Baked task image containing the AnySWE agent runtime")
+    container_formatter: str | list[str] = Field(
+        description=(
+            "Task image template, formatted with the row's instance_id. Either an OCI image "
+            "(e.g. swebench/sweb.eval.x86_64.{instance_id}) or one or more local Apptainer .sif path templates "
+            "(e.g. /images/r2e_gym/{instance_id}.sif). A .sif template takes precedence over the row's image."
+        )
+    )
     sandbox_provider: str | Dict[str, Any] = "sandbox"
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
+    # Applied to the agent box only; grading boxes keep their network to fetch test deps.
+    agent_network_policy: Optional[Dict[str, Any]] = None
     agent_runtime_source: str = "baked"
+    # Seconds allowed to download agent_deps_url into the box.
+    agent_runtime_fetch_timeout_s: int = 600
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
+    save_eval_output: bool = False
     concurrency: int = 256
 
 
@@ -191,6 +432,24 @@ class AnySweVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     # may be absent, and it wins the MRO. Restate the contract field so a consumer reading
     # this response's schema sees the contract's type, default and description.
     mask_sample: bool = BaseVerifyResponse.model_fields["mask_sample"]
+    # The same holds for the failure fields `SWEBenchMetrics` declares to parse the metrics file.
+    failure_kind: Optional[str] = BaseVerifyResponse.model_fields["failure_kind"]
+    failure_reason: Optional[str] = BaseVerifyResponse.model_fields["failure_reason"]
+
+
+def _pack_runtime(deps_dir: Path, archive_path: Path) -> None:
+    """Atomically (re)write the runtime archive.
+
+    Several servers may rebuild the archive from one checkout at once. Each writes its own temp file, so one
+    process's ``replace()`` never finds its file already moved by another; the last writer wins.
+    """
+    temporary = archive_path.with_name(f"{archive_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
+            archive.add(deps_dir, arcname=".")
+        temporary.replace(archive_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class GymAgentHarnessProcessor(BaseModel):
@@ -200,18 +459,28 @@ class GymAgentHarnessProcessor(BaseModel):
     def _agent_key(self) -> str:
         return self.config.agent_server_module.split(".")[-2]
 
+    def _recipe(self) -> str:
+        """Hash of everything that goes into the runtime bundle; a change triggers a rebuild."""
+        scripts = Path(__file__).parent / "setup_scripts"
+        sources = (
+            scripts / f"{self._agent_key}_deps.sh",
+            scripts / "_portable_python.sh",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "pyproject.toml",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "uv.lock",
+            *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
+            # The bundle carries its own copy of nemo_gym, so library changes must rebuild it too.
+            *sorted((PARENT_DIR / "nemo_gym").rglob("*.py")),
+            PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "uv.lock",
+            PARENT_DIR / "setup.py",
+        )
+        return hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
+
     def setup(self) -> Path:
         deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
         sentinel = deps_dir / ".installed"
-        scripts = Path(__file__).parent / "setup_scripts"
-        script = scripts / f"{self._agent_key}_deps.sh"
-        sources = (
-            script,
-            scripts / "_portable_python.sh",
-            PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
-            *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
-        )
-        recipe = hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
+        script = Path(__file__).parent / "setup_scripts" / f"{self._agent_key}_deps.sh"
+        recipe = self._recipe()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             return deps_dir
 
@@ -251,8 +520,6 @@ class GymAgentHarnessProcessor(BaseModel):
 class AnySweAgent(SimpleResponsesAPIAgent):
     """Runs a Gym agent in each task container."""
 
-    ray_enabled = False
-
     config: AnySweAgentConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -278,10 +545,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
-                temporary = agent_deps_archive.with_suffix(".tmp")
-                with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
-                    archive.add(agent_deps_dir, arcname=".")
-                temporary.replace(agent_deps_archive)
+                _pack_runtime(agent_deps_dir, agent_deps_archive)
         elif self.config.agent_runtime_source != "baked":
             if "://" in self.config.agent_runtime_source:
                 agent_deps_url = self.config.agent_runtime_source
@@ -297,7 +561,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             model_server_url=model_url,
             agent_deps_archive=agent_deps_archive,
             agent_deps_url=agent_deps_url,
-            resolved_sandbox_provider=resolve_provider_config(
+            resolved_sandbox_provider=_resolve_sandbox_provider(
                 self.config.sandbox_provider, self.server_client.global_config_dict
             ),
             sandbox_default_metadata=resolve_provider_metadata(
@@ -307,16 +571,53 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
 
     @staticmethod
-    def _sandbox_image(problem_info: Dict[str, Any]) -> str:
+    def _sif_candidates(instance_id: str, dataset_name: str) -> list[str]:
+        """Image names to try for one instance, following swe_agents' naming conventions.
+
+        The raw id first, then R2E-Gym's ``<repo>_final_<hash>``, then the ``__`` to ``_1776_`` / ``_s_``
+        rewrites (original case, then lowercase).
+        """
+        candidates = [instance_id]
+        if "R2E-Gym" in dataset_name:
+            candidates.append(re.sub(r"[^_]+__([^-]+)-", lambda m: m.group(1).lower() + "_final_", instance_id))
+        for replacement in ("_1776_", "_s_"):
+            replaced = instance_id.replace("__", replacement)
+            candidates.extend([replaced, replaced.lower()])
+        return list(dict.fromkeys(candidates))
+
+    @classmethod
+    def _sandbox_sif(cls, problem_info: Dict[str, Any], formatters: list[str]) -> str:
+        # Exact names only: a glob such as "{instance_id}*.sif" would resolve psf__requests-1142 to
+        # psf__requests-11420.sif. Put any fixed prefix or suffix in the template instead.
+        instance_id = problem_info["instance_id"]
+        candidates = cls._sif_candidates(instance_id, str(problem_info.get("dataset_name", "")))
+        tried = [formatter.format(instance_id=candidate) for formatter in formatters for candidate in candidates]
+        for path in tried:
+            if Path(path).exists():
+                return path
+        raise FileNotFoundError(f"no .sif image found for instance {instance_id!r}; tried {tried}")
+
+    @classmethod
+    def _sandbox_image(cls, problem_info: Dict[str, Any]) -> str:
         instance = problem_info.get("instance_dict", {})
         instance = json.loads(instance) if isinstance(instance, str) else instance
+        formatters = problem_info.get("container_formatter") or []
+        formatters = [formatters] if isinstance(formatters, str) else list(formatters)
+        explicit_sif = problem_info.get("sif_path") or instance.get("sif_path")
+        if explicit_sif:
+            if not Path(str(explicit_sif)).exists():
+                raise FileNotFoundError(f"sif_path does not exist: {explicit_sif}")
+            return str(explicit_sif)
+        # Local .sif images win over the row's image, so rollouts never pull it from a registry.
+        sif_formatters = [formatter for formatter in formatters if formatter.endswith(".sif")]
+        if sif_formatters:
+            return cls._sandbox_sif(problem_info, sif_formatters)
         explicit_image = problem_info.get("image") or instance.get("image") or instance.get("docker_image")
         if explicit_image:
             return str(explicit_image).removeprefix("docker://")
-        formatter = problem_info["container_formatter"]
-        if formatter.endswith(".sif"):
-            raise ValueError("sandbox_provider requires a container image, not a .sif file")
-        formatter = formatter.removeprefix("docker://")
+        if not formatters:
+            raise ValueError("container_formatter is required when the row carries no image")
+        formatter = formatters[0].removeprefix("docker://")
         instance_id = problem_info["instance_id"].replace("__", "_1776_").lower()
         image = formatter.format(instance_id=instance_id)
         if ":" not in image.rsplit("/", 1)[-1]:
@@ -328,9 +629,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         params: AnySweInstanceConfig,
         *,
         files: Optional[Dict[str, str]] = None,
+        agent: bool = False,
     ) -> SandboxSpec:
         config = dict(params.sandbox_spec)
         provider_options = dict(config.pop("provider_options", {}))
+        if agent and params.agent_network_policy:
+            if "opensandbox" not in params.resolved_sandbox_provider:
+                raise ValueError("agent_network_policy requires the opensandbox sandbox provider")
+            provider_options["network_policy"] = dict(params.agent_network_policy)
         metadata = {
             **params.sandbox_default_metadata,
             **config.pop("metadata", {}),
@@ -357,7 +663,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             for key in ("temperature", "top_p", "max_output_tokens")
             if getattr(params.body, key, None) is not None
         }
-        model_name = params.body.model or "model"
+        model_name = _model_name(params)
         return {
             "NGSWE_MODEL_NAME": model_name,
             "NGSWE_MODEL_URL": params.model_server_url,
@@ -374,6 +680,23 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return json.loads(value) if isinstance(value, str) else dict(value)
 
     @staticmethod
+    def _r2e_test_setup_script(repo_path: str = "/testbed", tests_path: str = "/r2e_tests") -> str:
+        """Put R2E-Gym's hidden tests where the image's ``run_tests.sh`` looks for them.
+
+        R2E-Gym images ship the tests at ``/r2e_tests``, while ``/testbed/run_tests.sh`` runs
+        ``.venv/bin/python -m pytest -rA r2e_tests`` from the repository. R2E-Gym's own runtime links the
+        directory into the repository before it runs the tests (``DockerRuntime.setup_env``); without that
+        step pytest stops with "file or directory not found: r2e_tests" and no patch can resolve.
+        Images that already have the tests in the repository are left alone.
+        """
+        repo_tests = shlex.quote(f"{repo_path.rstrip('/')}/r2e_tests")
+        tests = shlex.quote(tests_path)
+        return (
+            f"if [ ! -e {repo_tests} ] && [ -d {tests} ]; then "
+            f"ln -s {tests} {repo_tests} && echo '>>>>> Linked {tests_path} into {repo_path}'; fi\n"
+        )
+
+    @staticmethod
     def _apply_patch_script() -> str:
         return (
             "cd /testbed && "
@@ -384,7 +707,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             "echo '>>>>> Patch Apply Failed'; exit 1; fi\n"
         )
 
-    async def _grade_sandbox_patch(self, params: AnySweInstanceConfig, patch: str) -> tuple[bool, Optional[str]]:
+    @staticmethod
+    def _stage_patch(params: AnySweInstanceConfig, patch: bytes) -> Path:
+        """Write the patch, byte for byte plus the trailing newline ``git apply`` wants, for ``sandbox.upload``.
+
+        ``SandboxSpec.files`` holds text, so a diff of a CRLF or non-UTF-8 file would not survive it unchanged.
+        """
+        staged = params.persistent_dir / "patch.apply.diff"
+        staged.write_bytes(patch if patch.endswith(b"\n") else patch + b"\n")
+        return staged
+
+    async def _grade_sandbox_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
         if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
             return await self._grade_r2e_patch(params, patch)
 
@@ -396,16 +729,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         eval_script = (
             'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + test_spec.eval_script
         )
-        spec = self._sandbox_spec(
-            params,
-            files={
-                "/root/patch.diff": patch if patch.endswith("\n") else patch + "\n",
-                "/tmp/anyswe_eval.sh": eval_script,
-            },
-        )
+        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": eval_script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
             result = await sandbox.exec(
                 "bash /tmp/anyswe_eval.sh",
                 cwd="/testbed",
@@ -419,20 +747,22 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if params.save_eval_output:
+            (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log_file:
             log_file.write(log)
             log_file.flush()
             prediction = {
                 "instance_id": params.instance_id,
                 "model_name_or_path": params.body.model or "anyswe",
-                "model_patch": patch,
+                "model_patch": patch.decode("utf-8", errors="replace"),
             }
             report = get_eval_report(test_spec, prediction, log_file.name, include_tests_status=True)[
                 params.instance_id
             ]
         return bool(report["resolved"]), None
 
-    async def _grade_r2e_patch(self, params: AnySweInstanceConfig, patch: str) -> tuple[bool, Optional[str]]:
+    async def _grade_r2e_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
         instance = self._instance_dict(params)
         eval_script = instance.get("eval_script") or params.problem_info.get("eval_script")
         if not eval_script:
@@ -442,17 +772,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "elif [ -f /root/run_tests.sh ]; then bash /root/run_tests.sh; "
                 "else echo 'R2E eval script not found'; exit 127; fi"
             )
-        script = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + str(eval_script)
-        spec = self._sandbox_spec(
-            params,
-            files={
-                "/root/patch.diff": patch if patch.endswith("\n") else patch + "\n",
-                "/tmp/anyswe_eval.sh": script,
-            },
+        script = (
+            'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n'
+            + self._r2e_test_setup_script()
+            + self._apply_patch_script()
+            + str(eval_script)
         )
+        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
             result = await sandbox.exec(
                 "bash /tmp/anyswe_eval.sh",
                 cwd="/testbed",
@@ -466,6 +796,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if params.save_eval_output:
+            (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
+        has_lists = any(
+            _as_list(instance.get(key) or instance.get(key.lower())) for key in ("FAIL_TO_PASS", "PASS_TO_PASS")
+        )
+        if not has_lists and instance.get("expected_output_json"):
+            # R2E-Gym rows without test lists carry the verdict in expected_output_json; use R2E-Gym's own rule.
+            return _r2e_expected_resolved(instance["expected_output_json"], log), None
         return _r2e_resolved(instance, log), None
 
     async def _run_agent_in_sandbox(self, params: AnySweInstanceConfig) -> NeMoGymResponse:
@@ -476,9 +814,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         spec = self._sandbox_spec(
             params,
             files=files,
+            agent=True,
         )
         result = None
         sandbox_failed = False
+        sandbox_failure_kind: Optional[str] = None
+        sandbox_failure_reason: Optional[str] = None
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         started = time.time()
         try:
@@ -505,15 +846,15 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     "elif command -v python3 >/dev/null 2>&1; then "
                     f"python3 -c {python_fetch}; "
                     "else echo 'runtime download requires curl, wget, or python3' >&2; exit 127; fi",
-                    timeout_s=600,
+                    timeout_s=params.agent_runtime_fetch_timeout_s,
                     user="root",
                 )
                 if fetched.return_code != 0:
                     raise RuntimeError(f"agent runtime fetch failed: {(fetched.stderr or '')[:300]}")
             else:
                 runtime = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
-                if runtime.return_code != 0:
-                    raise RuntimeError("task image does not contain /agent_deps_mount/bin/python")
+                if _setup_command_failed(runtime):
+                    raise _RuntimeMissingError("task image does not contain /agent_deps_mount/bin/python")
             if external_runtime:
                 unpacked = await sandbox.exec(
                     "mkdir -p /sandbox/agent_deps_runtime && "
@@ -522,8 +863,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     timeout_s=600,
                     user="root",
                 )
-                if unpacked.return_code != 0:
-                    raise RuntimeError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
+                if _setup_command_failed(unpacked):
+                    raise _RuntimeSetupError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
             if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
                 await sandbox.exec(
                     "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests; "
@@ -535,9 +876,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
             agent_env = self._sandbox_agent_env(params)
             agent_env["NGSWE_AGENT_DEPS_DIR"] = runtime_dir
-            command = (
-                f"HOME=/sandbox/home TMPDIR=/sandbox/tmp {runtime_dir}/bin/python /trajectories_mount/agent_runner.py"
-            )
+            # -I ignores the task image's PYTHONPATH and user site, which can otherwise shadow the runtime's own
+            # packages (for example a numpy or pandas checkout on PYTHONPATH breaks the runner's imports).
+            command = f"HOME=/sandbox/home TMPDIR=/sandbox/tmp {runtime_dir}/bin/python -I /trajectories_mount/agent_runner.py"
             result = await sandbox.exec(
                 command,
                 cwd="/testbed",
@@ -553,6 +894,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 if exists.return_code == 0:
                     await sandbox.download(remote, local)
         except Exception as exc:
+            if isinstance(exc, NgFailureEvent):
+                observe_failure(exc)
+                sandbox_failure_kind = exc.failure_kind
+            elif isinstance(exc, _RuntimeMissingError):
+                sandbox_failure_kind = RUNTIME_MISSING
+            elif isinstance(exc, _RuntimeSetupError):
+                sandbox_failure_kind = SETUP_FAILED
+            sandbox_failure_reason = repr(exc)
             sandbox_failed = True
             update_metrics(
                 params.metrics_fpath,
@@ -561,6 +910,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     "patch_exists": False,
                     "error_kind": "sandbox",
                     "mask_sample": True,
+                    "failure_kind": sandbox_failure_kind or PROVIDER_UNAVAILABLE,
+                    "failure_reason": sandbox_failure_reason,
                     "agent_run_time": time.time() - started,
                 },
             )
@@ -569,12 +920,15 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             await sandbox.stop()
 
         patch_path = params.persistent_dir / "patch.diff"
-        patch = patch_path.read_text() if patch_path.exists() else ""
+        # Grading gets the exact bytes; the decoded text is for metrics only.
+        patch_bytes = patch_path.read_bytes() if patch_path.exists() else b""
+        patch = patch_bytes.decode("utf-8", errors="replace")
         response_path = params.persistent_dir / "response.json"
         saved = NeMoGymResponse.model_validate_json(response_path.read_text()) if response_path.exists() else None
 
         agent_error = ""
         agent_timed_out = False
+        eval_timeout_reason: Optional[str] = None
         error_kind = "sandbox" if sandbox_failed else None
         if result is not None:
             (params.persistent_dir / "agent_result.json").write_text(
@@ -591,6 +945,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             agent_timed_out = result.error_type == "timeout"
             if result.error_type == "sandbox":
                 error_kind = "sandbox"
+                sandbox_failure_reason = agent_error[-500:] or "the sandbox could not run the agent command"
         if saved is not None:
             agent_error += saved.model_dump_json()
         agent_error_kind = _classify_agent_error(agent_error)
@@ -598,18 +953,41 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         resolved = False
         if patch.strip() and error_kind is None:
             try:
-                resolved, error_kind = await self._grade_sandbox_patch(params, patch)
+                resolved, error_kind = await self._grade_sandbox_patch(params, patch_bytes)
+            except NgFailureEvent as exc:
+                if exc.boundary != FailureBoundary.SANDBOX:
+                    raise
+                observe_failure(exc)
+                error_kind = "sandbox"
+                sandbox_failure_kind, sandbox_failure_reason = exc.failure_kind, repr(exc)
+                (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except SandboxCreateError as exc:
                 error_kind = "sandbox"
+                sandbox_failure_reason = repr(exc)
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except (asyncio.TimeoutError, TimeoutError) as exc:
                 error_kind = "eval_timeout"
+                eval_timeout_reason = repr(exc)
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except Exception as exc:
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
 
         eval_timed_out = error_kind == "eval_timeout"
         mask_sample = _should_mask_sample(resolved, agent_error_kind, agent_timed_out, error_kind)
+        failure_kind = _masked_failure_kind(
+            resolved, agent_error_kind, agent_timed_out, error_kind, sandbox_failure_kind
+        )
+        # The reason names the same failure as the kind, in the precedence _masked_failure_kind uses.
+        if error_kind == "sandbox":
+            failure_reason = sandbox_failure_reason or "the sandbox failed during the eval command"
+        elif agent_timed_out:
+            failure_reason = f"the agent run timed out after {params.swebench_agent_timeout}s"
+        elif error_kind == "eval_timeout":
+            failure_reason = eval_timeout_reason or f"the eval run timed out after {params.swebench_tests_timeout}s"
+        elif failure_kind is not None:
+            failure_reason = f"the resolved run ended with {agent_error_kind}"
+        else:
+            failure_reason = None
         update_metrics(
             params.metrics_fpath,
             {
@@ -621,6 +999,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "eval_timed_out": eval_timed_out,
                 "error_kind": error_kind,
                 "mask_sample": mask_sample,
+                "failure_kind": failure_kind,
+                "failure_reason": failure_reason,
                 "agent_run_time": time.time() - started,
             },
         )
@@ -628,7 +1008,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"anyswe-{params.instance_id}",
             created_at=int(time.time()),
-            model=params.body.model,
+            model=_model_name(params),
             object="response",
             output=saved.output if saved is not None else [],
             parallel_tool_calls=params.body.parallel_tool_calls,
@@ -652,8 +1032,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
         persistent_dir.mkdir(parents=True, exist_ok=True)
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url:
-            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
+        # A sandbox_model_base_url relays to the same model server, so it keeps the rollout path that attributes calls.
+        server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
             **server_config,
@@ -711,3 +1091,6 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     AnySweAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AnySweAgent.run_webserver()  # noqa: F401

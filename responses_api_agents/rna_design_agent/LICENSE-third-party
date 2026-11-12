@@ -1,0 +1,34 @@
+# Third-party components
+
+`rds/` is a copy of the RNA Design Scientist harness, Apache-2.0, © NVIDIA. It calls the
+components below rather than vendoring them. No model weights are in this directory.
+
+## Called by the harness
+
+| Component | Role | Licence |
+|---|---|---|
+| [EternaFold](https://github.com/eternagame/EternaFold) | folding engine behind `fold.eternafold`, `score.fold_match`, `score.switch_match`, `score.ensemble_defect` | BSD-3-Clause, © Stanford |
+| [arnie](https://github.com/DasLab/arnie) | interface to EternaFold | MIT, DasLab |
+| [gRNAde](https://github.com/chaitjo/geometric-rna-design) | generative model behind `generate.grnade` | MIT, © 2025 C. K. Joshi |
+| [RibonanzaNet / -SS](https://github.com/Shujun-He/RibonanzaNet) | secondary structure behind `struct.rnet_ss`, and gRNAde's own filter | MIT |
+
+`rds/tools/pyg_shims/` holds pure-PyTorch versions of the two functions gRNAde uses from
+`torch_scatter` and `torch_cluster` (MIT), used only when those packages are not installed.
+
+## Data
+
+The suites are not in this repository. `prepare.py` builds them on first start from two
+[RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) files (MIT) at a pinned commit, each checked
+against its SHA-256. RNAInvBench collates sets published separately, under their own terms. Only structures
+and pinned bases are read from them.
+
+| Set | Origin | Terms |
+|---|---|---|
+| Eterna100 v1 | Anderson-Lee et al. 2016, [eterna100-benchmarking](https://github.com/eternagame/eterna100-benchmarking) | MIT |
+| Eterna100 v2 | Koodli et al. 2021, same repository | MIT |
+| rfam_learn-test | Runge et al. 2019 (LEARNA), built on [Rfam](https://rfam.org) | Rfam is CC0 |
+| rfam_taneda-test | Taneda 2011 (MODENA), built on Rfam | Rfam is CC0 |
+| anta_rfam / anta_strand / anta_pseudo | Kleinkauf et al. 2015 (antaRNA) | stated by the authors |
+| ArchiveII-test | Mathews lab, [rna.urmc.rochester.edu](https://rna.urmc.rochester.edu/) | No licence stated by the authors. Check that site before using it. |
+
+`resources_servers/rna_design/data/example.jsonl` holds five Eterna100 v1 targets from the same files (MIT).

@@ -28,29 +28,172 @@ import logging
 import subprocess
 import sys
 import time
-import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
+from aiohttp import ClientError, ClientTimeout
+from anyio import CancelScope
+from anyio.lowlevel import checkpoint_if_cancelled
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
+from nemo_skills.mcp.servers.python_tool import DirectPythonTool
 from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, raise_for_status
+from nemo_gym.client import request as http_request
+from nemo_gym.config import ResourcesServerRef
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 logger = logging.getLogger(__name__)
+
+# Like Skills' LocalSandbox.delete_session: 3 attempts, 2 s apart, each bounded by a 10 s timeout.
+_DELETE_ATTEMPTS = 3
+_DELETE_RETRY_DELAY_SECONDS = 2.0
+
+
+async def _delete_python_session(url: str, session_id: str) -> None:
+    """Delete a sandbox Python session, raising if the sandbox does not acknowledge it."""
+    # A transport error and a 5xx reply (a sandbox worker restarting behind its proxy) share one budget of bounded
+    # attempts, so an unreachable sandbox cannot hold the session lock for long.
+    for attempt in range(1, _DELETE_ATTEMPTS + 1):
+        try:
+            response = await http_request(
+                "DELETE",
+                url,
+                headers={"X-Session-ID": session_id},
+                timeout=ClientTimeout(total=10),
+                _max_num_tries=1,
+            )
+        except (ClientError, TimeoutError):
+            if attempt == _DELETE_ATTEMPTS:
+                raise
+        else:
+            async with response:
+                # 404: the session is already gone, or the request reached a worker that never held it.
+                if 200 <= response.status < 300 or response.status == 404:
+                    return
+                if response.status < 500 or attempt == _DELETE_ATTEMPTS:
+                    await raise_for_status(response)
+                    raise RuntimeError(
+                        f"Sandbox did not acknowledge deletion of session {session_id}: {response.status}"
+                    )
+        await asyncio.sleep(_DELETE_RETRY_DELAY_SECONDS)
+
+
+@dataclass
+class _PythonExecution:
+    request_id: str
+    session_id: Optional[str] = None
+
+
+class NSToolsToolManager(ToolManager):
+    """Keep ownership of Python sessions until the sandbox acknowledges their deletion."""
+
+    def __init__(
+        self,
+        module_specs: Iterable[str],
+        overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(module_specs=module_specs, overrides=overrides, context=context)
+        self._execution: ContextVar[Optional[_PythonExecution]] = ContextVar("ns_tools_execution", default=None)
+        self._python_requests: Dict[str, asyncio.Task[Dict[str, Any]]] = {}
+        for tool in self._tools.values():
+            if isinstance(tool, DirectPythonTool):
+                self._track_python_requests(tool)
+
+    def _track_python_requests(self, tool: DirectPythonTool) -> None:
+        send_request = tool._sandbox._send_request
+
+        async def tracked_send_request(body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+            execution = self._execution.get()
+            if execution is not None and body.get("session_id") is not None:
+                execution.session_id = str(body["session_id"])
+                tool.requests_to_sessions[execution.request_id] = execution.session_id
+            # A DELETE must not overtake this POST and acknowledge 404 before it creates its session.
+            # Shield only this request (Skills bounds it by timeout + 5), never the full history replay.
+            pending = asyncio.create_task(send_request(body, timeout))
+            if execution is not None:
+                self._python_requests[execution.request_id] = pending
+            try:
+                with CancelScope(shield=True):
+                    return await asyncio.shield(pending)
+            finally:
+                # An asyncio Task.cancel() bypasses AnyIO's shield. Keep its still-running POST owned so
+                # cleanup (or a later tool call) waits for the response before touching the Python session.
+                if execution is not None and pending.done():
+                    self._python_requests.pop(execution.request_id, None)
+                await checkpoint_if_cancelled()
+
+        tool._sandbox._send_request = tracked_send_request
+
+    async def execute_tool(
+        self, raw_name: str, args: Dict[str, Any], extra_args: Optional[Dict[str, Any]] = None
+    ) -> object:
+        tool, _ = self._resolve(self._raw_to_qualified_map[raw_name])
+        request_id = (extra_args or {}).get("request_id")
+        if not isinstance(tool, DirectPythonTool) or request_id is None:
+            return await super().execute_tool(raw_name, args, extra_args)
+        await self._wait_for_python_request(request_id)
+        execution = _PythonExecution(request_id=request_id)
+        token = self._execution.set(execution)
+        try:
+            return await super().execute_tool(raw_name, args, extra_args)
+        finally:
+            # Skills catches ordinary execution errors and overwrites the mapping with None; cancellation skips
+            # its assignment entirely. In either case the generated session may still need a DELETE.
+            if execution.session_id is not None and tool.requests_to_sessions.get(request_id) is None:
+                tool.requests_to_sessions[request_id] = execution.session_id
+            self._execution.reset(token)
+
+    async def _wait_for_python_request(self, request_id: str) -> None:
+        pending = self._python_requests.get(request_id)
+        if pending is None:
+            return
+        try:
+            await asyncio.shield(pending)
+        except Exception:
+            # A failed response can still have allocated a session; deletion must be attempted afterwards.
+            logger.warning("Python request failed before cleanup of %s", request_id, exc_info=True)
+        finally:
+            if pending.done():
+                self._python_requests.pop(request_id, None)
+
+    async def cleanup_request(self, request_id: str) -> None:
+        await self._wait_for_python_request(request_id)
+        for tool in self._tools.values():
+            if not isinstance(tool, DirectPythonTool):
+                await tool.cleanup_request(request_id)
+                continue
+            session_id = tool.requests_to_sessions.get(request_id)
+            if session_id is None:
+                tool.requests_to_sessions.pop(request_id, None)
+                continue
+
+            # Both cleanup_request and LocalSandbox.delete_session in the pinned Skills release suppress errors.
+            # Use the sandbox's resolved address and session routing header, and retain both maps on failure.
+            sandbox = tool._sandbox
+            session_id = str(session_id)
+            # The Environment Server closes once. If the DELETE still fails, close fails and the Python session stays
+            # owned (a verify still returns its score), so a later close or a checkpoint retire can release it.
+            await _delete_python_session(f"http://{sandbox.host}:{sandbox.port}/sessions/{session_id}", session_id)
+            sandbox.session_histories.pop(session_id, None)
+            tool.requests_to_sessions.pop(request_id, None)
 
 
 # ============================================================
@@ -126,7 +269,6 @@ class NSToolsVerifyResponse(BaseVerifyResponse):
 
 
 class NSToolsResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: NSToolsConfig
     tool_manager: Optional[Any] = None
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
@@ -281,7 +423,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             client_params["base_url"] = python_tool_url
             overrides["PythonTool"]["client_params"] = client_params
 
-        self.tool_manager = ToolManager(
+        self.tool_manager = NSToolsToolManager(
             module_specs=self.config.nemo_skills_tools,
             overrides=overrides,
             context=context,
@@ -298,6 +440,13 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         logger.info("NeMo Skills ToolManager initialized successfully")
 
     async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
+        """Run the tool before close can acknowledge releasing its Python session."""
+        # Skills records ownership only when execution returns. Close must wait for that record instead of
+        # fencing an empty session and relying on a later, unreported best-effort cleanup.
+        async with self.session_lock(request.session[SESSION_ID_KEY]):
+            return await self._execute_tool(tool_name, request)
+
+    async def _execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """
         Execute a nemo_skills tool by name.
 
@@ -313,11 +462,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             logger.error(f"Unknown tool requested: {tool_name}")
             return PlainTextResponse(json.dumps({"error": f"Unknown tool: {tool_name}"}))
 
-        # Get session ID for stateful execution
-        session_id = request.session.get(SESSION_ID_KEY)
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            logger.warning(f"No session ID found, using fallback: {session_id}")
+        # The session middleware always sets the session ID, which keys the stateful python session.
+        session_id = request.session[SESSION_ID_KEY]
+        if self.session_is_closed(session_id) or self.session_is_verified(session_id):
+            raise ResourcesSessionLostError(f"ns_tools session {session_id} is closed")
 
         if session_id not in self._timing_by_session:
             self._timing_by_session[session_id] = []
@@ -381,12 +529,31 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         return PlainTextResponse(json.dumps(result))
 
     # --------------------------------------------------------
+    # Sessions
+    # --------------------------------------------------------
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._timing_by_session
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Skills creates Python state on the first tool call; the base releases a prior cookie run."""
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Keep Python ownership and timings until the sandbox acknowledges release."""
+        if self.tool_manager is not None:
+            await self.tool_manager.cleanup_request(session_id)
+        self._timing_by_session.pop(session_id, None)
+
+    # --------------------------------------------------------
     # Verification
     # --------------------------------------------------------
 
-    def _aggregate_timing_metrics(self, session_id: Optional[str]) -> Dict[str, Any]:
+    def _aggregate_timing_metrics(self, session_id: Optional[str]) -> Dict[str, float | int]:
         """Aggregate tool execution timing metrics for a session."""
-        tool_timings = self._timing_by_session.pop(session_id, []) if session_id else []
+        tool_timings = self._timing_by_session.get(session_id, []) if session_id else []
+        if session_id in self._timing_by_session:
+            # Drop detailed timings but keep the live Python session visible until release succeeds.
+            self._timing_by_session[session_id] = []
 
         total_tool_time = sum(t["execution_time_seconds"] for t in tool_timings)
         num_tool_calls = len(tool_timings)
@@ -394,13 +561,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         tool_timeout_count = sum(1 for t in tool_timings if t.get("is_internal_timeout"))
         tool_request_timeout_count = sum(1 for t in tool_timings if t.get("is_request_timeout"))
 
-        return {
+        metrics = {
             "total_tool_execution_time_seconds": total_tool_time,
             "num_tool_calls": num_tool_calls,
             "avg_tool_call_time_seconds": avg_tool_time,
             "tool_timeout_count": tool_timeout_count,
             "tool_request_timeout_count": tool_request_timeout_count,
         }
+        return metrics
 
     async def verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
         """
@@ -414,48 +582,68 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
-        try:
-            metrics = self._aggregate_timing_metrics(session_id)
-            if self.config.verbose_tool_logging:
-                logger.info(
-                    f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
-                    f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
-                    f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
-                    f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
+        if not session_id:
+            return await self._verify(request, body, self._aggregate_timing_metrics(None))
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                return NSToolsVerifyResponse(
+                    **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
                 )
+            metrics = verification.retained
+            if not isinstance(metrics, dict):
+                metrics = self._aggregate_timing_metrics(session_id)
+            # Retain the snapshot even when the delegated verifier fails. A retry must rerun its judge without
+            # losing the original timing totals, and a failed release must keep that snapshot owned.
+            verification.retain(metrics)
+            return await self._verify(request, body, metrics)
 
-            # Select verifier
-            verifier_type = body.verifier_type or self.config.default_verifier
-
-            if verifier_type not in self.config.verifiers:
-                raise ValueError(
-                    f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
-                )
-
-            verifier_ref = self.config.verifiers[verifier_type]
-
-            # Delegate to the verifier
-            response = await self.server_client.post(
-                server_name=verifier_ref.name,
-                url_path="/verify",
-                json=body.model_dump(),
+    async def _verify(
+        self, request: Request, body: NSToolsVerifyRequest, metrics: Dict[str, float | int]
+    ) -> NSToolsVerifyResponse:
+        session_id = request.session.get(SESSION_ID_KEY) if request else None
+        if self.config.verbose_tool_logging:
+            logger.info(
+                f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
+                f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
+                f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
+                f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
             )
 
-            result = await response.json()
+        # Select verifier
+        verifier_type = body.verifier_type or self.config.default_verifier
 
-            # Hard fail if no reward in response
-            if "reward" not in result:
-                raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
+        if verifier_type not in self.config.verifiers:
+            raise ValueError(
+                f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
+            )
 
-            return NSToolsVerifyResponse(
+        verifier_ref = self.config.verifiers[verifier_type]
+
+        # Delegate to the verifier
+        response = await self.server_client.post(
+            server_name=verifier_ref.name,
+            url_path="/verify",
+            json=body.model_dump(),
+        )
+
+        result = await response.json()
+
+        # Hard fail if no reward in response
+        if "reward" not in result:
+            raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
+
+        return NSToolsVerifyResponse(
+            **{
                 **body.model_dump(),
-                reward=result["reward"],
-                delegated_response=result,
-                **metrics,
-            )
-        finally:
-            if self.tool_manager is not None and session_id:
-                await self.tool_manager.cleanup_request(session_id)
+                # A delegated judge outage must stay masked, even if the request carries stale verdict fields.
+                "mask_sample": result.get("mask_sample", False),
+                "failure_kind": result.get("failure_kind"),
+                "failure_reason": result.get("failure_reason"),
+            },
+            reward=result["reward"],
+            delegated_response=result,
+            **metrics,
+        )
 
     # --------------------------------------------------------
     # Cleanup

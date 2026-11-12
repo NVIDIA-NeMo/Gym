@@ -4,33 +4,53 @@
 """mini-SWE rollout orchestration using resource-owned sandboxes."""
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 from time import monotonic, time
-from typing import Literal
+from typing import Any, ClassVar
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
-from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    get_response_json,
-    get_server_url,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
+from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
+    FailureReportRow,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    agent_route_failure,
+    current_rollout_id,
+    failure_report_for,
+    rebuild_failure,
+    rollout_context,
+)
+from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxUnavailableError,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
     HarnessOutcome,
@@ -48,14 +68,41 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 LOGGER = logging.getLogger(__name__)
 
+DEPRECATION_WARNING = (
+    "DEPRECATED: miniswe_sandboxed_agent is superseded by mini_swe_agent agent sessions. "
+    "For Harbor task folders without [agent].user, use "
+    "gym eval run <tasks> --agent mini_swe_agent/mini_swe_agent_sandboxed. "
+    "Existing configurations keep working; tasks with [agent].user must keep this adapter. "
+    "Legacy /run benchmark presets, including Terminal-Bench-Science, "
+    "must stay on this adapter until their environment-server migration. "
+    "See responses_api_agents/mini_swe_agent/README.md#agent-sessions."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
+
+
+# The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.
+TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
+
 
 @dataclass
 class MiniSWESession:
-    """Execution state shared by /run and responses for one borrowed sandbox."""
+    """Execution state shared by /run and responses for one borrowed sandbox.
+
+    The legacy ``/run`` path fills ``seed`` from the resources server's reply. An episode session
+    (``/v1/agent_sessions``) receives the sandbox from the environment server instead: ``seed`` then
+    carries only the identity, ``original_params`` is bound by the first ``/v1/responses`` call, whose
+    input is the instruction, and ``provider`` is this process's transport, released at close.
+    """
 
     sandbox: AsyncSandbox
     seed: SeedSessionResponse
-    original_params: NeMoGymResponseCreateParamsNonStreaming
+    original_params: NeMoGymResponseCreateParamsNonStreaming | None
     rollout_id: str
     capture_model_calls: bool
     artifact_directory: Path | None = None
@@ -63,16 +110,35 @@ class MiniSWESession:
     setup_started_at: str | None = None
     result: AgentExecutionResult | None = None
     worker: asyncio.Task | None = None
+    workdir: str | None = None
+    provider: Any | None = None
+    episode: AgentSeedSessionRequest | None = None
+    observations: AgentObservationBundle | None = None
+    # Serializes the first-turn binding: an overlapping identical request waits for it and replays.
+    bind_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Set by close under ``bind_lock``: a first turn that reaches its binding afterwards must not start.
+    closed: bool = False
+
+
+@dataclass
+class MiniSWEEpisodeSession(AgentSessionState):
+    """The base agent's record of an episode session; the execution state lives in ``_sessions``."""
+
+    key: tuple[str, str]
+    state: MiniSWESession
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
-    num_workers: Literal[1] = 1
-    resources_server: ResourcesServerRef
+    # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
+    # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
+    # Wall-clock budget of one episode-session turn; the legacy path takes it from the seed reply.
+    agent_timeout_sec: float = Field(default=28800, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
     shutdown_timeout_sec: float = Field(default=30, ge=0)
 
@@ -92,8 +158,56 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
         return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
 
 
+# Harness outcomes that are not the agent's doing; the episode path refuses them with a 5xx.
+INFRASTRUCTURE_TERMINATIONS = frozenset({"infrastructure_error", "cancelled"})
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _instruction(input_value: Any) -> str:
+    """The task instruction: the text of the row's input messages."""
+    if isinstance(input_value, str):
+        return input_value
+    messages: list[str] = []
+    for item in input_value or []:
+        value = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        if not isinstance(value, dict):
+            messages.append(str(value))
+            continue
+        content = value.get("content", "")
+        if isinstance(content, str):
+            messages.append(content)
+        elif isinstance(content, list):
+            messages.extend(
+                str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("text")
+            )
+    return "\n\n".join(part for part in messages if part)
+
+
+async def _read_task_context(sandbox: AsyncSandbox) -> dict[str, Any]:
+    """``mcp_servers`` and ``skills_dir`` the resources server recorded for this task, if any.
+
+    Only a read that ran may find nothing: the command exits 0 whether or not the file exists, so a
+    provider ``error_type`` (a timeout, a lost container) or any other exit code is the provider's
+    failure, not an absent file, and binding the turn without its declared tools would score a silent zero.
+    """
+    result = await sandbox.exec(f"cat {TASK_CONTEXT_FILE} 2>/dev/null || true", timeout_s=30)
+    if result.error_type or result.return_code:
+        raise SandboxUnavailableError(
+            f"The sandbox could not read {TASK_CONTEXT_FILE}: {result.error_type or result.return_code}: "
+            f"{result.stderr or result.stdout or ''}"
+        )
+    text = (result.stdout or "").strip()
+    if not text:
+        return {}
+    try:
+        context = json.loads(text)
+    except json.JSONDecodeError:
+        LOGGER.warning(f"Ignoring unreadable {TASK_CONTEXT_FILE}")
+        return {}
+    return context if isinstance(context, dict) else {}
 
 
 def empty_response(params: NeMoGymResponseCreateParamsNonStreaming, model: str) -> NeMoGymResponse:
@@ -110,11 +224,26 @@ def empty_response(params: NeMoGymResponseCreateParamsNonStreaming, model: str) 
 
 
 class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: MiniSWESandboxedConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Episode sessions are agent sessions, which routing follows by agent_session_id.
+        if self.config.resources_server is None:
+            return None
+        return (
+            "its own /run path replays a retried run from this process's memory, "
+            "keyed by the cookie's session_id and the rollout ID, which agent session routing does not follow"
+        )
+
+    def supports_task_tool_context(self) -> bool:
+        """mini-SWE reads the task's MCP servers and skills directory from ``task.json`` at its first turn."""
+        return True
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        _warn_deprecated_once()
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()
@@ -160,20 +289,161 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         if not task.cancelled() and (error := task.exception()) is not None:
             LOGGER.error("mini-SWE background operation failed", exc_info=(type(error), error, error.__traceback__))
 
+    # -- episode sessions: the environment server seeds the sandbox and calls /v1/responses ------------
+
+    def _model_base_url(self) -> str:
+        """The Model Server address as the sandbox sees it, before the per-rollout prefix."""
+        return self.config.sandbox_model_base_url or get_server_url(self.config.model_server.name)
+
+    def _agent_timeout_sec(self, state: MiniSWESession, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
+        """The run budget: the seed's budget and the configured ceiling, bounded by the task's own timeout."""
+        budget = min(state.seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
+        raw = (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY)
+        if raw is not None:
+            try:
+                task_timeout = float(raw)
+            except (TypeError, ValueError):
+                LOGGER.warning(f"Ignoring non-numeric {AGENT_TIMEOUT_METADATA_KEY}={raw!r} in the request metadata")
+            else:
+                if task_timeout > 0:
+                    budget = min(budget, task_timeout)
+        return budget
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> MiniSWEEpisodeSession:
+        """Borrow the resources server's sandbox for this episode."""
+        if body.sandbox_access is None:
+            raise HTTPException(422, "mini-SWE needs sandbox_access from the resources server")
+        connection = body.sandbox_access.connection
+        if not isinstance(connection, DirectSandboxConnection):
+            raise HTTPException(422, "mini-SWE supports only direct sandbox connections")
+        provider_config = resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
+        # mini-SWE runs inside the sandbox and calls the Model Server itself, so a loopback URL (the
+        # default without use_absolute_ip) would make every model call fail and the episode score 0.
+        try:
+            assert_model_url_reachable_from_sandbox(
+                self._model_base_url(), provider_name=next(iter(provider_config), None)
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        provider = create_provider(provider_config)
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        # The environment server addresses the turn as /ng-rollout/<capture_key>/v1/responses and the base
+        # agent's session cookie finds the state, so the owner half of the key only has to be unique.
+        key = (f"episode:{body.agent_session_id}", body.episode_id.capture_key)
+        state = MiniSWESession(
+            sandbox=sandbox,
+            seed=SeedSessionResponse(
+                session_id=body.agent_session_id,
+                task_id=body.task_id.task_id,
+                agent_timeout_sec=self.config.agent_timeout_sec,
+            ),
+            original_params=None,
+            rollout_id=body.episode_id.capture_key,
+            capture_model_calls=True,
+            artifact_directory=self.config.artifacts_dir / body.agent_session_id,
+            workdir=body.sandbox_access.workdir,
+            provider=provider,
+            episode=body,
+        )
+        self._sessions[key] = state
+        return MiniSWEEpisodeSession(request=body, key=key, state=state)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, MiniSWEEpisodeSession):
+            raise TypeError("Expected a mini-SWE episode session state")
+        session = state.state
+        if self._sessions.get(state.key) is session:
+            self._sessions.pop(state.key, None)
+        # The environment server is giving up on the turn (its deadline fired, or its request failed). A
+        # first turn still binding finishes behind the lock and must not start afterwards; a started turn
+        # is stopped while the sandbox is still connected, so the harness ends its process groups and
+        # retrieves its artifacts, and its observations are collected before the connection is released.
+        async with session.bind_lock:
+            session.closed = True
+        worker = session.worker
+        if worker is not None:
+            if not worker.done():
+                if not worker.cancelling():
+                    worker.cancel()
+                # Bounded: a harness that swallows its cancellation must not hold up the environment
+                # server's sandbox cleanup, so the connection is released after the shutdown budget anyway.
+                _, pending = await asyncio.wait({worker}, timeout=self.config.shutdown_timeout_sec)
+                if pending:
+                    LOGGER.warning(
+                        f"mini-SWE turn of agent session {state.request.agent_session_id} did not stop within "
+                        f"{self.config.shutdown_timeout_sec}s of close; disconnecting its sandbox anyway"
+                    )
+            if worker.done() and not worker.cancelled() and worker.exception() is None:
+                session.result = worker.result()
+                self._record_observations(session, session.result)
+        try:
+            await session.sandbox.disconnect()
+        finally:
+            if session.provider is not None:
+                # Resources retains sandbox/Compose ownership; release only our transport.
+                await session.provider.aclose()
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=session.observations
+        )
+
+    async def _bind_episode_turn(
+        self, state: MiniSWESession, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: str | None
+    ) -> None:
+        """First /v1/responses on an episode session: the input is the instruction, task.json the tool grants.
+
+        Everything is read before anything is published, and ``original_params`` is set last: a request
+        that overlaps the first one waits on the lock, finds the binding complete and replays it, so it
+        never starts the harness with the tool grants still missing. A failed read leaves the state unbound.
+        """
+        async with state.bind_lock:
+            if state.original_params is not None:
+                return
+            if state.closed:
+                raise HTTPException(409, "Agent session is closed")
+            task_context = await _read_task_context(state.sandbox)
+            state.seed.instruction = _instruction(body.input)
+            state.seed.mcp_servers = task_context.get("mcp_servers") or []
+            state.seed.skills_dir = task_context.get("skills_dir")
+            # Model calls carry the /ng-rollout/<id> the environment server used, so capture correlates them.
+            state.capture_model_calls = rollout_id is not None
+            if rollout_id is not None:
+                state.rollout_id = rollout_id
+            state.original_params = body.model_copy(deep=True)
+
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-        owner = request.session[SESSION_ID_KEY]
+        if self._closing:
+            raise HTTPException(503, "Agent server is shutting down")
         rollout_id = current_rollout_id()
-        if rollout_id is None:
-            matches = [key for key in self._sessions if key[0] == owner]
-            if len(matches) > 1:
-                raise HTTPException(
-                    409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
-                )
-            state = self._sessions.get(matches[0]) if matches else None
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is not None:
+            # An episode session: the base agent's cookie names the seeded state.
+            record = self._require_agent_session(agent_session_id)
+            if not isinstance(record, MiniSWEEpisodeSession):
+                raise TypeError("Expected a mini-SWE episode session state")
+            state = record.state
         else:
-            state = self._sessions.get((owner, rollout_id))
-        if state is None:
-            raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
+            owner = request.session[SESSION_ID_KEY]
+            matches = [key for key in self._sessions if key[0] == owner]
+            if rollout_id is None:
+                if len(matches) > 1:
+                    raise HTTPException(
+                        409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
+                    )
+                state = self._sessions.get(matches[0]) if matches else None
+            else:
+                state = self._sessions.get((owner, rollout_id))
+            if state is None:
+                raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
+        if state.original_params is None:
+            try:
+                await self._bind_episode_turn(state, body, rollout_id)
+            except SandboxUnavailableError as exc:
+                # The provider, not the agent: the turn stays unbound for a retry and the episode is masked.
+                raise HTTPException(503, f"mini-SWE infrastructure_error: {exc}") from exc
         if body != state.original_params:
             raise HTTPException(409, "Agent session is already bound to another request")
 
@@ -195,16 +465,19 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
                         deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
                         async with asyncio.timeout_at(deadline):
-                            cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
-                            if cwd.return_code:
-                                raise RuntimeError("Unable to determine the task working directory")
+                            workdir = state.workdir
+                            if workdir is None:
+                                cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
+                                if cwd.return_code or not (cwd.stdout or "").strip():
+                                    raise RuntimeError("Unable to determine the task working directory")
+                                workdir = (cwd.stdout or "").strip().splitlines()[-1]
                             context = HarnessContext(
                                 session_id=seed.session_id,
                                 task_id=seed.task_id,
                                 rollout_id=rollout_id,
                                 instruction=seed.instruction,
                                 user=seed.user,
-                                workdir=cwd.stdout.strip(),
+                                workdir=workdir,
                                 setup_timeout_sec=self.config.setup_timeout_sec,
                                 mcp_servers=seed.mcp_servers,
                                 skills_dir=seed.skills_dir,
@@ -220,9 +493,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                                 params=params,
                                 model_base_url=self.base_url_for_run(
-                                    base_url=self.config.sandbox_model_base_url
-                                    or get_server_url(self.config.model_server.name),
-                                    body={"_ng_rollout_id": rollout_id},
+                                    base_url=self._model_base_url(), body={"_ng_rollout_id": rollout_id}
                                 )
                                 + "/v1",
                                 model_name=self.config.model_server.name,
@@ -231,11 +502,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             await harness.setup()
                         timings["agent_setup"]["finished_at"] = now()
                         timings["agent_execution"] = {"started_at": now()}
-                        budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
-                        deadline = monotonic() + budget
+                        deadline = monotonic() + self._agent_timeout_sec(state, body)
                         agent_started = True
                         response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
-                        if monotonic() >= deadline:
+                        # A kill is read from an exit code the sandbox returned before the deadline; only collecting
+                        # its artifacts afterwards can cross it.
+                        if monotonic() >= deadline and termination.reason != "killed":
                             termination.reason = "timeout"
                 except asyncio.CancelledError:
                     termination = HarnessOutcome(reason="cancelled")
@@ -246,6 +518,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         else "infrastructure_error",
                         detail=f"{type(exc).__name__}: {exc}",
                     )
+                    if not isinstance(exc, TimeoutError):
+                        failure = agent_route_failure(
+                            exc, operation="harness.run", stage="agent" if agent_started else "seed"
+                        )
+                        failure.__cause__ = exc
+                        FailureReportRow.merged_into(extra, failure_report_for(failure))
                 finally:
                     if harness is not None and not agent_started:
                         try:
@@ -273,12 +551,64 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             except asyncio.CancelledError:
                 if not state.worker.cancelling():
                     state.worker.cancel()
-        state.result = state.worker.result()
+        if state.worker.cancelled():
+            # Close stopped the turn before its first step: nothing ran, and this request was not cancelled.
+            state.result = AgentExecutionResult(
+                responses_create_params=body.model_copy(deep=True),
+                response=empty_response(body, self.config.model_server.name),
+                termination=HarnessOutcome(reason="cancelled"),
+            )
+        else:
+            state.result = state.worker.result()
+        if state.episode is not None:
+            return self._episode_turn_response(state, state.result)
         return state.result.response
+
+    @staticmethod
+    def _record_observations(state: MiniSWESession, result: AgentExecutionResult) -> None:
+        """Keep the harness's observations for the close response, whichever of the turn or close sees them first."""
+        observations = result.harness_metadata.get("ng_agent_observations") if result.harness_metadata else None
+        if observations:
+            state.observations = AgentObservationBundle.model_validate(observations)
+
+    @staticmethod
+    def _episode_turn_response(state: MiniSWESession, result: AgentExecutionResult) -> NeMoGymResponse:
+        """The environment server sees one response; carry the harness outcome in its metadata.
+
+        "completed", "nonzero_exit", "killed" and an execution "timeout" are the agent's own result and
+        are verified. An "infrastructure_error", a cancelled run, or a "timeout" before the agent started (the
+        setup budget ran out installing the harness, so the sandbox is untouched) is not the agent's doing
+        and is refused with a 503 so the episode is recorded as a masked failure instead of an unmasked
+        zero. A repeated request for the same turn replays the same answer.
+        """
+        MiniSWESandboxedAgent._record_observations(state, result)
+        setup_timeout = result.termination.reason == "timeout" and not result.agent_started
+        if result.termination.reason in INFRASTRUCTURE_TERMINATIONS or setup_timeout:
+            detail = f"mini-SWE {'setup timeout' if setup_timeout else result.termination.reason}"
+            if result.termination.detail:
+                detail += f": {result.termination.detail[:500]}"
+            error = HTTPException(503, detail)
+            # The harness's own typed failure, when it reported one, stays the cause of the 503's failure report.
+            cause = rebuild_failure(FailureReportRow.report(result.harness_metadata))
+            if cause is not None:
+                raise error from cause
+            raise error
+        response = result.response
+        metadata = dict(response.metadata or {})
+        metadata["miniswe_termination"] = result.termination.reason
+        if result.termination.detail:
+            metadata["miniswe_termination_detail"] = result.termination.detail[:500]
+        metadata["miniswe_agent_started"] = str(result.agent_started).lower()
+        response.metadata = metadata
+        return response
+
+    # -- legacy /run: this agent seeds and verifies against a TB4-style resources server ---------------
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
         if self._closing:
             raise HTTPException(503, "Agent server is shutting down")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "The legacy /run path needs a resources_server; use episode sessions instead")
         payload = body.model_dump(mode="json")
         rollout_id = self.rollout_id_from_run(body)
         payload["rollout_id"] = rollout_id or body.capture_rollout_id or payload.get("rollout_id") or uuid4().hex
@@ -369,6 +699,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 reason="timeout" if isinstance(exc, TimeoutError) else "infrastructure_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
+            if not isinstance(exc, TimeoutError):
+                failure = agent_route_failure(exc, operation="harness.run")
+                failure.__cause__ = exc
+                FailureReportRow.merged_into(result.harness_metadata, failure_report_for(failure))
         finally:
             if state is not None and self._sessions.get(key) is state:
                 self._sessions.pop(key, None)

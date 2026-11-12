@@ -1,0 +1,13 @@
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - bcftools
+  - bedtools
+  - bwa
+  - bowtie2
+  - blast
+  - fastqc
+  - nextflow
+  - samtools
+  - seqtk

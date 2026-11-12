@@ -14,13 +14,14 @@
 # limitations under the License.
 from typing import Dict, List, Optional, Union
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.generative_reward_model.score_parser import extract_scores
 
 
@@ -58,7 +59,6 @@ class GenerativeRewardModelVerifyResponse(BaseVerifyResponse):
 
 
 class GenerativeRewardModelResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GenerativeRewardModelResourcesServerConfig
 
     def _fail(self, body) -> GenerativeRewardModelVerifyResponse:
@@ -187,3 +187,6 @@ class GenerativeRewardModelResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GenerativeRewardModelResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GenerativeRewardModelResourcesServer.run_webserver()  # noqa: F401

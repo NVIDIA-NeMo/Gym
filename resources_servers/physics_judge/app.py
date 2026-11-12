@@ -22,7 +22,7 @@ tokens.
 Four overrides versus the parent:
 
   1. Judge prompt is loaded from a YAML file via Gym's prompt system
-     (``nemo_gym.prompt.load_prompt_config``). The default points at the
+     (``nemo_gym.data.prompt.load_prompt_config``). The default points at the
      bundled physics judge (byte-identical to NeMo Skills'
      ``judge/physics.yaml``); override ``judge_prompt_path`` in the server
      config to use a different judge prompt.
@@ -34,7 +34,8 @@ Four overrides versus the parent:
      bidirectional A/B swap done by ``math_with_judge`` is skipped.
   4. Per-domain breakdown via ``compute_subset_metrics(field="domain")`` so
      the Tier-2 domain-stratified accuracy that Skills exposes through
-     ``subset_for_metrics=domain`` is preserved.
+     ``subset_for_metrics=domain`` is preserved. ``verify()`` carries each
+     row's ``domain`` into its response, since the parent's models drop it.
 
 Skills places ``{generation}`` in the judge prompt; we re-use that placeholder
 name when filling the YAML so the prompt is character-for-character identical.
@@ -45,19 +46,22 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field
 
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
 )
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.reward_profile import compute_subset_metrics
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.metrics import compute_subset_metrics
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
+    LibraryJudgeMathVerifyRequest,
+    LibraryJudgeMathVerifyResponse,
 )
 
 
@@ -86,10 +90,16 @@ class PhysicsJudgeResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
     )
 
 
+class PhysicsJudgeVerifyRequest(LibraryJudgeMathVerifyRequest):
+    domain: Optional[str] = None
+
+
+class PhysicsJudgeVerifyResponse(LibraryJudgeMathVerifyResponse):
+    domain: Optional[str] = None
+
+
 class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with NeMo Skills' physics judge."""
-
-    ray_enabled = False
 
     config: PhysicsJudgeResourcesServerConfig
 
@@ -108,6 +118,12 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._judge_prompt_config: PromptConfig = load_prompt_config(self.config.judge_prompt_path)
+
+    async def verify(self, body: PhysicsJudgeVerifyRequest) -> PhysicsJudgeVerifyResponse:
+        # The parent's models have no `domain`; carry it into the verify row, which is where
+        # compute_metrics reads it for the per-domain breakdown.
+        response = await super().verify(body)
+        return PhysicsJudgeVerifyResponse(**response.model_dump(), domain=body.domain)
 
     async def _verify_answer(
         self, question: str, expected_answer: str, generated_answer: str
@@ -259,3 +275,6 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
 
 if __name__ == "__main__":
     PhysicsJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PhysicsJudgeResourcesServer.run_webserver()  # noqa: F401

@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-json-repair==0.53.0
-jsonschema

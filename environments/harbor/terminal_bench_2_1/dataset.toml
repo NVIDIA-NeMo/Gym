@@ -1,0 +1,10 @@
+# Terminal Bench 2.1 on the Harbor task shape: the committed entry for the package-store dataset.
+# `gym dataset pull terminal_bench_2_1` fetches the source below into this folder (the task folders and
+# manifest.toml it writes are gitignored); `gym dataset validate terminal_bench_2_1` and
+# `gym eval run terminal_bench_2_1 ...` then resolve the entry name to this folder.
+[gym]
+# Harbor's package store publishes the 89 tasks under the `latest` tag only, so the entry pins the dataset by
+# its content hash (the version `latest` resolved to on 29 Apr 2026). A pull of this pinned reference lands
+# here; the plain `harbor:terminal-bench/terminal-bench-2-1` reference (the store's current `latest`) is another
+# reference and lands in environments/harbor/terminal-bench-2-1/ as before.
+source = "harbor:terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"

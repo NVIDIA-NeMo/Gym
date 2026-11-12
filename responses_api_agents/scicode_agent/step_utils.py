@@ -17,6 +17,7 @@
 """Prompt-context construction and code extraction for the SciCode step loop."""
 
 import re
+from pathlib import Path
 
 
 # Sentinel stored for sub-steps that could not be generated (context window exceeded). Scored as a
@@ -87,61 +88,21 @@ def is_context_window_error(error: Exception) -> bool:
     return any(marker in msg for marker in _CONTEXT_WINDOW_MARKERS)
 
 
+def _official_prefilled_step(step_number: str) -> str:
+    """The official SciCode reference file for an unscored step, byte for byte (see prefilled_steps/)."""
+    return (Path(__file__).parent / "prefilled_steps" / f"{step_number}.txt").read_text(encoding="utf-8")
+
+
 # A few SciCode sub-steps are prefilled with reference code rather than generated (a quirk of the
 # original SciCode protocol). They provide context for later steps but are not themselves scored.
+#
+# Steps 13.6 and 62.1 define classes (Maxwell; Block and EnlargedBlock) that every later step of their
+# problem instantiates. They are the official unscored-step files of the SciCode release, whole. An earlier
+# version of this table kept only each class's `__init__` function, so the cumulative program held no class
+# and every later step of problems 13 and 62 ended in a NameError, whatever the model wrote.
 PREFILLED_STEPS_CODE = {
-    (
-        "13",
-        5,
-    ): '''
-def __init__(self, n_grid, x_out):
-    """Constructor sets up coordinates, memory for variables.
-        The variables:
-            mesh points:
-                x: the x coordinate for each mesh grid
-                y: the y coordinate for each mesh grid
-                z: the z coordinate for each mesh grid
-                t: the time coordinate of the simulation
-                r: the distance to the origin for each mesh grid
-            evolving fields:
-                E_x: the x component of the field E
-                E_y: the y componnet of the field E
-                E_z: the z component of the field E
-                A_x: the x component of the field A
-                A_y: the y component of the field A
-                A_z: the z component of the field A
-                phi: the scalar potential field phi values
-            monitor variables:
-                constraint: the current constraint violation value from the evolving fields.
-
-        """
-    self.n_grid = n_grid
-    self.n_vars = 7
-    self.delta = float(x_out) / (n_grid - 2.0)
-    delta = self.delta
-    self.x = np.linspace(-self.delta * 0.5, x_out + 0.5 * self.delta, self.n_grid)[:, None, None]
-    self.y = np.linspace(-self.delta * 0.5, x_out + 0.5 * self.delta, self.n_grid)[None, :, None]
-    self.z = np.linspace(-self.delta * 0.5, x_out + 0.5 * self.delta, self.n_grid)[None, None, :]
-    self.r = np.sqrt(self.x ** 2 + self.y ** 2 + self.z ** 2)
-    self.E_x = zeros((n_grid, n_grid, n_grid))
-    self.E_y = zeros((n_grid, n_grid, n_grid))
-    self.E_z = zeros((n_grid, n_grid, n_grid))
-    self.A_x = zeros((n_grid, n_grid, n_grid))
-    self.A_y = zeros((n_grid, n_grid, n_grid))
-    self.A_z = zeros((n_grid, n_grid, n_grid))
-    self.phi = zeros((n_grid, n_grid, n_grid))
-    self.constraint = zeros((n_grid, n_grid, n_grid))
-    self.t = 0.0
-'''.strip(),
-    (
-        "62",
-        0,
-    ): """
-def __init__(self, length, basis_size, operator_dict):
-    self.length = length
-    self.basis_size = basis_size
-    self.operator_dict = operator_dict
-""".strip(),
+    ("13", 5): _official_prefilled_step("13.6"),
+    ("62", 0): _official_prefilled_step("62.1"),
     (
         "76",
         2,

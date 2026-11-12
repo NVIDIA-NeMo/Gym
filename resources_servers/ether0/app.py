@@ -23,15 +23,16 @@ ensure_ether0()
 
 from ether0.model_prompts import extract_answer_loose  # noqa: E402
 from ether0.models import RewardFunctionInfo  # noqa: E402
-from ether0.rewards import EVAL_FUNCTIONS  # noqa: E402
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.ether0.graders import EVAL_FUNCTIONS  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,10 @@ class Ether0VerifyResponse(BaseVerifyResponse):
 
 
 class Ether0ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification runs one ether0 reward function on the answer: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: BaseResourcesServerConfig
 
     async def verify(self, body: Ether0VerifyRequest) -> Ether0VerifyResponse:
@@ -147,3 +151,6 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 
 if __name__ == "__main__":
     Ether0ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = Ether0ResourcesServer.run_webserver()  # noqa: F401

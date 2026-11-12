@@ -26,15 +26,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
-from nemo_gym.config_types import ModelServerRef, OmegaConf
-from nemo_gym.global_config import CACHE_DIR_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef
+from nemo_gym.config.config_types import OmegaConf
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    model_sampling_context,
+    rollout_context,
 )
-from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
+    EVAL_TIMEOUT,
     ActiveContainerCommand,
     AgentPromptOverride,
     BaseDatasetHarnessProcessor,
@@ -55,6 +62,7 @@ from responses_api_agents.swe_agents.app import (
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
     _extract_replay_system_content,
+    _masked_failure,
     _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -1053,6 +1061,27 @@ class TestOpenHandsHarnessProcessor:
         # The script is written at persistent_dir / agent_script_{agent_run_id}.sh
         script_path = config.persistent_dir / f"agent_script_{config.agent_run_id}.sh"
         return script_path.read_text()
+
+    def test_get_run_command_writes_sampling_params_when_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, inference_params={"temperature": 0.7, "top_p": 0.95})
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenHandsHarnessProcessor(config=config).get_run_command()
+            script = self._read_agent_script(config)
+            assert "temperature = 0.7" in script
+            assert "top_p = 0.95" in script
+
+    def test_get_run_command_without_sampling_params(self) -> None:
+        # The request may omit temperature/top_p; the config must not require them.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, inference_params={})
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            result = OpenHandsHarnessProcessor(config=config).get_run_command()
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            script = self._read_agent_script(config)
+            assert "temperature =" not in script
+            assert "top_p =" not in script
+            assert 'base_url = "http://test-host:12345/v1"' in script
 
     def test_get_run_command_with_debug(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2402,6 +2431,118 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "/swebench_setup" in result
 
+    @staticmethod
+    def _symlinked_setup_tree(tmp_path: Path, name: str) -> tuple[Path, Path]:
+        """A setup tree stored under ``shared/`` and reached through a symlink under ``linked/``."""
+        real = tmp_path / "shared" / name
+        real.mkdir(parents=True)
+        link = tmp_path / "linked" / name
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(real)
+        return link, real
+
+    def test_real_path_bind_mounts(self, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, "swe_swebench_setup")
+        assert swe_app._real_path_bind_mounts(link) == [f"--mount type=bind,src={real},dst={real}"]
+        assert swe_app._real_path_bind_mounts(str(link), ro=True) == [f"--mount type=bind,src={real},dst={real},ro"]
+        # A symlinked parent directory counts too.
+        assert swe_app._real_path_bind_mounts(link / "SWE-bench") == [
+            f"--mount type=bind,src={real}/SWE-bench,dst={real}/SWE-bench"
+        ]
+        assert swe_app._real_path_bind_mounts(real) == []
+
+    def test_symlinked_openhands_setup_is_also_bound_at_its_real_path(self, monkeypatch, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, "swe_openhands_setup")
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (real / "OpenHands" / subdir).mkdir(parents=True)
+        (real / "miniforge3").mkdir()
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path), openhands_setup_dir=link)
+        cmd_args = ExecuteContainerCommandArgs(
+            command="echo hello", expected_file_pattern="/tmp/*.json", mode="agent", timeout=300
+        )
+
+        result = wrapper._build_apptainer_command(params, cmd_args)
+
+        oh = real / "OpenHands"
+        expected = [
+            f"--mount type=bind,src={oh},dst={oh},ro",
+            f"--mount type=bind,src={oh}/.eval_sessions,dst={oh}/.eval_sessions",
+            f"--mount type=bind,src={oh}/logs,dst={oh}/logs",
+            f"--mount type=bind,src={oh}/evaluation/oh,dst={oh}/evaluation/oh",
+            f"--mount type=bind,src={real}/miniforge3,dst={real}/miniforge3,ro",
+        ]
+        for mount in expected:
+            assert mount in result
+        # The read-only parent is bound before its writable subdirectories.
+        assert result.index(expected[0]) < result.index(expected[1])
+        # The existing binds at the configured (link) path are unchanged.
+        assert f"--mount type=bind,src={link}/OpenHands,dst={link}/OpenHands,ro" in result
+
+    def test_no_real_path_binds_without_symlinks(self, monkeypatch, tmp_path) -> None:
+        tmp_path = tmp_path.resolve()
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+        agent = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="echo hello", expected_file_pattern="/tmp/*.json", mode="agent", timeout=300
+            ),
+        )
+        # Only the existing binds: /openhands_setup/... plus the same-path bind.
+        assert agent.count(f"src={oh_dir},") == 2
+        assert agent.count(f"src={params.openhands_setup_dir}/miniforge3,") == 2
+        evaluation = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="run_eval", expected_file_pattern="/tmp/*.json", mode="eval", timeout=300
+            ),
+        )
+        assert evaluation.count(f"src={params.swebench_setup_dir},") == 2
+
+    @pytest.mark.parametrize(
+        "dataset_name,setup_field",
+        [
+            ("princeton-nlp/SWE-bench_Verified", "swebench_setup_dir"),
+            ("SWE-bench_Multilingual", "swebench_multilingual_setup_dir"),
+            ("R2E-Gym/R2E-Gym-Subset", "r2e_gym_setup_dir"),
+        ],
+    )
+    def test_symlinked_eval_setup_is_also_bound_at_its_real_path(
+        self, monkeypatch, tmp_path, dataset_name, setup_field
+    ) -> None:
+        tmp_path = tmp_path.resolve()
+        link, real = self._symlinked_setup_tree(tmp_path, setup_field)
+        wrapper = _create_wrapper(monkeypatch)
+        problem_info = {
+            "problem_statement": "Fix",
+            "instance_id": "django__django-12345",
+            "base_commit": "abc",
+            "dataset_name": dataset_name,
+            "split": "test",
+            "instance_dict": "{}",
+            "container_formatter": ["docker://custom/{instance_id}"],
+        }
+        params = _make_instance_config(str(tmp_path), problem_info=problem_info, **{setup_field: link})
+        oh_dir = Path(params.openhands_setup_dir) / "OpenHands"
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            (oh_dir / subdir).mkdir(parents=True, exist_ok=True)
+        (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True, exist_ok=True)
+        cmd_args = ExecuteContainerCommandArgs(
+            command="run_eval", expected_file_pattern="/tmp/*.json", mode="eval", timeout=300
+        )
+
+        result = wrapper._build_apptainer_command(params, cmd_args)
+
+        assert f"--mount type=bind,src={link},dst={link}" in result
+        assert f"--mount type=bind,src={real},dst={real}" in result
+
     def test_memory_limit(self, monkeypatch) -> None:
         # No cgroups in the enroot sandbox, so the memory limit is enforced by
         # the gym-side RSS watchdog (_memory_watchdog), not a static ulimit
@@ -2718,6 +2859,36 @@ class TestSWEBenchWrapperSetupParams:
             # The sandboxed agent reaches the model through the capture-prefixed URL.
             assert "/training-token-capture/" in params.agent_script
 
+    @pytest.mark.parametrize("sampling", [None, "null", "VALUES"])
+    def test_sampling_alone_hands_openhands_the_per_run_url(self, monkeypatch, sampling) -> None:
+        """With capture off, a training run's segment must still reach OpenHands, which ignores llm.base_url."""
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: False)
+            with rollout_context("rollout-1"), model_sampling_context(sampling):
+                params, _ = wrapper._setup_params(body)
+
+            # Gym-only evaluation (no segment) keeps its bare-URL behavior.
+            assert params.install_openhands_capture_overlay is (sampling is not None)
+            if sampling is not None:
+                assert params.model_server_base_url.endswith(f"/ng-sampling/{sampling}")
+                assert f"/ng-sampling/{sampling}" in params.agent_script
+
     def test_setup_params_raises_when_capture_enabled_without_rollout_id(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2964,7 +3135,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3008,7 +3179,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3491,7 +3662,7 @@ class TestEvaluatorLaunchFailure:
         )
         wrapper = _create_wrapper(monkeypatch)
         wrapper._sem = asyncio.Semaphore(1)
-        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        wrapper._vllm_converter = swe_app.ChatCompletionsConverter(return_token_id_information=True)
         processor = NVInternalDatasetProcessor(config=params)
         with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
             response = await wrapper._inner_responses(params, processor)
@@ -3501,6 +3672,8 @@ class TestEvaluatorLaunchFailure:
         assert result.reward == 0.0
         assert result.mask_sample is expected_mask
         assert result.instance_config.mask_sample is expected_mask
+        assert result.failure_kind == (PROVIDER_UNAVAILABLE if expected_mask else None)
+        assert bool(result.failure_reason) is expected_mask
         assert result.response.output[-1].generation_token_ids == [3, 4]
         if outcome == "failed_tests":
             # A completed negative verifier result is a valid policy outcome.
@@ -3511,3 +3684,28 @@ class TestEvaluatorLaunchFailure:
     def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
         metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})
         assert metrics.eval_launch_failed is False
+
+
+@pytest.mark.parametrize(
+    ("metrics", "expected_kind"),
+    [
+        # An unmeasured reward outranks the agent's own limit.
+        ({"eval_launch_failed": True, "agent_error_kind": "max_iteration"}, PROVIDER_UNAVAILABLE),
+        ({"oom_killed": True, "agent_error_kind": "oom"}, PROVIDER_OOM_KILLED),
+        ({"eval_oom_killed": True, "agent_error_kind": "max_iteration"}, PROVIDER_OOM_KILLED),
+        ({"eval_timed_out": True, "agent_error_kind": "context_window"}, EVAL_TIMEOUT),
+        ({"agent_timed_out": True, "resolved": True}, AGENT_TIMEOUT),
+        ({"agent_error_kind": "max_iteration", "resolved": True}, AGENT_LIMIT),
+        ({"agent_error_kind": "context_window", "resolved": False}, MODEL_CONTEXT_LIMIT),
+        ({"agent_error_kind": "stuck_in_loop", "resolved": False}, None),
+        ({"agent_error_kind": "other", "resolved": True}, None),
+    ],
+)
+def test_masked_failure_names_the_first_matching_kind(metrics: dict, expected_kind: Optional[str]) -> None:
+    masked_failure = _masked_failure(SWEBenchMetrics.model_validate(metrics))
+    if expected_kind is None:
+        assert masked_failure is None
+    else:
+        kind, reason = masked_failure
+        assert kind == expected_kind
+        assert reason

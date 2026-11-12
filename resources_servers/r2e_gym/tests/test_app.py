@@ -488,7 +488,7 @@ class TestAgentSandbox:
             < seed.index("apply_anti_cheat_setup(")
             < seed.index("return REPO_DIRECTORY")
         )
-        assert "_create_sandbox(body)" in seed and "files=" not in seed, "the agent sandbox gets no row files"
+        assert "_create_sandbox(body, session_id=session_id)" in seed and "files=" not in seed
 
     def test_a_failed_scrub_refuses_the_rollout(self) -> None:
         source = self._source()

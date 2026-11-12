@@ -12,6 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""LiteLLM proxy model server.
+
+Startup verifies the proxy version through ``GET /health/readiness/details``. Virtual keys
+scoped to ``llm_api_routes`` get 401/403 there, so the fallback reads the proxy's
+``x-litellm-version`` response header from a one-token ``POST /v1/responses`` against the
+configured model. ``GET /v1/models`` is not usable for this: real deployments answer it
+without the header (only LLM-call responses carry it). ``POST /v1/chat/completions`` is not
+used either: its error path omits the header (LiteLLM 1.105.x), so a model-side 4xx would
+block startup even on a safe proxy, whereas the Responses API error path keeps it. The probe
+is a billed one-token call; operators who object to it can instead grant the key the health
+route.
+"""
+
 import asyncio
 import logging
 import re
@@ -21,13 +34,13 @@ from uuid import uuid4
 
 from fastapi import FastAPI
 
-from nemo_gym.base_responses_api_model import Body
-from nemo_gym.openai_utils import (
+from nemo_gym.client import request
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_converter import VLLMConverter, _usage_detail
-from nemo_gym.server_utils import request
+from nemo_gym.models import Body, ChatCompletionsConverter
+from nemo_gym.models.chat_completions_converter import _usage_detail
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -36,7 +49,7 @@ logger = logging.getLogger(__name__)
 _SENSITIVE_HEADER_RE = re.compile(r"('(?:Authorization|x-litellm-key)': ')[^']*(')", re.IGNORECASE)
 _SENSITIVE_COOKIE_RE = re.compile(r"('(?:Set-)?Cookie': ')[^']*(')", re.IGNORECASE)
 _PROXY_CHECK_TIMEOUT_SECONDS = 5.0
-_CHAT_COMPLETION_CONVERTER = VLLMConverter(
+_CHAT_COMPLETION_CONVERTER = ChatCompletionsConverter(
     return_token_id_information=False,
     uses_reasoning_parser=False,
 )
@@ -183,6 +196,13 @@ _COMPROMISED_VERSIONS = frozenset({"1.82.7", "1.82.8"})
 _MIN_SAFE_VERSION = "1.83.0"
 _MIN_SAFE_VERSION_TUPLE = (1, 83, 0)
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$")
+# Virtual keys scoped to ``llm_api_routes`` cannot call the health route; fall back to the
+# ``x-litellm-version`` response header that the proxy attaches to LLM-call responses. Non-LLM
+# routes such as ``/v1/models`` answer without it, so the probe is a one-token LLM call. It goes
+# to ``/v1/responses`` rather than ``/v1/chat/completions``: the chat-completion exception path
+# drops the header (LiteLLM 1.105.x), the Responses API exception path keeps it.
+_HEALTH_FORBIDDEN_STATUSES = frozenset({401, 403})
+_VERSION_HEADER = "x-litellm-version"
 _ALLOWED_VERSION_SUFFIX_RE = re.compile(r"^(?:|-stable(?:\.patch\.\d+)?|\.post\d+)$")
 
 
@@ -204,8 +224,57 @@ class LiteLLMModelServerConfig(SimpleModelServerConfig):
 
 
 class LiteLLMModelServer(SimpleModelServer):
-    ray_enabled = False
     config: LiteLLMModelServerConfig
+
+    async def _version_from_probe_header(self, base_url: str, headers: Dict[str, str]) -> str:
+        """Read ``x-litellm-version`` from a one-token ``POST /v1/responses`` when the health route is forbidden.
+
+        LiteLLM virtual keys scoped to ``llm_api_routes`` get 401/403 on
+        ``/health/readiness/details``. The proxy attaches ``x-litellm-version`` to LLM-call
+        responses only (``GET /v1/models`` answers without it), so probe the configured model
+        with the cheapest possible Responses API call. The header is read whatever the HTTP
+        status is: a model-side 4xx (for example a thinking model rejecting a one-token budget)
+        still carries the proxy header on this route. Only a missing header or a transport
+        failure fails closed.
+
+        Chat completions is deliberately not used. In LiteLLM 1.105.x the chat-completion
+        exception path omits the version argument to the error handler, so a model-side 4xx on
+        ``POST /v1/chat/completions`` answers without ``x-litellm-version`` and would block
+        startup even when the proxy version is safe. The ``/v1/responses`` exception path passes
+        the version, so its error responses keep the header.
+        """
+        probe_url = f"{base_url}/v1/responses"
+        probe_body = {
+            "model": self.config.openai_model,
+            "input": "ping",
+            "max_output_tokens": 1,
+        }
+        logger.warning(
+            "LiteLLM proxy health route is forbidden for this key; sending a billed one-token POST /v1/responses "
+            "probe (%s, model=%s, max_output_tokens=1) to read the %s header. "
+            "Grant the key the health route to avoid it.",
+            probe_url,
+            self.config.openai_model,
+            _VERSION_HEADER,
+        )
+        resp = await asyncio.wait_for(
+            request("POST", probe_url, _internal=True, headers=dict(headers), json=probe_body),
+            timeout=_PROXY_CHECK_TIMEOUT_SECONDS,
+        )
+        version = resp.headers.get(_VERSION_HEADER, "")
+        if not version:
+            raise RuntimeError(
+                f"fallback POST {probe_url} answered status={resp.status} with no {_VERSION_HEADER} header. "
+                f"Cannot enforce minimum safe version >= {_MIN_SAFE_VERSION}."
+            )
+        logger.info(
+            "LiteLLM proxy version %s read from the %s header of the one-token POST /v1/responses probe "
+            "(status=%s) because the health route is forbidden for this key",
+            version,
+            _VERSION_HEADER,
+            resp.status,
+        )
+        return version
 
     async def _check_proxy_version(self) -> None:
         """Verify the LiteLLM proxy is running a known-safe version."""
@@ -215,21 +284,20 @@ class LiteLLMModelServer(SimpleModelServer):
         if not auth_header.lower().startswith("bearer "):
             auth_header = f"Bearer {auth_header}"
         raw_api_key = auth_header.removeprefix("Bearer ").strip()
+        headers = {"Authorization": auth_header, "x-litellm-key": raw_api_key}
 
         try:
             resp = await asyncio.wait_for(
-                request(
-                    "GET",
-                    health_url,
-                    _internal=True,
-                    headers={"Authorization": auth_header, "x-litellm-key": raw_api_key},
-                ),
+                request("GET", health_url, _internal=True, headers=headers),
                 timeout=_PROXY_CHECK_TIMEOUT_SECONDS,
             )
-            if not resp.ok:
+            if resp.status in _HEALTH_FORBIDDEN_STATUSES:
+                version = await self._version_from_probe_header(base_url, headers)
+            elif not resp.ok:
                 raise RuntimeError(f"status={resp.status}")
-            data = await resp.json(content_type=None)
-            version = data.get("litellm_version", "")
+            else:
+                data = await resp.json(content_type=None)
+                version = data.get("litellm_version", "")
         except Exception as e:
             raise RuntimeError(f"Could not verify LiteLLM proxy version at {health_url}: {_sanitize_error(e)}") from e
 
@@ -292,7 +360,7 @@ class LiteLLMModelServer(SimpleModelServer):
             return NeMoGymResponse.model_validate(_normalize_to_response(openai_response_dict))
 
         # Apply the inherited upstream retry policy, pool timeout, and status propagation.
-        return await self._serve_upstream(create_and_validate)
+        return await self._call_upstream(create_and_validate)
 
 
 if __name__ == "__main__":

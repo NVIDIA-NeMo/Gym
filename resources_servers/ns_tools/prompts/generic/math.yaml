@@ -1,0 +1,21 @@
+# Copy of NeMo Skills' nemo_skills/prompt/config/generic/math.yaml; everything below this header is unchanged.
+# Source: https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml
+# License: Apache-2.0 (NeMo Skills).
+# prepare_dataset.py reads it from here because the pinned nemo-skills-tools package ships no prompt YAMLs.
+# Any divergence from the Skills prompt changes the prepared data in data/compmath_test.jsonl.
+
+# default prompt for all math benchmarks (e.g. gsm8k, math)
+
+few_shot_examples:
+  prefix: "Here are some examples of problems and solutions you can refer to.\n\n"
+  template: "Problem:\n{problem}\n\nSolution:\n{solution}\n\n\n\n\n\n"
+  suffix: "Here is the problem you need to solve:\n"
+  # this is built as <prefix>{template.format(example1)}{template.format(example2)}...{template.format(exampleN)}<suffix>
+  # and available as {examples} key in the final prompt
+  # if examples_type is not specified, then {examples} will be empty
+  # by default there are no examples, but can be changed from code/cmd
+
+user: |-
+  Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {examples}{problem}

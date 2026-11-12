@@ -1,0 +1,24 @@
+config_paths:
+  - benchmarks/genrm_mmrb2/dataset.yaml
+  - resources_servers/genrm_eval/configs/policy_model.yaml
+
+genrm_mmrb2_benchmark_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: genrm_mmrb2_reasoning_text_only
+          type: benchmark
+          jsonl_fpath: benchmarks/genrm_mmrb2/data/genrm_mmrb2_reasoning_text_only_genrm_validation.jsonl
+          prepare_script: benchmarks/genrm_mmrb2/prepare.py
+          prepare_dependencies: [Pillow]
+          prompt_config: null
+          num_repeats: 1
+          license: CC-BY-NC-4.0
+
+policy_model:
+  responses_api_models:
+    genrm_model:
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      supports_principle_role: false
+      propagate_context_overflow_errors: true

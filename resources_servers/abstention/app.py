@@ -36,20 +36,21 @@ from typing import List, Optional, Union
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError, call_judge
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +295,10 @@ class AbstentionVerifyResponse(BaseVerifyResponse):
 
 
 class AbstentionServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification matches the abstention phrase or makes one judge call: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: AbstentionConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -375,3 +379,6 @@ class AbstentionServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     AbstentionServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AbstentionServer.run_webserver()  # noqa: F401

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+user: |-
+  Below is a multiple choice question. After explanation finish your answer with statement "the answer is \boxed{{X}}" where X is the correct letter from the below choices.
+  Please read the question carefully and choose the correct answer from the given options.
+  Question: {question}
+  Options:
+  A. {option1}
+  B. {option2}
+  C. {option3}
+  D. {option4}

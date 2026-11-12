@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Standalone, model-specific smoke config; not canonical benchmark defaults.
+config_paths:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - benchmarks/indic/mbpp/config.yaml
+
+responses_create_params:
+  max_output_tokens: 8192
+resume_from_cache: false
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_interleaved_reasoning: false
+      chat_template_kwargs:
+        enable_thinking: true
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 64
+        seed: 0
+
+indic_mbpp_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: indic_mbpp_smoke
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/mbpp/data/review-smoke.jsonl
+          prepare_script: benchmarks/indic/mbpp/prepare.py
+          prompt_config: benchmarks/mbpp/prompts/default.yaml
+          num_repeats: 1
+          license: Apache-2.0

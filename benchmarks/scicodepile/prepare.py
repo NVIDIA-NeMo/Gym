@@ -61,7 +61,7 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
     """Download and prepare the SciCodePile runnable benchmark. Returns the JSONL path."""
     from datasets import load_dataset
 
-    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
+    from nemo_gym.config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
 
     print(f"Downloading {HF_DATASET} from HuggingFace...")
     # `maybe_`, not `get_`: the latter falls through to a full Hydra CLI parse, which

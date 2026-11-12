@@ -1,0 +1,207 @@
+{
+ "case": "derived-stream-split-name",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "bash": "bash"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "sse_events": [
+     {
+      "id": "c1",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant",
+         "content": "Inspect é",
+         "tool_calls": [
+          {
+           "index": 0,
+           "id": "call-a",
+           "type": "function",
+           "function": {
+            "name": "Run"
+           }
+          }
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "id": "c1",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "name": "Command",
+            "arguments": "{\"command\":"
+           }
+          }
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "id": "c1",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": "\"pwd\"}"
+           }
+          }
+         ]
+        },
+        "finish_reason": "tool_calls"
+       }
+      ]
+     }
+    ],
+    "sse_wire": "data: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Inspect \\u00e9\", \"tool_calls\": [{\"index\": 0, \"id\": \"call-a\", \"type\": \"function\", \"function\": {\"name\": \"Run\"}}]}}]}\r\n\r\ndata: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"name\": \"Command\", \"arguments\": \"{\\\"command\\\":\"}}]}}]}\r\n\r\ndata: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\\\"pwd\\\"}\"}}]}, \"finish_reason\": \"tool_calls\"}]}\r\n\r\ndata: [DONE]\r\n\r\n"
+   },
+   "returned": {
+    "sse_text": "data: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Inspect é\"}}]}\n\ndata: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"name\": \"RunCommand\", \"arguments\": \"{\\\"command\\\":\"}, \"id\": \"call-a\", \"type\": \"function\"}]}}]}\n\ndata: {\"id\": \"c1\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\\\"pwd\\\"}\"}}]}, \"finish_reason\": \"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+   },
+   "error": null,
+   "outgoing_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "bash": "bash"
+   },
+   "response": {
+    "id": "c1",
+    "object": "chat.completion",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Inspect é",
+       "tool_calls": [
+        {
+         "function": {
+          "name": "RunCommand",
+          "arguments": "{\"command\":\"pwd\"}"
+         },
+         "id": "call-a",
+         "type": "function"
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

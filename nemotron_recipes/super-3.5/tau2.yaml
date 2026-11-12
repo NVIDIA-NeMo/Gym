@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Tau2 (agentic tool use; retail, airline, telecom): 278 customer-service tasks x 8 repeats. A
+# user-simulator model (Qwen3-235B-A22B-Instruct-2507-FP8) plays the customer; a task scores 1
+# if its outcome matches the task's expected one.
+#
+#   nemotron_recipes/super-3.5/run.sh tau2
+#
+# Tech report (key_metrics of tau2_benchmark_agent):
+#   Tau2 Retail: retail/reward x100
+#   Tau2 Airline: airline/reward x100
+#   Tau2 Telecom: telecom/reward x100
+#
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY
+#
+# Needs a simulator endpoint (judge_base_url in env.yaml, or tau2_user_simulator_base_url for
+# this recipe only) serving Qwen3-235B-A22B-Instruct-2507-FP8 on Chat Completions
+# (<base_url>/chat/completions).
+#
+# run.sh first sources tau2.setup.sh, which pins the tasks and the data the agent reads
+# (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commits, 7245a8f6 and
+# 346f74d9, and clears agent data left by an earlier tau2 or tau3 run. The tau2 package is
+# installed from branch bxyu/nemo_gym_stable, as in that run.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/tau2/configs/tau2.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
+
+# User simulator: Qwen3-235B-A22B-Instruct-2507-FP8 instead of the benchmark default (gpt-5.2).
+# Endpoint and key come from env.yaml; set tau2_user_simulator_model_name there only if your
+# provider serves this model under a different id.
+tau2_benchmark_agent:
+  responses_api_agents:
+    tau2:
+      user_model_server:
+        name: Qwen3-235B-A22B-Instruct-2507-FP8
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:tau2_user_simulator_base_url,${judge_base_url}}
+      api_key: ${oc.select:tau2_user_simulator_api_key,${judge_api_key}}
+      model: ${oc.select:tau2_user_simulator_model_name,Qwen/Qwen3-235B-A22B-Instruct-2507-FP8}
+      replace_developer_role_with_system: true
+      return_token_id_information: false
+      uses_reasoning_parser: true

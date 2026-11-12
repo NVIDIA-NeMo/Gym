@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import yaml
 from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
 
 
 class TestApp:
@@ -77,6 +79,10 @@ class TestApp:
         # strict requires boxed; plain C should fail
         result = await server.verify(verify_request)
         assert result.reward == 0.0
+        # A wrong or unparsed answer is graded, not masked: the row carries the gym-p0/v1 TE-6 fields.
+        dumped = result.model_dump()
+        assert dumped["evaluation_completed"] is True
+        assert dumped["mask_sample"] is False
 
         # Now send boxed C (strict)
         response_boxed = NeMoGymResponse(
@@ -799,6 +805,113 @@ class TestGradingModeAnswerColonMD:
             assert result.extracted_answer == expected, text
             assert result.reward == 1.0, text
 
+    async def test_terminal_localized_answer_labels(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("বাংলায় ব্যাখ্যা।\n\nউত্তর: C", "C"),
+            ("ગુજરાતીમાં સમજૂતી.\n\n**જવાબ: B**", "B"),
+            ("हिंदी में व्याख्या।\n\n**उत्तर:** D।", "D"),
+            ("ಕನ್ನಡದಲ್ಲಿ ವಿವರಣೆ.\n\nಉತ್ತರ: A", "A"),
+            ("தமிழில் விளக்கம்.\n\nபதில்：C。", "C"),
+            ("اردو میں وضاحت۔\n\nجواب: B", "B"),
+            ("উত্তৰ: B", "B"),
+            ("ഉത്തരം: B", "B"),
+            ("ଉତ୍ତର: B", "B"),
+            ("ਉੱਤਰ: B", "B"),
+            ("उत्तरम्: B", "B"),
+            ("उत्तरं: B", "B"),
+            ("விடை: B", "B"),
+            ("సమాధానం: B", "B"),
+        ]
+        for text, expected in cases:
+            body = _make_verify_request(
+                text=text, expected=expected, template_metadata={"allow_localized_answer_labels": True}
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_localized_fallback_is_explicitly_row_scoped(self) -> None:
+        server = self._make_server()
+        for metadata in (
+            None,
+            {},
+            {"allow_localized_answer_labels": False},
+            {"allow_localized_answer_labels": "true"},
+        ):
+            body = _make_verify_request(text="উত্তর: B", expected="B", template_metadata=metadata)
+            result = await server.verify(body)
+            assert result.extracted_answer is None
+            assert result.reward == 0.0
+
+    async def test_localized_fallback_rejects_non_answer_labels(self) -> None:
+        server = self._make_server()
+        for text in ("Eliminated option: B", "(A): B", "Candidate: B", "Excluded choice: B", "My arbitrary label: B"):
+            for enabled in (False, True):
+                body = _make_verify_request(
+                    text=text, expected="B", template_metadata={"allow_localized_answer_labels": enabled}
+                )
+                result = await server.verify(body)
+                assert result.extracted_answer is None, text
+                assert result.reward == 0.0, text
+
+    async def test_localized_fallback_preserves_existing_boxed_precedence(self) -> None:
+        server = self._make_server()
+        for suffix in ("Eliminated option: B", "(A): B", "উত্তর: B"):
+            for enabled in (False, True):
+                body = _make_verify_request(
+                    text="\\boxed{C}\n" + suffix,
+                    expected="C",
+                    template_metadata={"answer_prefix": "answer is", "allow_localized_answer_labels": enabled},
+                )
+                result = await server.verify(body)
+                assert result.extracted_answer == "C", suffix
+                assert result.reward == 1.0, suffix
+
+    async def test_existing_benchmark_consumers_keep_their_scores(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        for benchmark in ("gpqa", "mmlu_pro", "supergpqa", "mmlu_prox"):
+            config = yaml.safe_load((root / "benchmarks" / benchmark / "config.yaml").read_text())
+            verifiers = [
+                value["resources_servers"]["mcqa"]
+                for value in config.values()
+                if isinstance(value, dict) and "resources_servers" in value and "mcqa" in value["resources_servers"]
+            ]
+            assert len(verifiers) == 1, benchmark
+            server = self._make_server(verifiers[0]["grading_mode"])
+            assert verifiers[0]["grading_mode"] == "lenient_answer_colon_md"
+            for text, expected, prefix, prediction in (
+                ("Eliminated option: B", "B", None, None),
+                ("(A): B", "B", None, None),
+                ("উত্তর: B", "B", None, None),
+                ("**Answer: B**", "B", None, "B"),
+                ("\\boxed{C}\nEliminated option: B", "C", "answer is", "C"),
+                ("\\boxed{C}\nউত্তর: B", "C", "answer is", "C"),
+            ):
+                body = _make_verify_request(
+                    text=text, expected=expected, template_metadata={"answer_prefix": prefix} if prefix else None
+                )
+                result = await server.verify(body)
+                assert result.extracted_answer == prediction, (benchmark, text)
+                assert result.reward == float(prediction == expected), (benchmark, text)
+
+    async def test_terminal_localized_answer_rejects_unsafe_shapes(self) -> None:
+        server = self._make_server()
+        cases = [
+            "উত্তর: A/B",
+            "A: B",
+            "উত্তর: B because C is wrong",
+            "উত্তর: B\nআরও ব্যাখ্যা",
+            "A: option text",
+        ]
+        for text in cases:
+            body = _make_verify_request(
+                text=text, expected="B", template_metadata={"allow_localized_answer_labels": True}
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer is None, text
+            assert result.reward == 0.0, text
+
     async def test_multilingual_ambiguous_list_rejected(self) -> None:
         server = self._make_server()
         body = _make_verify_request(
@@ -834,8 +947,7 @@ class TestGradingModeAnswerColonMD:
 class TestComputeMetrics:
     async def test_mcqa_server_returns_pass_majority_metrics(self) -> None:
         """MCQA server overrides compute_metrics to compute pass@k and majority@k."""
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
-        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+        from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 
         config = MCQAResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="mcqa")
         server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

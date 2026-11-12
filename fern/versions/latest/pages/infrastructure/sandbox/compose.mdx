@@ -134,8 +134,9 @@ normalization, interpolate environment variables, read `.env` files, or merge
 Compose files. Resolve these inputs upstream.
 
 Use mappings for `environment` and `depends_on`, and long-form mappings for
-`ports` and `volumes`. Supply byte counts for `mem_limit` and `shm_size`, and
-resolved absolute bind paths. Strings are passed literally, including `$` and
+`volumes`; `ports` take the short (`"8080"`, `"8080:80/tcp"`) or long syntax and
+are checked against the endpoint rules at load. Supply byte counts for
+`mem_limit` and `shm_size`, and resolved absolute bind paths. Strings are passed literally, including `$` and
 `$$`; write shell variables as `$VAR` rather than escaping them for Compose.
 
 The YAML must reference prebuilt images and contain no `build` entries. This is
@@ -167,6 +168,11 @@ Providers must implement `SupportsSandboxNetwork`, including for single-service
 collections. OpenSandbox requires `networking.enabled=True` and mutually reachable
 sandbox IPs. Service names and aliases are installed in each sandbox's `/etc/hosts`.
 Client-facing proxy endpoints cannot substitute for direct service communication.
+
+Because services talk by IP and share storage, every sandbox of one collection
+(services, the shared-volume helper, and seeds) is labeled
+`nemo.nvidia.com/placement-group=<project>`. A multi-cell front end routes every
+create with the same label to one cell. On a single server the label has no effect.
 
 For `network_mode: service:<name>`, OpenSandbox can opt into TCP loopback
 forwarding with `networking.loopback_forwarding=True`. This forwards the target's

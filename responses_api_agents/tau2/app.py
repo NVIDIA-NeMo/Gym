@@ -16,6 +16,7 @@
 import json
 from collections import defaultdict
 from collections.abc import Mapping
+from contextvars import ContextVar
 from functools import partial
 from os import environ
 from pathlib import Path
@@ -30,27 +31,32 @@ environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
 from loguru import logger
-from pydantic import ConfigDict, Field
+from openai.types.completion_usage import CompletionUsage
+from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
+from nemo_gym.client import NeMoGymAsyncOpenAI, get_server_url
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    EPISODE_FAILED,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.tau2.observability import build_tool_observations
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_model.app import split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
@@ -61,6 +67,22 @@ from tau2.utils.llm_utils import to_litellm_messages
 
 TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS = "tau2_malformed_tool_call"
 TAU2_AGENT_FAILURE_CLASS = "tau2_agent_error"
+
+# The model names Tau2 sends with the policy and user-simulator calls; the shared client tells them apart by it.
+TAU2_AGENT_MODEL = "openai/dummy agent model"
+TAU2_USER_MODEL = "openai/dummy user model"
+
+# Which call of a failed rollout failed, by the model name Tau2 sent with it: the policy's, the user simulator's (a
+# harness call: its failure is evaluation-side), or another model's. Stamped on the failure row as `failure_caller`.
+FAILURE_CALLERS = {TAU2_AGENT_MODEL: "policy", TAU2_USER_MODEL: "user_simulator"}
+# The model names of the calls that raised in the current rollout, in order. Set by `Tau2Agent.run`.
+_FAILED_CALL_MODELS: ContextVar[Optional[List[Any]]] = ContextVar("tau2_failed_call_models", default=None)
+
+# Usage of every policy-model response that finished in the current rollout, including responses Tau2 or the
+# malformed-tool-call retry discarded. Set by `Tau2Agent.run`.
+_POLICY_CALL_USAGES: ContextVar[Optional[List[Optional[NeMoGymResponseUsage]]]] = ContextVar(
+    "tau2_policy_call_usages", default=None
+)
 
 _RESERVED_RESULT_KEYS = (
     "reward",
@@ -116,15 +138,37 @@ def _validate_tool_call_arguments(response: Mapping[str, Any]) -> None:
             )
 
 
+def _record_policy_usage(model: Any, response: Mapping[str, Any]) -> None:
+    usages = _POLICY_CALL_USAGES.get()
+    if usages is None or model != TAU2_AGENT_MODEL:
+        return
+    raw_usage = response.get("usage")
+    try:
+        usage = (
+            chat_completion_usage_to_response_usage(CompletionUsage.model_validate(raw_usage)) if raw_usage else None
+        )
+    except ValidationError:
+        # A malformed usage block is unknown usage, not a reason to fail the rollout.
+        usage = None
+    usages.append(usage)
+
+
 class Tau2ToolValidatingAsyncOpenAI(NeMoGymAsyncOpenAI):
-    """Reject chat completions whose raw tool arguments Tau2 cannot parse."""
+    """Reject chat completions whose raw tool arguments Tau2 cannot parse, and record policy-call usage."""
 
     malformed_tool_call_max_retries: int = Field(default=0, ge=0)
 
     async def create_chat_completion(self, **kwargs: Any) -> Dict[str, Any]:
         max_attempts = self.malformed_tool_call_max_retries + 1
         for attempt in range(1, max_attempts + 1):
-            response = await super().create_chat_completion(**kwargs)
+            try:
+                response = await super().create_chat_completion(**kwargs)
+            except Exception:
+                failed = _FAILED_CALL_MODELS.get()
+                if failed is not None:
+                    failed.append(kwargs.get("model"))
+                raise
+            _record_policy_usage(kwargs.get("model"), response)
             try:
                 _validate_tool_call_arguments(response)
             except Tau2MalformedToolCallError as error:
@@ -220,7 +264,6 @@ class Tau2FailureResponse(BaseVerifyResponse):
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: Tau2Config
 
     __key_metrics: Optional[List[str]] = None
@@ -250,8 +293,12 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse | Tau2FailureResponse:
         record = self._sanitized_record(body)
+        policy_call_usages: List[Optional[NeMoGymResponseUsage]] = []
+        usages_token = _POLICY_CALL_USAGES.set(policy_call_usages)
+        failed_call_models: List[Any] = []
+        failed_token = _FAILED_CALL_MODELS.set(failed_call_models)
         try:
-            return await self._run(body)
+            result = await self._run(body)
         except Exception as error:  # noqa: BLE001 -- one bad rollout must not abort the full collection
             malformed_error = _find_nested_exception(error, Tau2MalformedToolCallError)
             if malformed_error is not None:
@@ -260,12 +307,28 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             else:
                 failure_class = TAU2_AGENT_FAILURE_CLASS
                 detail = _first_nested_exception(error)
-            return self._failure_response(
+            result = self._failure_response(
                 body,
                 record,
                 failure_class,
                 f"{type(detail).__name__}: {detail}",
+                failed_call_model=failed_call_models[-1] if failed_call_models else None,
+                failed_call=bool(failed_call_models),
             )
+        finally:
+            _POLICY_CALL_USAGES.reset(usages_token)
+            _FAILED_CALL_MODELS.reset(failed_token)
+
+        # A failed rollout still spent the tokens of the policy calls that finished. A finished call whose usage was
+        # lost makes the total unknown rather than a partial sum (rollout-evidence.mdx). No recorded call also stays
+        # unknown: the recorder sees only calls made through `Tau2ToolValidatingAsyncOpenAI`, so an empty record does
+        # not prove that no policy call finished.
+        result.response.usage = (
+            NeMoGymResponseUsage.sum_from_list(policy_call_usages)
+            if policy_call_usages and all(usage is not None for usage in policy_call_usages)
+            else None
+        )
+        return result
 
     async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         # Gym-internal request fields (e.g. `capture_rollout_id`) are marked `exclude=True`;
@@ -278,9 +341,11 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         config: TextRunConfig = body_dict["config"]
 
         # Need `openai/` provider prefix for LiteLLM
-        config.llm_user = "openai/dummy user model"
+        config.llm_user = TAU2_USER_MODEL
+        # A training framework trains the agent, not the simulated user, which keeps its own sampling.
+        user_base_url = self.base_url_for_run(get_server_url(self.config.user_model_server.name), body, trained=False)
         config.llm_args_user |= {
-            "api_base": f"{self.base_url_for_run(get_server_url(self.config.user_model_server.name), body)}/v1",
+            "api_base": f"{user_base_url}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | self.config.user_llm_args
 
@@ -290,7 +355,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             extra_agent_args["max_tokens"] = responses_create_params["max_output_tokens"]
 
         # Need `openai/` provider prefix for LiteLLM
-        config.llm_agent = "openai/dummy agent model"
+        config.llm_agent = TAU2_AGENT_MODEL
         config.llm_args_agent = {
             "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
@@ -316,7 +381,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         message_dicts = to_litellm_messages(messages_to_convert)
 
-        converter = VLLMConverter(return_token_id_information=True)
+        converter = ChatCompletionsConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
         input_items_1, output_items = split_responses_input_output_items(all_items)
         # Tau starts trajectories with an assistant message
@@ -396,8 +461,20 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         record: Dict[str, Any],
         failure_class: str,
         error: str,
+        *,
+        failed_call_model: Any = None,
+        failed_call: bool = False,
     ) -> Tau2FailureResponse:
         print(f"[tau2] rollout failed: {error}", flush=True)
+        cause: Dict[str, Any] = {}
+        if failed_call:
+            # The rollout ended on a failed model call: name whose call it was. A user simulator's or another
+            # harness model's failure is evaluation-side, an episode failure of the environment; a policy call's
+            # failure keeps its saved model failure as its cause.
+            caller = FAILURE_CALLERS.get(failed_call_model, "other")
+            cause["failure_caller"] = caller
+            if caller != "policy":
+                cause["failure_kind"] = EPISODE_FAILED
         return Tau2FailureResponse.model_validate(
             record
             | {
@@ -406,24 +483,23 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 NG_FAILURE_CLASS_KEY: failure_class,
                 "error": error[:500],
             }
+            | cause
         )
 
     def _empty_response(self, body: Tau2RunRequest) -> NeMoGymResponse:
-        """Return a minimal valid response so the failure path itself never emits HTTP 500."""
+        """A minimal valid response with no output, so the failure path never emits HTTP 500.
+
+        It carries no assistant message: a failed rollout has no answer, and collection keeps no response object
+        that has neither output nor status.
+        """
         return NeMoGymResponse(
             id=f"tau2-failure-{body.config.domain}-{body.task.id}",
             created_at=0.0,
             model=body.responses_create_params.model or "tau2",
             object="response",
-            output=[
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "id": "msg_0",
-                    "content": [{"type": "output_text", "text": "", "annotations": []}],
-                }
-            ],
+            # No generation happened: recovery must not keep this placeholder as the model's answer.
+            metadata=dict(NG_NO_GENERATION_METADATA),
+            output=[],
             parallel_tool_calls=False,
             tools=[],
             tool_choice="auto",

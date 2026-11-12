@@ -21,11 +21,11 @@ import uvicorn
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
-from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.server_runtime import TOKEN_HEADER, maybe_auto_expose
+from nemo_gym.trajectory import AgentInvocation
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
     ExampleMCPWeatherResourcesServerConfig,
@@ -33,6 +33,44 @@ from resources_servers.example_mcp_weather.app import (
 from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+
+
+def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported() -> None:
+    agent = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+            resources_server={"type": "resources_servers", "name": "resources"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    raw = {
+        "invocations": [
+            {"invocation_id": "root", "status": "completed"},
+            {
+                "invocation_id": "root.child-1",
+                "parent_invocation_id": "root",
+                "status": "incomplete",
+                "stop_reason": "max_iterations",
+            },
+        ]
+    }
+
+    invocations = [
+        record
+        for record in agent._sandbox_observations({}, raw, runtime_info=None).records
+        if isinstance(record, AgentInvocation)
+    ]
+
+    assert len(invocations) == 2
+    assert invocations[0].status == "completed"
+    assert invocations[0].stop_reason is None
+    assert invocations[1].parent_invocation_id == "root"
+    assert invocations[1].status == "incomplete"
+    assert invocations[1].stop_reason == "max_iterations"
 
 
 def _completion(message: dict) -> dict:
@@ -48,18 +86,21 @@ def _completion(message: dict) -> dict:
 class _ModelServer:
     """Answer chat completions over HTTP in order and record each request body."""
 
-    def __init__(self, answers: list[dict]) -> None:
+    def __init__(self, answers: list[dict], *, status_codes: list[int] | None = None) -> None:
         self.answers = answers
         self.requests: list[dict] = []
+        self.request_headers: list[dict[str, str]] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 server.requests.append(body)
+                server.request_headers.append(dict(self.headers))
                 answer = server.answers[min(len(server.requests), len(server.answers)) - 1]
                 payload = json.dumps(answer).encode()
-                self.send_response(200)
+                index = min(len(server.requests), len(server.answers)) - 1
+                self.send_response(status_codes[index] if status_codes is not None else 200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -136,6 +177,181 @@ def _payload(model_base_url: str, **overrides) -> dict:
         "user_message": "fix bug",
         **overrides,
     }
+
+
+@pytest.mark.parametrize("inherited_hermes_home", [False, True])
+def test_worker_configures_session_state_before_hermes_imports(tmp_path, inherited_hermes_home) -> None:
+    import yaml
+
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    task_home = tmp_path / "task-home"
+    task_hermes_home = task_home / ("custom-hermes" if inherited_hermes_home else ".hermes")
+    task_hermes_home.mkdir(parents=True)
+    (task_hermes_home / ".env").write_text("HERMES_TASK_ENV_LOADED=1\n")
+    (task_hermes_home / "config.yaml").write_text("model: task_model\n")
+    original_task_files = {path.name: path.read_bytes() for path in task_hermes_home.iterdir()}
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    input_path, output_path = session_dir / "input.json", session_dir / "output.json"
+    report_path = tmp_path / "report.json"
+    task_env = {
+        "HOME": str(task_home),
+        "PATH": os.environ["PATH"],
+        "PYTHONPATH": str(tmp_path / "task-packages"),
+        "PYTHONHOME": str(tmp_path / "task-python"),
+    }
+    env = {
+        **os.environ,
+        **task_env,
+        "OPENAI_BASE_URL": "http://stale-task-model.invalid/v1",
+        "OPENAI_API_KEY": "stale-task-key",
+    }
+    env.pop("HERMES_HOME", None)
+    env.pop("HERMES_TASK_ENV_LOADED", None)
+    if inherited_hermes_home:
+        env["HERMES_HOME"] = str(task_hermes_home)
+    # A fresh process must import the real dependency: this test module has already imported Hermes.
+    # Pass the test environment's trusted import paths explicitly, independently of the task's PYTHONPATH.
+    driver = """
+import json, os, pathlib, subprocess, sys
+sys.path[:0] = json.loads(sys.argv[1])
+imports = {}
+class WatchImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {'run_agent', 'hermes_constants'}:
+            home = pathlib.Path(os.environ.get('HERMES_HOME', pathlib.Path.home() / '.hermes'))
+            config = home / 'config.yaml'
+            imports[fullname] = {
+                'home': str(home),
+                'config': config.read_text() if config.exists() else None,
+                'model_base_url': os.environ.get('OPENAI_BASE_URL'),
+                'model_api_key': os.environ.get('OPENAI_API_KEY'),
+            }
+sys.meta_path.insert(0, WatchImports())
+import sandbox_runner
+status = sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
+import run_agent
+from tools.memory_tool import MEMORY_DIR
+from tools.process_registry import CHECKPOINT_PATH
+keys = ['HOME', 'PATH', 'PYTHONPATH', 'PYTHONHOME']
+child_code = 'import json, os, sys; print(json.dumps({k: os.environ.get(k) for k in sys.argv[1:]}))'
+child = subprocess.check_output(
+    [sys.executable, '-I', '-c', child_code, *keys], text=True,
+)
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+    'imports': imports,
+    'import_home': str(run_agent._hermes_home),
+    'memory_dir': str(MEMORY_DIR),
+    'checkpoint_path': str(CHECKPOINT_PATH),
+    'task_dotenv_loaded': os.environ.get('HERMES_TASK_ENV_LOADED'),
+    'environment': {key: os.environ.get(key) for key in keys},
+    'child_environment': json.loads(child),
+}))
+raise SystemExit(status)
+"""
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        payload = _payload(server.base_url)
+        input_path.write_text(json.dumps(payload))
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                driver,
+                json.dumps([str(Path(sandbox_runner.__file__).parent), *sys.path]),
+                str(input_path),
+                str(output_path),
+                str(report_path),
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+
+    details = output_path.read_text() if output_path.exists() else result.stdout
+    assert result.returncode == 0, f"{result.stderr}\n{details}"
+    assert json.loads(output_path.read_text())["result"]["final_response"] == "done"
+    report = json.loads(report_path.read_text())
+    hermes_home = session_dir / "hermes-home"
+    expected_config = {
+        "model": "policy_model",
+        "provider": "auto",
+        "auxiliary": {
+            "compression": {
+                "provider": "custom",
+                "base_url": server.base_url,
+                "api_key": "gym",
+                "model": "policy_model",
+            }
+        },
+    }
+    for imported in report["imports"].values():
+        imported["config"] = yaml.safe_load(imported["config"])
+    assert report["imports"] == {
+        name: {
+            "home": str(hermes_home),
+            "config": expected_config,
+            "model_base_url": server.base_url,
+            "model_api_key": "gym",
+        }
+        for name in ("run_agent", "hermes_constants")
+    }
+    assert report["import_home"] == str(hermes_home)
+    assert report["memory_dir"] == str(hermes_home / "memories")
+    assert report["checkpoint_path"] == str(hermes_home / "processes.json")
+    assert report["task_dotenv_loaded"] is None
+    assert report["environment"] == report["child_environment"] == task_env
+    assert {path.name: path.read_bytes() for path in task_hermes_home.iterdir()} == original_task_files
+
+
+def test_sandbox_retry_attempts_retain_invocation_headers(tmp_path, restore_process_globals) -> None:
+    rejected = {"error": {"message": "retry this request", "type": "server_error"}}
+    with _ModelServer([rejected, rejected, _completion({"content": "done"})], status_codes=[429, 500, 200]) as server:
+        output = _run(_payload(server.base_url, max_turns=4), tmp_path)
+
+    assert len(server.requests) == 3
+    assert [headers.get("x-session-id") for headers in server.request_headers] == ["root"] * 3
+    assert output["observations"]["invocations"][0]["model_response_ids"] == ["chatcmpl-test"]
+    assert output["result"]["completed"]
+
+
+@pytest.mark.parametrize("has_completed_call", [False, True])
+def test_sandbox_rejection_preserves_runtime_token_totals(
+    tmp_path, restore_process_globals, has_completed_call
+) -> None:
+    answers = [{"error": {"message": "rejected request", "type": "invalid_request_error"}}]
+    statuses = [400]
+    if has_completed_call:
+        response = _completion(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": json.dumps({"command": "printf 391"})},
+                    }
+                ],
+            }
+        )
+        response["usage"] = {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        answers.insert(0, response)
+        statuses.insert(0, 200)
+
+    with _ModelServer(answers, status_codes=statuses) as server:
+        output = _run(_payload(server.base_url, max_turns=4), tmp_path)
+
+    result = output["result"]
+    assert result["failed"] and not result["completed"]
+    assert "400" in result["error"]
+    assert result["prompt_tokens"] == (10 if has_completed_call else 0)
+    assert result["completion_tokens"] == (2 if has_completed_call else 0)
+    assert len(server.requests) == (4 if has_completed_call else 3)
+    assert output["observations"]["invocations"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("marker", ["present", "absent", "omitted"])
@@ -284,6 +500,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
         ],
     }
     answers = [_completion(tool_call), _completion({"content": "summary of the work"})]
+    answers[0]["id"] = "chatcmpl-tool"
+    answers[1]["id"] = "chatcmpl-summary"
 
     with _ModelServer(answers) as model_server:
         if execution == "sandbox":
@@ -292,8 +510,15 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 tmp_path,
             )
             assert output["result"]["final_response"] == "summary of the work"
+            assert output["result"]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["status"] == "incomplete"
+            assert output["observations"]["invocations"][0]["model_response_ids"] == [
+                "chatcmpl-tool",
+                "chatcmpl-summary",
+            ]
         else:
-            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+            from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
             agent = HermesAgent(
                 config=HermesAgentConfig(
@@ -323,13 +548,28 @@ def test_iteration_limit_summary_reaches_the_model_server(
                     },
                 ),
             )
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
-            output = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix bug")))
+            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args, **_kwargs: model_server.base_url)
+            observations = []
+            output = asyncio.run(
+                agent._create_response(
+                    NeMoGymResponseCreateParamsNonStreaming(input="fix bug"),
+                    observation_collector=observations.append,
+                )
+            )
             assert output.output[-1].content[0].text == "summary of the work"
+            assert output.status == "incomplete"
+            assert output.metadata["stop_reason"] == "max_iterations"
+            assert observations[0].records[0].stop_reason == "max_iterations"
+            assert observations[0].records[0].status == "incomplete"
+            assert [call.response_id for call in observations[0].records[0].model_calls] == [
+                "chatcmpl-tool",
+                "chatcmpl-summary",
+            ]
 
     assert len(model_server.requests) == 2
     assert all(not request.get("stream") for request in model_server.requests)
     first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
+    NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[1])
     assert all("chat_template_kwargs" not in body for body in model_server.requests)
     if template_enabled:
         assert json.loads(first.metadata["chat_template_kwargs"]) == {
@@ -380,7 +620,7 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["deadline", "close"])
 def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
@@ -416,9 +656,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
 """
     process = subprocess.Popen(
         [
-            sys.executable,
-            "-I",
-            process_supervisor.__file__,
+            "bash",
+            str(SUPERVISOR_SCRIPT),
             "--timeout",
             "2" if ending == "deadline" else "10",
             "--cleanup-timeout",
@@ -449,8 +688,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert (tmp_path / "model.patch").exists()
+            # Production sends no signal; the stop file alone must stop the supervisor.
             stop_request_path.touch()
-            process.terminate()
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
     finally:
@@ -481,3 +720,28 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
+
+
+def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_process_globals):
+    import yaml
+    from agent.auxiliary_client import call_llm
+
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, max_turns=4), tmp_path)
+        response = call_llm(task="compression", messages=[{"role": "user", "content": "Summarize"}])
+    assert response.choices[0].message.content == "done"
+    assert server.requests[-1]["messages"] == [{"role": "user", "content": "Summarize"}]
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == server.base_url
+    assert config["auxiliary"]["compression"]["model"] == "policy_model"
+
+
+def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_path, restore_process_globals):
+    """The agent gives compression a URL that keeps its own sampling; the runner points Hermes at it."""
+    import yaml
+
+    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, compression_model_base_url=compression_url), tmp_path)
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == compression_url

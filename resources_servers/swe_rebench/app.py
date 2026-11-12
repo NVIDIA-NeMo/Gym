@@ -33,7 +33,17 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -41,11 +51,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_rebench.log_parsers import default_cache_dir, resolve_parser
 from resources_servers.swe_rebench.verification import (
     VerificationInputs,
@@ -91,6 +97,9 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     # Where the upstream log-parser repo is cloned. Empty uses the shared nemo_gym cache.
     log_parser_cache_dir: str = ""
     apply_anti_cheating: bool = True
+    # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
+    # that mount their own read-only settings.xml, e.g. one that already mirrors Maven Central.
+    overwrite_maven_settings: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -150,7 +159,6 @@ class SWERebenchVerifyResponse(BaseVerifyResponse):
 
 
 class SWERebenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SWERebenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -316,7 +324,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
                 }
             )
 
-        files = verification_files(inputs)
+        files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0
         verification_time_taken = 0.0

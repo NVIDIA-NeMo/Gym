@@ -1,0 +1,14 @@
+# Oracle agent: runs a Harbor task's solution/solve.sh in the seeded sandbox instead of calling a model.
+# `gym dataset validate <folder | harbor:dataset>` selects it; `gym eval run ... --agent harbor_oracle` is the same
+# validation run and writes under results/harbor/validation/, never where a model run resumes from.
+harbor_oracle_agent:
+  responses_api_agents:
+    harbor_oracle_agent:
+      entrypoint: app.py
+      # A native-session harness: no resources server, and no legacy /run route.
+      resources_server: null
+      # The `harbor` environment server places the task's solution/ at /solution in the sandbox it seeds for this
+      # agent and hands over the task user, `[solution].env` and `[agent].timeout_sec`; the oracle reads no task
+      # folder of its own. This caps solve.sh below `[agent].timeout_sec` when set.
+      max_solve_timeout_s: null
+      output_tail_chars: 4000

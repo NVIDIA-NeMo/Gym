@@ -47,37 +47,46 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
-    OmegaConf,
+    ModelServerRef,
+    get_first_server_config_dict,
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.config.global_config import OmegaConf
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
+    current_rollout_id,
 )
-from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.telemetry import Profiler
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
     parse_replay_subagent_manifest,
     parse_replay_subagent_payload,
 )
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_model.app import split_responses_input_output_items
 
 
 OPENHANDS_CAPTURE_OVERLAY_DIR = Path(__file__).parent / "openhands_capture_overlay"
@@ -297,6 +306,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
     # GRPO related fields
     mask_sample: bool = False
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     @property
     def instance_id(self) -> str:
@@ -338,6 +349,35 @@ class SWEBenchMetrics(BaseModel):
     total_model_call_time: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
+
+
+# The evaluation ran past swebench_tests_timeout. The model's patch can make the tests hang, and so can a
+# slow host, so this is not one of the shared policy or infrastructure kinds.
+EVAL_TIMEOUT = "swe_agents:eval_timeout"
+
+
+def _masked_failure(metrics: SWEBenchMetrics) -> Optional[tuple[str, str]]:
+    """Return the failure_kind and failure_reason that mask this sample, or None when its reward counts.
+
+    Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not
+    reported as a measured policy failure. Max-iteration and context-window runs are masked whether or not
+    the patch resolved the tests, because a resolved patch from an agent that never finished is accidental.
+    """
+    if metrics.eval_launch_failed:
+        return PROVIDER_UNAVAILABLE, "The evaluation container failed before its startup marker"
+    if metrics.oom_killed:
+        return PROVIDER_OOM_KILLED, "The memory watchdog killed the agent container"
+    if metrics.eval_oom_killed:
+        return PROVIDER_OOM_KILLED, "The memory watchdog killed the evaluation container"
+    if metrics.eval_timed_out:
+        return EVAL_TIMEOUT, "The evaluation ran past swebench_tests_timeout"
+    if metrics.agent_timed_out:
+        return AGENT_TIMEOUT, "The agent ran past swebench_agent_timeout"
+    if metrics.agent_error_kind == "max_iteration":
+        return AGENT_LIMIT, "The agent reached its maximum number of iterations"
+    if metrics.agent_error_kind == "context_window":
+        return MODEL_CONTEXT_LIMIT, "The conversation exceeded the model's context window"
+    return None
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
@@ -394,6 +434,22 @@ def _resolve_remote_commit(repo: Optional[str], ref: str) -> str:
         f"could not resolve agent_framework_commit={ref!r} against {repo}; "
         "pin a full 40-hex SHA or use a branch/tag that exists on the remote."
     )
+
+
+def _real_path_bind_mounts(path: Union[str, Path], ro: bool = False) -> List[str]:
+    """Bind ``path`` at its symlink-resolved location too, when it is reached through a symlink.
+
+    The setup trees are also bound at their own absolute host path because the interpreters and venvs inside them
+    record absolute paths at install time. Those recorded paths are the REAL paths: ``uv`` venvs point
+    ``bin/python`` and ``pyvenv.cfg`` at the resolved interpreter, and miniforge's console-script shebangs use the
+    resolved prefix. When the configured path goes through a symlink (a symlinked ``cache_dir`` or home directory,
+    or a setup tree linked to a shared copy), only the link path existed inside the container and every interpreter
+    lookup failed. Returns no mounts when ``path`` is not reached through a symlink.
+    """
+    real = os.path.realpath(path)
+    if real == os.path.abspath(path):
+        return []
+    return [f"--mount type=bind,src={real},dst={real}{',ro' if ro else ''}"]
 
 
 @contextmanager
@@ -1797,9 +1853,12 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         llm_model_config = {
             "model": self.config.body.model or "",
             "base_url": f"{model_server_base_url}/v1",
-            "temperature": self.config.inference_params["temperature"],
-            "top_p": self.config.inference_params["top_p"],
         }
+        # temperature/top_p are only in inference_params when the request set them;
+        # tomlkit cannot serialize None, so only write the keys that are present.
+        for key in ("temperature", "top_p"):
+            if self.config.inference_params.get(key) is not None:
+                llm_model_config[key] = self.config.inference_params[key]
         max_output_tokens = self.config.inference_params.get("tokens_to_generate")
         if max_output_tokens is not None:
             llm_model_config["max_output_tokens"] = max_output_tokens
@@ -3017,7 +3076,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     config: SWEBenchWrapperConfig
 
     _sem: Optional[Semaphore] = None
-    _vllm_converter: Optional[VLLMConverter] = None
+    _vllm_converter: Optional[ChatCompletionsConverter] = None
     _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -3067,7 +3126,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
         self._sem = Semaphore(self.config.concurrency)
-        self._vllm_converter = VLLMConverter(return_token_id_information=True)
+        self._vllm_converter = ChatCompletionsConverter(return_token_id_information=True)
 
         return super().model_post_init(context)
 
@@ -3454,6 +3513,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
             )
+            # The same tree at its symlink-resolved path: read-only parent first, then the writable subdirectories.
+            real_openhands_mounts = _real_path_bind_mounts(openhands_dir, ro=True)
+            if real_openhands_mounts:
+                real_openhands_dir = os.path.realpath(openhands_dir)
+                real_openhands_mounts += [
+                    f"--mount type=bind,src={real_openhands_dir}/{subdir},dst={real_openhands_dir}/{subdir}"
+                    for subdir in (".eval_sessions", "logs", "evaluation/oh")
+                ]
+            mount_args.extend(real_openhands_mounts)
             if params.install_openhands_capture_overlay and command.mode == "agent":
                 # Mount ``sitecustomize.py`` into capture-enabled agent containers.
                 # The module patches the OpenHands ``nemo-gym`` client at startup.
@@ -3476,6 +3544,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
+            mount_args.extend(_real_path_bind_mounts(miniforge3_path, ro=True))
 
         # Add SWE-bench setup directory mount if available (for evaluation)
         # swe-bench-ext, nv-internal-1, and deepswe don't use the swebench harness
@@ -3484,6 +3553,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
+            mount_args.extend(_real_path_bind_mounts(params.swebench_setup_dir))
 
         if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
             mount_args.append(
@@ -3492,6 +3562,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(
                 f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst={params.swebench_multilingual_setup_dir}"
             )
+            mount_args.extend(_real_path_bind_mounts(params.swebench_multilingual_setup_dir))
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
             run_script_path = params.persistent_dir / "run_script.sh"
@@ -3510,6 +3581,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup")
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir}")
+            mount_args.extend(_real_path_bind_mounts(params.r2e_gym_setup_dir))
 
         if command.mode == "eval" and "SWE-rebench" in data_point["dataset_name"]:
             rebench_setup_dir = params.swe_rebench_setup_dir
@@ -3795,7 +3867,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
-            install_openhands_capture_overlay=token_capture_enabled,
+            # The overlay points OpenHands at the per-run URL, which it otherwise ignores: needed whenever that URL
+            # carries what the model server requires, the capture prefix or the rollout's sampling segment.
+            install_openhands_capture_overlay=token_capture_enabled or current_model_sampling_segment() is not None,
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
@@ -3902,29 +3976,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             metrics_to_update["resolved"] = False
 
-        # Decide whether to mask this sample from the GRPO gradient.
-        # 1) Patch passed eval but agent did not actually submit (hit max-turns
-        #    or blew the context window) — the reward is accidental.
-        # 2) Final eval step timed out — reward is unreliable.
-        # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
-        # 4) Memory watchdog killed the agent container (OOM).
-        # 5) Memory watchdog killed the eval container.
-        # 6) Evaluator failed before its startup marker; no reward was measured.
+        # Decide whether to mask this sample, and record why.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
-        agent_error_kind = persisted_metrics.agent_error_kind
-        eval_timed_out = bool(persisted_metrics.eval_timed_out)
-        agent_timed_out = bool(persisted_metrics.agent_timed_out)
-        oom_killed = bool(persisted_metrics.oom_killed)
-        eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
-        if (
-            agent_error_kind in ("max_iteration", "context_window")
-            or eval_timed_out
-            or persisted_metrics.eval_launch_failed
-            or agent_timed_out
-            or oom_killed
-            or eval_oom_killed
-        ):
+        masked_failure = _masked_failure(persisted_metrics)
+        if masked_failure:
             params.mask_sample = True
+            params.failure_kind, params.failure_reason = masked_failure
 
         trajectories_dir = params.persistent_dir / "trajectories"
         (
@@ -4068,6 +4125,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 # Report it on the contract as well; `instance_config.mask_sample` stays
                 # for one release so existing consumers keep working.
                 mask_sample=instance_config.mask_sample,
+                failure_kind=instance_config.failure_kind,
+                failure_reason=instance_config.failure_reason,
                 **metrics.model_dump(),
                 instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,
@@ -4077,3 +4136,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SWEBenchWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchWrapper.run_webserver()  # noqa: F401

@@ -33,12 +33,11 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_ID_CAPTURE_BLOCK
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
+from nemo_gym.client import ServerClient
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_CAPTURE_BLOCK
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.sandbox import ApptainerProvider, DockerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
-from nemo_gym.sandbox.providers.docker import DockerProvider
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
@@ -261,6 +260,46 @@ def _make_setup_agent(tmp_path: Path, model_server_url: str = "", **config_overr
 
 
 class TestSetupParams:
+    SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    def test_model_url_unchanged_without_rollout_id_or_traces(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body).model_server_url == "http://model-host:8000"
+
+    def test_model_url_carries_trace_context_without_rollout_id(self, tmp_path: Path, monkeypatch) -> None:
+        # Capture off, traces on: the harness still gets the current span in the URL.
+
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body).model_server_url == f"http://model-host:8000{self.SEGMENT}"
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == (
+            f"http://model-host:8000/ng-rollout/3-1{self.SEGMENT}"
+        )
+
+    @pytest.mark.parametrize("relay_url", ["http://relay:9000", "http://relay:9000/v1", "http://relay:9000/v1/"])
+    def test_sandbox_model_url_keeps_the_rollout_path(self, tmp_path: Path, monkeypatch, relay_url: str) -> None:
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(tmp_path, model_server_url=relay_url, sandbox_model_base_url=relay_url)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == (
+            f"http://relay:9000/ng-rollout/3-1{self.SEGMENT}"
+        )
+
+    def test_sandbox_model_url_without_a_model_server_is_unchanged(self, tmp_path: Path) -> None:
+        # Without a Gym model server, nothing behind the URL strips the rollout path.
+        gateway = "https://gw.example/v1"
+        agent = _make_setup_agent(
+            tmp_path, model_server_url=gateway, sandbox_model_base_url=gateway, model_server=None
+        )
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == gateway
+
     def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
         agent = _make_setup_agent(tmp_path)
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
@@ -307,7 +346,7 @@ class TestSetupParams:
 
     def test_model_server_url_carries_the_training_capture_prefix(self, tmp_path: Path) -> None:
         agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_id_capture=True)
-        agent.server_client.global_config_dict = {TOKEN_ID_CAPTURE_BLOCK: {"enabled": True}}
+        agent.server_client.global_config_dict = {TOKEN_CAPTURE_BLOCK: {"enabled": True}}
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 
         params = agent._setup_params(body, rollout_id="7-2")
@@ -776,6 +815,7 @@ class TestProcessSingleDatapoint:
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["agent_timed_out"] is True
         assert metrics["mask_sample"] is True
+        assert metrics["failure_kind"] == "agent_timeout"
 
     async def test_container_killed_mid_run_sets_flag_and_masks(self, tmp_path: Path) -> None:
         # exec() on a container the TTL already removed returns error_type="sandbox" without
@@ -795,6 +835,7 @@ class TestProcessSingleDatapoint:
         assert metrics["agent_timed_out"] is True
         assert metrics["sandbox_failed"] is False
         assert metrics["mask_sample"] is True
+        assert metrics["failure_kind"] == "provider_unavailable"
 
     async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -810,7 +851,57 @@ class TestProcessSingleDatapoint:
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["sandbox_failed"] is True
         assert metrics["mask_sample"] is True
+        assert metrics["failure_kind"] == "provider_unavailable"
+        assert "boom" in metrics["failure_reason"]
         sandbox.stop.assert_awaited_once()
+
+    async def test_agent_timeout_keeps_its_kind_when_cleanup_fails_later(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=124, error_type="timeout")),
+            stop=AsyncMock(side_effect=RuntimeError("stop failed")),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["failure_kind"] == "agent_timeout"
+        assert metrics["sandbox_failed"] is True
+        assert metrics["mask_sample"] is True
+
+    async def test_typed_sandbox_failure_keeps_its_kind(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_credentials_rejected",
+            operation="create",
+            failure_reason="rejected",
+        )
+        sandbox = SimpleNamespace(start=AsyncMock(side_effect=error), exec=AsyncMock(), stop=AsyncMock())
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["failure_kind"] == "provider_credentials_rejected"
+        assert metrics["mask_sample"] is True
+
+    async def test_missing_task_tests_is_a_setup_failure_not_a_provider_failure(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path)
+        cfg.problem_info["task_dir"] = str(tmp_path / "no_such_task")
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["failure_kind"] == "anyterminal_agent:setup_failed"
+        assert "no_such_task" in metrics["failure_reason"]
+        assert metrics["mask_sample"] is True
 
     async def test_remote_provider_stages_and_collects(self, tmp_path: Path) -> None:
         archive = tmp_path / "deps.tar.gz"
@@ -876,6 +967,7 @@ class TestProcessSingleDatapoint:
 
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["container_timed_out"] is True
+        assert metrics["failure_kind"] == "anyterminal_agent:eval_timeout"
         sandbox.stop.assert_awaited_once()
 
 
@@ -907,3 +999,113 @@ class TestStageTests:
 
         assert not (staging_tests / "stale.sh").exists()
         assert (staging_tests / "fresh.sh").exists()
+
+
+# ── AnyTerminalAgent._inner_responses ───────────────────────────────────────────────
+
+
+class TestInnerResponses:
+    async def _inner_response(self, tmp_path: Path, saved_response: dict | None):
+        agent = _make_setup_agent(tmp_path)
+        params = _make_instance_config(tmp_path)
+        if saved_response is not None:
+            (params.persistent_dir / "response.json").write_text(json.dumps(saved_response))
+        remote = MagicMock()
+        remote.options.return_value.remote = AsyncMock(return_value=None)
+        with (
+            patch("responses_api_agents.anyterminal_agent.app._run_remote", remote),
+            patch.object(AnyTerminalAgent, "_ray_resource_opts", return_value={}),
+        ):
+            return await agent._inner_responses(params)
+
+    async def test_keeps_the_inner_agents_usage(self, tmp_path: Path) -> None:
+        usage = {
+            "input_tokens": 5300,
+            "input_tokens_details": {"cached_tokens": 4096},
+            "output_tokens": 812,
+            "output_tokens_details": {"reasoning_tokens": 300},
+            "total_tokens": 6112,
+        }
+        saved = {
+            "id": "resp_inner",
+            "created_at": 0,
+            "model": "inner",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": usage,
+        }
+
+        response = await self._inner_response(tmp_path, saved)
+
+        expected_usage = usage | {"input_tokens_details": {"cached_tokens": 4096, "cache_write_tokens": None}}
+        assert response.usage.model_dump(mode="json") == expected_usage
+        assert response.output[0].content[0].text == "done"
+
+    async def test_usage_is_unknown_without_a_saved_response(self, tmp_path: Path) -> None:
+        response = await self._inner_response(tmp_path, None)
+
+        assert response.output == []
+        assert response.usage is None
+
+
+class TestRuntimeSetupFailures:
+    """A setup command that could not run keeps a provider kind; one that completed and failed is a setup failure."""
+
+    @pytest.fixture(autouse=True)
+    def _remote_sandbox(self):
+        with (
+            patch("responses_api_agents.anyterminal_agent.app._build_provider", return_value=None),
+            patch.object(RunTerminalAgent, "_uses_bind_mounts", return_value=False),
+        ):
+            yield
+
+    @pytest.mark.parametrize(
+        "archive,failing,result,failure_kind,reason_part",
+        [
+            (False, "test -x", _sandbox_result(error_type="timeout"), "provider_unavailable", "timeout"),
+            (False, "test -x", _sandbox_result(error_type="sandbox"), "provider_unavailable", "sandbox"),
+            (False, "test -x", _sandbox_result(return_code=1), "anyterminal_agent:setup_failed", "does not contain"),
+            (True, "tar -xzf", _sandbox_result(error_type="sandbox"), "provider_unavailable", "sandbox"),
+            (True, "tar -xzf", _sandbox_result(error_type="timeout"), "provider_unavailable", "timeout"),
+            (
+                True,
+                "tar -xzf",
+                SimpleNamespace(stdout="", stderr="gzip: stdin: not in gzip format", return_code=2, error_type=None),
+                "anyterminal_agent:setup_failed",
+                "not in gzip format",
+            ),
+        ],
+    )
+    async def test_runtime_setup_command_outcome(
+        self, tmp_path: Path, archive: bool, failing: str, result, failure_kind: str, reason_part: str
+    ) -> None:
+        cfg = _make_instance_config(tmp_path, agent_deps_archive=tmp_path / "deps.tar.gz" if archive else None)
+        (cfg.persistent_dir / "instruction.txt").write_text("x")
+        (cfg.persistent_dir / "agent_runner.py").write_text("x")
+
+        async def run(command, **kwargs):
+            return result if failing in command else _sandbox_result()
+
+        sandbox = SimpleNamespace(start=AsyncMock(), exec=run, upload=AsyncMock(), stop=AsyncMock())
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["mask_sample"] is True
+        assert metrics["sandbox_failed"] is True
+        assert metrics["resolved"] is False
+        assert metrics["failure_kind"] == failure_kind
+        assert reason_part in metrics["failure_reason"]
+        if failure_kind == "provider_unavailable":
+            assert "does not contain" not in metrics["failure_reason"]

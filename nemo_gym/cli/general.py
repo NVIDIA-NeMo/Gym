@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import sys
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as md_version
 from subprocess import Popen
 
@@ -24,8 +25,8 @@ import psutil
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR, __version__
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import JSON_OUTPUT_KEY_NAME, get_global_config_dict
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import JSON_OUTPUT_KEY_NAME, get_global_config_dict
 
 
 class VersionConfig(BaseNeMoGymCLIConfig):
@@ -64,7 +65,13 @@ def version():  # pragma: no cover
         "ray",
     ]
 
-    dependencies = {dep: md_version(dep) for dep in key_deps}
+    dependencies = {}
+    for dep in key_deps:
+        try:
+            dependencies[dep] = md_version(dep)
+        except PackageNotFoundError:
+            # Ray is optional; report it rather than failing the whole command.
+            dependencies[dep] = "not installed"
 
     version_info["dependencies"] = dependencies
 

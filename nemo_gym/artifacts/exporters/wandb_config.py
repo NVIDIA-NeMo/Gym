@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The settings of `gym eval export wandb`, kept apart from the exporter so that they can be imported without the
+W&B SDK: `gym eval submit` validates an export's settings on a machine that may not have it."""
+
+from nemo_gym.config.config_types import RunExportConfig, UploadRolloutsConfigMixin, WANDBConfig
+
+
+class WandbExportConfig(RunExportConfig, WANDBConfig, UploadRolloutsConfigMixin):
+    """Settings of `gym eval export wandb`."""
+
+    @property
+    def is_available(self) -> bool:
+        # A post-run export can authenticate from WANDB_API_KEY in the environment, so the key is optional here.
+        # A key that is given must still be real (not empty, not masked).
+        if self.wandb_api_key is None:
+            return bool(self.wandb_project and self.wandb_name)
+        return super().is_available

@@ -15,19 +15,26 @@
 import asyncio
 import json
 import logging
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import openai
+import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
+from verifiers.clients import NeMoRLChatCompletionsClient
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient, apply_rollout_prefix
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef
+from nemo_gym.core import FailureReportRow, StageOutcomePolicyConfig, model_sampling_context
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
+from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
     _NoStoreCookieJar,
+    _rollout_error_fact,
 )
 from responses_api_agents.verifiers_agent.app import (
     logger as agent_app_logger,
@@ -41,8 +48,8 @@ SESSION_COOKIE = "VLLMModel___policy_model=abc123; Path=/"
 def _policy_server_that_sets_a_session_cookie(seen_cookie_headers: list) -> httpx.MockTransport:
     """Stand-in for Gym's vllm_model server.
 
-    Like the real one (SessionMiddleware + add_session_id in
-    nemo_gym/server_utils.py) it puts a session cookie on EVERY response, and
+    Like the real one (SessionMiddleware + SessionIDMiddleware, set up in
+    nemo_gym/server_runtime/base_server.py) it puts a session cookie on EVERY response, and
     it records the Cookie header each request arrived with so a test can see
     whether the client replayed it.
     """
@@ -154,6 +161,91 @@ class TestApp:
         assert output[2]["content"][0]["text"] == "answer"
         assert output[2]["prompt_token_ids"] == [3]
 
+    def test_eval_rollout_without_token_ids_is_not_reported_as_empty(self, caplog) -> None:
+        """Eval mode (`return_token_id_information: false`) returns no token ids, but the trajectory is complete."""
+        tool_call = {"id": "call_1", "name": "python", "arguments": json.dumps({"expr": "2+2"})}
+        completion = [
+            {"role": "assistant", "content": "", "tool_calls": [json.dumps(tool_call)]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "4"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        rollout_output = {
+            "completion": completion,
+            "trajectory": [
+                {"completion": [{"role": "assistant", "content": "", "tool_calls": [tool_call]}]},
+                {"completion": [{"role": "assistant", "content": "answer"}]},
+            ],
+        }
+
+        with caplog.at_level(logging.DEBUG, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "token ids were likely not requested" in caplog.text
+        assert [item["type"] for item in output] == ["function_call", "function_call_output", "message", "message"]
+        assert output[-1]["id"] == "msg_empty"
+        assert output[-1]["generation_token_ids"] == [0]
+
+    @pytest.mark.parametrize(
+        ("completion", "expect_warning"),
+        [
+            # Stopped by max_turns right after a tool call: only function_call items, no assistant message.
+            (
+                [
+                    {"role": "assistant", "content": "", "tool_calls": [json.dumps({"id": "c1", "name": "f"})]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+                ],
+                False,
+            ),
+            # Only non-assistant messages: a user or tool message must not count as an assistant turn.
+            ([{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": "ok"}], True),
+        ],
+    )
+    def test_each_kind_of_assistant_turn_decides_the_warning(self, caplog, completion, expect_warning) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            self._agent()._convert_trajectory_to_output({"completion": completion, "trajectory": []})
+
+        assert ("Returning empty trajectory" in caplog.text) is expect_warning
+
+    def test_rollout_without_completion_items_still_warns_empty_trajectory(self, caplog) -> None:
+        rollout_output = {"completion": [], "trajectory": [], "error": {"error": "sandbox quota exceeded"}}
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Returning empty trajectory" in warnings[0].getMessage()
+        assert "sandbox quota exceeded" in warnings[0].getMessage()
+        assert [item["id"] for item in output] == ["msg_empty"]
+
+    def test_rollout_error_after_assistant_turns_is_still_logged(self, caplog) -> None:
+        rollout_output = {
+            "completion": [{"role": "assistant", "content": "partial answer"}],
+            "trajectory": [{"completion": [{"role": "assistant", "content": "partial answer"}]}],
+            "error": {"error": "ToolError", "error_chain_repr": "ToolError('sandbox died')"},
+        }
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "ToolError" in warnings[0]
+        assert "Returning empty trajectory" not in warnings[0]
+        assert output[-1]["id"] == "msg_empty"
+
+    @staticmethod
+    def _agent() -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+        )
+        return VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
 
 class TestPolicyClient:
     """The policy client decides which vLLM engine serves a rollout.
@@ -205,7 +297,7 @@ class TestPolicyClient:
     def test_rollout_prefixed_client_inherits_deadlines_and_retries(self) -> None:
         agent = self._agent(client_timeout_s=3600, client_connect_timeout_s=60, client_max_retries=0)
 
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
             return f"http://policy{prefix}/v1"
 
@@ -230,7 +322,7 @@ class TestPolicyClient:
     def test_client_base_url_carries_the_rollout_capture_prefix(self) -> None:
         agent = self._agent()
 
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
             return f"http://policy{prefix}/v1"
 
@@ -257,6 +349,25 @@ class TestPolicyClient:
 
         assert first is second
         assert str(first.client.base_url).rstrip("/") == POLICY_URL
+
+    def test_a_rollout_with_sampling_values_gets_its_own_url_with_capture_off(self) -> None:
+        agent = self._agent()
+
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
+            return f"{apply_rollout_prefix('http://policy', rollout_id, trace_context=trace_context)}/v1"
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: None),
+        ):
+            with model_sampling_context("SEG"):
+                sampled = agent._get_client(MagicMock())
+            unsampled = agent._get_client(MagicMock())
+
+        # The shared client is built inside the first rollout, yet its URL carries no rollout's values.
+        assert str(unsampled.client.base_url).rstrip("/") == "http://policy/v1"
+        assert str(sampled.client.base_url).rstrip("/") == "http://policy/ng-sampling/SEG/v1"
+        assert sampled.client._client is unsampled.client._client
 
     def test_policy_client_never_replays_the_session_cookie(self) -> None:
         agent = self._agent()
@@ -318,7 +429,7 @@ class TestPrefixedResponsesRoute:
         return VerifiersAgent(config=config, server_client=server_client)
 
     @staticmethod
-    def _resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+    def _resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
         return "http://policy%s/v1" % (f"/ng-rollout/{rollout_id}" if rollout_id else "")
 
     def _base_url_seen_by(self, agent: VerifiersAgent, url: str) -> str:
@@ -578,3 +689,463 @@ class TestExportStateColumns:
             _, body = self._run(export_state_columns=["assertion_result"])
         assert "exported_state" not in body["response"]
         assert "['assertion_result'] not on the verifiers State" in caplog.text
+
+
+class TestSharedClientTraceContext:
+    """The cached policy client is shared across rollouts, so its base URL must not name a span.
+
+    Per-run copies may: they live for one rollout. See Gym #4836.
+    """
+
+    SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    def _agent(self, *, observability: bool) -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {
+            OBSERVABILITY_ENABLED_KEY_NAME: observability,
+            "policy_model": {"responses_api_models": {"vllm_model": {"host": "policy", "port": 8000}}},
+        }
+        server_client._build_server_base_url = lambda cfg: "http://policy:8000"
+        return VerifiersAgent(config=config, server_client=server_client)
+
+    def test_cached_client_has_no_trace_context_while_per_run_copies_do(self, monkeypatch) -> None:
+        # Stand in for an exporting tracer with a current span at every call.
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: self.SEGMENT)
+
+        agent = self._agent(observability=False)
+        shared = agent._get_client({"_ng_task_index": 0, "_ng_rollout_index": 0})
+        assert str(shared.client.base_url).rstrip("/") == "http://policy:8000/v1"
+        assert agent._get_client({"_ng_task_index": 1, "_ng_rollout_index": 0}) is shared
+
+        agent = self._agent(observability=True)
+        per_run = agent._get_client({"_ng_task_index": 2, "_ng_rollout_index": 0})
+        assert str(per_run.client.base_url).rstrip("/") == f"http://policy:8000/ng-rollout/2-0{self.SEGMENT}/v1"
+        cached = agent.client_cache["policy_model"]
+        assert str(cached.client.base_url).rstrip("/") == "http://policy:8000/v1"
+
+
+class TestOwnGradingRecord:
+    """The agent runs its rubric itself, so with observability on it returns its own verifier invocation."""
+
+    @staticmethod
+    def _run(funcs, *, observability: bool = True) -> dict:
+        import types
+
+        import verifiers as vf
+
+        rubric = vf.Rubric(funcs=funcs)
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            # Score as verifiers does: each reward function through the rubric, an error scored 0.0.
+            state = {"prompt": [], "completion": [], "answer": "", "info": {}, "input": {}}
+            rewards = [await rubric._call_individual_reward_func(func, state) for func in rubric.funcs]
+            return [{"reward": sum(rewards), "metrics": {}, "completion": [], "trajectory": []}]
+
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="automationbench",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: observability}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+        env = types.SimpleNamespace(rubric=rubric, run_group=fake_run_group)
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch("responses_api_agents.verifiers_agent.app.vf.load_environment", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={
+                    "task_idx": 0,
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+                },
+            )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_a_synchronous_rubric_returns_the_agents_own_scored_grading_record(self) -> None:
+        def aa_headline(state, **kwargs) -> float:
+            return 1.0
+
+        body = self._run([aa_headline])
+        [invocation] = body["ng_verifier_invocations"]
+        assert invocation["status"] == "completed" and invocation["failure_kind"] is None
+        assert invocation["model_calls"] == [] and invocation.get("grading_operations") is None
+        record = invocation["grading_record"]
+        assert (record["verifier"], record["score"], record["verdict"]) == ("automationbench", 1.0, "scored")
+        # Bound to the row as collection saves it: the response and reward of this /run reply.
+        from nemo_gym.trajectory import grading_result_binding
+
+        assert record["result_binding_sha256"] == grading_result_binding(body)
+        assert body["reward"] == 1.0 and body.get("mask_sample") is False
+
+    def test_a_reward_function_that_raises_is_a_grading_fault_not_a_zero_score(self) -> None:
+        def partial_credit(state, **kwargs) -> float:
+            raise KeyError("world_state")
+
+        body = self._run([partial_credit])
+        assert body["mask_sample"] is True and body["failure_kind"] == "verifier_error"
+        assert "partial_credit" in body["failure_reason"]
+        [invocation] = body["ng_verifier_invocations"]
+        assert invocation["failure_kind"] == "verifier_error"
+        assert invocation["grading_record"]["verdict"] == "masked"
+
+    def test_a_rubric_that_may_ask_a_model_is_not_observed(self) -> None:
+        """No invocation at all, as before: one without a record would read as ungraded and be re-verified."""
+
+        async def judge(state, **kwargs) -> float:
+            return 1.0
+
+        body = self._run([judge])
+        assert not body.get("ng_verifier_invocations")
+        assert body["reward"] == 1.0 and body.get("mask_sample") is False
+
+    def test_observability_off_returns_no_verifier_invocation(self) -> None:
+        def aa_headline(state, **kwargs) -> float:
+            return 1.0
+
+        body = self._run([aa_headline], observability=False)
+        assert not body.get("ng_verifier_invocations")
+        assert body["reward"] == 1.0
+
+
+class TestProgrammaticRubricOfRealEnvironments:
+    """verifiers' own environments wrap the rubric in a RubricGroup with their weight-0 monitor rubrics."""
+
+    @staticmethod
+    def _tool_env(*funcs):
+        import verifiers as vf
+        from datasets import Dataset
+
+        return vf.ToolEnv(
+            dataset=Dataset.from_list([{"question": "q", "answer": "a"}]),
+            rubric=vf.Rubric(funcs=list(funcs)),
+            tools=[],
+            max_turns=2,
+        )
+
+    def test_a_tool_env_with_synchronous_reward_functions_is_programmatic_and_watched(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        def correct(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        env = self._tool_env(correct)
+        assert [type(m).__name__ for m in env.rubric.rubrics] == [
+            "Rubric",
+            "MultiTurnMonitorRubric",
+            "ToolMonitorRubric",
+        ]
+        assert _programmatic_rubric(env) is True
+        [watched] = env.rubric.rubrics[0].funcs
+        assert watched._ng_watched_reward_func is True and watched.__wrapped__ is correct
+        # The monitors' own metrics are left as they are.
+        assert all(not getattr(f, "_ng_watched_reward_func", False) for m in env.rubric.rubrics[1:] for f in m.funcs)
+
+    def test_a_tool_env_whose_reward_function_is_async_is_not_programmatic(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        async def judged(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        assert _programmatic_rubric(self._tool_env(judged)) is False
+
+    def test_a_monitor_that_carries_reward_weight_is_not_left_out(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        def correct(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        env = self._tool_env(correct)
+        env.rubric.rubrics[1].weights[0] = 1.0
+        assert _programmatic_rubric(env) is False
+
+
+class TestRolloutErrorFact:
+    """The error a rollout ended on is recorded on the row as a typed fact; the reward and the mask do not change."""
+
+    @pytest.mark.parametrize(
+        "error, expected",
+        [
+            (None, None),
+            ({}, None),
+            (
+                {
+                    "error": "ModelError",
+                    "message": "Error code: 502 - {'detail': 'Bad Gateway'}",
+                    "error_chain_repr": "ModelError(...) -> InternalServerError('Error code: 502')",
+                    "error_chain_str": "ModelError -> InternalServerError",
+                },
+                {"type": "ModelError", "status_code": 502, "kind_candidate": "http_5xx"},
+            ),
+            (
+                {
+                    "error": "ModelError",
+                    "message": "Request timed out.",
+                    "error_chain_repr": "ModelError('Request timed out.') -> APITimeoutError('Request timed out.')",
+                    "error_chain_str": "ModelError -> APITimeoutError",
+                },
+                {"type": "ModelError", "status_code": None, "kind_candidate": "timeout"},
+            ),
+            (
+                {
+                    "error": "ModelError",
+                    "message": "Connection error.",
+                    "error_chain_repr": "ModelError('Connection error.') -> APIConnectionError('Connection error.')",
+                    "error_chain_str": "ModelError -> APIConnectionError",
+                },
+                {"type": "ModelError", "status_code": None, "kind_candidate": "connection"},
+            ),
+            (
+                {
+                    "error": "RateLimitError",
+                    "message": "Error code: 429",
+                    "error_chain_repr": "",
+                    "error_chain_str": "",
+                },
+                {"type": "RateLimitError", "status_code": 429, "kind_candidate": "http_429"},
+            ),
+            (
+                {
+                    "error": "SandboxError",
+                    "message": "sandbox died",
+                    "error_chain_repr": "SandboxError('sandbox died')",
+                    "error_chain_str": "SandboxError",
+                },
+                {"type": "SandboxError", "status_code": None, "kind_candidate": "infra"},
+            ),
+            (
+                {
+                    "error": "EmptyModelResponseError",
+                    "message": "empty",
+                    "error_chain_repr": "EmptyModelResponseError('empty')",
+                    "error_chain_str": "EmptyModelResponseError",
+                },
+                {"type": "EmptyModelResponseError", "status_code": None, "kind_candidate": "model_response"},
+            ),
+            ("sandbox quota exceeded", {"type": None, "status_code": None, "kind_candidate": "other"}),
+        ],
+    )
+    def test_the_fact_types_the_error(self, error, expected) -> None:
+        fact = _rollout_error_fact(error)
+        if expected is None:
+            assert fact is None
+            return
+        assert {key: fact[key] for key in expected} == expected
+        assert set(fact) == {"type", "chain", "status_code", "kind_candidate", "message_head"}
+
+    def test_the_message_head_is_bounded(self) -> None:
+        fact = _rollout_error_fact({"error": "ValueError", "message": "x" * 5000})
+        assert len(fact["message_head"]) == 500
+
+    def _run(self, error, *, call_errors=(), rubric_reward=0.0, **config_options) -> dict:
+        """One rollout whose policy client sees each of ``call_errors`` (an exception raises, anything else returns)
+        before verifiers reports ``error`` as the error the rollout ended on."""
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+            **config_options,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            with patch.object(NeMoRLChatCompletionsClient, "get_native_response", AsyncMock(side_effect=call_errors)):
+                for _ in call_errors:
+                    try:
+                        await client.get_native_response([], "policy", {})
+                    except Exception:
+                        pass
+            return [{"reward": rubric_reward, "metrics": {}, "completion": [], "trajectory": [], "error": error}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    @staticmethod
+    def _http_error(status: int) -> openai.APIStatusError:
+        request = httpx.Request("POST", "http://policy:8000/v1/chat/completions")
+        return openai.APIStatusError(
+            f"Error code: {status} - private-body-marker",
+            response=httpx.Response(status, request=request),
+            body=None,
+        )
+
+    @staticmethod
+    def _ended_on_model_error(status: int | None = None) -> dict:
+        message = f"Error code: {status}" if status else "Request timed out."
+        return {"error": "ModelError", "message": message, "error_chain_str": "ModelError"}
+
+    def test_a_rollout_that_ended_on_an_error_records_it_on_the_row(self) -> None:
+        body = self._run(self._ended_on_model_error(503))
+        assert body["rollout_error"]["kind_candidate"] == "http_5xx" and body["rollout_error"]["status_code"] == 503
+        assert body["response"]["rollout_error"] == body["rollout_error"]
+        # The error text names a status, but no model call reported it: the diagnostic candidate decides nothing.
+        assert body["reward"] == 0.0 and not body.get("mask_sample") and body.get("failure_kind") is None
+
+    def test_a_first_turn_503_without_an_answer_is_a_provider_event_the_rerun_path_acts_on(self) -> None:
+        body = self._run(self._ended_on_model_error(503), call_errors=[self._http_error(503)])
+
+        assert body["mask_sample"] is True and body["reward"] == 0.0
+        assert (
+            body["failure_kind"] == "model_request_error"
+            and body["failure_reason"] == "HTTP 503 from the model server"
+        )
+        assert (body["failure_outcome_action"], body["failure_outcome_attribution"]) == ("retry", "evaluation")
+        # The saved row names its selected event; it is a model-boundary event with its status, stage and cause.
+        report = FailureReportRow.report(body)
+        event = report.events[report.failure_id]
+        assert (event.boundary, event.failure_kind, event.http_status, event.stage) == (
+            "model",
+            "model_request_error",
+            503,
+            "agent",
+        )
+        assert event.details.request_upload_complete is True
+        assert (event.foreign_error.exception_type, event.foreign_error.http_status) == ("openai.APIStatusError", 503)
+        # The SDK's text, which holds the reply body, is not copied.
+        assert "private-body-marker" not in json.dumps(body)
+        # Recovery acts on the saved row alone: it is a masked, evaluation-side result with no answer to keep.
+        assert masked_infrastructure_kind(body) == "model_request_error"
+
+    def test_the_same_503_is_not_rerun_when_the_policy_ends_it_ungraded(self) -> None:
+        policy = StageOutcomePolicyConfig(by_stage={"agent": {"by_status_code": {503: "fail"}}})
+        body = self._run(self._ended_on_model_error(503), call_errors=[self._http_error(503)], outcome_policy=policy)
+
+        assert body["mask_sample"] is True and body["failure_outcome_action"] == "fail"
+        assert masked_infrastructure_kind(body) is None
+
+    def test_a_model_side_rejection_is_counted_as_a_zero(self) -> None:
+        body = self._run(self._ended_on_model_error(400), call_errors=[self._http_error(400)])
+
+        assert (body["reward"], body["mask_sample"], body["failure_kind"]) == (0.0, False, "model_request_error")
+        assert is_policy_counted_zero(body)
+        assert masked_infrastructure_kind(body) is None
+
+    def test_a_counted_zero_is_a_zero_even_when_the_rubric_scored_the_errored_rollout_positive(self) -> None:
+        body = self._run(self._ended_on_model_error(400), call_errors=[self._http_error(400)], rubric_reward=1.0)
+
+        assert (body["reward"], body["mask_sample"], body["failure_outcome_action"]) == (0.0, False, "count_as_zero")
+        assert is_policy_counted_zero(body)
+
+    def test_a_masked_retry_keeps_the_rubric_reward_it_was_given(self) -> None:
+        body = self._run(self._ended_on_model_error(503), call_errors=[self._http_error(503)], rubric_reward=1.0)
+
+        assert body["mask_sample"] is True and body["failure_outcome_action"] == "retry"
+        assert body["reward"] == 1.0
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            StageOutcomePolicyConfig(by_stage={"agent": {"by_status_code": {503: "fail"}}}),
+            {"by_stage": {"agent": {"by_status_code": {503: "fail"}}}},
+        ],
+    )
+    def test_a_partial_policy_override_keeps_the_untouched_default_rules(self, override) -> None:
+        agent_policy = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            outcome_policy=override,
+        ).outcome_policy.by_stage["agent"]
+
+        assert agent_policy.by_status_code[503] == "fail"
+        assert agent_policy.by_status_code[429] == "retry" and agent_policy.by_status_code[400] == "count_as_zero"
+        assert agent_policy.by_failure_kind["model_transport_error"] == "retry"
+
+        body = self._run(self._ended_on_model_error(429), call_errors=[self._http_error(429)], outcome_policy=override)
+        assert body["failure_outcome_action"] == "retry"
+        body = self._run(self._ended_on_model_error(400), call_errors=[self._http_error(400)], outcome_policy=override)
+        assert is_policy_counted_zero(body)
+
+    def test_a_configured_rule_counts_a_server_error_as_a_zero(self) -> None:
+        policy = StageOutcomePolicyConfig(by_stage={"agent": {"by_status_code": {503: "count_as_zero"}}})
+        body = self._run(self._ended_on_model_error(503), call_errors=[self._http_error(503)], outcome_policy=policy)
+
+        assert body["mask_sample"] is False and is_policy_counted_zero(body)
+
+    def test_a_429_is_neither_a_zero_nor_classified_as_a_transport_failure(self) -> None:
+        body = self._run(self._ended_on_model_error(429), call_errors=[self._http_error(429)])
+
+        assert (body["mask_sample"], body["failure_kind"], body["failure_outcome_action"]) == (
+            True,
+            "model_request_error",
+            "retry",
+        )
+        event = FailureReportRow.report(body).events[body["_ng_failure_id"]]
+        assert event.http_status == 429 and event.boundary == "model"
+
+    @pytest.mark.parametrize("status", [429, 408, 425])
+    def test_a_retryable_status_row_is_rerun_by_recovery_on_its_recorded_retry_action(self, status: int) -> None:
+        body = self._run(self._ended_on_model_error(status), call_errors=[self._http_error(status)])
+
+        assert body["mask_sample"] is True and body["failure_outcome_action"] == "retry"
+        # The recorded decision is honored; the attribution is not changed to satisfy the classifier.
+        assert body["failure_kind"] == "model_request_error"
+        assert masked_infrastructure_kind(body) == "model_request_error"
+
+    def test_a_call_that_got_no_reply_is_a_transport_failure_without_a_status(self) -> None:
+        timeout = openai.APITimeoutError(request=httpx.Request("POST", "http://policy:8000/v1/chat/completions"))
+        body = self._run(self._ended_on_model_error(), call_errors=[timeout])
+
+        assert (body["mask_sample"], body["failure_kind"]) == (True, "model_transport_error")
+        event = FailureReportRow.report(body).events[body["_ng_failure_id"]]
+        assert event.http_status is None and event.details.request_upload_complete is None
+        assert event.foreign_error.exception_type == "openai.APITimeoutError"
+
+    def test_a_failed_call_that_a_later_call_recovered_from_does_not_mask_another_error(self) -> None:
+        body = self._run(
+            {"error": "ToolError", "message": "bad tool", "error_chain_str": "ToolError"},
+            call_errors=[self._http_error(503), SimpleNamespace(id="chatcmpl-a", usage=None)],
+        )
+
+        assert body["reward"] == 0.0 and not body.get("mask_sample") and body.get("failure_kind") is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            {"error": "ModelError", "message": "Error code: 400", "error_chain_str": "ModelError"},
+            {"error": "ToolError", "message": "bad tool", "error_chain_str": "ToolError"},
+            {"error": "EmptyModelResponseError", "message": "empty", "error_chain_str": "EmptyModelResponseError"},
+            # Text that mentions a status, or a transport name in the chain, is not evidence of either.
+            {"error": "ToolError", "message": "Error code: 503", "error_chain_str": "ToolError -> TimeoutError"},
+            {"error": "SandboxError", "message": "sandbox died", "error_chain_str": "SandboxError"},
+        ],
+    )
+    def test_an_error_no_model_call_reported_is_still_scored(self, error) -> None:
+        body = self._run(error)
+        assert body["reward"] == 0.0 and not body.get("mask_sample") and body.get("failure_kind") is None
+
+    def test_a_clean_rollout_has_no_field(self) -> None:
+        body = self._run(None)
+        assert "rollout_error" not in body and "rollout_error" not in body["response"]

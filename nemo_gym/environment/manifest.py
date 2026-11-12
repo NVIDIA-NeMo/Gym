@@ -22,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.config_types import ConfigError, Domain
+from nemo_gym.config.config_types import ConfigError, Domain
 
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"

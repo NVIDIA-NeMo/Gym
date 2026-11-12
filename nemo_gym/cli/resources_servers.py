@@ -23,15 +23,15 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.resources_server_registry import discover_resources_servers, read_resources_server_value
+from nemo_gym.environment.resources_server_registry import discover_resources_servers, read_resources_server_value
 
 
 def _inspect_resources_server(name: str, servers: dict, global_config_dict) -> None:

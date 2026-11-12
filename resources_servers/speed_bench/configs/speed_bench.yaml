@@ -5,11 +5,9 @@ speed_bench_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
-      description: Speculative-decoding throughput benchmark. Reads vLLM `/metrics` Prometheus counters before/after generation to compute acceptance length and acceptance rate.
+      description: Speculative-decoding throughput benchmark. Aggregates vLLM per-request acceptance metrics returned by the agent.
       value: Measure inference-time speculative-decoding effectiveness for serving research and regression tests.
-      vllm_base_url: ${policy_base_url}
-      server_type_for_metrics: vllm
-      snapshot_at_init: false
+      metrics_source: response
 
 speed_bench_simple_agent:
   responses_api_agents:

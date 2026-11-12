@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# WMT24++ (no tools): 960 English sentences translated into 9 languages, 8,640 translations, one
+# sample each. Scored by the xCOMET-XXL model.
+#
+#   nemotron_recipes/super-3.5/run.sh wmt24pp
+#
+# Tech report (key_metrics of wmt24pp_wmt_translation_simple_agent):
+#   WMT24pp COMET: xx->xx/comet
+#
+# Set in .env: POLICY_API_KEY, HF_TOKEN
+#
+# Needs the gated scorer model's terms accepted, with the account HF_TOKEN belongs to
+# (https://huggingface.co/Unbabel/XCOMET-XXL), and GPUs for scoring: xCOMET-XXL runs on this
+# machine, one copy per GPU, 43 GB of weights plus the batch (comet_batch_size below). Choosing
+# GPUs: reproducibility.md, "WMT24++".
+#
+# run.sh first sources wmt24pp.setup.sh, which picks the GPUs for scoring and downloads the
+# scorer model once.
+#
+# The published run's served context (32,768 tokens) capped each translation, thinking included.
+# max_output_tokens below sets the same cap, slightly looser as the prompt no longer counts
+# against it, so serve the model as for the other recipes.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/wmt24pp/config.yaml
+
+responses_create_params:
+  max_output_tokens: 32768
+
+prepare_script_args:
+  # The published run's 9 target languages (the benchmark default prepares 55).
+  target_languages: [de_DE, es_MX, fr_FR, it_IT, ja_JP, zh_CN, hi_IN, pt_BR, ko_KR]
+  # wmt24pp.setup.sh downloads the scorer model instead.
+  prefetch_comet: false
+
+wmt24pp_wmt_translation_resources_server:
+  resources_servers:
+    wmt_translation:
+      compute_comet: true
+      # Translations per scoring call: changes memory per GPU, not scores. The published run
+      # used 128; lower it if scoring runs out of memory.
+      comet_batch_size: 16
+      # The published run turned the per-answer language check off (benchmark default: CLD2).
+      language_consistency_backend: null

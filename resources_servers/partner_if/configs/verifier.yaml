@@ -1,0 +1,3 @@
+config_paths:
+  - resources_servers/partner_if/configs/verifier_base.yaml
+  - resources_servers/partner_if/configs/judge.yaml

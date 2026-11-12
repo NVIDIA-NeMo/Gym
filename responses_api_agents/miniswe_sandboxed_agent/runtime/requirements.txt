@@ -1,0 +1,5 @@
+# The native CLI runs outside Gym's MCP v1 environment. LiteLLM's Responses
+# adapter imports its MCP gateway even for ordinary function tools.
+mini-swe-agent==2.4.6
+litellm[mcp]==1.106.0
+mcp==2.2.0
