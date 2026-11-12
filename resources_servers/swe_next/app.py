@@ -34,11 +34,11 @@ import sys
 from pathlib import Path
 from time import time
 from traceback import format_exc
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, BeforeValidator, ConfigDict, JsonValue
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
@@ -61,6 +61,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_next.verification import (
@@ -278,7 +279,10 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
         )
 
     async def seed_session(
-        self, request: Request, body: SWENextSeedSessionRequest | ResourcesSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[SWENextSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> SWENextSeedSessionResponse | ResourcesSeedSessionResponse:
         """Seed an episode session or the existing agent-run sandbox-handle response."""
         if isinstance(body, ResourcesSeedSessionRequest):
