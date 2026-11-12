@@ -2063,6 +2063,21 @@ async def test_status_reports_the_checkpoint_mode_when_no_worker_answers(
     assert (status["kind"], status["mode"]) == ("resources", "restart_only")
 
 
+@pytest.mark.parametrize(("hooks_type", "keeps"), [(LabelledSessionStates, True), (SessionStates, False)])
+async def test_status_reports_whether_the_workers_checkpoints_keep_state_outside_gym(
+    socket_dir: str, hooks_type: type[SessionStates], keeps: bool
+) -> None:
+    def make() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(hooks_type(), "exported"), FastAPI()
+
+    async with coordinated(socket_dir, make) as deployment:
+        status = await dispatch_control(deployment.controller, "status", None)
+
+    # The coordinator answers for the workers: only where their hooks delete such state must a controller release.
+    assert status["status_workers"] == 2
+    assert status["keeps_external_state"] is keeps
+
+
 async def test_a_large_export_arrives_in_chunks_with_every_record(
     socket_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

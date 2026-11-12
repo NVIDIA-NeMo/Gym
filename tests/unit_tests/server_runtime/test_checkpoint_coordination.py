@@ -145,6 +145,21 @@ async def test_discover_orders_participants_and_skips_servers_without_control_ro
     ]
 
 
+async def test_discover_carries_whether_a_server_s_checkpoints_keep_state_outside_gym() -> None:
+    client, recorders, _ = deployment(*FULL)
+    recorders["res"].keeps_external_state = True
+
+    participants = await coordination.discover(client, auth_token=TOKEN)
+
+    # The controller reads here which servers it has to release.
+    assert {member.server_name: member.keeps_external_state for member in participants.members} == {
+        "env": False,
+        "policy": False,
+        "agent": False,
+        "res": True,
+    }
+
+
 async def test_discover_refuses_a_deployment_without_a_policy_model() -> None:
     client, _, _ = deployment(("env", "environment"), ("judge", None))
 
