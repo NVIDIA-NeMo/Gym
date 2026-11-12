@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Original source: https://gitlab-master.nvidia.com/mingjiel/osworld_internal
+# Original source provenance: https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md
 # Revision: 3b775dc538931ead0cb6b4922349da9c6d493dab
 # Original file: webarena/common/eval_snapshots.py
 # Original license: Apache-2.0; Copyright 2024 XLANG NLP Lab.

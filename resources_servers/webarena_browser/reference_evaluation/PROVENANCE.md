@@ -34,9 +34,9 @@ site state is vendored here.
 
 ## Source URL, license and original notices
 
-Source repository: https://gitlab-master.nvidia.com/mingjiel/osworld_internal. Revision: `3b775dc538931ead0cb6b4922349da9c6d493dab` (`nemotron-v3`).
+Source repository and original URL: see the [immutable public import-provenance record](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices). Original revision: `3b775dc538931ead0cb6b4922349da9c6d493dab` (`nemotron-v3`). This permalink identifies the published provenance record, not a new upstream source revision.
 
-The root [LICENSE](https://gitlab-master.nvidia.com/mingjiel/osworld_internal/-/blob/3b775dc538931ead0cb6b4922349da9c6d493dab/LICENSE) at that exact revision is Apache-2.0 and contains `Copyright 2024 XLANG NLP Lab`. The complete original text is retained in `SOURCE_LICENSE`. The pinned tree has no additional LICENSE, COPYING or NOTICE files, and the three original module headers contain no separate copyright notices.
+The root LICENSE at that exact original revision is Apache-2.0 and contains `Copyright 2024 XLANG NLP Lab`; its original locator and verification are retained in the [same immutable public record](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices). The complete original text is retained in `SOURCE_LICENSE`. The pinned tree has no additional LICENSE, COPYING or NOTICE files, and the three original module headers contain no separate copyright notices.
 
 | Original file | Gym file |
 | --- | --- |
