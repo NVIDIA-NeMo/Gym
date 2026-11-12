@@ -35,10 +35,12 @@ from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAP
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    FailureClass,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    OutcomeAction,
     failure_kinds,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
@@ -231,14 +233,24 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
             "target_name": target_name,
         }
         if not out.get("ok"):
-            # An unfinished campaign says nothing about the design, so mask it.
-            kind = failure_kinds.AGENT_TIMEOUT if out.get("error_type") == "Timeout" else failure_kinds.AGENT_RUN_ERROR
+            reason = f"{out.get('error_type')}: {out.get('error')}"
+            if out.get("error_type") == "Timeout":
+                # The campaign ran out of its time: the model's own result, a zero that stays in the denominator.
+                return RnaDesignVerifyResponse(
+                    **base,
+                    reward=0.0,
+                    failure_kind=failure_kinds.AGENT_TIMEOUT,
+                    failure_reason=reason,
+                    failure_outcome_action=OutcomeAction.COUNT_AS_ZERO,
+                    failure_outcome_attribution=FailureClass.MODEL,
+                )
+            # Any other unfinished campaign says nothing about the design, so mask it.
             return RnaDesignVerifyResponse(
                 **base,
                 reward=0.0,
                 mask_sample=True,
-                failure_kind=kind,
-                failure_reason=f"{out.get('error_type')}: {out.get('error')}",
+                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_reason=reason,
             )
 
         result = out["result"]

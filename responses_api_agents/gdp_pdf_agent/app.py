@@ -58,9 +58,11 @@ from nemo_gym.agents.agent_outcome import policy_timeout_failure
 from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import (
+    FailureClass,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    OutcomeAction,
     failure_kinds,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -656,9 +658,16 @@ class GdpPdfAgent(SimpleAgent):
             result.setdefault("verifier_metadata", meta)["pages_truncated"] = pages_truncated
         if terminal_limit and not result.get("mask_sample"):
             result["failure_reason"] = f"GDP.pdf terminal input limit: {terminal_limit}"
-            if self.config.mask_failed_attempts:
+            result["failure_kind"] = _failure_kind(terminal_limit)
+            if not self.config.mask_failed_attempts:
+                # The input never fit the model: its result, a zero that stays in the denominator.
+                result.update(
+                    reward=0.0,
+                    failure_outcome_action=OutcomeAction.COUNT_AS_ZERO,
+                    failure_outcome_attribution=FailureClass.MODEL,
+                )
+            else:
                 result["mask_sample"] = True
-                result["failure_kind"] = _failure_kind(terminal_limit)
                 # NeMo RL versions that predate the top-level field read instance_config.
                 result["instance_config"] = {**(result.get("instance_config") or {}), "mask_sample": True}
         if trajectory is not None:

@@ -68,8 +68,10 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     PROVIDER_OOM_KILLED,
     PROVIDER_UNAVAILABLE,
+    FailureClass,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    OutcomeAction,
     current_model_sampling_segment,
     current_rollout_id,
 )
@@ -308,6 +310,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     mask_sample: bool = False
     failure_kind: Optional[str] = None
     failure_reason: Optional[str] = None
+    failure_outcome_action: Optional[OutcomeAction] = None
+    failure_outcome_attribution: Optional[FailureClass] = None
 
     @property
     def instance_id(self) -> str:
@@ -356,8 +360,14 @@ class SWEBenchMetrics(BaseModel):
 EVAL_TIMEOUT = "swe_agents:eval_timeout"
 
 
+# The agent or the model hit its own limit: a measured policy failure, so it scores 0 and stays in the denominator.
+_MODEL_SIDE_KINDS = frozenset({AGENT_TIMEOUT, AGENT_LIMIT, MODEL_CONTEXT_LIMIT})
+
+
 def _masked_failure(metrics: SWEBenchMetrics) -> Optional[tuple[str, str]]:
-    """Return the failure_kind and failure_reason that mask this sample, or None when its reward counts.
+    """Return the failure_kind and failure_reason of an unusual outcome, or None when the reward is taken as is.
+
+    The caller masks the sample for an evaluation-side kind and scores a model-side kind (`_MODEL_SIDE_KINDS`) 0.
 
     Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not
     reported as a measured policy failure. Max-iteration and context-window runs are masked whether or not
@@ -3980,8 +3990,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
         masked_failure = _masked_failure(persisted_metrics)
         if masked_failure:
-            params.mask_sample = True
             params.failure_kind, params.failure_reason = masked_failure
+            if params.failure_kind in _MODEL_SIDE_KINDS:
+                # The agent's own limit is the model's result: a zero, even if the unfinished patch resolved.
+                params.failure_outcome_action = OutcomeAction.COUNT_AS_ZERO
+                params.failure_outcome_attribution = FailureClass.MODEL
+            else:
+                params.mask_sample = True
 
         trajectories_dir = params.persistent_dir / "trajectories"
         (
@@ -4118,15 +4133,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
 
+            counts_as_zero = instance_config.failure_outcome_action == OutcomeAction.COUNT_AS_ZERO
+
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
-                reward=1.0 if metrics.resolved else 0.0,
+                reward=1.0 if metrics.resolved and not counts_as_zero else 0.0,
                 # Report it on the contract as well; `instance_config.mask_sample` stays
                 # for one release so existing consumers keep working.
                 mask_sample=instance_config.mask_sample,
                 failure_kind=instance_config.failure_kind,
                 failure_reason=instance_config.failure_reason,
+                failure_outcome_action=instance_config.failure_outcome_action,
+                failure_outcome_attribution=instance_config.failure_outcome_attribution,
                 **metrics.model_dump(),
                 instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,

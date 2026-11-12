@@ -3686,6 +3686,61 @@ class TestEvaluatorLaunchFailure:
         assert metrics.eval_launch_failed is False
 
 
+class TestAgentSideFailureScoresZero:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("metrics", "kind", "scored_zero"),
+        [
+            ({"agent_timed_out": True}, AGENT_TIMEOUT, True),
+            ({"agent_error_kind": "max_iteration"}, AGENT_LIMIT, True),
+            ({"agent_error_kind": "context_window"}, MODEL_CONTEXT_LIMIT, True),
+            ({"oom_killed": True}, PROVIDER_OOM_KILLED, False),
+            ({"eval_timed_out": True}, EVAL_TIMEOUT, False),
+        ],
+    )
+    async def test_model_side_kinds_are_zero_and_evaluation_side_kinds_are_masked(
+        self, tmp_path: Path, monkeypatch, metrics: dict, kind: str, scored_zero: bool
+    ) -> None:
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.metrics_fpath.write_text(json.dumps(metrics))
+        report_path = tmp_path / "report.json"
+        # The unfinished agent's patch resolved the tests: that must not count as a pass.
+        report_path.write_text(json.dumps({params.instance_id: {"resolved": True}}))
+        completions_dir = params.trajectories_root / "llm_completions" / params.instance_id
+        completions_dir.mkdir(parents=True)
+        (completions_dir / "001.json").write_text(
+            json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Fix the bug"}],
+                    "provider_specific_fields": {
+                        "prompt_token_ids": [1, 2],
+                        "generation_token_ids": [3, 4],
+                        "generation_log_probs": [-0.1, -0.2],
+                    },
+                    "response": {
+                        "id": "completion-1",
+                        "choices": [{"message": {"role": "assistant", "content": "Fixed"}}],
+                    },
+                    "kwargs": {"tools": []},
+                }
+            )
+        )
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper._sem = asyncio.Semaphore(1)
+        wrapper._vllm_converter = swe_app.ChatCompletionsConverter(return_token_id_information=True)
+        processor = MagicMock()
+        with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=str(report_path)):
+            response = await wrapper._inner_responses(params, processor)
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=response):
+            result = await wrapper.run(swe_app.BaseRunRequest(responses_create_params=params.body))
+
+        assert result.failure_kind == kind
+        assert result.mask_sample is not scored_zero
+        assert result.failure_outcome_action == ("count_as_zero" if scored_zero else None)
+        assert result.failure_outcome_attribution == ("model" if scored_zero else None)
+        assert result.reward == (0.0 if scored_zero else 1.0)
+
+
 @pytest.mark.parametrize(
     ("metrics", "expected_kind"),
     [

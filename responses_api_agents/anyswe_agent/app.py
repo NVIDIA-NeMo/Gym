@@ -41,9 +41,11 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     PROVIDER_UNAVAILABLE,
     FailureBoundary,
+    FailureClass,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    OutcomeAction,
     observe_failure,
 )
 from nemo_gym.sandbox import (
@@ -157,17 +159,9 @@ def _classify_agent_error(error: str) -> Optional[str]:
     return "other" if text.strip() else None
 
 
-def _should_mask_sample(
-    resolved: bool,
-    agent_error_kind: Optional[str],
-    agent_timed_out: bool,
-    error_kind: Optional[str],
-) -> bool:
-    return bool(
-        (resolved and agent_error_kind in ("max_iteration", "context_window"))
-        or agent_timed_out
-        or error_kind in ("eval_timeout", "sandbox")
-    )
+def _should_mask_sample(error_kind: Optional[str]) -> bool:
+    """Mask only a sample whose reward was not measured. The agent's own timeout or limit is a zero, not a mask."""
+    return error_kind in ("eval_timeout", "sandbox")
 
 
 RUNTIME_MISSING = "anyswe_agent:runtime_missing"
@@ -193,26 +187,31 @@ def _setup_command_failed(result: Any) -> bool:
     return result.return_code != 0
 
 
+# The agent or the model hit its own limit: a measured policy failure, scored 0 and kept in the denominator.
+_MODEL_SIDE_KINDS = frozenset({AGENT_TIMEOUT, AGENT_LIMIT, MODEL_CONTEXT_LIMIT})
+
+
 def _masked_failure_kind(
-    resolved: bool,
     agent_error_kind: Optional[str],
     agent_timed_out: bool,
     error_kind: Optional[str],
     sandbox_failure_kind: Optional[str] = None,
 ) -> Optional[str]:
-    """The ``failure_kind`` of a masked sample, or None when ``_should_mask_sample`` does not mask it.
+    """The ``failure_kind`` of a sample that did not simply pass or fail its tests, or None.
 
-    A sandbox failure keeps the kind its event carried and is a ``provider_unavailable`` otherwise.
+    An unmeasured reward (sandbox, eval timeout) comes first and masks the sample. A sandbox failure keeps the kind
+    its event carried and is a ``provider_unavailable`` otherwise. The agent's own timeout or limit is one of
+    ``_MODEL_SIDE_KINDS``: it scores 0 whether or not the unfinished patch resolved the tests.
     """
     if error_kind == "sandbox":
         return sandbox_failure_kind or PROVIDER_UNAVAILABLE
-    if agent_timed_out:
-        return AGENT_TIMEOUT
     if error_kind == "eval_timeout":
         return "anyswe_agent:eval_timeout"
-    if resolved and agent_error_kind == "max_iteration":
+    if agent_timed_out:
+        return AGENT_TIMEOUT
+    if agent_error_kind == "max_iteration":
         return AGENT_LIMIT
-    if resolved and agent_error_kind == "context_window":
+    if agent_error_kind == "context_window":
         return MODEL_CONTEXT_LIMIT
     return None
 
@@ -973,19 +972,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
 
         eval_timed_out = error_kind == "eval_timeout"
-        mask_sample = _should_mask_sample(resolved, agent_error_kind, agent_timed_out, error_kind)
-        failure_kind = _masked_failure_kind(
-            resolved, agent_error_kind, agent_timed_out, error_kind, sandbox_failure_kind
-        )
+        mask_sample = _should_mask_sample(error_kind)
+        failure_kind = _masked_failure_kind(agent_error_kind, agent_timed_out, error_kind, sandbox_failure_kind)
         # The reason names the same failure as the kind, in the precedence _masked_failure_kind uses.
         if error_kind == "sandbox":
             failure_reason = sandbox_failure_reason or "the sandbox failed during the eval command"
-        elif agent_timed_out:
-            failure_reason = f"the agent run timed out after {params.swebench_agent_timeout}s"
         elif error_kind == "eval_timeout":
             failure_reason = eval_timeout_reason or f"the eval run timed out after {params.swebench_tests_timeout}s"
+        elif agent_timed_out:
+            failure_reason = f"the agent run timed out after {params.swebench_agent_timeout}s"
         elif failure_kind is not None:
-            failure_reason = f"the resolved run ended with {agent_error_kind}"
+            failure_reason = f"the agent run ended with {agent_error_kind}"
         else:
             failure_reason = None
         update_metrics(
@@ -1077,13 +1074,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             # which keeps its default here, and pass it once at the top level.
             mask_sample = bool(metrics.mask_sample)
             instance_config.mask_sample = mask_sample
+            counts_as_zero = metrics.failure_kind in _MODEL_SIDE_KINDS and not mask_sample
 
             return AnySweVerifyResponse(
                 responses_create_params=body.responses_create_params.model_dump()
                 | {"input": json.loads(meta["input"]), "tools": [t.model_dump() for t in (response.tools or [])]},
                 response=response,
-                reward=1.0 if metrics.resolved else 0.0,
+                # The agent's own timeout or limit is the model's result, a zero whatever the tests said.
+                reward=1.0 if metrics.resolved and not counts_as_zero else 0.0,
                 mask_sample=mask_sample,
+                failure_outcome_action=OutcomeAction.COUNT_AS_ZERO if counts_as_zero else None,
+                failure_outcome_attribution=FailureClass.MODEL if counts_as_zero else None,
                 **metrics.model_dump(exclude={"mask_sample"}),
                 instance_config=instance_config.model_dump(),
             )

@@ -762,12 +762,13 @@ class TestRun:
         assert list((tmp_path / "rna_design_agent").iterdir()) == []
 
     @pytest.mark.asyncio
-    async def test_a_timeout_is_masked_with_its_own_kind(self, tmp_path: Path) -> None:
+    async def test_a_timeout_is_a_counted_zero_with_its_own_kind(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path, rollout_timeout_s=0.05)
         out = await agent.run(MagicMock(cookies={}), _request("rnainvbench_eterna100_v1", "eterna100_v1_57"))
 
-        assert out.mask_sample is True
+        assert out.mask_sample is False and out.reward == 0.0
         assert out.failure_kind == "agent_timeout"
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("count_as_zero", "model")
 
     @pytest.mark.asyncio
     async def test_concurrent_rollouts_do_not_share_state(self, tmp_path: Path) -> None:

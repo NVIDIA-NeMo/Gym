@@ -884,7 +884,8 @@ class TestRun:
         assert result.response.output == []
         assert result.failure_reason == "GDP.pdf terminal input limit: context"
         assert result.mask_sample is False
-        assert result.failure_kind is None
+        assert result.failure_kind == "model_context_limit"
+        assert result.failure_outcome_action == "count_as_zero"
         assert agent.server_client.post.await_count == 2  # seed_session, verify
 
     @pytest.mark.parametrize("status", [500, 502, 503])
@@ -994,7 +995,8 @@ class TestMaskFailedAttempts:
         result = await self._run(tmp_path, _error("maximum context length", status=400))
         assert result.reward == 0.0
         assert result.mask_sample is False
-        assert result.failure_kind is None
+        assert result.failure_kind == "model_context_limit"
+        assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("count_as_zero", "model")
         assert result.failure_reason == "GDP.pdf terminal input limit: context"
         assert "mask_sample" not in (result.model_extra.get("instance_config") or {})
 
@@ -1013,6 +1015,7 @@ class TestMaskFailedAttempts:
         assert result.mask_sample is True
         assert result.failure_kind == kind
         assert result.model_extra["instance_config"]["mask_sample"] is True
+        assert result.failure_outcome_action is None
         assert result.failure_reason.startswith("GDP.pdf terminal input limit: ")
 
     async def test_a_failed_verification_is_masked_either_way(self, tmp_path: Path) -> None:

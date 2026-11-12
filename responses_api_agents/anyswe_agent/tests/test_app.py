@@ -298,35 +298,32 @@ class TestSandboxAPI:
         assert _classify_agent_error("ContextWindowExceeded") == "context_window"
         assert _classify_agent_error("") is None
 
-    def test_masking_matches_swe_agents(self) -> None:
-        assert not _should_mask_sample(False, None, False, None)
-        assert not _should_mask_sample(False, "max_iteration", False, None)
-        assert _should_mask_sample(True, "max_iteration", False, None)
-        assert _should_mask_sample(True, "context_window", False, None)
-        assert not _should_mask_sample(True, "other", False, None)
-        assert _should_mask_sample(False, None, True, None)
-        assert _should_mask_sample(False, None, False, "eval_timeout")
-        assert _should_mask_sample(False, None, False, "sandbox")
-        assert not _should_mask_sample(False, None, False, "eval_error")
+    def test_only_an_unmeasured_reward_is_masked(self) -> None:
+        assert not _should_mask_sample(None)
+        assert not _should_mask_sample("eval_error")
+        assert _should_mask_sample("eval_timeout")
+        assert _should_mask_sample("sandbox")
 
     @pytest.mark.parametrize(
         "args,kind",
         [
-            ((False, None, False, "sandbox"), "provider_unavailable"),
-            ((False, None, False, "sandbox", "provider_command_outcome_unknown"), "provider_command_outcome_unknown"),
-            ((False, None, True, None), "agent_timeout"),
-            ((False, None, False, "eval_timeout"), "anyswe_agent:eval_timeout"),
-            ((True, "max_iteration", False, None), "agent_limit"),
-            ((True, "context_window", False, None), "model_context_limit"),
-            ((False, None, False, None), None),
-            ((True, "other", False, None), None),
-            ((False, "max_iteration", False, "eval_error"), None),
+            (("max_iteration", False, "sandbox"), "provider_unavailable"),
+            (
+                ("max_iteration", False, "sandbox", "provider_command_outcome_unknown"),
+                "provider_command_outcome_unknown",
+            ),
+            ((None, True, None), "agent_timeout"),
+            ((None, False, "eval_timeout"), "anyswe_agent:eval_timeout"),
+            ((None, True, "eval_timeout"), "anyswe_agent:eval_timeout"),
+            (("max_iteration", False, None), "agent_limit"),
+            (("context_window", False, None), "model_context_limit"),
+            ((None, False, None), None),
+            (("other", False, None), None),
+            (("max_iteration", False, "eval_error"), "agent_limit"),
         ],
     )
-    def test_a_masked_sample_names_its_failure_kind(self, args, kind) -> None:
+    def test_a_sample_names_its_failure_kind(self, args, kind) -> None:
         assert _masked_failure_kind(*args) == kind
-        # A kind is named exactly when the sample is masked.
-        assert (kind is not None) is _should_mask_sample(*args[:4])
 
     def test_dataset_routes(self) -> None:
         assert _dataset_family("princeton-nlp/SWE-bench_Verified") == "swebench"
@@ -491,8 +488,8 @@ class TestExampleData:
 class TestRunReportsMaskSample:
     """`/run` must build a serializable response and carry the masking decision."""
 
-    def _agent(self, *, mask_sample: bool) -> AnySweAgent:
-        metrics = SWEBenchMetrics(resolved=True, mask_sample=mask_sample)
+    def _agent(self, *, mask_sample: bool, failure_kind: str | None = None) -> AnySweAgent:
+        metrics = SWEBenchMetrics(resolved=True, mask_sample=mask_sample, failure_kind=failure_kind)
         instance_config = {
             "problem_info": {"instance_id": "astropy__astropy-12907"},
             "body": {"input": "fix it"},
@@ -548,6 +545,15 @@ class TestRunReportsMaskSample:
 
         assert dumped["mask_sample"] is False
         assert dumped["instance_config"]["mask_sample"] is False
+
+    @pytest.mark.parametrize("kind", ["agent_timeout", "agent_limit", "model_context_limit"])
+    def test_the_agents_own_limit_is_a_counted_zero_even_when_the_patch_resolved(self, kind: str) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=False, failure_kind=kind).run(self._body())).model_dump()
+
+        assert dumped["reward"] == 0.0
+        assert dumped["mask_sample"] is False
+        assert dumped["failure_kind"] == kind
+        assert (dumped["failure_outcome_action"], dumped["failure_outcome_attribution"]) == ("count_as_zero", "model")
 
 
 class TestSandboxGradingFailures:

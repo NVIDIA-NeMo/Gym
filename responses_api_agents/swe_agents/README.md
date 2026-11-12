@@ -667,7 +667,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 ## GRPO masking and failure modes
 
-`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when one of these happens. The verify response carries `mask_sample` too, with a `failure_kind` and `failure_reason` for the first match in this order:
+When one of these happens, the verify response carries a `failure_kind` and `failure_reason` for the first match in this order. The unmeasured ones (the first four) set `mask_sample` (`SWEBenchWrapperInstanceConfig.mask_sample` as well), so downstream RL drops the rollout; the last three are the agent's or model's own result and score 0 with `failure_outcome_action: count_as_zero`, unmasked:
 
 | Condition | `failure_kind` |
 |---|---|
@@ -679,7 +679,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 | The agent ended in a `max_iteration` error | `agent_limit` |
 | The agent ended in a `context_window` error | `model_context_limit` |
 
-Each condition masks regardless of `resolved`. A patch that resolves the tests after the agent hit its iteration limit or context window is accidental.
+The agent timeout, iteration limit and context window score 0 regardless of `resolved`: a patch that resolves the tests after the agent hit one of them is accidental.
 
 Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not reported as a measured policy failure. An eval timeout gets its own `swe_agents:` name because the model's patch can make the tests hang, and so can a slow host.
 

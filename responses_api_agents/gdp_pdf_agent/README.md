@@ -85,7 +85,8 @@ as a `multimodal_history_redacted` gap on the trajectory.
 ## Failed attempts in training
 
 An attempt can end without a gradable answer when the input still does not fit after the backoff
-(a context, image-count or payload limit). It then scores 0 and carries a `failure_reason`.
+(a context, image-count or payload limit). It then scores 0 and carries a `failure_reason`, a `failure_kind`
+(`model_context_limit` or `model_request_error`) and `failure_outcome_action: count_as_zero`.
 Evaluation should count that zero, so `mask_failed_attempts` is off by default. For training the
 zero says nothing about an answer, so set `mask_failed_attempts: true`: such attempts get
 `mask_sample: true` and a `failure_kind` (`model_context_limit` for a context limit,
