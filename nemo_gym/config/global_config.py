@@ -238,6 +238,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "langgraph_agent",
         "kilocode_agent",
         "langchain_deepagents_agent",
+        "kimi_code_agent",
         "mini_swe_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
