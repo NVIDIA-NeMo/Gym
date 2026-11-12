@@ -290,6 +290,19 @@ def staged_attachments(sandbox, payload) -> list[bytes]:
     return [sandbox.files[arg[1:]] for arg in payload["command"] if arg.startswith("@")]
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_helpers_and_extension_are_staged_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, [{"role": "user", "content": "Fix the code"}])
+
+    directory = sandbox.directory
+    assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+    assert (f"{directory}/request_gzip_extension.mjs" in sandbox.files) is gzip_enabled
+    assert (f"{directory}/request_gzip_extension.mjs" in payload["command"]) is gzip_enabled
+
+
 def test_session_attaches_prompt_images_and_declares_image_input(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
