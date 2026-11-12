@@ -120,6 +120,7 @@ class WebArenaClassicEvaluator:
             raise EvaluatorConfigurationError("WEBARENA_JUDGE_API_KEY is required by this WebArena task")
 
         from resources_servers.webarena_browser.reference_evaluation import (
+            build_snapshot_context,
             collect_browser_snapshots_sync,
             collect_snapshots,
             merge_snapshots,
@@ -129,6 +130,8 @@ class WebArenaClassicEvaluator:
             collect_snapshots(collision_plan),
             collect_browser_snapshots_sync(browser_context.page, collision_plan),
         )
+        # Reject an unavailable/misdirected baseline before the agent can act.
+        build_snapshot_context(collision_plan, before, before)
         self._task_key = (task.benchmark, task.task_id)
         self._task_config = task_config
         self._collision_plan = collision_plan

@@ -124,16 +124,23 @@ async def test_dom_capture_disconnect_cannot_create_positive_delta(monkeypatch, 
     spec = {"key": snapshot_target_key(target), "target": target}
     plan = {"snapshot_adapters": {"program_html": {"targets": [spec]}}}
     if asynchronous:
-        page = SimpleNamespace(evaluate=AsyncMock(side_effect=ConnectionError("disconnected")), close=AsyncMock())
+        page = SimpleNamespace(
+            url=target["url"], evaluate=AsyncMock(side_effect=ConnectionError("disconnected")), close=AsyncMock()
+        )
         root = SimpleNamespace(context=SimpleNamespace(new_page=AsyncMock(return_value=page)))
-        monkeypatch.setattr(snapshots, "goto", AsyncMock())
+        monkeypatch.setattr(snapshots, "goto", AsyncMock(return_value=SimpleNamespace(status=200)))
         before = await snapshots.collect_browser_snapshots(root, plan)
     else:
 
         def fail(*args, **kwargs):
             raise ConnectionError("disconnected")
 
-        page = SimpleNamespace(evaluate=Mock(side_effect=fail), goto=Mock(), close=Mock())
+        page = SimpleNamespace(
+            url=target["url"],
+            evaluate=Mock(side_effect=fail),
+            goto=Mock(return_value=SimpleNamespace(status=200)),
+            close=Mock(),
+        )
         root = SimpleNamespace(context=SimpleNamespace(new_page=lambda: page))
         before = snapshots.collect_browser_snapshots_sync(root, plan)
         page.goto.assert_called_once()

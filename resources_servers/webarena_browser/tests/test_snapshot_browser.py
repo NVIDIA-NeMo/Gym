@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import pytest
 from playwright.async_api import Route as AsyncRoute
@@ -65,9 +67,9 @@ CASES = [
 ]
 
 
-def _target(locator: str, expected: str) -> tuple[dict, dict]:
+def _target(locator: str, expected: str, *, url: str = "http://snapshot.test/page") -> tuple[dict, dict]:
     target = {
-        "url": "http://snapshot.test/page",
+        "url": url,
         "locator": locator,
         "required_contents": {"must_include": [expected]},
     }
@@ -255,6 +257,129 @@ def test_sync_invalid_final_dom_in_real_browser_is_inconclusive(chromium, locato
             classic.evaluate_classic_task_sync(config, {}, page)
     finally:
         context.close()
+
+
+NAVIGATION_CASES = [
+    ("before-503", (503, "/page", ""), (200, "/page", "saved\nunrelated"), None),
+    ("before-login", (200, "/login", ""), (200, "/page", "saved\nunrelated"), None),
+    (
+        "before-login-document",
+        (200, "/page", '<form id="login-form"><input type="password"></form>'),
+        (200, "/page", "saved"),
+        None,
+    ),
+    ("healthy-existing", (200, "/page", "saved"), (200, "/page", "saved\nunrelated"), 0),
+    ("healthy-empty", (200, "/page", ""), (200, "/page", "saved"), 1),
+    ("canonical-redirect", (200, "/page/", ""), (200, "/page/", "saved"), 1),
+    ("before-not-found", (404, "/page", "Not found"), (200, "/page", "saved"), 1),
+    ("after-not-found", (200, "/page", "saved"), (404, "/page", "Not found"), 0),
+    ("after-deletion-redirect", (200, "/page", "saved"), (200, "/grid", "Deleted"), 0),
+    ("after-503", (200, "/page", "saved"), (503, "/page", ""), None),
+    ("after-login", (200, "/page", "saved"), (200, "/users/sign_in", ""), None),
+    (
+        "after-login-document",
+        (200, "/page", "saved"),
+        (200, "/page", '<form id="new_user"><input type="password"></form>'),
+        None,
+    ),
+]
+
+
+@pytest.fixture
+def navigation_site():
+    """Serve redirects too: Playwright route handlers only intercept the first URL."""
+    state = {"response": (200, "/page", "")}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, path, body = state["response"]
+            redirect = self.path == "/page" and path != "/page"
+            self.send_response(302 if redirect else status)
+            if redirect:
+                self.send_header("Location", path)
+                payload = b""
+            else:
+                html = f'<main id="content">{body}</main>' if status == 200 else body or "Unavailable"
+                payload = html.encode()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/page", state
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+@pytest.mark.parametrize("name,before,after,expected", NAVIGATION_CASES, ids=[case[0] for case in NAVIGATION_CASES])
+def test_public_snapshot_navigation_with_real_browser(chromium, navigation_site, name, before, after, expected):
+    url, state = navigation_site
+    target, plan = _target("document.querySelector('#content').textContent", "saved", url=url)
+    config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
+    task = _webarena_task(original_metadata=config, task_kwargs={"collision_plan": plan})
+    state["response"] = before
+    context = chromium.new_context()
+    evaluator = WebArenaTaskEvaluator(config=_config())
+    try:
+        page = context.new_page()
+        browser_context = VisualBrowserEvaluationContext(page=page, browser_context=context, evidence=())
+
+        def run():
+            evaluator.prepare(task=task, observation=WebObservation(), browser_context=browser_context)
+            state["response"] = after
+            return evaluator.evaluate(
+                task=task, observation=WebObservation(), final_answer="done", browser_context=browser_context
+            )
+
+        if expected is None:
+            with pytest.raises(EvaluatorInfrastructureError):
+                run()
+        else:
+            result = run()
+            assert result.valid_sample and result.reward == expected
+        assert context.pages == [page]
+    finally:
+        evaluator.close()
+        context.close()
+
+
+@pytest.mark.parametrize("name,before,after,expected", NAVIGATION_CASES, ids=[case[0] for case in NAVIGATION_CASES])
+@pytest.mark.asyncio
+async def test_async_snapshot_navigation_with_real_browser(navigation_site, name, before, after, expected):
+    async with async_playwright() as playwright:
+        executable = playwright.chromium.executable_path
+        if not Path(executable).is_file():
+            pytest.skip("Real-browser regression tests require the qualified Chromium bundle")
+        browser = await playwright.chromium.launch(executable_path=executable, headless=True, args=["--no-sandbox"])
+        try:
+            context = await browser.new_context()
+            url, state = navigation_site
+            target, plan = _target("document.querySelector('#content').textContent", "saved", url=url)
+            config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
+            state["response"] = before
+            page = await context.new_page()
+            captured_before = await snapshots.collect_browser_snapshots(page, plan)
+            state["response"] = after
+            captured_after = await snapshots.collect_browser_snapshots(page, plan)
+            if expected is None:
+                with pytest.raises(EvaluatorInfrastructureError):
+                    snapshots.build_snapshot_context(plan, captured_before, captured_after)
+            else:
+                evaluation_context = snapshots.build_snapshot_context(plan, captured_before, captured_after)
+                score, _ = await classic.evaluate_classic_task(config, {}, page, eval_context=evaluation_context)
+                assert score == expected
+            assert context.pages == [page]
+        finally:
+            await browser.close()
 
 
 @pytest.mark.asyncio

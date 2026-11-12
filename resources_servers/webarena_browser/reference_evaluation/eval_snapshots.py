@@ -14,8 +14,11 @@ import difflib
 import hashlib
 import json
 import logging
+import os
+import re
 from collections import defaultdict
 from typing import Any
+from urllib.parse import SplitResult, parse_qsl, urlsplit
 
 import httpx
 
@@ -32,6 +35,81 @@ from .navigation import goto
 
 
 logger = logging.getLogger(__name__)
+_SNAPSHOT_LOGIN_FORM = """() => document.querySelector(
+    'form#login-form input[type="password"], form#new_user input[type="password"], '
+    + 'form[action$="/login"] input[type="password"], form[action$="/sign_in"] input[type="password"]'
+) !== null"""
+
+
+def _same_snapshot_origin(requested: SplitResult, landed: SplitResult) -> bool:
+    if requested.scheme not in {"http", "https"} or landed.scheme not in {requested.scheme, "https"}:
+        return False
+    ports = [None if url.port == {"http": 80, "https": 443}[url.scheme] else url.port for url in (requested, landed)]
+    return bool(requested.hostname) and (requested.hostname, ports[0]) == (landed.hostname, ports[1])
+
+
+def _snapshot_url_matches(requested_url: str, landed_url: str) -> bool:
+    """Recognize the same resource, including bounded local-site canonical redirects."""
+    requested, landed = urlsplit(requested_url), urlsplit(landed_url)
+    if not _same_snapshot_origin(requested, landed):
+        return False
+    paths = [url.path.rstrip("/") or "/" for url in (requested, landed)]
+    for env_name in ("WA_SHOPPING", "WA_SHOPPING_ADMIN", "WA_REDDIT"):
+        site_url = os.environ.get(env_name)
+        if not site_url:
+            continue
+        site = urlsplit(site_url)
+        prefix = site.path.rstrip("/")
+        if not _same_snapshot_origin(site, requested) or not all(
+            path == prefix or path.startswith(prefix + "/") for path in paths
+        ):
+            continue
+        if env_name == "WA_REDDIT":
+            # A changed post title changes the slug, not the forum/post identity.
+            paths = [re.sub(r"^(/f/[^/]+/\d+)(?:/[^/]+)?$", r"\1", path[len(prefix) :]) for path in paths]
+        else:
+            paths = [re.sub(r"^/index\.php(?:/|$)", "/", path[len(prefix) :]).rstrip("/") or "/" for path in paths]
+        break
+    return paths[0] == paths[1] and sorted(parse_qsl(requested.query, keep_blank_values=True)) == sorted(
+        parse_qsl(landed.query, keep_blank_values=True)
+    )
+
+
+def _validate_snapshot_navigation(record: dict[str, Any], phase: str) -> None:
+    if "navigation" not in record:
+        return  # Retained structured captures predate navigation metadata.
+    navigation = record["navigation"]
+    if not isinstance(navigation, dict):
+        raise EvaluatorInfrastructureError("Malformed snapshot navigation")
+    status, landed_url = navigation.get("status"), navigation.get("url")
+    if type(status) is not int or not 200 <= status <= 599 or not isinstance(landed_url, str):
+        raise EvaluatorInfrastructureError("Missing snapshot navigation response")
+    requested, landed = urlsplit(record["url"]), urlsplit(landed_url)
+    if not _same_snapshot_origin(requested, landed):
+        raise EvaluatorInfrastructureError("Snapshot navigation left the target site")
+    login_path = re.search(r"(?:^|/)(?:login|log_in|sign_in|signin)(?:/|$)", landed.path, re.IGNORECASE)
+    login_query = ("page", "login") in parse_qsl(landed.query)
+    if status >= 500 or status in {401, 403, 408, 425, 429} or login_path or login_query:
+        raise EvaluatorInfrastructureError("Snapshot navigation reached an unavailable or unauthenticated page")
+    if 300 <= status < 400 and status != 304:
+        raise EvaluatorInfrastructureError("Snapshot navigation did not complete")
+    # A missing file before creation is observed absence. After the agent acts,
+    # a 404/410 or same-site redirect can be the task outcome (e.g. deletion).
+    # Neither may be silently converted to an invalid/retried rollout.
+    if phase == "before" and (
+        (status >= 400 and status not in {404, 410}) or not _snapshot_url_matches(record["url"], landed_url)
+    ):
+        raise EvaluatorInfrastructureError("Snapshot baseline did not reach the requested resource")
+
+
+def _snapshot_navigation(page, response, requested_url: str) -> dict[str, Any]:
+    if response is None:
+        raise EvaluatorInfrastructureError("Missing snapshot navigation response")
+    navigation = {"status": response.status, "url": page.url}
+    # Reject service/auth failures before extraction in all four collectors.
+    # Baseline resource identity is checked once the capture phase is known.
+    _validate_snapshot_navigation({"url": requested_url, "navigation": navigation}, "after")
+    return navigation
 
 
 def _stable_key(record: dict[str, Any], preferred_keys: tuple[str, ...]) -> str:
@@ -309,7 +387,10 @@ async def _collect_program_html_snapshots(page, targets: list[dict[str, Any]]) -
     for url, specs in specs_by_url.items():
         snapshot_page = await page.context.new_page()
         try:
-            await goto(snapshot_page, url, wait_until="domcontentloaded", timeout=60000)
+            response = await goto(snapshot_page, url, wait_until="domcontentloaded", timeout=60000)
+            navigation = _snapshot_navigation(snapshot_page, response, url)
+            if await snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
+                raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 target = spec["target"]
                 try:
@@ -320,6 +401,7 @@ async def _collect_program_html_snapshots(page, targets: list[dict[str, Any]]) -
                             "url": target.get("url"),
                             "locator": target.get("locator"),
                             "value": value,
+                            "navigation": navigation,
                         }
                     )
                 except Exception:
@@ -387,7 +469,10 @@ async def _collect_page_image_snapshots(page, queries: list[dict[str, Any]]) -> 
     for url, specs in specs_by_url.items():
         snapshot_page = await page.context.new_page()
         try:
-            await goto(snapshot_page, url, wait_until="domcontentloaded", timeout=60000)
+            response = await goto(snapshot_page, url, wait_until="domcontentloaded", timeout=60000)
+            navigation = _snapshot_navigation(snapshot_page, response, url)
+            if await snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
+                raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 query = spec["query"]
                 try:
@@ -398,6 +483,7 @@ async def _collect_page_image_snapshots(page, queries: list[dict[str, Any]]) -> 
                             "url": query.get("eval_image_url"),
                             "locator": query.get("eval_image_class"),
                             "image_urls": urls,
+                            "navigation": navigation,
                         }
                     )
                 except Exception:
@@ -540,7 +626,10 @@ def _collect_program_html_snapshots_sync(page, targets: list[dict[str, Any]]) ->
     for url, specs in specs_by_url.items():
         snapshot_page = page.context.new_page()
         try:
-            snapshot_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            response = snapshot_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            navigation = _snapshot_navigation(snapshot_page, response, url)
+            if snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
+                raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 target = spec["target"]
                 try:
@@ -551,6 +640,7 @@ def _collect_program_html_snapshots_sync(page, targets: list[dict[str, Any]]) ->
                             "url": target.get("url"),
                             "locator": target.get("locator"),
                             "value": value,
+                            "navigation": navigation,
                         }
                     )
                 except Exception:
@@ -617,7 +707,10 @@ def _collect_page_image_snapshots_sync(page, queries: list[dict[str, Any]]) -> l
     for url, specs in specs_by_url.items():
         snapshot_page = page.context.new_page()
         try:
-            snapshot_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            response = snapshot_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            navigation = _snapshot_navigation(snapshot_page, response, url)
+            if snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
+                raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 query = spec["query"]
                 try:
@@ -628,6 +721,7 @@ def _collect_page_image_snapshots_sync(page, queries: list[dict[str, Any]]) -> l
                             "url": query.get("eval_image_url"),
                             "locator": query.get("eval_image_class"),
                             "image_urls": urls,
+                            "navigation": navigation,
                         }
                     )
                 except Exception:
@@ -714,6 +808,7 @@ def _validate_snapshots(plan: dict[str, Any], snapshots: dict[str, Any], phase: 
         if any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys) or not expected.issubset(keys):
             raise EvaluatorInfrastructureError(f"Missing or malformed {phase} {adapter} target keys")
         for record in records:
+            _validate_snapshot_navigation(record, phase)
             if adapter == "program_html":
                 valid = isinstance(record.get("value"), str)
             else:
