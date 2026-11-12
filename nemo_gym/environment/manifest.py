@@ -18,6 +18,7 @@ from pydantic import (
     FiniteFloat,
     StringConstraints,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -30,12 +31,14 @@ MANIFEST_SCHEMA_ID = "environment-manifest.schema.json"
 _PRIVATE_LICENSE_VALUES = frozenset({"internal", "proprietary", "unknown"})
 SOURCE_PATTERN = r"^(?:(?:https?|ssh|git|file)://\S+|[^@\s]+@[^:\s]+:\S+)$"
 CALLABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
+GITHUB_LOGIN_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 License = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Source = Annotated[str, StringConstraints(strip_whitespace=True, pattern=SOURCE_PATTERN)]
 GitRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"^[^\s]+$")]
 PythonCallable = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CALLABLE_PATTERN)]
+GitHubLogin = Annotated[str, StringConstraints(strip_whitespace=True, pattern=GITHUB_LOGIN_PATTERN)]
 
 
 class EnvironmentKind(StrEnum):
@@ -82,6 +85,11 @@ class PromptSource(StrEnum):
     TEMPLATE = "template"
     PREPARED = "prepared"
     AGENT = "agent"
+
+
+class IntendedUse(StrEnum):
+    EVALUATION = "evaluation"
+    TRAINING = "training"
 
 
 _PROFILE_REQUIRED_FIELDS = {
@@ -144,6 +152,19 @@ class AdoptedFrom(_ManifestModel):
     source: Source
     ref: GitRef
     reconciled: date
+
+
+class ManifestRequirements(_ManifestModel):
+    """What a run needs beyond the model under test; an absent value is unknown."""
+
+    gpu: bool | None = Field(
+        default=None,
+        description="Whether the environment itself needs a GPU, for example to score answers.",
+    )
+    internet: bool | None = Field(
+        default=None,
+        description="Whether a run needs outbound internet access, for example web search or downloads.",
+    )
 
 
 def _profile_schema_conditions() -> list[dict[str, Any]]:
@@ -209,6 +230,16 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             },
             "else": {"properties": {"rollout_driver": {"type": "null"}}},
         },
+        {
+            "not": {
+                "properties": {"setup_of": nonempty_string, "protocol_of": nonempty_string},
+                "required": ["setup_of", "protocol_of"],
+            },
+        },
+        {
+            "if": {"properties": {"kind": {"const": "environment"}}, "required": ["kind"]},
+            "then": {"properties": {"protocol_of": {"type": "null"}}},
+        },
     ]
 
 
@@ -224,6 +255,14 @@ class EnvironmentManifest(_ManifestModel):
     )
 
     name: NonEmptyString
+    setup_of: NonEmptyString | None = Field(
+        default=None,
+        description="Name of the manifest whose tasks and scoring this config runs with another harness or runtime.",
+    )
+    protocol_of: NonEmptyString | None = Field(
+        default=None,
+        description="Name of the benchmark whose tasks this config scores under other prompt, tools or scoring.",
+    )
     version: NonEmptyString = Field(
         description="Version of the resolved composition; Semantic Versioning is recommended."
     )
@@ -241,6 +280,33 @@ class EnvironmentManifest(_ManifestModel):
         description="SPDX license expression, internal, proprietary, or unknown.",
     )
     authors: list[NonEmptyString] = Field(min_length=1, json_schema_extra={"uniqueItems": True})
+    maintainers: list[GitHubLogin] | None = Field(
+        default=None,
+        min_length=1,
+        json_schema_extra={"uniqueItems": True},
+        description="GitHub logins of the people who maintain the environment now.",
+    )
+    intended_use: list[IntendedUse] | None = Field(
+        default=None,
+        min_length=1,
+        json_schema_extra={"uniqueItems": True},
+        description="Whether the environment is meant for evaluation, training or both; unknown when absent.",
+    )
+    training_allowed: bool | None = Field(
+        default=None,
+        description="Whether its data may be used for training; unknown when absent.",
+    )
+    overlaps_with: list[NonEmptyString] | None = Field(
+        default=None,
+        min_length=1,
+        json_schema_extra={"uniqueItems": True},
+        description="Benchmarks whose tasks overlap with this environment's data, so training on it affects them.",
+    )
+    primary_metric: NonEmptyString | None = Field(
+        default=None,
+        description="The key metric that is the environment's headline score.",
+    )
+    requirements: ManifestRequirements | None = None
     reward: Reward
     determinism: Determinism = Determinism.UNKNOWN
 
@@ -265,11 +331,11 @@ class EnvironmentManifest(_ManifestModel):
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
 
-    @field_validator("authors")
+    @field_validator("authors", "maintainers", "intended_use", "overlaps_with")
     @classmethod
-    def validate_unique_authors(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("authors must be unique")
+    def validate_unique_items(cls, value: list[str] | None, info: ValidationInfo) -> list[str] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError(f"{info.field_name} must be unique")
         return value
 
     @field_validator("licensing")
@@ -310,6 +376,12 @@ class EnvironmentManifest(_ManifestModel):
             dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets
         ):
             raise ValueError("a benchmark manifest requires a benchmark dataset")
+        if self.setup_of is not None and self.protocol_of is not None:
+            raise ValueError("a manifest declares setup_of or protocol_of, not both")
+        if self.protocol_of is not None and self.kind != EnvironmentKind.BENCHMARK:
+            raise ValueError("protocol_of is only valid for benchmarks")
+        if self.name in (self.setup_of, self.protocol_of):
+            raise ValueError("a manifest cannot be a setup or protocol of itself")
         return self
 
 

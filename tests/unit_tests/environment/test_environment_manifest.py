@@ -12,6 +12,7 @@ from nemo_gym.config.config_types import ConfigError, Domain
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,
+    IntendedUse,
     ManifestError,
     dump_manifest,
     load_manifest,
@@ -452,3 +453,96 @@ def test_neutral_example_matches_manifest_contract() -> None:
 
     assert manifest.name == "example_environment"
     assert manifest.integration_profile == IntegrationProfile.CUSTOM_GYM_VERIFIER
+
+
+CATALOG_FIELDS = (
+    "setup_of",
+    "protocol_of",
+    "maintainers",
+    "intended_use",
+    "training_allowed",
+    "overlaps_with",
+    "primary_metric",
+    "requirements",
+)
+
+
+def test_catalog_fields_are_unknown_by_default_and_left_out_of_dumps() -> None:
+    manifest = EnvironmentManifest.model_validate(_manifest())
+
+    assert all(getattr(manifest, field) is None for field in CATALOG_FIELDS)
+    dumped = yaml.safe_load(dump_manifest(manifest))
+    assert not set(CATALOG_FIELDS) & set(dumped)
+
+
+def test_catalog_fields_round_trip() -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(
+        name="my_eval/opencode",
+        setup_of="my_eval",
+        maintainers=["alice-nv"],
+        intended_use=["evaluation", "training"],
+        training_allowed=False,
+        overlaps_with=["gpqa"],
+        primary_metric="pass@1",
+        requirements={"gpu": False, "internet": True},
+    )
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.intended_use == [IntendedUse.EVALUATION, IntendedUse.TRAINING]
+    assert manifest.requirements is not None and manifest.requirements.internet is True
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+@pytest.mark.parametrize(
+    ("kind", "changes", "valid"),
+    [
+        ("environment", {"setup_of": "other"}, True),
+        ("benchmark", {"setup_of": "other"}, True),
+        ("benchmark", {"protocol_of": "other"}, True),
+        ("benchmark", {"setup_of": "other", "protocol_of": "other"}, False),
+        ("environment", {"protocol_of": "other"}, False),
+    ],
+)
+def test_setup_and_protocol_links_are_exclusive_and_protocols_are_benchmark_only(
+    backend: str, kind: str, changes: dict, valid: bool
+) -> None:
+    raw = _manifest(kind=kind) | changes
+    if backend == "schema":
+        assert (not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))) is valid
+    elif valid:
+        EnvironmentManifest.model_validate(raw)
+    else:
+        with pytest.raises(ValidationError, match="setup_of or protocol_of|only valid for benchmarks"):
+            EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("field", ["setup_of", "protocol_of"])
+def test_manifest_cannot_link_to_itself(field: str) -> None:
+    raw = _manifest(kind="benchmark")
+    raw[field] = raw["name"]
+
+    with pytest.raises(ValidationError, match="of itself"):
+        EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("maintainers", ["alice", "alice"]),
+        ("maintainers", ["Alice Smith"]),
+        ("maintainers", []),
+        ("intended_use", ["serving"]),
+        ("intended_use", ["training", "training"]),
+        ("overlaps_with", ["gpqa", "gpqa"]),
+        ("training_allowed", "maybe"),
+        ("requirements", {"gpu": True, "vram_gb": 80}),
+    ],
+)
+def test_catalog_fields_reject_invalid_values(field: str, value: object) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError):
+        EnvironmentManifest.model_validate(raw)
