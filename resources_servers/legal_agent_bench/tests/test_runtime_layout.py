@@ -13,19 +13,17 @@ def test_runtime_imports_outside_repository_use_component_packages(tmp_path: Pat
     program = """
 import sys
 from pathlib import Path
-from resources_servers.legal_agent_bench import legal_harbor_agent, prepare, verifier
-from resources_servers.legal_agent_bench.harness.adapters import base, openai_compatible
+from resources_servers.legal_agent_bench import prepare, verifier, environment_prepare
 from resources_servers.legal_agent_bench.lab_harbor import judge, scoring, tools
 
 root = Path(prepare.__file__).parent
 assert str(root / 'vendor' / 'harvey_labs') not in sys.path
-assert legal_harbor_agent.SYSTEM_PROMPT_PATH == root / 'harness' / 'system-prompt.md'
+assert environment_prepare.PACKAGE_DIR == root
 assert prepare.TOOL_RUNNER_SOURCE == root / 'lab_harbor' / 'container_tool_runner.py'
-assert openai_compatible.ModelAdapter is base.ModelAdapter
 assert verifier.score_rubric is scoring.score_rubric
 assert verifier.OpenAICompatibleJudge is judge.OpenAICompatibleJudge
-assert legal_harbor_agent.get_all_tool_definitions is tools.get_all_tool_definitions
-for module in [base, openai_compatible, judge, scoring, tools]:
+assert callable(tools.get_all_tool_definitions)
+for module in [judge, scoring, tools]:
     assert Path(module.__file__).is_relative_to(root)
     assert 'vendor' not in Path(module.__file__).relative_to(root).parts
 vendor = root / 'vendor' / 'harvey_labs'

@@ -11,8 +11,8 @@
 """Harbor entrypoint and result writer for Legal Agent Bench verification.
 
 Generated Harbor tasks place the adjacent ``lab_harbor`` verifier package in
-``/tests``. Repository imports use the adjacent package at the pinned source
-revision.
+``/tests``. Repository imports use the adjacent package with adaptations from the pinned
+source revision.
 """
 
 from __future__ import annotations
@@ -137,6 +137,11 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
         "judge_model_base_url": judge.base_url,
         "judge_parallelism": judge_parallelism,
         "scored_at": datetime.now(timezone.utc).isoformat(),
+        "source_revision": (task_config.get("metadata") or {}).get("lab_source_revision"),
+        "harness_pin": config.get("harness_pin"),
+        "gym_commit": config.get("gym_commit"),
+        "completion": {"status": metrics.get("status"), "finish_reason": metrics.get("finish_reason")},
+        "usage": metrics.get("usage", {}),
     }
     if metrics:
         scores["cost"] = {

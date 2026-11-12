@@ -6,10 +6,9 @@ minimal runtime adaptation of
 `f46ef86e4788545622db25dcffa3aebb7a139929` and distributed under Harvey's
 MIT license in `LICENSE`.
 
-NeMo Gym modifications add an asynchronous protocol adapter for the local Gym
-model server selected by the Harbor agent,
-path-constrained file tools, pagination and telemetry, and a Harbor-oriented
-system prompt. `../../lab_harbor/scoring.py` is an attributed adaptation of upstream
+NeMo Gym adaptations provide path-constrained file tools, pagination, telemetry,
+and a task system prompt. The session agent calls Gym's model server directly.
+`../../lab_harbor/scoring.py` is an attributed adaptation of upstream
 `evaluation/scoring.py`; its module docstring lists each intentional behavioral
 difference. `../../lab_harbor/judge.py` contains the Gym-specific judge transport.
 The agent can also use `bash` within the Harbor task container.
@@ -31,9 +30,6 @@ and protocols. Paths on the right are relative to `legal_agent_bench/`.
 
 | Upstream source | Local adaptation |
 | --- | --- |
-| [`harness/adapters/base.py`](https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/harness/adapters/base.py) | `harness/adapters/base.py`; protocol used by `harness/adapters/openai_compatible.py` |
-| [`harness/adapters/openai.py`](https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/harness/adapters/openai.py) | `harness/adapters/openai_compatible.py` |
-| [`harness/agent_loop.py`](https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/harness/agent_loop.py) | `legal_harbor_agent.py` |
 | [`harness/tools.py`](https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/harness/tools.py) | `lab_harbor/tools.py`, `lab_harbor/container_tool_runner.py` |
 | [`harness/system_prompt.md`](https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/harness/system_prompt.md) | `harness/system-prompt.md` |
 | [`evaluation/scoring.py`](https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/evaluation/scoring.py) | `lab_harbor/scoring.py`; scoring contract used by `verifier.py` |
