@@ -234,7 +234,7 @@
       "source_path": "saas_bench/opencode/worker.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/opencode/worker.py",
       "source_sha256": "6d247edf9efa029bd1981436c0ee734bdda0da06423dab7c1912ff20e0c2dd70",
-      "vendored_sha256": "5b31ed414aa2395242757d0549e4611cf13bdbd6379ac4a8fdf3cb5e225be017",
+      "vendored_sha256": "d0dd6dea1b77213eee729eb7d9a77612cfb9d9b158637ebdb5874e1c92dbdf3c",
       "license": "Apache-2.0",
       "python_ast_unchanged": false,
       "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged."

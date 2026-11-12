@@ -448,6 +448,8 @@ def execute(config: dict) -> dict:
                     mask_sample=diagnostics["unavailable"],
                     failure_kind="saas_bench:verifier"
                     if diagnostics["unavailable"]
+                    else "agent_timeout"
+                    if timed_out
                     else "saas_bench:model_ending"
                     if health["termination"] in model_endings
                     else None,

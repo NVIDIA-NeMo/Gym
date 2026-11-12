@@ -283,7 +283,11 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         elif result.get("failure_kind") == "saas_bench:verifier" or diagnostics.get("unavailable"):
             kind = VERIFIER_ERROR
         else:
-            kind = _MODEL_ENDINGS.get((result.get("execution_health") or {}).get("termination"))
+            kind = (
+                AGENT_TIMEOUT
+                if result.get("timed_out")
+                else _MODEL_ENDINGS.get((result.get("execution_health") or {}).get("termination"))
+            )
             if kind is None and result.get("failure_kind"):
                 kind = AGENT_RUN_ERROR
         if kind is not None:

@@ -220,3 +220,13 @@ def test_judge_fault_wins_over_model_ending_and_requests_row_retry(agent, kind):
     assert response.failure_outcome_action == "retry"
     assert response.failure_outcome_attribution == "evaluation"
     assert response.native_metrics == {}
+
+
+def test_timeout_flag_without_health_keeps_canonical_failure_kind(agent):
+    native = result(score=0.75)
+    native["timed_out"] = True
+    response = agent._response(request(), native)
+    assert response.failure_kind == "agent_timeout"
+    assert response.failure_outcome_action == "count_as_zero"
+    assert response.failure_outcome_attribution == "model"
+    assert response.reward == 0 and response.mask_sample is False

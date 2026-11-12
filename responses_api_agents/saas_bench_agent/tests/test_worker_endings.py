@@ -89,3 +89,5 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
         assert result["verify"]["score"] == 0.5  # Measured state is retained separately from policy zero.
         assert result["reward"] == 0
         assert result["execution_health"]["termination"] == ending
+        if ending == "timeout":
+            assert result["failure_kind"] == "agent_timeout"
