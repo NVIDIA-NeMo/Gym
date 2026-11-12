@@ -6,7 +6,37 @@
 
 - `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
-  adapter, and task-local MCP CLI.
+  adapter, and task-local MCP CLI, in [`mini_swe_agent`](../../responses_api_agents/mini_swe_agent/README.md)
+  agent sessions. The TB4 resources server lends each task sandbox, and
+  `single_agent_turn_legacy` drives the episode and grades it after the agent closes.
+- `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same mini-SWE version
+  through the deprecated `miniswe_sandboxed_agent` over the `legacy_agent` `/run`
+  relay. The two adapters are configured differently, so do not compare their
+  scores as the same measurement.
+
+### Session profile
+
+Rows come from `prepare_sessions.py` (`data/benchmark_sessions.jsonl`): each embeds the
+task's `instruction.md` as one user message and its `[agent].timeout_sec` as
+`metadata.agent_timeout_sec`, read from the pinned package. mini-SWE runs for the
+smaller of that budget and `++tb4_agent_max_timeout_sec` (default 28800 seconds),
+as on the `/run` path. Before lending the sandbox, the resources server writes the
+task's MCP servers and skills directory to `/tmp/.nemo-gym/task.json`, the file the
+Harbor environment server writes, so MCP and skills tasks keep their tools.
+mini-SWE runs as the image's default user; no TB4 task sets `[agent].user`.
+
+With `++tb4_split_sandbox_endpoints=true`, each task sandbox is lent through its
+endpoint pool's provider block (`terminal_bench_4_cpu_sandbox` or
+`terminal_bench_4_gpu_sandbox` in `resources.yaml`), so the agent reconnects to the
+deployment the task runs on. With one deployment, it is lent through
+`terminal_bench_4_sandbox`.
+
+mini-SWE's trajectory is returned in the agent close bundle. This profile writes no
+`<tb4_jobs_dir>/agent` artifacts and has no `tb4_sandbox_model_base_url`: mini-SWE
+calls the Gym model server from inside the sandbox at the server's own address, so a
+loopback address is refused at seed (hence `++use_absolute_ip=true`). Episodes are bounded by
+`++tb4_episode_timeout_sec` (default 54000 seconds: setup, the 8-hour agent
+budget, and the slowest verifier).
 
 ## Artificial Analysis comparison
 
@@ -101,6 +131,9 @@ traffic. Dynamic allowlists and offline Compose are not supported by this adapte
 
 ## Run
 
+The commands are the same for both profiles; replace `terminal_bench_4/miniswe` with
+`terminal_bench_4/miniswe_legacy_agent` for the `/run` relay.
+
 ```sh
 gym eval prepare --benchmark terminal_bench_4/miniswe
 gym eval run --benchmark terminal_bench_4/miniswe \
@@ -109,10 +142,10 @@ gym eval run --benchmark terminal_bench_4/miniswe \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
 ```
 
-mini-SWE's loop runs in the resources process, using its existing sandbox and
-calling the Gym model server. The agent endpoint forwards the collector's run
-request and returns the result; it does not manage task environments.
-MCP tasks also need Python venv/pip
+In the session profile, mini-SWE's runtime is built by the agent server and uploaded
+to the lent sandbox, which needs glibc 2.28+ or musl and about 450 MB in `/tmp`.
+In the relay profile, mini-SWE's loop runs in the resources process, using its existing
+sandbox and calling the Gym model server; MCP tasks there also need Python venv/pip
 for its pinned task-local `mcp==1.29.0` client.
 
 Select tasks during preparation:
@@ -151,8 +184,8 @@ successful model run.
 Infrastructure failures carry `infrastructure_error` and `_ng_failure_class` and
 must be excluded from model-negative aggregates.
 
-The standalone smoke runner starts real Gym HTTP agent, resources, and model
-servers on loopback. The agent runs mini-SWE and calls the Gym model server;
+The standalone smoke runner exercises the relay profile (`miniswe_legacy_agent.yaml`).
+It starts real Gym HTTP agent, resources, and model servers on loopback. The agent runs mini-SWE and calls the Gym model server;
 resources owns task provisioning, grading, and cleanup.
 It requires the existing sandbox endpoint credentials and `OPENAI_API_KEY`.
 

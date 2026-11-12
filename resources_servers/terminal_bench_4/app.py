@@ -87,6 +87,9 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     # Top-level sandbox provider block equivalent to environment.sandbox_provider. Agents that
     # borrow the task sandbox through SandboxAccess (episode sessions) reconnect with it.
     sandbox_provider_ref: str | None = None
+    # With environment.sandbox_split_endpoints, the top-level provider blocks for each endpoint pool ("cpu" and "gpu",
+    # reaching OPENSANDBOX_DOMAIN_CPU and OPENSANDBOX_DOMAIN_GPU): a lent task sandbox is reached through its pool's.
+    split_sandbox_provider_refs: dict[Literal["cpu", "gpu"], str] = Field(default_factory=dict)
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -466,10 +469,17 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         and ``/close_session`` releases whatever remains. Seeds are idempotent per
         ``resources_session_id``; a changed request, or any seed after close, is rejected.
         """
-        if self.config.sandbox_provider_ref is None:
-            raise HTTPException(422, "Set sandbox_provider_ref to lend task sandboxes through SandboxAccess")
         if self.config.environment.sandbox_split_endpoints:
-            raise HTTPException(422, "Split sandbox endpoints cannot be lent through one provider reference")
+            missing = sorted({"cpu", "gpu"} - self.config.split_sandbox_provider_refs.keys())
+            if missing:
+                raise HTTPException(
+                    422,
+                    "Set split_sandbox_provider_refs for "
+                    + ", ".join(missing)
+                    + " to lend task sandboxes from split sandbox endpoints",
+                )
+        elif self.config.sandbox_provider_ref is None:
+            raise HTTPException(422, "Set sandbox_provider_ref to lend task sandboxes through SandboxAccess")
         try:
             identity = TaskIdentity.model_validate(body.task_data)
         except ValidationError as error:
@@ -545,12 +555,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 workdir = await session.environment.agent_workdir()
                 if not PurePosixPath(workdir).is_absolute():
                     raise RuntimeError(f"Task working directory is not absolute: {workdir!r}")
+                await session.environment.write_task_context(workdir)
                 self._raise_if_closed_during_setup(session)
                 session.resources_response = ResourcesSeedSessionResponse(
                     resources_session_id=session.resources_request.resources_session_id,
                     sandbox_access=SandboxAccess(
                         connection=DirectSandboxConnection(
-                            provider_config_ref=self.config.sandbox_provider_ref,
+                            provider_config_ref=self._lent_provider_ref(session),
                             descriptor=session.seed_response.sandbox_descriptor,
                         ),
                         workdir=workdir,
@@ -571,6 +582,12 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 )
                 # A late seed that performs a fenced close's teardown starts its fence's close retry window.
                 self._start_fence_expiry(key, session)
+
+    def _lent_provider_ref(self, session: Session) -> str:
+        """The provider block a borrower reconnects through: its endpoint pool's with split endpoints."""
+        if self.config.environment.sandbox_split_endpoints:
+            return self.config.split_sandbox_provider_refs[session.environment.pool]
+        return self.config.sandbox_provider_ref
 
     def _raise_if_closed_during_setup(self, session: Session) -> None:
         if session.resources_request.resources_session_id in self._fenced_resources:

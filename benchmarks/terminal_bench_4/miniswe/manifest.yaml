@@ -1,11 +1,11 @@
 name: terminal_bench_4/miniswe
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: The pinned 66-task Terminal-Bench 4.0 dataset with the mini-SWE 2.4.6
-  native loop owned by the agent server and separate official verification.
+description: The pinned 66-task Terminal-Bench 4.0 dataset for mini-SWE 2.4.6 agent sessions
+  in the lent task sandbox and separate official verification.
 modality: text
 licensing: unknown
 authors:
@@ -17,15 +17,16 @@ reward:
   higher_is_better: true
 determinism: unknown
 config_path: ../miniswe.yaml
+dataset_owner: terminal_bench_4_miniswe_resources_server
 resources_server: terminal_bench_4
-agent_server: miniswe_sandboxed_agent
+agent_server: mini_swe_agent
 datasets:
 - name: terminal_bench_4
   type: benchmark
-  jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
-  prepare_script: benchmarks/terminal_bench_4/prepare.py
+  jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark_sessions.jsonl
+  prepare_script: benchmarks/terminal_bench_4/prepare_sessions.py
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
-prompt_source: agent
+prompt_source: prepared
 lifecycle: active

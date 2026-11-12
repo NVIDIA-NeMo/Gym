@@ -11,11 +11,16 @@ BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark.jsonl"
 
 
-def prepare(task_names: list[str] | None = None, category: str | None = None) -> Path:
+def load_manifest() -> dict:
     manifest = json.loads((BENCHMARK_DIR / "manifest.json").read_text())
     tasks = manifest["tasks"]
     if len(tasks) != 66 or len({task["name"] for task in tasks}) != 66:
         raise ValueError("Terminal-Bench 4.0 must contain 66 unique tasks")
+    return manifest
+
+
+def select_tasks(manifest: dict, task_names: list[str] | None = None, category: str | None = None) -> list[dict]:
+    tasks = manifest["tasks"]
     if task_names is not None:
         unknown = set(task_names) - {task["name"] for task in tasks}
         if unknown:
@@ -27,21 +32,26 @@ def prepare(task_names: list[str] | None = None, category: str | None = None) ->
         tasks = [task for task in tasks if task["category"] == category]
     if not tasks:
         raise ValueError("The TB4 task selection is empty")
+    return tasks
+
+
+def task_row(manifest: dict, task: dict) -> dict:
+    return {
+        "task_id": f"terminal-bench/{task['name']}",
+        "task_name": f"terminal-bench/{task['name']}",
+        "task_ref": task["ref"],
+        "dataset_ref": manifest["ref"],
+        "responses_create_params": {"input": []},
+    }
+
+
+def prepare(task_names: list[str] | None = None, category: str | None = None) -> Path:
+    manifest = load_manifest()
+    tasks = select_tasks(manifest, task_names, category)
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_PATH.open("w") as output:
         for task in tasks:
-            output.write(
-                json.dumps(
-                    {
-                        "task_id": f"terminal-bench/{task['name']}",
-                        "task_name": f"terminal-bench/{task['name']}",
-                        "task_ref": task["ref"],
-                        "dataset_ref": manifest["ref"],
-                        "responses_create_params": {"input": []},
-                    }
-                )
-                + "\n"
-            )
+            output.write(json.dumps(task_row(manifest, task)) + "\n")
     return OUTPUT_PATH
 
 

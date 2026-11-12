@@ -670,3 +670,57 @@ async def test_protein_submission_resolves_its_assay_url_without_hosts(tmp_path,
     assert "user" not in services["submission"]
     assert services["submission"]["environment"] == {"ASSAY_STATUS": "http://assay:8080/status"}
     assert services["submission"]["x-sandbox"] == {"hosts": [], "resolve_environment": ["ASSAY_STATUS"]}
+
+
+async def test_task_context_is_written_where_a_borrowing_harness_reads_it(tmp_path, monkeypatch):
+    env, box, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        task_config={
+            "environment": {
+                "mcp_servers": [{"name": "browser", "transport": "sse", "url": "http://playwright-mcp:8931/sse"}],
+                "skills_dir": "skills",
+            }
+        },
+    )
+    env.main = box
+    box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None))
+
+    await env.write_task_context("/app")
+
+    command = box.exec.await_args.args[0]
+    assert box.exec.await_args.kwargs["user"] == "root"
+    assert "/tmp/.nemo-gym/task.json" in command and "chmod 644" in command
+    payload = json.loads(command.split("printf %s ", 1)[1].split(" > ", 1)[0].strip("'"))
+    assert payload == {
+        "mcp_servers": [
+            {
+                "name": "browser",
+                "transport": "sse",
+                "url": "http://playwright-mcp:8931/sse",
+                "command": None,
+                "args": [],
+            }
+        ],
+        "skills_dir": "/app/skills",
+    }
+
+
+async def test_task_context_falls_back_to_the_default_user_and_skips_tasks_without_tools(tmp_path, monkeypatch):
+    env, box, *_ = make_environment(tmp_path, monkeypatch, task_config={"environment": {"skills_dir": "/skills"}})
+    env.main = box
+    box.exec = AsyncMock(
+        side_effect=[
+            SimpleNamespace(return_code=1, stdout="", stderr="", error_type="user_switch_unavailable"),
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+        ]
+    )
+    await env.write_task_context("/app")
+    assert [call.kwargs.get("user") for call in box.exec.await_args_list] == ["root", None]
+    assert '"skills_dir": "/skills"' in box.exec.await_args.args[0]
+
+    plain, plain_box, *_ = make_environment(tmp_path / "plain", monkeypatch)
+    plain.main = plain_box
+    plain_box.exec.reset_mock()
+    await plain.write_task_context("/app")
+    plain_box.exec.assert_not_awaited()

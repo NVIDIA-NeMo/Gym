@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import os
+import posixpath
 import shlex
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -27,6 +28,7 @@ from nemo_gym.sandbox import (
     SandboxResources,
     SandboxSpec,
     SupportsSandboxNetwork,
+    exec_as_root,
     get_provider_class,
     resolve_provider_config,
     resolve_provider_metadata,
@@ -37,6 +39,10 @@ from resources_servers.terminal_bench_4.task import Settings, Task, resolve_env
 
 
 ImageRole = Literal["agent", "verifier", "service"]
+# Where a harness borrowing the task sandbox reads the task's MCP servers and skills directory: the same file, in
+# the same shape, as the Harbor environment server writes.
+TASK_CONTEXT_DIR = "/tmp/.nemo-gym"
+TASK_CONTEXT_FILE = f"{TASK_CONTEXT_DIR}/task.json"
 
 
 class TaskImageMap(Settings):
@@ -445,6 +451,34 @@ class Environment:
         if cwd.return_code:
             raise RuntimeError("Unable to determine the task working directory")
         return cwd.stdout.strip()
+
+    async def write_task_context(self, workdir: str) -> None:
+        """Leave the task's MCP servers and skills directory where a harness borrowing the sandbox reads them.
+
+        The ``/run`` seed hands both to the agent server; a borrower gets only SandboxAccess, so they go to
+        ``/tmp/.nemo-gym/task.json`` as the Harbor environment server writes it: ``mcp_servers`` and an absolute
+        ``skills_dir`` (a relative one resolved against ``workdir``; one only a shell resolves is passed as written).
+        Written as root, or as the default user when the sandbox cannot switch users, and readable by any user.
+        """
+        settings = self.task.config.environment
+        if not settings.mcp_servers and not settings.skills_dir:
+            return
+        skills_dir = settings.skills_dir
+        if skills_dir and not (skills_dir.startswith("~") or "$" in skills_dir):
+            skills_dir = posixpath.normpath(posixpath.join(workdir, skills_dir))
+        context = {
+            "mcp_servers": [server.model_dump(mode="json") for server in settings.mcp_servers],
+            "skills_dir": skills_dir,
+        }
+        payload = shlex.quote(json.dumps(context))
+        result = await exec_as_root(
+            self.sandbox(),
+            f"mkdir -p {TASK_CONTEXT_DIR} && printf %s {payload} > {TASK_CONTEXT_FILE} "
+            f"&& (chmod 755 {TASK_CONTEXT_DIR} && chmod 644 {TASK_CONTEXT_FILE} || true)",
+            timeout_s=60,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Could not write {TASK_CONTEXT_FILE}: {result.stderr or result.stdout}")
 
     async def healthcheck(self):
         hc = self.settings.healthcheck

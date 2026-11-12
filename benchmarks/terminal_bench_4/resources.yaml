@@ -1,3 +1,60 @@
+# The provider blocks that harnesses borrowing the task sandbox through SandboxAccess (miniswe.yaml) reconnect
+# through. Each must reach the OpenSandbox deployment the resources server placed the task on: its
+# environment.sandbox_provider, or with tb4_split_sandbox_endpoints the task's endpoint pool.
+terminal_bench_4_sandbox:
+  # One deployment for every task.
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # The harness's supervisor runs for the whole agent budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_4_cpu_sandbox:
+  # Split endpoints: tasks that need no GPU.
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_CPU,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_CPU,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # The harness's supervisor runs for the whole agent budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_4_gpu_sandbox:
+  # Split endpoints: tasks whose agent or verifier needs a GPU.
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_GPU,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_GPU,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # The harness's supervisor runs for the whole agent budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
 terminal_bench_4:
   resources_servers:
     terminal_bench_4:

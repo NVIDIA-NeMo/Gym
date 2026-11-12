@@ -40,6 +40,8 @@ class FakeEnvironment:
     def __init__(self, workdir: str = "/app") -> None:
         self.workdir = workdir
         self.main = None
+        self.pool = "default"
+        self.task_context_workdirs: list[str] = []
         self.uses_compose = False
         self.closed = False
         self.stops = 0
@@ -51,6 +53,9 @@ class FakeEnvironment:
 
     async def agent_workdir(self) -> str:
         return self.workdir
+
+    async def write_task_context(self, workdir: str) -> None:
+        self.task_context_workdirs.append(workdir)
 
     async def stop(self) -> None:
         self.stops += 1
@@ -190,6 +195,8 @@ def test_lends_the_task_sandbox_grades_once_and_releases_on_close(harness) -> No
         assert client.cookies
         assert client.post("/seed_session", json=seed.model_dump(mode="json")).json() == seeded.json()
         assert harness.prepared == 1
+        # The task's MCP servers and skills directory reach the borrower in the sandbox, before it is lent.
+        assert harness.environments[0].task_context_workdirs == ["/app"]
 
         verified = client.post("/verify", json=harness.verify_body())
         assert verified.status_code == 200, verified.text
@@ -559,6 +566,43 @@ async def test_seed_requires_a_provider_reference(tmp_path, monkeypatch) -> None
     with pytest.raises(HTTPException) as error:
         await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
     assert error.value.status_code == 422
+    assert harness.prepared == 0
+
+
+@pytest.mark.parametrize("pool", ["cpu", "gpu"])
+async def test_split_endpoints_lend_through_the_task_pool_provider(tmp_path, monkeypatch, pool) -> None:
+    harness = Harness(
+        tmp_path,
+        monkeypatch,
+        environment={"sandbox_split_endpoints": True},
+        split_sandbox_provider_refs={"cpu": "cpu_sandbox", "gpu": "gpu_sandbox"},
+    )
+    prepare = harness._prepare
+
+    async def prepare_in_pool(session):
+        await prepare(session)
+        session.environment.pool = pool
+
+    monkeypatch.setattr(
+        TerminalBench4ResourcesServer, "_prepare_session", lambda server, session: prepare_in_pool(session)
+    )
+    seeded = await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    assert seeded.sandbox_access.connection.provider_config_ref == f"{pool}_sandbox"
+
+
+@pytest.mark.parametrize("refs", [{}, {"cpu": "cpu_sandbox"}])
+async def test_split_endpoints_require_a_provider_for_each_pool(tmp_path, monkeypatch, refs) -> None:
+    harness = Harness(
+        tmp_path,
+        monkeypatch,
+        sandbox_provider_ref="task_sandbox",
+        environment={"sandbox_split_endpoints": True},
+        split_sandbox_provider_refs=refs,
+    )
+    with pytest.raises(HTTPException) as error:
+        await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    assert error.value.status_code == 422
+    assert "split_sandbox_provider_refs" in error.value.detail
     assert harness.prepared == 0
 
 

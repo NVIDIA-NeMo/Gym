@@ -111,7 +111,7 @@ async def main(args):
     config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
-    profile = OmegaConf.load(root / f"{args.harness}.yaml")
+    profile = OmegaConf.load(root / f"{args.harness}_legacy_agent.yaml")
     del profile["config_paths"]
     config = OmegaConf.merge(config, profile)
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
