@@ -9,8 +9,9 @@ validation.
 
 This is the companion provisioning change for the
 [VS-Bench Gym adapter (draft PR #5977)](https://github.com/NVIDIA-NeMo/Gym/pull/5977).
-The provisioning branch is `vs-bench-runtime-provisioning-20261110` and is
-not yet published. Apply both changes to the same Gym checkout before using
+The provisioning branch is
+[`vs-bench-runtime-provisioning-20261110`](https://github.com/aroshanghias-nvd/Gym/tree/vs-bench-runtime-provisioning-20261110).
+Apply both changes to the same Gym checkout before using
 the source-preparation commands below; this change alone does not provide
 `benchmarks.vs_bench.prepare_patched_source`. The
 [adapter instructions](../README.md) are supplied by the adapter change.
