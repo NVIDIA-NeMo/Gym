@@ -228,6 +228,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "browsecomp_agent",
         "claude_code_agent",
+        "cline_agent",
         "codex_agent",
         "copilot_agent",
         "droid_agent",
@@ -344,6 +345,9 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
 MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
+# A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
+# the rollout's model calls is captured. False or absent leaves capture to the run's token_id_capture block.
+SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
