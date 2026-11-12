@@ -216,7 +216,19 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 ],
             },
         },
-        "pi": {"harness_overrides": context},
+        "pi": {
+            "probe": ".pi:PiProbe",
+            "harness_overrides": context,
+            "probe_overrides": {
+                "tool_output_chars": 20000,
+                "responses": [
+                    *[{"kind": "tool", "input_tokens": 500, "output_tokens": 8} for _ in range(scenario.tool_steps)],
+                    {"kind": "context_overflow"},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
         "kilocode": {
             "harness_overrides": {
                 **context,

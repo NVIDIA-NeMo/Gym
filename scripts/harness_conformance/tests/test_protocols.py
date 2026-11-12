@@ -10,6 +10,7 @@ from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import _settings
+from scripts.harness_conformance.pi import PiProbe
 from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
@@ -183,3 +184,50 @@ def test_miniswe_finishes_using_native_submission_sentinel(tmp_path):
     assert execution.returncode == 0
     assert execution.stdout == f"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n{ANSWER}\n"
     assert probe.finished and probe.finish_call["id"] == call["call_id"]
+
+
+def test_pi_overflow_preserves_error_and_resumes_scripted_replies(tmp_path):
+    scenario = replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=2)
+    settings = _settings("pi", tmp_path, 30, scenario)
+    probe = PiProbe(scenario, tmp_path, harness="pi", **settings.probe_overrides)
+    body = {
+        "model": "probe",
+        "messages": [{"role": "user", "content": "Run checks"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"properties": {"command": {"type": "string"}}}},
+            }
+        ],
+    }
+    with TestClient(probe.model_app()) as client:
+        for _ in range(scenario.tool_steps):
+            response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+            assert response.status_code == 200
+            message = response.json()["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            execution = subprocess.run(
+                json.loads(call["function"]["arguments"])["command"],
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert execution.stdout == "x" * 20000 + probe.tool_calls[-1]["token"]
+            body["messages"].extend(
+                [message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}]
+            )
+        overflow = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+        assert overflow.status_code == 400
+        assert overflow.json()["error"]["code"] == "context_length_exceeded"
+        assert not probe.finished and not probe.compaction_response_ids
+        assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
+        summary = client.post("/ng-rollout/0-0/v1/chat/completions", json={**body, "messages": []})
+        assert summary.json()["choices"][0]["message"]["content"] == probe.compaction_summary
+        body["messages"] = [{"role": "user", "content": probe.compaction_summary}]
+        final = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+        assert final.json()["choices"][0]["message"]["content"] == ANSWER
+        assert client.post("/ng-rollout/0-0/v1/chat/completions", json=body).status_code == 409
+    captures = [json.loads(line) for line in (tmp_path / "capture/0-0.capture.jsonl").read_text().splitlines()]
+    assert [c["response"] for c in captures] == [a["response"] for a in probe.attempts]
+    assert [a["status_code"] for a in probe.attempts] == [200, 200, 400, 200, 200, 409]
