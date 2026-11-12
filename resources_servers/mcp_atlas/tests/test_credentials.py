@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym import NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
 from resources_servers.mcp_atlas.credentials import (
@@ -20,6 +21,9 @@ from resources_servers.mcp_atlas.tests.test_app import judge_client, make_server
 
 
 ROOT = Path(__file__).resolve().parents[3]
+CLEAN_APPTAINER_PROVIDER = {
+    "apptainer": {"create": {"extra_start_args": ["--cleanenv"]}, "exec": {"extra_exec_args": ["--cleanenv"]}}
+}
 
 
 def agent_config(path: Path, **dataset_fields) -> dict:
@@ -69,6 +73,11 @@ def test_unknown_enabled_server_cannot_bypass_credential_validation() -> None:
         task_environment({}, ["unknown"])
 
 
+def test_empty_enabled_servers_cannot_select_upstream_auto_mode() -> None:
+    with pytest.raises(CredentialConfigurationError, match="nonempty"):
+        task_environment({}, [])
+
+
 def test_dataset_preflight_ignores_unrelated_agents_and_reads_required_servers(tmp_path) -> None:
     source = tmp_path / "tasks.jsonl"
     source.write_text(json.dumps({"verifier_metadata": {"servers": ["exa", "weather"]}}) + "\n")
@@ -96,6 +105,132 @@ def test_missing_requested_dataset_is_rejected_but_declared_prepare_is_explicitl
     assert required.deferred_inputs == (source,)
 
 
+def test_dataset_inventory_includes_bound_resource_and_agent_declarations(tmp_path) -> None:
+    own = tmp_path / "own.jsonl"
+    own.write_text(json.dumps({"verifier_metadata": {"servers": ["notion"]}}) + "\n")
+    agent = tmp_path / "agent.jsonl"
+    agent.write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
+    config = agent_config(agent)
+    config["mcp_atlas"] = {"resources_servers": {"mcp_atlas": {"datasets": [{"jsonl_fpath": str(own)}]}}}
+    config["unrelated"] = {
+        "resources_servers": {"mcp_atlas": {"datasets": [{"jsonl_fpath": str(tmp_path / "absent.jsonl")}]}}
+    }
+    required = configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
+    assert required.servers == {"exa", "notion"}
+    assert required.deferred_inputs == ()
+
+
+@pytest.mark.parametrize("materialized,canonical", [(False, False), (False, True), (True, False), (True, True)])
+def test_dataset_inventory_accepts_supported_task_containers(tmp_path, materialized: bool, canonical: bool) -> None:
+    metadata = {"verifier_metadata": {"servers": ["exa"]}}
+    task_input = {"task_data": metadata} if canonical else metadata
+    row = (
+        {"task_id": {"taskset": "mcp_atlas", "task_id": "task"}, "task_input": task_input}
+        if materialized
+        else task_input
+    )
+    source = tmp_path / "tasks.jsonl"
+    source.write_text(json.dumps(row) + "\n")
+    required = configured_dataset_servers(agent_config(source), resources_server="mcp_atlas", root=tmp_path)
+    assert required.servers == {"exa"}
+
+
+@pytest.mark.parametrize("duplicate_equal", [True, False])
+def test_dataset_inventory_preserves_canonical_task_field_conflict_rules(tmp_path, duplicate_equal: bool) -> None:
+    metadata = {"servers": ["exa"]}
+    canonical = metadata if duplicate_equal else {"servers": ["exa"], "claims": ["different"]}
+    source = tmp_path / "tasks.jsonl"
+    source.write_text(
+        json.dumps({"verifier_metadata": metadata, "task_data": {"verifier_metadata": canonical}}) + "\n"
+    )
+    if duplicate_equal:
+        assert configured_dataset_servers(
+            agent_config(source), resources_server="mcp_atlas", root=tmp_path
+        ).servers == {"exa"}
+    else:
+        with pytest.raises(CredentialConfigurationError, match="conflicting task_data fields: verifier_metadata"):
+            configured_dataset_servers(agent_config(source), resources_server="mcp_atlas", root=tmp_path)
+
+
+@pytest.mark.parametrize("task_input", [None, {"task_data": None}])
+def test_dataset_inventory_rejects_malformed_materialized_containers(tmp_path, task_input: object) -> None:
+    source = tmp_path / "tasks.jsonl"
+    source.write_text(
+        json.dumps({"task_id": {"taskset": "mcp_atlas", "task_id": "task"}, "task_input": task_input}) + "\n"
+    )
+    with pytest.raises(CredentialConfigurationError, match="must be an object"):
+        configured_dataset_servers(agent_config(source), resources_server="mcp_atlas", root=tmp_path)
+
+
+def test_dataset_inventory_uses_controller_precedence_after_worker_cwd_and_import_roots_change(
+    monkeypatch, tmp_path
+) -> None:
+    controller = tmp_path / "controller"
+    extra = tmp_path / "extra"
+    component = tmp_path / "component"
+    worker = component / "resources_servers" / "mcp_atlas"
+    worker.mkdir(parents=True)
+    for directory, server in [(controller, "notion"), (extra, "exa"), (component, "github"), (worker, "weather-data")]:
+        directory.mkdir(exist_ok=True)
+        (directory / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": [server]}}) + "\n")
+    monkeypatch.chdir(worker)
+    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(component))
+    monkeypatch.setenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, json.dumps([str(extra), str(controller), str(component)]))
+    required = configured_dataset_servers(
+        agent_config(Path("tasks.jsonl")), resources_server="mcp_atlas", root=component
+    )
+    assert required.servers == {"exa"}
+    monkeypatch.setenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, json.dumps([str(controller), str(component)]))
+    assert configured_dataset_servers(
+        agent_config(Path("tasks.jsonl")), resources_server="mcp_atlas", root=component
+    ).servers == {"notion"}
+
+
+def test_dataset_inventory_missing_prepared_input_keeps_controller_origin(monkeypatch, tmp_path) -> None:
+    origin = tmp_path / "controller"
+    origin.mkdir()
+    monkeypatch.setenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, json.dumps([str(origin)]))
+    config = agent_config(Path("pending.jsonl"), prepare_script="prepare.py")
+    required = configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
+    assert required.servers == frozenset()
+    assert required.deferred_inputs == (origin / "pending.jsonl",)
+    config["agent"]["responses_api_agents"]["simple_agent"]["datasets"][0].pop("prepare_script")
+    with pytest.raises(CredentialConfigurationError, match="absolute resource-host-visible.*--search-dir"):
+        configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
+
+
+def test_dataset_inventory_does_not_fall_through_a_shadowing_directory(monkeypatch, tmp_path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    (first / "tasks.jsonl").mkdir(parents=True)
+    second.mkdir()
+    (second / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
+    monkeypatch.setenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, json.dumps([str(first), str(second)]))
+    with pytest.raises(CredentialConfigurationError, match="dataset is not readable.*absolute resource-host-visible"):
+        configured_dataset_servers(
+            agent_config(Path("tasks.jsonl"), prepare_script="prepare.py"), resources_server="mcp_atlas", root=tmp_path
+        )
+
+
+def test_dataset_inventory_direct_call_uses_explicit_origin(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, raising=False)
+    (tmp_path / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
+    required = configured_dataset_servers(
+        agent_config(Path("tasks.jsonl")), resources_server="mcp_atlas", root=tmp_path
+    )
+    assert required.servers == {"exa"}
+
+
+@pytest.mark.parametrize("snapshot", ["not-json", '["relative"]'])
+def test_invalid_inherited_snapshot_explains_how_to_clear_launching_environment(
+    monkeypatch, tmp_path, snapshot
+) -> None:
+    (tmp_path / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
+    monkeypatch.setenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, snapshot)
+    with pytest.raises(CredentialConfigurationError, match="unset NEMO_GYM_INPUT_ROOTS in the launching environment"):
+        configured_dataset_servers(agent_config(Path("tasks.jsonl")), resources_server="mcp_atlas", root=tmp_path)
+
+
 def test_actual_five_examples_require_no_service_credential_at_startup(monkeypatch, tmp_path) -> None:
     for name in SERVICE_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
@@ -106,7 +241,7 @@ def test_actual_five_examples_require_no_service_credential_at_startup(monkeypat
     assert not {name for server in required.servers for name in SERVER_CREDENTIALS[server]}
     image = tmp_path / "development.sif"
     image.touch()
-    server = make_server("", client, sandbox_image=str(image), sandbox_provider={"apptainer": {}})
+    server = make_server("", client, sandbox_image=str(image), sandbox_provider=CLEAN_APPTAINER_PROVIDER)
     assert server._pool is not None
     assert task_environment(server._pool.sandbox_env, sorted(required.servers)) == {}
 
@@ -121,7 +256,7 @@ def test_startup_rejects_missing_actual_dataset_credentials(monkeypatch, tmp_pat
     image = tmp_path / "development.sif"
     image.touch()
     with pytest.raises(ValueError, match="GITHUB_TOKEN"):
-        make_server("", client, sandbox_image=str(image), sandbox_provider={"apptainer": {}})
+        make_server("", client, sandbox_image=str(image), sandbox_provider=CLEAN_APPTAINER_PROVIDER)
 
 
 @pytest.mark.parametrize("name", ["SLACK_MCP_XOXC_TOKEN", "OPENSANDBOX_API_KEY", "INFERENCE_API_KEY", "NVAUTH_TOKEN"])
@@ -189,5 +324,5 @@ def test_startup_error_does_not_dump_other_credentials_from_the_real_client_conf
     image = tmp_path / "development.sif"
     image.touch()
     with pytest.raises(ValueError, match="GITHUB_TOKEN") as rejected:
-        make_server("", client, sandbox_image=str(image), sandbox_provider={"apptainer": {}})
+        make_server("", client, sandbox_image=str(image), sandbox_provider=CLEAN_APPTAINER_PROVIDER)
     assert "fake model credential sentinel" not in str(rejected.value)

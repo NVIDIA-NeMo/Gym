@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
-import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
-from aiohttp import web
 from fastapi import HTTPException
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
@@ -29,6 +27,14 @@ from resources_servers.mcp_atlas.tests.fake_agent_environment import FakeAgentEn
 from resources_servers.mcp_atlas.tests.test_sandbox import ExecSandbox, FakeSandbox, pool
 from resources_servers.mcp_atlas.tests.test_verifier import message, response
 from tests.helpers.reverification import build_reverification_payload
+
+
+APPTAINER_PROVIDER = {
+    "apptainer": {
+        "create": {"extra_start_args": ["--cleanenv"]},
+        "exec": {"extra_exec_args": ["--cleanenv"]},
+    }
+}
 
 
 TOOLS = ["calculator_calculate", "github_get_repository", "met-museum_get-museum-object"]
@@ -135,7 +141,7 @@ def test_apptainer_requires_explicit_development_mode(tmp_path) -> None:
             "",
             judge_client(),
             sandbox_image=str(image),
-            sandbox_provider={"apptainer": {}},
+            sandbox_provider=APPTAINER_PROVIDER,
             sandbox_development_mode=False,
         )
 
@@ -272,7 +278,8 @@ async def test_resolved_provider_stages_cache_defaults_and_preserves_file_overri
     before = dict(requested_files) if requested_files is not None else None
     overrides = {} if files_mode == "omitted" else {"sandbox_files": requested_files}
     client = judge_client()
-    client.global_config_dict = {"runtime": {provider_name: {}}}
+    provider = APPTAINER_PROVIDER if provider_name == "apptainer" else {provider_name: {}}
+    client.global_config_dict = {"runtime": provider}
     image = "ghcr.io/scaleapi/mcp-atlas:1.2.7"
     options = {"network_policy": {"defaultAction": "deny", "egress": []}}
     if provider_name == "apptainer":
@@ -290,7 +297,7 @@ async def test_resolved_provider_stages_cache_defaults_and_preserves_file_overri
         service_env_names=[],
         **overrides,
     )
-    assert server._pool.sandbox_provider == {provider_name: {}}
+    assert server._pool.sandbox_provider == provider
     specs = []
 
     def runtime(provider, spec):
@@ -449,7 +456,6 @@ async def test_model_tool_errors_are_scored_instead_of_masked(environment, statu
             "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: "
             "HTTP 429 Too Many Requests",
         ),
-        (200, "Error: HTTP 502 Bad Gateway"),
     ],
 )
 async def test_explicit_upstream_failures_still_mask(environment, status: int, text: str) -> None:
@@ -470,15 +476,17 @@ async def test_explicit_upstream_failures_still_mask(environment, status: int, t
     ("status", "text"),
     [
         (401, "authentication rejected"),
+        (401, "Failed to call tool: HTTP 403 Forbidden"),
+        (401, "Failed to call tool: HTTP 403: API rate limit exceeded for synthetic account"),
         (403, "insufficient scope"),
-        (500, "Failed to call tool: HTTP 403 Forbidden"),
+        (500, "Failed to call tool: HTTP 403 Forbidden: insufficient scope"),
         (500, "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: 401"),
-        (200, "Error: Unauthorized " + "long diagnostic " * 200),
-        (200, "Error: HTTP 401 Unauthorized " + "long diagnostic " * 200),
     ],
-    ids=["401", "403", "wrapped403", "nested401", "longUnauthorized", "long401"],
+    ids=["401", "outer401-conflicting403", "outer401-conflicting-rate", "403", "wrapped403", "nested401"],
 )
-async def test_auth_failure_is_a_sticky_nonretryable_configuration_rejection(environment, status, text) -> None:
+async def test_auth_failure_rejects_resources_until_close_without_calling_tools_or_judge(
+    environment, status, text, caplog
+) -> None:
     env, url = environment
     env.results["github_get_repository"] = (
         status,
@@ -493,10 +501,16 @@ async def test_auth_failure_is_a_sticky_nonretryable_configuration_rejection(env
         assert rejected.value.status_code == 422
         assert (
             rejected.value.detail
-            == "MCP-Atlas authentication failed for github_get_repository; check credentials/scopes"
+            == "MCP-Atlas authentication failed for github_get_repository; check credentials/scopes. "
+            "The environment is unavailable; give your final answer."
         )
         assert text not in rejected.value.detail
     assert len(env.calls) == 1
+    diagnostics = [
+        record.getMessage() for record in caplog.records if record.name == MCPAtlasResourcesServer.__module__
+    ]
+    assert len(diagnostics) == 1 and "give your final answer" in diagnostics[0]
+    assert text not in diagnostics[0]
     for _ in range(2):
         with pytest.raises(HTTPException) as rejected:
             await judge_failsafe(server.verify)(http_request(), verify_body("answer"))
@@ -528,53 +542,24 @@ async def test_bad_seed_metadata_is_rejected_before_provider_allocation(field, v
     provider.start.assert_not_awaited()
 
 
-async def test_mcp_returned_program_deadline_is_scored_after_real_process_execution() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Failed to call tool: Timed out running the program",
+        "Failed to call tool 'mcp-code-executor_execute_code': 500: Tool 'mcp-code-executor_execute_code' execution failed: Execution timed out",
+    ],
+)
+async def test_returned_program_deadline_is_scored_at_the_tool_response_boundary(text) -> None:
+    # These are controlled error envelopes, not claims about the installed executor's deadline behavior.
     code_tool = "mcp-code-executor_execute_code"
-
-    class ProgramEnvironment(FakeAgentEnvironment):
-        timed_out = False
-
-        async def _call_tool(self, request: web.Request) -> web.Response:
-            payload = await request.json()
-            self.calls.append(payload)
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-c",
-                payload["tool_args"]["code"],
-                env={},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                # Confirm execution started before applying the program's runtime budget.
-                assert process.stdout is not None
-                assert await asyncio.wait_for(process.stdout.readline(), 2) == b"running\n"
-                try:
-                    await asyncio.wait_for(process.wait(), 0.05)
-                except asyncio.TimeoutError:
-                    self.timed_out = True
-                    process.kill()
-                    await process.communicate()
-                    # The pinned bridge returns MCP tool errors through HTTP500 text. This stand-in
-                    # supplies a real program timeout, without claiming the pinned package's exact text.
-                    return web.json_response(
-                        {"detail": "Failed to call tool: Timed out running the program"}, status=500
-                    )
-            finally:
-                if process.returncode is None:
-                    process.kill()
-                    await process.communicate()
-            raise AssertionError("test program must outlive its configured deadline")
-
-    env = ProgramEnvironment([code_tool], {})
+    env = FakeAgentEnvironment([code_tool], {code_tool: (500, {"detail": text})})
     url = await env.start()
     try:
-        client = judge_client("not_fulfilled", "not_fulfilled")
-        server = make_server(url, client)
+        server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"))
         await seed(server, metadata={**META, "enabled_tools": [code_tool], "servers": ["mcp-code-executor"]})
-        await server.call_tool(http_request(), code_tool, {"code": "print('running', flush=True)\nwhile True: pass"})
+        assert text in await server.call_tool(http_request(), code_tool, {"code": "while True: pass"})
         result = await server.verify(http_request(), verify_body("wrong answer"))
-        assert env.timed_out and len(env.calls) == 1
+        assert len(env.calls) == 1
         assert result.reward == 0 and result.mask_sample is False and result.service_errors == []
     finally:
         await env.stop()
@@ -1032,7 +1017,13 @@ async def test_retirement_drops_only_local_state_for_a_shared_development_enviro
 def test_provider_configuration_resolves_defaults_and_metadata(tmp_path, named: bool) -> None:
     image = tmp_path / "atlas.sif"
     image.touch()
-    block = {"apptainer": {"create": {"apply_resource_limits": False}}, "default_metadata": {"team": "atlas"}}
+    provider = {
+        "apptainer": {
+            "create": {"apply_resource_limits": False, "extra_start_args": ["--cleanenv"]},
+            "exec": {"extra_exec_args": ["--cleanenv"]},
+        }
+    }
+    block = {**provider, "default_metadata": {"team": "atlas"}}
     client = judge_client()
     client.global_config_dict = {"sandbox": block}
     config = MCPAtlasResourcesServerConfig(
@@ -1046,7 +1037,7 @@ def test_provider_configuration_resolves_defaults_and_metadata(tmp_path, named: 
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
     )
     server = MCPAtlasResourcesServer(config=config, server_client=client)
-    assert server._pool.sandbox_provider == {"apptainer": {"create": {"apply_resource_limits": False}}}
+    assert server._pool.sandbox_provider == provider
     assert server._pool.sandbox_metadata == {"team": "atlas"}
 
 
@@ -1076,3 +1067,188 @@ async def test_judge_failsafe_preserves_environment_snapshot(environment, servic
     assert again.tool_calls == 1
     assert again.mask_sample is service_failure
     assert again.service_errors == saved["service_errors"]
+
+
+@pytest.mark.parametrize(
+    "tool,servers",
+    [
+        ("filesystem_read_file", ["filesystem"]),
+        ("mcp-code-executor_execute_code", ["mcp-code-executor"]),
+        ("github_get_repository", ["github"]),
+    ],
+)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Error: HTTP 401 Unauthorized",
+        "Error: Forbidden",
+        "Error: HTTP 502 Bad Gateway",
+        "Error: Unauthorized " + "diagnostic " * 300,
+    ],
+)
+async def test_successful_tool_content_is_not_interpreted_as_a_failure(tool, servers, text) -> None:
+    env = FakeAgentEnvironment([tool], {tool: (200, [{"type": "text", "text": text}])})
+    url = await env.start()
+    try:
+        client = judge_client("not_fulfilled", "not_fulfilled")
+        server = make_server(url, client)
+        await seed(server, metadata={**META, "servers": servers, "enabled_tools": [tool]})
+        assert await server.call_tool(http_request(), tool, {}) == text
+        result = await server.verify(http_request(), verify_body("wrong answer"))
+        assert not result.mask_sample and result.reward == 0 and result.service_errors == []
+        assert len(env.calls) == 1 and client.post.await_count == 2
+    finally:
+        await env.stop()
+
+
+@pytest.mark.parametrize(
+    "tool,server_name",
+    [
+        ("mcp-code-executor_execute_code", "mcp-code-executor"),
+        ("filesystem_read_file", "filesystem"),
+    ],
+)
+async def test_program_and_file_errors_do_not_claim_service_authentication(tool, server_name) -> None:
+    text = f"Failed to call tool '{tool}': 500: Tool '{tool}' execution failed: HTTP 403 Forbidden"
+    env = FakeAgentEnvironment([tool], {tool: (500, {"detail": text})})
+    url = await env.start()
+    try:
+        server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"))
+        await seed(server, metadata={**META, "servers": [server_name], "enabled_tools": [tool]})
+        assert text in await server.call_tool(http_request(), tool, {})
+        result = await server.verify(http_request(), verify_body("wrong answer"))
+        assert result.reward == 0 and not result.mask_sample and result.service_errors == []
+    finally:
+        await env.stop()
+
+
+@pytest.mark.parametrize(
+    "status,prefix",
+    [
+        (403, ""),
+        (500, "Failed to call tool: "),
+        (500, "Failed to call tool: HTTP 403: "),
+        (
+            500,
+            "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: HTTP 403 ",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "message",
+    [
+        "API rate limit exceeded for synthetic account",
+        "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+    ],
+)
+async def test_github_rate_limits_remain_service_failures_not_sticky_credentials(
+    environment, status, prefix, message
+) -> None:
+    env, url = environment
+    env.results["github_get_repository"] = (status, {"detail": prefix + message})
+    client = judge_client("not_fulfilled", "not_fulfilled")
+    server = make_server(url, client)
+    await seed(server)
+    await server.call_tool(http_request(), "github_get_repository", {})
+    await server.call_tool(http_request(), "github_get_repository", {})
+    result = await server.verify(http_request(), verify_body("wrong answer"))
+    assert result.mask_sample and result.failure_kind == "mcp_atlas:service_error"
+    assert result.tool_calls == len(env.calls) == 2
+    assert client.post.await_count == 2
+
+
+@pytest.mark.parametrize("code", ["invalid_auth", "not_authed", "token_expired", "token_revoked", "missing_scope"])
+async def test_slack_auth_codes_in_trusted_tool_errors_reject_before_judging(code) -> None:
+    tool = "slack_conversations_history"
+    text = f"Failed to call tool '{tool}': 500: Tool '{tool}' execution failed: {code}"
+    env = FakeAgentEnvironment([tool], {tool: (500, {"detail": text})})
+    url = await env.start()
+    try:
+        client = judge_client()
+        server = make_server(url, client)
+        await seed(server, metadata={**META, "servers": ["slack"], "enabled_tools": [tool]})
+        with pytest.raises(HTTPException) as rejected:
+            await server.call_tool(http_request(), tool, {})
+        assert rejected.value.status_code == 422 and code not in rejected.value.detail
+        with pytest.raises(HTTPException) as rejected:
+            await server.verify(http_request(), verify_body("answer"))
+        assert rejected.value.status_code == 422
+        client.post.assert_not_awaited()
+    finally:
+        await env.stop()
+
+
+async def test_ordinary_closed_verification_is_masked_and_cannot_replay_saved_fields(environment) -> None:
+    _, url = environment
+    client = judge_client()
+    server = make_server(url, client)
+    await seed(server)
+    await server.close_resources_session(
+        http_request(),
+        ResourcesCloseSessionRequest(resources_session_id="s1", episode_id=EpisodeId(rollout_id="episode")),
+    )
+    body = verify_body("answer")
+    body.__pydantic_extra__ = {"service_errors": [], "tool_calls": 7}
+    result = await server.verify(http_request(), body)
+    assert result.mask_sample and result.failure_kind == "mcp_atlas:session_lost"
+    assert result.tool_calls == 0 and result.reward == 0
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "status,text",
+    [
+        (403, "Forbidden"),
+        (500, "Failed to call tool: Forbidden"),
+        (500, "Failed to call tool: HTTP 403 Forbidden"),
+        (
+            500,
+            "Failed to call tool 'github_get_repository': 500: Tool 'github_get_repository' execution failed: HTTP 403 Forbidden",
+        ),
+    ],
+)
+async def test_unqualified_forbidden_errors_are_not_invalid_credential_proof(environment, status, text) -> None:
+    env, url = environment
+    env.results["github_get_repository"] = (status, {"detail": text})
+    client = judge_client("not_fulfilled", "not_fulfilled")
+    server = make_server(url, client)
+    await seed(server)
+    await server.call_tool(http_request(), "github_get_repository", {})
+    await server.call_tool(http_request(), "github_get_repository", {})
+    result = await server.verify(http_request(), verify_body("wrong answer"))
+    assert result.mask_sample and result.failure_kind == "mcp_atlas:service_error"
+    assert result.tool_calls == len(env.calls) == 2
+    assert client.post.await_count == 2
+
+
+def test_startup_rejects_host_credentials_even_with_no_dataset_inventory(tmp_path) -> None:
+    image = tmp_path / "development.sif"
+    image.touch()
+    forbidden_value = "synthetic-host-only-value"
+    client = judge_client()
+    assert client.global_config_dict == {}
+    with pytest.raises(ValueError) as rejected:
+        make_server(
+            "",
+            client,
+            sandbox_image=str(image),
+            sandbox_provider=APPTAINER_PROVIDER,
+            sandbox_env={"CUSTOM_JUDGE_TOKEN": forbidden_value},
+            service_env_names=[],
+        )
+    assert "CUSTOM_JUDGE_TOKEN" in str(rejected.value)
+    assert forbidden_value not in str(rejected.value)
+
+
+async def test_empty_task_server_list_is_rejected_before_provider_allocation() -> None:
+    server = make_server("http://unused", judge_client())
+    provider = AsyncMock()
+    server._pool = provider
+    body = MCPAtlasSeedSessionRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={**META, "servers": []},
+    )
+    with pytest.raises(HTTPException) as rejected:
+        await server.seed_session(http_request(), body)
+    assert rejected.value.status_code == 422
+    provider.start.assert_not_awaited()

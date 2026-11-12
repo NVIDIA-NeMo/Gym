@@ -84,11 +84,15 @@ def pool(
     ready_gate: asyncio.Event | None = None,
     stop_gate: asyncio.Event | None = None,
     sandbox_metadata: dict | None = None,
+    sandbox_provider: dict | None = None,
 ) -> SandboxPool:
     port = free_port()
     return SandboxPool(
         image="/images/mcp-atlas.sif",
-        sandbox_provider={"apptainer": {}},
+        sandbox_provider=sandbox_provider
+        or {
+            "apptainer": {"create": {"extra_start_args": ["--cleanenv"]}, "exec": {"extra_exec_args": ["--cleanenv"]}}
+        },
         sandbox_env={name: "fake service credential" for name in SERVICE_ENV_NAMES},
         sandbox_files={"/root/.npmrc": "before=2026-07-17\n"},
         port_range=(port, port + 20),
@@ -152,26 +156,17 @@ async def test_missing_tools_are_reported() -> None:
     await sandboxes.close()
 
 
-async def test_model_code_process_cannot_read_an_unrelated_task_service_credential() -> None:
-    sandboxes = pool(["cli-mcp-server_run_command"])
+async def test_provider_spec_forwards_only_task_service_credentials() -> None:
+    tools = ["cli-mcp-server_run_command", "github_get_repository"]
+    sandboxes = pool(tools)
     sandboxes.sandbox_env["NOTION_TOKEN"] = "fake unrelated notion sentinel"
     try:
-        await sandboxes.start("s1", servers=["cli-mcp-server"], tools=["cli-mcp-server_run_command"])
+        await sandboxes.start("s1", servers=["cli-mcp-server", "github"], tools=tools)
         provider = FakeSandbox.instances[-1]
-        # Run a real local code process with the exact environment delivered at the provider boundary.
-        # This proves credential forwarding, not deployment filesystem/network or cross-process isolation.
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-c",
-            "import json,os; print(json.dumps({'unrelated': 'NOTION_TOKEN' in os.environ, "
-            "'enabled': os.environ['ENABLED_SERVERS']}))",
-            env=provider.spec.env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        assert process.returncode == 0, stderr.decode(errors="replace")
-        assert json.loads(stdout) == {"unrelated": False, "enabled": "cli-mcp-server"}
+        assert provider.spec.env == {
+            "ENABLED_SERVERS": "cli-mcp-server,github",
+            "GITHUB_TOKEN": "fake service credential",
+        }
     finally:
         await sandboxes.close()
 
@@ -375,8 +370,9 @@ async def test_provider_metadata_reaches_the_sandbox_spec() -> None:
 class ExecSandbox:
     """The external provider boundary; HTTP bridge responses arrive through exec stdout."""
 
-    def __init__(self, spec, *, startup_result=None, stop_errors=0) -> None:
+    def __init__(self, spec, *, startup_result=None, stop_errors=0, http_responses=None) -> None:
         self.spec = spec
+        self.http_responses = http_responses if http_responses is not None else {}
         self.startup_result = startup_result or SandboxExecResult("", "", 0)
         self.stop_errors = stop_errors
         self.stopped = False
@@ -402,6 +398,9 @@ class ExecSandbox:
         if self.next_result is not None:
             result, self.next_result = self.next_result, None
             return result
+        if request["path"] in self.http_responses:
+            status, body = self.http_responses[request["path"]]
+            return SandboxExecResult(json.dumps({"status": status, "body": body}), "", 0)
         if request["path"] == "/health":
             body = {"status": "health_and_client_connection_ok"}
         elif request["path"] == "/list-tools":
@@ -417,12 +416,14 @@ class ExecSandbox:
         self.stopped = True
 
 
-def exec_pool(*, startup_result=None, stop_errors=0, **overrides):
+def exec_pool(*, startup_result=None, stop_errors=0, http_responses=None, **overrides):
     created = []
 
     def factory(provider, spec):
         assert next(iter(provider)) == "opensandbox"
-        sandbox = ExecSandbox(spec, startup_result=startup_result, stop_errors=stop_errors)
+        sandbox = ExecSandbox(
+            spec, startup_result=startup_result, stop_errors=stop_errors, http_responses=http_responses
+        )
         created.append(sandbox)
         return sandbox
 
@@ -734,3 +735,298 @@ async def test_bridge_deadline_stops_a_real_helper_despite_continuous_socket_dat
             process.kill()
             await process.wait()
         await runner.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "body"),
+    [
+        ("/health", 401, {"detail": "Unauthorized: synthetic-private-response"}),
+        ("/health", 403, {"detail": "Forbidden: insufficient scope: synthetic-private-response"}),
+        (
+            "/health",
+            200,
+            {
+                "status": "health_and_client_connection_health_check_failed",
+                "error": "HTTP 401 Unauthorized: synthetic-private-response",
+            },
+        ),
+        (
+            "/health",
+            200,
+            {
+                "status": "health_and_client_connection_health_check_failed",
+                "error": "Error: invalid API key: synthetic-private-response",
+            },
+        ),
+        ("/list-tools", 401, {"detail": "Unauthorized: synthetic-private-response"}),
+        ("/list-tools", 403, {"detail": "Forbidden: insufficient scope: synthetic-private-response"}),
+        ("/list-tools", 500, {"detail": "Failed to list tools: HTTP 401 Unauthorized: synthetic-private-response"}),
+        ("/list-tools", 500, {"detail": "Failed to list tools: Error: invalid API key: synthetic-private-response"}),
+    ],
+)
+async def test_startup_authentication_rejects_configuration_and_releases_capacity(caplog, path, status, body):
+    responses = {path: (status, body)}
+    sandboxes, created = exec_pool(
+        http_responses=responses, sandbox_env={"GITHUB_TOKEN": "synthetic-service"}, max_concurrency=1
+    )
+    try:
+        with pytest.raises(CredentialConfigurationError, match="authentication failed") as error:
+            await asyncio.wait_for(sandboxes.start("invalid", servers=["github"], tools=["github_get_repository"]), 2)
+        assert "synthetic-private-response" not in str(error.value)
+        assert "synthetic-private-response" not in caplog.text
+        assert len(created) == 1 and created[0].stopped and sandboxes.get("invalid") is None
+        assert [request["path"] for request in created[0].requests] == (
+            ["/health"] if path == "/health" else ["/health", "/list-tools"]
+        )
+        responses.clear()
+        recovered = await asyncio.wait_for(
+            sandboxes.start("recovered", servers=["calculator"], tools=["calculator_calculate"]), 2
+        )
+        assert not recovered.missing_tools and len(created) == 2 and not created[1].stopped
+    finally:
+        await sandboxes.close()
+
+
+async def test_startup_authentication_preserves_typed_error_and_retryable_cleanup_ownership():
+    responses = {
+        "/health": (
+            200,
+            {"status": "health_and_client_connection_health_check_failed", "error": "HTTP 401 Unauthorized"},
+        )
+    }
+    sandboxes, created = exec_pool(
+        http_responses=responses, sandbox_env={"GITHUB_TOKEN": "synthetic-service"}, max_concurrency=1, stop_errors=1
+    )
+    try:
+        with pytest.raises(CredentialConfigurationError, match="authentication failed"):
+            await sandboxes.start("invalid", servers=["github"], tools=["github_get_repository"])
+        box = sandboxes.get("invalid")
+        assert box is not None and not box.stopped and not created[0].stopped
+        assert await sandboxes.stop("invalid") is True
+        assert box.stopped and created[0].stopped and sandboxes.get("invalid") is None
+        responses.clear()
+        await asyncio.wait_for(sandboxes.start("recovered", servers=["calculator"], tools=["calculator_calculate"]), 2)
+        assert len(created) == 2 and not created[1].stopped
+        # Only the first provider's startup cleanup is configured to fail in this scenario.
+        created[1].stop_errors = 0
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize("path", ["/health", "/list-tools"])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "message",
+    ["API rate limit exceeded for synthetic account", "You have exceeded a secondary rate limit. Please wait."],
+)
+async def test_startup_canonical_rate_limits_remain_environment_failures(monkeypatch, path, wrapped, message):
+    monkeypatch.setattr(sandbox_module, "POLL_INTERVAL_S", 0.001)
+    body = {"detail": message}
+    status = 403
+    if wrapped:
+        status = 200 if path == "/health" else 500
+        body = (
+            {"status": "health_and_client_connection_health_check_failed", "error": f"HTTP 403: {message}"}
+            if path == "/health"
+            else {"detail": f"Failed to list tools: HTTP 403: {message}"}
+        )
+    responses = {path: (status, body)}
+    sandboxes, created = exec_pool(
+        http_responses=responses, sandbox_env={"GITHUB_TOKEN": "synthetic-service"}, startup_timeout_s=0.01
+    )
+    try:
+        with pytest.raises(SandboxError):
+            await asyncio.wait_for(sandboxes.start("limited", servers=["github"], tools=["github_get_repository"]), 2)
+        assert len(created) == 1 and created[0].stopped and sandboxes.get("limited") is None
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize("path", ["/health", "/list-tools"])
+async def test_keyfree_startup_auth_looking_errors_remain_environment_failures(monkeypatch, path):
+    monkeypatch.setattr(sandbox_module, "POLL_INTERVAL_S", 0.001)
+    responses = {path: (401, {"detail": "Unauthorized: no service credentials are involved"})}
+    sandboxes, created = exec_pool(http_responses=responses, startup_timeout_s=0.01)
+    try:
+        with pytest.raises(SandboxError):
+            await asyncio.wait_for(
+                sandboxes.start("keyfree", servers=["calculator"], tools=["calculator_calculate"]), 2
+            )
+        assert len(created) == 1 and created[0].stopped and sandboxes.get("keyfree") is None
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize("path", ["/health", "/list-tools"])
+async def test_slack_startup_authentication_code_rejects_configuration(path):
+    body = (
+        {"status": "health_and_client_connection_health_check_failed", "error": "Error: invalid_auth"}
+        if path == "/health"
+        else {"detail": "Failed to list tools: invalid_auth"}
+    )
+    responses = {path: (200 if path == "/health" else 500, body)}
+    sandboxes, created = exec_pool(
+        http_responses=responses,
+        sandbox_env={"SLACK_MCP_XOXC_TOKEN": "synthetic-xoxc", "SLACK_MCP_XOXD_TOKEN": "synthetic-xoxd"},
+    )
+    try:
+        with pytest.raises(CredentialConfigurationError):
+            await sandboxes.start("slack", servers=["slack"], tools=["slack_get_channel"])
+        assert len(created) == 1 and created[0].stopped and sandboxes.get("slack") is None
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize(
+    ("start_flag", "exec_flag"),
+    [("--cleanenv", "--cleanenv"), ("-e", "-e"), ("--containall", "-C"), ("-C", "--cleanenv")],
+)
+async def test_apptainer_requires_environment_isolation_for_both_start_and_exec(start_flag, exec_flag):
+    provider = {"apptainer": {"create": {"extra_start_args": [start_flag]}, "exec": {"extra_exec_args": [exec_flag]}}}
+    sandboxes = pool(["calculator_calculate"], sandbox_provider=provider)
+    try:
+        box = await sandboxes.start("isolated", servers=["calculator"], tools=["calculator_calculate"])
+        status, body = await call_sandbox_tool(box, "calculator_calculate", {}, timeout_s=1)
+        assert status == 200 and body == [{"type": "text", "text": "ok"}]
+        assert FakeSandbox.instances[-1].spec.env == {"ENABLED_SERVERS": "calculator"}
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {},
+        {"create": {"extra_start_args": ["--cleanenv"]}},
+        {"exec": {"extra_exec_args": ["--cleanenv"]}},
+        {
+            "create": {"extra_start_args": ["--cleanenv", "--cleanenv=false"]},
+            "exec": {"extra_exec_args": ["--cleanenv"]},
+        },
+    ],
+)
+def test_apptainer_missing_or_disabled_clean_environment_fails_before_allocation(block):
+    before = len(FakeSandbox.instances)
+    with pytest.raises(CredentialConfigurationError, match="requires --cleanenv"):
+        pool(["calculator_calculate"], sandbox_provider={"apptainer": block})
+    assert len(FakeSandbox.instances) == before
+
+
+@pytest.mark.parametrize("prefix", ["APPTAINERENV_", "SINGULARITYENV_"])
+@pytest.mark.parametrize("name", ["NOTION_TOKEN", "INFERENCE_API_KEY", "MCP_ATLAS_REVIEW_BENIGN_SETTING"])
+def test_inherited_apptainer_aliases_are_rejected_without_values(monkeypatch, prefix, name):
+    key = prefix + name
+    monkeypatch.setenv(key, "synthetic-host-private-value")
+    before = len(FakeSandbox.instances)
+    with pytest.raises(CredentialConfigurationError, match="inherited Apptainer environment aliases") as error:
+        pool(["calculator_calculate"])
+    assert key in str(error.value) and "sandbox_env" in str(error.value)
+    assert "synthetic-host-private-value" not in str(error.value)
+    assert len(FakeSandbox.instances) == before
+
+
+@pytest.mark.parametrize("prefix", ["APPTAINERENV_", "SINGULARITYENV_"])
+async def test_apptainer_alias_added_after_construction_cannot_replace_a_running_sandbox(monkeypatch, prefix):
+    sandboxes = pool(["calculator_calculate"])
+    try:
+        first = await sandboxes.start("existing", servers=["calculator"], tools=["calculator_calculate"])
+        before = len(FakeSandbox.instances)
+        monkeypatch.setenv(prefix + "MCP_ATLAS_REVIEW_TOKEN", "synthetic-host-private-value")
+        with pytest.raises(CredentialConfigurationError):
+            await sandboxes.start("existing", servers=["calculator"], tools=["calculator_calculate"])
+        assert sandboxes.get("existing") is first and not first.stopped
+        assert len(FakeSandbox.instances) == before
+        monkeypatch.delenv(prefix + "MCP_ATLAS_REVIEW_TOKEN")
+        replacement = await sandboxes.start("existing", servers=["calculator"], tools=["calculator_calculate"])
+        assert first.stopped and replacement is not first
+        assert len(FakeSandbox.instances) == before + 1
+    finally:
+        await sandboxes.close()
+
+
+async def test_healthy_startup_does_not_interpret_an_unused_error_field():
+    responses = {
+        "/health": (200, {"status": "health_and_client_connection_ok", "error": "HTTP 401 Unauthorized"}),
+        "/list-tools": (200, [{"name": "get_repository"}]),
+    }
+    sandboxes, created = exec_pool(http_responses=responses, sandbox_env={"GITHUB_TOKEN": "synthetic-service"})
+    try:
+        box = await sandboxes.start("healthy", servers=["github"], tools=["github_get_repository"])
+        assert box.missing_tools == []
+        assert len(created) == 1 and not created[0].stopped
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize(("section", "option"), [("create", "extra_start_args"), ("exec", "extra_exec_args")])
+@pytest.mark.parametrize(
+    "injection",
+    [
+        ["--env", "NOTION_TOKEN=synthetic-unrelated-value"],
+        ["--env=NOTION_TOKEN=synthetic-unrelated-value"],
+        ["--env-file", "/synthetic/private-envfile"],
+        ["--env-file=/synthetic/private-envfile"],
+    ],
+    ids=["env-split", "env-equals", "file-split", "file-equals"],
+)
+def test_raw_apptainer_environment_arguments_cannot_bypass_scoping(section, option, injection):
+    provider = {
+        "apptainer": {"create": {"extra_start_args": ["--cleanenv"]}, "exec": {"extra_exec_args": ["--cleanenv"]}}
+    }
+    provider["apptainer"][section][option].extend(injection)
+    before = len(FakeSandbox.instances)
+    with pytest.raises(CredentialConfigurationError, match="must not include --env") as rejected:
+        pool(["calculator_calculate"], sandbox_provider=provider)
+    message = str(rejected.value)
+    assert f"{section}.{option}" in message and "sandbox_env" in message
+    assert "synthetic-unrelated-value" not in message and "/synthetic/private-envfile" not in message
+    assert len(FakeSandbox.instances) == before
+
+
+async def test_benign_apptainer_flags_preserve_scoped_provider_environment():
+    tools = ["cli-mcp-server_run_command", "github_get_repository"]
+    provider = {
+        "apptainer": {
+            "create": {"extra_start_args": ["--cleanenv", "--no-home"]},
+            "exec": {"extra_exec_args": ["-e", "--writable-tmpfs"]},
+        }
+    }
+    sandboxes = pool(tools, sandbox_provider=provider)
+    try:
+        box = await sandboxes.start("scoped", servers=["cli-mcp-server", "github"], tools=tools)
+        status, output = await call_sandbox_tool(box, "github_get_repository", {}, timeout_s=1)
+        assert status == 200 and output == [{"type": "text", "text": "ok"}]
+        assert FakeSandbox.instances[-1].spec.env == {
+            "ENABLED_SERVERS": "cli-mcp-server,github",
+            "GITHUB_TOKEN": "fake service credential",
+        }
+    finally:
+        await sandboxes.close()
+
+
+@pytest.mark.parametrize("path", ["/health", "/list-tools"])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_credentialed_startup_forbidden_without_scope_evidence_is_an_environment_failure(
+    monkeypatch, path, wrapped
+):
+    monkeypatch.setattr(sandbox_module, "POLL_INTERVAL_S", 0.001)
+    status, body = 403, {"detail": "Forbidden"}
+    if wrapped:
+        status = 200 if path == "/health" else 500
+        body = (
+            {"status": "health_and_client_connection_health_check_failed", "error": "HTTP 403 Forbidden"}
+            if path == "/health"
+            else {"detail": "Failed to list tools: HTTP 403 Forbidden"}
+        )
+    responses = {path: (status, body)}
+    sandboxes, created = exec_pool(
+        http_responses=responses, sandbox_env={"GITHUB_TOKEN": "synthetic-service"}, startup_timeout_s=0.01
+    )
+    try:
+        with pytest.raises(SandboxError):
+            await asyncio.wait_for(
+                sandboxes.start("forbidden", servers=["github"], tools=["github_get_repository"]), 2
+            )
+        assert len(created) == 1 and created[0].stopped and sandboxes.get("forbidden") is None
+    finally:
+        await sandboxes.close()

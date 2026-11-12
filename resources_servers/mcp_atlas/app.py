@@ -6,8 +6,9 @@ Each rollout gets its own sandbox that serves only the task's MCP servers. The m
 ``ENABLED_TOOLS`` and every call is proxied to the sandbox's ``/call-tool``. The verifier judges the final
 answer claim by claim (see ``verifier.py``); ``reward`` is 1 when claim coverage reaches the pass threshold.
 
-When the environment rather than the model fails (the sandbox does not start, a task tool is missing, a
-service answers with an auth, quota, TLS or server error), the rollout still runs but its verify response
+Invalid credential configuration is rejected separately from scoring. When the environment rather than the
+model fails (the sandbox does not start, a task tool is missing, or a service has quota/TLS/server errors),
+the rollout still runs but its verify response
 sets ``mask_sample`` with a ``mcp_atlas:<kind>`` ``failure_kind``.
 """
 
@@ -48,23 +49,27 @@ from nemo_gym.verification import JudgeError, call_judge
 
 
 if __package__:
+    from .authentication import is_authentication_failure, tool_error_diagnostic, tool_server_name
     from .credentials import (
         SERVICE_ENV_NAMES,
         CredentialConfigurationError,
         configured_dataset_servers,
         enabled_servers,
         task_environment,
+        validate_workload_environment,
     )
     from .sandbox import AtlasSandbox, SandboxError, SandboxPool, call_sandbox_tool
     from .verifier import coverage, final_answer, judge_request, parse_verdict
 else:
     # Gym starts a resources server from its own directory, so sibling modules import at top level.
+    from authentication import is_authentication_failure, tool_error_diagnostic, tool_server_name
     from credentials import (
         SERVICE_ENV_NAMES,
         CredentialConfigurationError,
         configured_dataset_servers,
         enabled_servers,
         task_environment,
+        validate_workload_environment,
     )
     from sandbox import AtlasSandbox, SandboxError, SandboxPool, call_sandbox_tool
     from verifier import coverage, final_answer, judge_request, parse_verdict
@@ -91,7 +96,8 @@ SERVICE_HTTP_STATUSES = {401, 402, 403, 429, 502, 503, 504}
 SERVICE_ERROR_PATTERN = re.compile(
     r"^(?:HTTP(?:/\d(?:\.\d)?)?\s+(?:401|402|403|408|429|5\d\d)\b|"
     r"(?:HTTPError|ClientResponseError):\s*(?:401|402|403|408|429|5\d\d)\b|"
-    r"unauthori[sz]ed\b|forbidden\b|authentication failed\b|rate[ _-]?limit exceeded\b|"
+    r"unauthori[sz]ed\b|forbidden\b|authentication failed\b|(?:API )?rate[ _-]?limit exceeded\b|"
+    r"You have exceeded a secondary rate limit\b|"
     r"too many requests\b|payment required\b|certificate verify failed\b|"
     r"(?:SSLError|SSLCertVerificationError|ConnectionError|ConnectTimeout|ReadTimeout):|"
     r"connection (?:refused|reset|closed|aborted)\b|name or service not known\b|"
@@ -104,43 +110,25 @@ EMPTY_RESULT = "success"
 # always masked; the second is masked when mask_service_errors is set.
 HARD_FAILURES = ("session_lost", "sandbox_start_failed", "sandbox_unreachable", "tools_missing")
 SOFT_FAILURES = ("service_error", "tool_timeout")
-
-
-def _tool_error_diagnostic(text: str, tool_name: str) -> tuple[str, bool]:
-    error = text.strip()
-    wrapped = False
-    for prefix in (f"Failed to call tool '{tool_name}':", "Failed to call tool:"):
-        if error.startswith(prefix):
-            error = error[len(prefix) :].lstrip()
-            wrapped = True
-            break
-    # The pinned handler catches its own HTTPException for MCP is_error content, producing this wrapper.
-    # That 500 describes the handler, not the upstream service; classify only the enclosed diagnostic.
-    inner_prefix = f"500: Tool '{tool_name}' execution failed:"
-    if wrapped and error.startswith(inner_prefix):
-        error = error[len(inner_prefix) :].lstrip()
-    if error.startswith("Error:"):
-        error = error[len("Error:") :].lstrip()
-        wrapped = True
-    return error, wrapped
-
-
-def _is_auth_error(status: int, text: str, tool_name: str) -> bool:
-    if status in {401, 403}:
-        return True
-    error, wrapped = _tool_error_diagnostic(text[:2000], tool_name)
-    return (status >= 400 or wrapped) and re.match(
-        r"^(?:(?:HTTP(?:/\d(?:\.\d)?)?\s+|HTTPError:\s*|ClientResponseError:\s*)?(?:401|403)\b|"
-        r"unauthori[sz]ed\b|forbidden\b|authentication failed\b)",
-        error,
-        re.IGNORECASE,
-    ) is not None
+# These tools return model-written program/file outcomes. Their error text is not a service diagnostic.
+MODEL_RESULT_SERVERS = frozenset(
+    {
+        "calculator",
+        "cli-mcp-server",
+        "desktop-commander",
+        "filesystem",
+        "git",
+        "memory",
+        "mcp-code-executor",
+        "mcp-server-code-runner",
+    }
+)
 
 
 def _is_service_error(status: int, text: str, tool_name: str) -> bool:
     if status in SERVICE_HTTP_STATUSES:
         return True
-    error, wrapped = _tool_error_diagnostic(text, tool_name)
+    error, wrapped = tool_error_diagnostic(text, tool_name)
     # The image wraps upstream exceptions in "Failed to call tool:"; only there does a leading status
     # have HTTP meaning. A number elsewhere in a tool's message is not a service failure.
     if wrapped and re.match(r"(?:401|402|403|429|502|503|504)\b", error):
@@ -207,6 +195,7 @@ class MCPAtlasVerifyResponse(BaseVerifyResponse):
 class _Rollout:
     task_id: str
     tools: frozenset[str]
+    servers: frozenset[str]
     box: Optional[AtlasSandbox] = None
     tool_calls: int = 0
     # (kind, detail) of every environment failure seen in this rollout.
@@ -253,6 +242,7 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
     _judge_slots: asyncio.Semaphore = PrivateAttr()
     _reaper: Optional[asyncio.Task] = PrivateAttr(default=None)
     _closed_sessions: ResourcesSessionFences[EpisodeId] = PrivateAttr()
+    _terminal_auth_sessions: ResourcesSessionFences[str] = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -264,6 +254,7 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             raise ValueError("sandbox_base_url requires sandbox_development_mode=true; do not use it for scores")
         self._judge_slots = asyncio.Semaphore(self.config.judge_max_concurrency)
         self._closed_sessions = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
+        self._terminal_auth_sessions = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         if self.config.sandbox_image:
             provider = resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
             provider_name = next(iter(provider))
@@ -306,7 +297,9 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                 resources_server=self.config.name,
                 root=Path(__file__).resolve().parents[2],
             )
-            task_environment(environment, sorted(required.servers))
+            validate_workload_environment(environment)
+            if required.servers:
+                task_environment(environment, sorted(required.servers))
             for path in required.deferred_inputs:
                 logger.warning(
                     "MCP-Atlas credential preflight awaits prepared input %s; each task is checked before startup",
@@ -380,7 +373,9 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                     raise CredentialConfigurationError("enabled_tools must be a list of tool names")
             except CredentialConfigurationError as exc:
                 raise ResourcesSeedRejectedError(str(exc)) from exc
-            rollout = _Rollout(task_id=str(meta.get("task_id", "")), tools=frozenset(tools))
+            rollout = _Rollout(
+                task_id=str(meta.get("task_id", "")), tools=frozenset(tools), servers=frozenset(servers)
+            )
             if self._pool is None:
                 names = {name: name for name in rollout.tools}
                 rollout.box = AtlasSandbox(base_url=self.config.sandbox_base_url, tool_names=names, missing_tools=[])
@@ -415,7 +410,9 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
             async with self.session_lock(session_id):
                 if self._pool is not None:
                     await self._pool.stop(session_id)
-                self._rollouts.pop(session_id, None)
+                rollout = self._rollouts.pop(session_id, None)
+                if rollout is not None and rollout.configuration_error:
+                    self._terminal_auth_sessions.fence(session_id, rollout.configuration_error)
                 self._closed_sessions.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
@@ -460,26 +457,25 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                 rollout.failures.append(("sandbox_unreachable", f"{tool_name}: {type(exc).__name__}: {exc}"))
                 return f"Error: tool call failed: {type(exc).__name__}"
             if status == 200:
-                text = tool_output_text(payload)
-                if _is_auth_error(status, text, served_name):
-                    rollout.configuration_error = (
-                        f"MCP-Atlas authentication failed for {tool_name}; check credentials/scopes"
-                    )
-                    raise HTTPException(422, rollout.configuration_error)
-                # Some servers report a failed upstream call as a short successful result.
-                if len(text) < 500 and _is_service_error(status, text, served_name):
-                    rollout.failures.append(("service_error", f"{tool_name}: {text}"))
-                return text
+                # The pinned bridge has a separate HTTP error path for MCP is_error results. Successful
+                # content can be arbitrary file/program text, including strings that look like auth errors.
+                return tool_output_text(payload)
             # The sandbox reports every tool error as an HTTP error; the model sees its body, as upstream.
             text = payload if isinstance(payload, str) else json.dumps(payload)
             detail = payload.get("detail") if isinstance(payload, dict) else None
             diagnostic = detail if isinstance(detail, str) else text
-            if _is_auth_error(status, diagnostic, served_name):
+            if is_authentication_failure(
+                status, diagnostic, servers=rollout.servers, tool_name=tool_name, served_name=served_name
+            ):
                 rollout.configuration_error = (
-                    f"MCP-Atlas authentication failed for {tool_name}; check credentials/scopes"
+                    f"MCP-Atlas authentication failed for {tool_name}; check credentials/scopes. "
+                    "The environment is unavailable; give your final answer."
                 )
+                logger.error("%s", rollout.configuration_error)
                 raise HTTPException(422, rollout.configuration_error)
-            if _is_service_error(status, diagnostic, served_name):
+            if tool_server_name(tool_name, rollout.servers) not in MODEL_RESULT_SERVERS and _is_service_error(
+                status, diagnostic, served_name
+            ):
                 rollout.failures.append(("service_error", f"{tool_name}: HTTP {status}: {text[:500]}"))
             return text
 
@@ -521,8 +517,10 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: MCPAtlasVerifyRequest) -> MCPAtlasVerifyResponse:
         session_id = request.session.get(SESSION_ID_KEY)
         async with self.session_lock(session_id or ""):
-            if session_id is not None and session_id in self._closed_sessions:
-                raise HTTPException(422, "MCP-Atlas session is already closed")
+            closed = session_id is not None and session_id in self._closed_sessions
+            terminal_error = self._terminal_auth_sessions.get(session_id) if session_id is not None else None
+            if terminal_error is not None:
+                raise HTTPException(422, terminal_error)
             rollout = self._rollouts.get(session_id)
             if self._pool is not None and session_id is not None:
                 try:
@@ -537,6 +535,10 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                 answer = final_answer(body.response)
                 if rollout is not None:
                     failures, tool_calls = list(rollout.failures), rollout.tool_calls
+                elif closed:
+                    # A closed live cookie cannot be revived by injected saved-artifact fields. Ordinary
+                    # close follows the framework lost-session contract; terminal auth has its own fence.
+                    failures, tool_calls = [("session_lost", "session already closed")], 0
                 else:
                     failures, tool_calls = saved_environment(body) or ([("session_lost", "no session at verify")], 0)
                 body.__pydantic_extra__ = {

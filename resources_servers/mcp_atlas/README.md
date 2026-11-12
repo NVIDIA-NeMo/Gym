@@ -16,8 +16,10 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
   failures described below, a tool error reaches the model as the sandbox's error text and an empty result
   as `success`. Bridge/provider transport timeouts are infrastructure failures.
 - **Limits.** 256 model turns (`max_steps`) and 100 tool calls; calls past the 100th return an error that asks
-  for the final answer. Upstream also stops a task after 1800 s of wall-clock time. This resources server
-  sets no per-task wall-clock deadline; its 60 s tool timeout and sandbox TTL do not enforce that deadline.
+  for the final answer. The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/run_eval.py#L344-L345)
+  uses a default 1800 s per-task request deadline and records a timeout as an `ERROR` response. This
+  resources server sets no per-task wall-clock deadline; its 60 s tool timeout and sandbox TTL do not
+  enforce that deadline.
 - **Concurrency.** Tool calls within one rollout are serialized under its session lock. Verification and
   close wait for an active call, up to `tool_call_timeout_s` (60 s by default), before stopping its sandbox.
   Different rollouts can run concurrently.
@@ -39,23 +41,47 @@ model outcomes:
 | `failure_kind` | Meaning | Masked |
 |---|---|---|
 | `mcp_atlas:sandbox_start_failed` | The sandbox did not start or never became healthy. | always |
-| `mcp_atlas:sandbox_unreachable` | A tool call could not reach the sandbox. | always |
+| `mcp_atlas:sandbox_unreachable` | A bridge/provider request failed or exceeded its transport deadline. | always |
 | `mcp_atlas:tools_missing` | A server of the task did not come up, so some task tools were missing. | always |
 | `mcp_atlas:session_lost` | Verify found no seeded session. | always |
 | `mcp_atlas:service_error` | A service answered with a quota, rate-limit, TLS or server error. | if `mask_service_errors` |
-| `mcp_atlas:tool_timeout` | Legacy saved timeout marker whose origin was not established. | if `mask_service_errors` |
+| `mcp_atlas:tool_timeout` | A timeout marker saved by an earlier server version. | if `mask_service_errors` |
 | `judge_failed` | A judge call failed, or `judge_max_attempts` calls gave no readable verdict for a claim (set by Gym's `judge_failsafe`; upstream scores such a claim 0). | always |
 
-An HTTP 401/403 or recognized authentication-error diagnostic is a configuration failure. The resources
-server's tool route returns HTTP 422 with
-`detail: "MCP-Atlas authentication failed for <tool_name>; check credentials/scopes"`.
-Later direct tool calls and verification return the same rejection until the session is closed, without
-judging the answer or producing a reward or masked result. This resource-level rejection does not guarantee
-that an enclosing collection run or resumable chain stops automatically: caller layers may wrap the error
-or write failure artifacts. Inspect those artifacts and fix the credentials/scopes before using results.
+Recognized authentication failures from credentialed, enabled services on trusted startup or tool-error
+paths are configuration failures. The resources server's tool route returns HTTP 422 with
+`detail: "MCP-Atlas authentication failed for <tool_name>; check credentials/scopes. The environment is unavailable; give your final answer."`.
+The affected session does not make further upstream tool calls or judge its answer, and verification
+rejects it without producing a reward or masked result. An ordinary closed or lost session instead
+returns a masked `session_lost` result; closing an authentication-rejected session does not erase its
+rejection during the configured close retry window. HTTP 422 is a resource-boundary signal. Simple Agent
+presents the tool's 422 body to the model as tool output and may continue model turns. It is the later
+`/verify` 422 that becomes `/run` HTTP 500. A startup `/seed_session` 422 can instead produce `/run` HTTP
+500 before model turns. With the collector default
+`route_failures_to_sidecar: false`, this failed `/run` stops collection after preserving unscored failure
+evidence. With the option set to `true`, collection records an ungraded, nonterminal agent failure row and
+continues. Inspect that evidence and fix the credentials/scopes before using results.
+
+Successful HTTP 200 tool content is opaque data: text resembling an authentication or service error is
+not evidence of failure. Tools that need no credentials cannot establish a service-credential failure.
+On tool calls to a credentialed, enabled service, a trusted HTTP 401 is an authentication failure. A bare
+HTTP 403 or `Forbidden` diagnostic remains a service failure unless it provides explicit credential or
+scope evidence.
+Recognized GitHub primary or secondary rate-limit diagnostics with HTTP 403 remain `service_error` outcomes,
+subject to `mask_service_errors`, rather than credential rejections.
+During startup, a 403 without credential/scope evidence does not establish an authentication failure.
+If health or tool listing cannot become ready, it remains a masked `sandbox_start_failed` outcome.
+
+An API can report an auth or quota failure inside HTTP 200 content without setting the MCP error flag.
+Such content is not automatically rejected or masked. Before benchmark scoring, make a known-good call
+to every credentialed service used by the task set and capture its actual success and error formats
+without credential values.
 
 An execution-deadline error actually returned by an MCP tool for model-written code remains a model
-observation and is scored normally. A bridge or provider transport timeout is instead
+observation and is scored normally. Returned errors from `calculator`, `cli-mcp-server`,
+`desktop-commander`, `filesystem`, `git`, `memory`, `mcp-code-executor` and `mcp-server-code-runner` are
+also scored, even when their text says `Client failed to connect` or `session was closed`: model code
+and files can produce arbitrary text. An actual bridge or provider transport timeout is instead
 `mcp_atlas:sandbox_unreachable`, an infrastructure failure. A legacy saved `tool_timeout` marker does not
 establish that a model program timed out; it retains its historical service-failure masking policy.
 `service_errors` in a scored verify response lists its recorded failures. `gym eval reverify` recomputes
@@ -64,18 +90,22 @@ the score and mask from saved `service_errors` and `tool_calls`, preserving that
 ### Check rollouts before publishing
 
 Before committing genuine rollout artifacts, use the service credential values used for collection,
-provided through approved environment configuration, and run from the repository root:
+provided through approved environment configuration, and scan every JSONL file being published. This
+includes rollout, failure and materialized-input sidecars. For a dedicated output directory, run from
+the repository root:
 
 ```bash
-python -m resources_servers.mcp_atlas.validate_rollouts results/mcp_atlas/rollouts.jsonl
+python -m resources_servers.mcp_atlas.validate_rollouts results/mcp_atlas/*.jsonl
 ```
 
 The scanner checks raw JSONL and decoded JSON strings for exact nonblank service credential values.
 It reports only file/line locations, credential names and counts, never values or surrounding text.
 It exits 1 for a match and 2 for missing or malformed inputs. A successful scan reports how many
-credential values were checked: zero checked values is not a credential-leak audit. This check does not
-detect arbitrary encoded exfiltration or replace credential scoping and enforced network isolation.
-Run it on the actual artifacts; absent or synthetic example rollouts do not establish publication readiness.
+credential values were checked. Zero checked values is legitimate for a task set using only key-free
+services, but does not establish that credential values are absent from artifacts. Confirm the count
+matches the actual configured services. This check does not detect arbitrary encoded exfiltration or
+replace credential scoping and enforced network isolation. Run it on the actual artifacts; absent or
+synthetic example rollouts do not establish publication readiness.
 
 ## Setup
 
@@ -83,7 +113,8 @@ The current integration is pending validation. The five Slack schemas match the 
 export (see Licensing). An authenticated runtime listing, working Slack credentials and the seeded workspace
 still need validation. The OpenSandbox transport and policy configuration require real deployment and
 rollout validation.
-An evaluated Python tool must be unable to reach other rollouts or the Gym control plane. See the
+Collect and inspect five genuine example rollouts with a model before treating the integration as validated.
+An evaluated Python tool must be unable to reach other rollouts or the NeMo Gym control plane. See the
 [evaluation tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/mcp-atlas).
 
 1. Include the approved OpenSandbox provider config and set `sandbox_image` to the OCI reference
@@ -102,9 +133,16 @@ An evaluated Python tool must be unable to reach other rollouts or the Gym contr
 3. Export the service credentials under the upstream names (`service_env_names`, for example `EXA_API_KEY`,
    `GITHUB_TOKEN`, `NOTION_TOKEN`). Each sandbox receives only known service credentials required by its
    `ENABLED_SERVERS`; unrelated known credential names are removed even when supplied through `sandbox_env`.
-   Missing credentials for servers in the configured, available dataset fail startup with
-   `CredentialConfigurationError`. Inputs awaiting a declared preparation script are checked at each seed:
-   missing credentials or unknown server names reject the seed with HTTP 422 before provider allocation.
+   Startup preflight reads available datasets declared by this resources server or agents using it,
+   including materialized task inputs and canonical `task_data` rows. Relative JSONL paths follow the
+   controller's search root order captured before worker launch, including configured `--search-dir`
+   roots. The resolved files must be readable on the resources server host. A resolution failure gives
+   guidance to supply an absolute `jsonl_fpath` or an appropriate `--search-dir`.
+   Missing credentials fail startup with `CredentialConfigurationError`. Inputs awaiting a declared
+   preparation script are checked at each seed: missing credentials, unknown server names or an empty
+   server list reject the seed with HTTP 422 before provider allocation. Recognized authentication failures
+   in health or tool listing also reject configuration after sandbox cleanup, rather than becoming masked
+   startup failures.
    Nonblank values establish presence, not valid scopes or account state.
    411 of the 500 ground-truth trajectories call at least one key-gated server; five servers (Airtable,
    Google Calendar, Notion, MongoDB, Slack) also need the upstream `data_exports/` seeded into the accounts.
@@ -130,9 +168,15 @@ chmod -R a+rX mcp-atlas && chmod -R a+rwX mcp-atlas/root mcp-atlas/data mcp-atla
 apptainer build mcp-atlas-1.2.7-nonroot.sif mcp-atlas
 ```
 
-Set `sandbox_image` to that file. `--cleanenv` keeps host credentials out of the workload; the provider
-shares host networking, so separate filesystems/ports are not a scoring boundary. Apptainer does not
-enforce provider `ttl_s`; an exited host process can leave instances requiring operator cleanup.
+Set `sandbox_image` to that file. The component requires `--cleanenv`/`-e` or `--containall`/`-C` on both
+instance-start and exec paths, including custom provider configurations. Externally inherited
+`APPTAINERENV_` and `SINGULARITYENV_` variables are rejected: unset them before starting this server.
+Raw `--env`/`--env-file` options in `create.extra_start_args` or `exec.extra_exec_args` are also rejected.
+Set workload values through `sandbox_env` so task credential scoping applies; the provider's internal
+environment file generated from `SandboxSpec.env` is retained. These guards constrain environment
+forwarding; they do not establish isolation.
+The provider shares host networking, so separate filesystems/ports are not a scoring boundary. Apptainer
+does not enforce provider `ttl_s`; an exited host process can leave instances requiring operator cleanup.
 
 For development, `sandbox_base_url` points at one running agent-environment
 (`docker run -p 1984:1984 --env-file .env ghcr.io/scaleapi/mcp-atlas:1.2.7`). Every rollout then shares it, so
@@ -142,7 +186,13 @@ development transport may be used for benchmark scores.
 ## Differences from upstream
 
 - The upstream harness stops at the 100th tool call; here the model gets an error and may still answer.
-- The upstream harness stops a task after 1800 s; this server sets no task timeout.
+- The upstream evaluation driver's default per-task request deadline is 1800 s (linked above); this
+  resources server sets no per-task wall-clock deadline.
+- Recognized service-authentication failures reject configuration before judging, instead of becoming
+  scored model observations or masked service failures.
+- The local bridge/provider deadline is an infrastructure failure. An error returned by a tool for a
+  model's program remains scored; real package deadline behavior still needs qualification before
+  protocol comparisons.
 - Upstream counts a claim whose judge call fails 8 times as not fulfilled; here the rollout is masked.
 
 ## Licensing

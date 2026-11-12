@@ -30,10 +30,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from nemo_gym import NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME
+from nemo_gym.core import is_materialized_task_row
+from nemo_gym.data import normalize_task_fields
 
 
 # Configuration facts from the pinned agent-environment template, independently implemented here:
@@ -89,8 +94,8 @@ class CredentialConfigurationError(ValueError):
 
 def enabled_servers(servers: object) -> list[str]:
     """Validate task server names before using them for credential checks or provider configuration."""
-    if not isinstance(servers, list) or not all(isinstance(server, str) for server in servers):
-        raise CredentialConfigurationError("enabled servers must be a list of server names")
+    if not isinstance(servers, list) or not servers or not all(isinstance(server, str) for server in servers):
+        raise CredentialConfigurationError("enabled servers must be a nonempty list of server names")
     unknown = sorted(set(servers) - SERVER_CREDENTIALS.keys())
     if unknown:
         raise CredentialConfigurationError(f"unknown MCP-Atlas servers: {', '.join(unknown)}")
@@ -130,6 +135,15 @@ def validate_provider_environment(provider: Mapping[str, object]) -> None:
             )
 
 
+def validate_workload_environment(environment: Mapping[str, str]) -> None:
+    """Reject host credentials independently of whether a configured task inventory is available."""
+    forbidden = sorted(name for name in environment if _host_credential(name))
+    if forbidden:
+        raise CredentialConfigurationError(
+            f"host credentials must not enter MCP-Atlas workloads: {', '.join(forbidden)}"
+        )
+
+
 def task_environment(environment: Mapping[str, str], servers: list[str]) -> dict[str, str]:
     """Require the task's credentials and exclude every unrelated known service credential.
 
@@ -137,11 +151,7 @@ def task_environment(environment: Mapping[str, str], servers: list[str]) -> dict
     scope and nonblank checks as a credential obtained from the host environment.
     """
     servers = enabled_servers(servers)
-    forbidden = sorted(name for name in environment if _host_credential(name))
-    if forbidden:
-        raise CredentialConfigurationError(
-            f"host credentials must not enter MCP-Atlas workloads: {', '.join(forbidden)}"
-        )
+    validate_workload_environment(environment)
     required = {name for server in servers for name in SERVER_CREDENTIALS[server]}
     missing = sorted(name for name in required if not environment.get(name, "").strip())
     if missing:
@@ -157,47 +167,112 @@ class DatasetServerRequirements:
     deferred_inputs: tuple[Path, ...]
 
 
+def _dataset_declarations(
+    global_config: Mapping[str, object], resources_server: str
+) -> Iterator[Mapping[str, object]]:
+    for name, component in global_config.items():
+        if isinstance(component, Mapping):
+            resources = component.get("resources_servers", {})
+            if name == resources_server and isinstance(resources, Mapping):
+                for resource in resources.values():
+                    if isinstance(resource, Mapping):
+                        yield resource
+            agents = component.get("responses_api_agents", {})
+            if isinstance(agents, Mapping):
+                for agent in agents.values():
+                    if isinstance(agent, Mapping):
+                        target = agent.get("resources_server")
+                        if isinstance(target, Mapping) and target.get("name") == resources_server:
+                            yield agent
+
+
+def _row_servers(row: object) -> list[str]:
+    if not isinstance(row, Mapping):
+        raise CredentialConfigurationError("task row must be an object")
+    task_input = row["task_input"] if is_materialized_task_row(row) else row
+    if not isinstance(task_input, Mapping):
+        raise CredentialConfigurationError("task_input must be an object")
+    task_data = task_input.get("task_data", {})
+    if not isinstance(task_data, Mapping):
+        raise CredentialConfigurationError("task_data must be an object")
+    conflicts = sorted(
+        key for key in task_data.keys() & task_input.keys() if key != "task_data" and task_data[key] != task_input[key]
+    )
+    if conflicts:
+        raise CredentialConfigurationError(f"conflicting task_data fields: {', '.join(conflicts)}")
+    fields = {**task_data, **{key: value for key, value in task_input.items() if key != "task_data"}}
+    fields, conflicts = normalize_task_fields(fields)
+    if conflicts:
+        raise CredentialConfigurationError(f"conflicting task fields: {', '.join(conflicts)}")
+    return enabled_servers(fields.get("servers"))
+
+
+def _dataset_path(jsonl_fpath: str, root: Path) -> Path:
+    path = Path(jsonl_fpath)
+    if path.is_absolute():
+        return path
+    snapshot = os.environ.get(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME)
+    roots = [root.absolute()]
+    if snapshot is not None:
+        try:
+            serialized_roots = json.loads(snapshot)
+        except ValueError as exc:
+            raise CredentialConfigurationError(
+                f"invalid internal controller input-root snapshot; unset {NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME} "
+                "in the launching environment and relaunch"
+            ) from exc
+        if (
+            not isinstance(serialized_roots, list)
+            or not serialized_roots
+            or not all(isinstance(value, str) and Path(value).is_absolute() for value in serialized_roots)
+        ):
+            raise CredentialConfigurationError(
+                "internal controller input-root snapshot must contain absolute resource-host-visible roots; "
+                f"unset {NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME} in the launching environment and relaunch"
+            )
+        roots = [Path(value) for value in serialized_roots]
+    return next((candidate / path for candidate in roots if (candidate / path).exists()), roots[0] / path)
+
+
 def configured_dataset_servers(
     global_config: Mapping[str, object], *, resources_server: str, root: Path
 ) -> DatasetServerRequirements:
     """Read server requirements only from datasets wired to this resources server.
 
-    A missing requested input is an error. A declared prepare script permits an input to be materialized
-    later; every actual seed is checked again before provider allocation, including such deferred inputs.
+    Relative reads follow the controller's captured roots; direct callers provide their known origin in
+    ``root``. A declared prepare script permits a missing input to be materialized later; every actual seed
+    is checked again before provider allocation, including deferred inputs.
     """
     servers: set[str] = set()
     deferred: set[Path] = set()
-    for component in global_config.values():
-        if not isinstance(component, Mapping):
-            continue
-        agents = component.get("responses_api_agents", {})
-        if not isinstance(agents, Mapping):
-            continue
-        for agent in agents.values():
-            if not isinstance(agent, Mapping):
-                continue
-            target = agent.get("resources_server")
-            if not isinstance(target, Mapping) or target.get("name") != resources_server:
-                continue
-            for dataset in agent.get("datasets") or ():
-                if not isinstance(dataset, Mapping) or not isinstance(dataset.get("jsonl_fpath"), str):
-                    raise CredentialConfigurationError("MCP-Atlas datasets require an explicit jsonl_fpath")
-                path = root / dataset["jsonl_fpath"]
-                if not path.is_file():
-                    if dataset.get("prepare_script"):
-                        deferred.add(path)
-                        continue
-                    raise CredentialConfigurationError(f"MCP-Atlas dataset does not exist: {path}")
-                with path.open() as source:
-                    for line_number, line in enumerate(source, 1):
-                        if not line.strip():
-                            continue
-                        try:
-                            row = json.loads(line)
-                            enabled = enabled_servers(row["verifier_metadata"]["servers"])
-                        except (KeyError, TypeError, ValueError) as exc:
-                            raise CredentialConfigurationError(
-                                f"invalid MCP-Atlas server metadata at {path}:{line_number}"
-                            ) from exc
-                        servers.update(enabled)
+    for declaration in _dataset_declarations(global_config, resources_server):
+        for dataset in declaration.get("datasets") or ():
+            if not isinstance(dataset, Mapping) or not isinstance(dataset.get("jsonl_fpath"), str):
+                raise CredentialConfigurationError("MCP-Atlas datasets require an explicit jsonl_fpath")
+            path = _dataset_path(dataset["jsonl_fpath"], root)
+            if not path.exists():
+                if dataset.get("prepare_script"):
+                    deferred.add(path)
+                else:
+                    raise CredentialConfigurationError(
+                        f"MCP-Atlas dataset does not exist: {path}; use an absolute resource-host-visible "
+                        "jsonl_fpath or --search-dir available on the resources-server host"
+                    )
+            else:
+                try:
+                    with path.open() as source:
+                        for line_number, line in enumerate(source, 1):
+                            if line.strip():
+                                try:
+                                    enabled = _row_servers(json.loads(line))
+                                except (KeyError, TypeError, ValueError) as exc:
+                                    raise CredentialConfigurationError(
+                                        f"invalid MCP-Atlas server metadata at {path}:{line_number}: {exc}"
+                                    ) from exc
+                                servers.update(enabled)
+                except OSError as exc:
+                    raise CredentialConfigurationError(
+                        f"MCP-Atlas dataset is not readable: {path}; use an absolute resource-host-visible "
+                        "jsonl_fpath or --search-dir available on the resources-server host"
+                    ) from exc
     return DatasetServerRequirements(frozenset(servers), tuple(sorted(deferred)))

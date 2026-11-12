@@ -35,9 +35,11 @@ from nemo_gym.server_runtime import ResourcesSessionLocks
 
 
 if __package__:
-    from .credentials import task_environment, validate_provider_environment
+    from .authentication import is_authentication_failure
+    from .credentials import CredentialConfigurationError, task_environment, validate_provider_environment
 else:
-    from credentials import task_environment, validate_provider_environment
+    from authentication import is_authentication_failure
+    from credentials import CredentialConfigurationError, task_environment, validate_provider_environment
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,51 @@ LIST_TOOLS_ATTEMPTS = 5
 
 class SandboxError(RuntimeError):
     """The sandbox could not be started or reached: an infrastructure failure, not a model one."""
+
+
+def _validate_apptainer_environment(provider: Mapping[str, Any]) -> None:
+    """Require clean start/exec environments and reject unmanaged host injection aliases.
+
+    Existing APPTAINERENV_/SINGULARITYENV_ host settings must move into scoped sandbox_env; this checks
+    names only. Raw --env/--env-file arguments are rejected; the provider's later SandboxSpec-derived
+    --env-file remains the supported injection path.
+    """
+    block = provider["apptainer"]
+    if not isinstance(block, Mapping):
+        raise CredentialConfigurationError("MCP-Atlas Apptainer configuration must be a mapping")
+    isolation_flags = {"--cleanenv", "-e", "--containall", "-C"}
+    assignments = tuple(f"{flag}=" for flag in isolation_flags)
+    for section, option in (("create", "extra_start_args"), ("exec", "extra_exec_args")):
+        config = block.get(section) or {}
+        arguments = config.get(option, []) if isinstance(config, Mapping) else getattr(config, option, [])
+        if (
+            not isinstance(arguments, list)
+            or any(not isinstance(argument, str) for argument in arguments)
+            or not isolation_flags.intersection(arguments)
+            or any(argument.startswith(assignments) for argument in arguments)
+        ):
+            raise CredentialConfigurationError(
+                f"MCP-Atlas Apptainer {section}.{option} requires --cleanenv/-e or --containall/-C"
+            )
+        injected = next(
+            (
+                flag
+                for argument in arguments
+                for flag in ("--env", "--env-file")
+                if argument == flag or argument.startswith(flag + "=")
+            ),
+            None,
+        )
+        if injected is not None:
+            raise CredentialConfigurationError(
+                f"MCP-Atlas Apptainer {section}.{option} must not include {injected}; use scoped sandbox_env"
+            )
+    aliases = sorted(name for name in os.environ if name.startswith(("APPTAINERENV_", "SINGULARITYENV_")))
+    if aliases:
+        raise CredentialConfigurationError(
+            "MCP-Atlas rejects inherited Apptainer environment aliases: "
+            f"{', '.join(aliases)}; move ordinary settings into scoped sandbox_env"
+        )
 
 
 def _remove_scratch_dir(directory: str) -> None:
@@ -249,6 +296,8 @@ class SandboxPool:
             raise ValueError("MCP-Atlas requires one resolved opensandbox or apptainer provider")
         validate_provider_environment(self.sandbox_provider)
         self._exec_transport = next(iter(self.sandbox_provider)) == "opensandbox"
+        if not self._exec_transport:
+            _validate_apptainer_environment(self.sandbox_provider)
         self.sandbox_env = dict(sandbox_env)
         self.sandbox_files = dict(sandbox_files)
         self.sandbox_metadata = dict(sandbox_metadata or {})
@@ -280,6 +329,8 @@ class SandboxPool:
     async def start(self, session_id: str, *, servers: list[str], tools: list[str]) -> AtlasSandbox:
         """Start a sandbox that serves ``servers`` and wait until it lists the task's tools."""
         # Reject missing credentials before stopping a prior sandbox or allocating any provider resources.
+        if not self._exec_transport:
+            _validate_apptainer_environment(self.sandbox_provider)
         environment = task_environment(self.sandbox_env, servers)
         async with self._sessions.locked(session_id):
             await self._stop_locked(session_id)
@@ -324,7 +375,7 @@ class SandboxPool:
                     box.server_task = asyncio.create_task(
                         box.sandbox.exec(command, timeout_s=self.ttl_s + self.startup_timeout_s)
                     )
-                listed = await self._wait_until_ready(box, tools)
+                listed = await self._wait_until_ready(box, tools, servers)
                 box.tool_names, box.missing_tools = sandbox_tool_names(tools, listed, servers)
                 return box
             except BaseException as exc:
@@ -337,7 +388,7 @@ class SandboxPool:
                         session_id,
                         stop_error,
                     )
-                if isinstance(exc, SandboxError) or not isinstance(exc, Exception):
+                if isinstance(exc, (SandboxError, CredentialConfigurationError)) or not isinstance(exc, Exception):
                     raise
                 raise SandboxError(f"sandbox start failed: {type(exc).__name__}: {exc}") from exc
 
@@ -352,7 +403,7 @@ class SandboxPool:
             logger.warning("could not read the MCP-Atlas sandbox log: %s", exc)
             return f"log unavailable: {type(exc).__name__}"
 
-    async def _wait_until_ready(self, box: AtlasSandbox, tools: list[str]) -> set[str]:
+    async def _wait_until_ready(self, box: AtlasSandbox, tools: list[str], servers: list[str]) -> set[str]:
         """Wait for ``/health``, then for ``/list-tools`` to report every tool or stop changing."""
         deadline = monotonic() + self.startup_timeout_s
         healthy = False
@@ -367,6 +418,18 @@ class SandboxPool:
                 raise SandboxError(f"sandbox server exited during startup: {await self._log_tail(box)}")
             with contextlib.suppress(ClientError, asyncio.TimeoutError, OSError):
                 status, body = await _sandbox_http_json(box, "GET", "/health", 10)
+                error = body.get("error", "") if isinstance(body, dict) else ""
+                detail = body.get("detail", error) if isinstance(body, dict) else body
+                unhealthy = (
+                    isinstance(body, dict) and body.get("status") == "health_and_client_connection_health_check_failed"
+                )
+                if (
+                    status >= 400
+                    and is_authentication_failure(status, detail if isinstance(detail, str) else "", servers=servers)
+                ) or (unhealthy and isinstance(error, str) and is_authentication_failure(500, error, servers=servers)):
+                    raise CredentialConfigurationError(
+                        "MCP-Atlas authentication failed during startup; check credentials/scopes"
+                    )
                 healthy = (
                     status == 200
                     and isinstance(body, dict)
@@ -389,6 +452,13 @@ class SandboxPool:
             except (ClientError, asyncio.TimeoutError, OSError) as exc:
                 raise SandboxError(f"list-tools failed: {type(exc).__name__}: {exc}") from exc
             if status != 200 or not isinstance(body, list):
+                detail = body.get("detail", "") if isinstance(body, dict) else body
+                if isinstance(detail, str) and detail.startswith("Failed to list tools:"):
+                    detail = detail[len("Failed to list tools:") :].lstrip()
+                if is_authentication_failure(status, detail if isinstance(detail, str) else "", servers=servers):
+                    raise CredentialConfigurationError(
+                        "MCP-Atlas authentication failed while listing tools; check credentials/scopes"
+                    )
                 raise SandboxError(f"list-tools returned HTTP {status}: {str(body)[:500]}")
             listed = {tool["name"] for tool in body if isinstance(tool, dict) and isinstance(tool.get("name"), str)}
             # The served set is final once every tool is there, or once it lists the bare names of one server.
