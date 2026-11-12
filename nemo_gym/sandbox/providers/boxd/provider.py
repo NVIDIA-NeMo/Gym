@@ -29,7 +29,9 @@ the machine from a boxd snapshot instead of the default image, for example one w
 images pulled or dependencies installed ahead of time.
 
 Machines are created ``isolated`` by default: they cannot reach other machines of the
-organization and carry no boxd credentials. ``close()`` deletes the machine.
+organization and carry no boxd credentials. ``close()`` deletes the machine, and every
+machine carries a lifetime (``SandboxSpec.ttl_s``, else ``create.max_lifetime_s``) after
+which boxd deletes it even if ``close()`` never runs.
 
 Failures follow the sandbox failure-event contract: allocation, readiness, lifecycle
 and transport failures raise ``NgFailureEvent`` with ``boundary="sandbox"``; command
@@ -96,11 +98,17 @@ KEEPALIVE_CMD = "while :; do sleep 2147483647; done"
 STAGING_DIR = "/tmp/nemo-gym-transfer"
 # The machine's own user. Commands for any other user go through sudo.
 MACHINE_USER = "boxd"
-# Commands whose deadline is longer than this get a keepalive: a NUL byte on stderr every
-# KEEPALIVE_INTERVAL_S, so idle-connection timeouts between client and machine never end the stream
-# of a command that prints nothing for a long time. The provider removes those bytes from stderr.
+# Commands whose deadline is longer than this get a keepalive: a marker on stderr every
+# KEEPALIVE_INTERVAL_S, so a command that prints nothing for a long time still produces output.
+# The marker is unique to the call, and the provider removes it from stderr.
 KEEPALIVE_AFTER_S = 900.0
 KEEPALIVE_INTERVAL_S = 300
+# A create call that ended without an answer may still make its machine. The provider looks for
+# the machine by name for this long, this often, and deletes it when it appears.
+ORPHAN_LOOKUP_S = 15.0
+ORPHAN_LOOKUP_INTERVAL_S = 1.0
+# Status codes with which boxd answers a create call it did not carry out.
+_CREATE_REFUSED_CODES = frozenset({"invalid_argument", "failed_precondition", "resource_exhausted", "not_found"})
 
 _STATUS_BY_MACHINE_STATE = {
     "pending": SandboxStatus.STARTING,
@@ -213,6 +221,9 @@ class BoxdCreateConfig:
     image_pull_timeout_s: float = 1200.0
     # Pull the image even when the machine already has it (a snapshot may carry it).
     always_pull: bool = False
+    # boxd deletes the machine this many seconds after creation, even if close() never runs.
+    # SandboxSpec.ttl_s overrides it per sandbox; None sets no lifetime.
+    max_lifetime_s: float | None = 3600.0
 
     def __post_init__(self) -> None:
         if self.from_snapshot is not None and (not isinstance(self.from_snapshot, str) or not self.from_snapshot):
@@ -228,6 +239,7 @@ class BoxdCreateConfig:
             raise TypeError("create.labels must be a mapping")
         _check_positive("create.ready_timeout_s", self.ready_timeout_s, allow_none=False)
         _check_positive("create.image_pull_timeout_s", self.image_pull_timeout_s, allow_none=False)
+        _check_positive("create.max_lifetime_s", self.max_lifetime_s)
 
 
 @dataclass(frozen=True)
@@ -247,7 +259,9 @@ class BoxdExecConfig:
 class BoxdOperationConfig:
     """Retries for control-plane and file calls that failed in transport.
 
-    Machine creation and commands are never retried: either may already have taken effect.
+    These are the only retries: the provider turns the SDK client's own off, so the two never
+    multiply. Machine creation is never retried, and a command that may have started is never
+    run again.
     """
 
     retries: int = 2
@@ -364,6 +378,8 @@ class BoxdProvider:
         self._operations = _config_from_mapping(BoxdOperationConfig, operations)
         self._attribution = _config_from_mapping(AttributionConfig, attribution)
         self._client: Any = None
+        # Cleanups of failed creates that outlived a cancelled caller; aclose() waits for them.
+        self._cleanups: set[asyncio.Future[None]] = set()
 
     # ---------------------------------------------------------------- helpers
 
@@ -375,7 +391,8 @@ class BoxdProvider:
                 for key, value in (("api_key", self._connection.api_key), ("region", self._connection.region))
                 if value
             }
-            self._client = boxd.AsyncBoxd(**kwargs)
+            # Retries belong to _with_retries, which knows which calls are safe to repeat.
+            self._client = boxd.AsyncBoxd(max_retries=0, **kwargs)
         return self._client
 
     def _failure(
@@ -503,17 +520,26 @@ class BoxdProvider:
                 )
         else:
             kwargs.update(self._size_kwargs(spec))
-        if spec.ttl_s is not None:
+        lifetime_s = spec.ttl_s if spec.ttl_s is not None else self._create.max_lifetime_s
+        if lifetime_s is not None:
             # boxd deletes the machine when its lifetime ends, even if close() never runs.
-            kwargs["delete_after"] = max(1, math.ceil(spec.ttl_s))
+            kwargs["delete_after"] = max(1, math.ceil(lifetime_s))
 
         try:
             # Not retried: a create whose answer was lost may still have made a machine.
             created = await self._sdk_client().machines.create(name, **kwargs)
+        except asyncio.CancelledError:
+            # The request may already be on its way, so the machine can still appear.
+            await self._finish_cleanup(self._delete_orphan(name, wait_s=ORPHAN_LOOKUP_S))
+            raise
         except Exception as exc:
             failure = self._failure(operation="create", cause=exc, reason=f"boxd could not create machine {name!r}")
             if failure.failure_kind != PROVIDER_CREDENTIALS_REJECTED:
-                await self._delete_orphan(name)
+                refused = (
+                    failure.failure_kind == PROVIDER_QUOTA_EXHAUSTED
+                    or getattr(exc, "code", None) in _CREATE_REFUSED_CODES
+                )
+                await self._finish_cleanup(self._delete_orphan(name, wait_s=0.0 if refused else ORPHAN_LOOKUP_S))
             raise failure from exc
 
         machine = BoxdMachine(machine_id=str(created.id), name=name, env={str(k): str(v) for k, v in spec.env.items()})
@@ -531,13 +557,24 @@ class BoxdProvider:
                     timeout_s=60.0,
                 )
         except BaseException:
-            await self._delete_quietly(handle)
+            await self._finish_cleanup(self._delete_quietly(handle))
             raise
         return handle
 
+    async def _finish_cleanup(self, cleanup: Awaitable[None]) -> None:
+        """Run the cleanup of a failed create to its end, even if the caller is cancelled while it runs."""
+        task = asyncio.ensure_future(cleanup)
+        self._cleanups.add(task)
+        task.add_done_callback(self._cleanups.discard)
+        await asyncio.shield(task)
+
     async def _wait_ready(self, handle: SandboxHandle, *, timeout_s: float) -> None:
         try:
-            await self._sdk_client().machines.wait_until_ready(handle.sandbox_id, timeout=timeout_s)
+            await self._with_retries(
+                lambda: self._sdk_client().machines.wait_until_ready(handle.sandbox_id, timeout=timeout_s),
+                operation="create",
+                sandbox_id=handle.sandbox_id,
+            )
         except TimeoutError as exc:
             raise self._failure(
                 operation="create",
@@ -586,15 +623,25 @@ class BoxdProvider:
                 reason=f"container from {image!r} did not answer the readiness probe: {machine.shell[-200:]!r}",
             )
 
-    async def _delete_orphan(self, name: str) -> None:
-        """Delete the machine a failed create call may still have made; its name is unique to that attempt."""
-        try:
-            machine = await self._sdk_client().machines.get(name)
-        except Exception as exc:  # noqa: BLE001 - nothing to clean up, or nothing we can find
-            if not _is_sdk_error(exc, "NotFoundError"):
-                LOGGER.warning("Could not look up boxd machine %r after a failed create: %s", name, exc)
+    async def _delete_orphan(self, name: str, *, wait_s: float) -> None:
+        """Delete the machine a failed create call may still have made; its name is unique to that attempt.
+
+        The machine can appear after the call ended, so the lookup repeats until ``wait_s`` has passed.
+        ``wait_s=0`` looks once.
+        """
+        deadline = monotonic() + wait_s
+        while True:
+            try:
+                machine = await self._sdk_client().machines.get(name)
+            except Exception as exc:  # noqa: BLE001 - nothing to clean up, or nothing we can find
+                if monotonic() >= deadline:
+                    if not _is_sdk_error(exc, "NotFoundError"):
+                        LOGGER.warning("Could not look up boxd machine %r after a failed create: %s", name, exc)
+                    return
+                await asyncio.sleep(ORPHAN_LOOKUP_INTERVAL_S)
+                continue
+            await self._delete_quietly(SandboxHandle(sandbox_id=str(machine.id), provider_name=self.name, raw=None))
             return
-        await self._delete_quietly(SandboxHandle(sandbox_id=str(machine.id), provider_name=self.name, raw=None))
 
     async def _delete_quietly(self, handle: SandboxHandle) -> None:
         try:
@@ -646,6 +693,8 @@ class BoxdProvider:
         handle.raw = None
 
     async def aclose(self) -> None:
+        if self._cleanups:
+            await asyncio.gather(*self._cleanups, return_exceptions=True)
         client, self._client = self._client, None
         close = getattr(client, "close", None)
         if close is not None:
@@ -657,7 +706,11 @@ class BoxdProvider:
         """Hibernate the machine: memory and disk are kept, so running processes resume as they were."""
         self._machine(handle)
         try:
-            await self._sdk_client().machines.hibernate(handle.sandbox_id)
+            await self._with_retries(
+                lambda: self._sdk_client().machines.hibernate(handle.sandbox_id),
+                operation="pause",
+                sandbox_id=handle.sandbox_id,
+            )
         except Exception as exc:
             raise self._failure(operation="pause", cause=exc, sandbox_id=handle.sandbox_id) from exc
 
@@ -665,7 +718,11 @@ class BoxdProvider:
         """Wake a hibernated machine and wait until it runs commands again."""
         self._machine(handle)
         try:
-            await self._sdk_client().machines.wake(handle.sandbox_id)
+            await self._with_retries(
+                lambda: self._sdk_client().machines.wake(handle.sandbox_id),
+                operation="resume",
+                sandbox_id=handle.sandbox_id,
+            )
         except Exception as exc:
             raise self._failure(operation="resume", cause=exc, sandbox_id=handle.sandbox_id) from exc
         await self._wait_ready(handle, timeout_s=self._create.ready_timeout_s)
@@ -749,11 +806,13 @@ class BoxdProvider:
         if effective_timeout is not None and (not _is_number(effective_timeout) or effective_timeout <= 0):
             raise ValueError("boxd command timeout_s must be > 0")
         line = self._command_line(machine, command, cwd=cwd, env=env, user=user)
-        keepalive = effective_timeout is None or effective_timeout > KEEPALIVE_AFTER_S
-        if keepalive:
+        keepalive: str | None = None
+        if effective_timeout is None or effective_timeout > KEEPALIVE_AFTER_S:
+            keepalive = f"<nemo-gym-keepalive-{uuid.uuid4().hex}>"
             # The keepalive loop shares the command's process group, so a deadline stops both.
             line = (
-                f"( while sleep {KEEPALIVE_INTERVAL_S} >/dev/null 2>&1; do printf '\\0' >&2; done ) >/dev/null & "
+                f"( while sleep {KEEPALIVE_INTERVAL_S} >/dev/null 2>&1; do printf %s '{keepalive}' >&2; done )"
+                " >/dev/null & "
                 "keepalive=$!; "
                 f"{line}; status=$?; kill $keepalive 2>/dev/null; exit $status"
             )
@@ -792,7 +851,7 @@ class BoxdProvider:
             )
         stderr = result.stderr
         if keepalive and stderr:
-            stderr = stderr.replace("\0", "")
+            stderr = stderr.replace(keepalive, "")
         return SandboxExecResult(
             stdout=result.stdout,
             stderr=stderr,

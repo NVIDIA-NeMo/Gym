@@ -68,6 +68,7 @@ sandbox:
       ready_timeout_s: 180.0
       image_pull_timeout_s: 1200.0
       always_pull: false
+      max_lifetime_s: 3600.0
     exec:
       default_timeout_s: 180.0
       shell: null
@@ -129,7 +130,7 @@ asyncio.run(main())
 | `workdir` | The container's working directory, or a directory the provider creates on the machine. |
 | `env` | Set on the container, or passed to every command on the machine. |
 | `resources` | `cpu` and `memory_mib` pick the smallest machine size that holds them: 1 vCPU / 4 GiB, 2 / 8, 4 / 16 or 8 / 32. `disk_gib` up to 100 is accepted. `gpu` is refused. |
-| `ttl_s` | boxd deletes the machine when the lifetime ends, even if `stop()` never runs. |
+| `ttl_s` | boxd deletes the machine when the lifetime ends, even if `stop()` never runs. When it is unset, `create.max_lifetime_s` applies (3600 seconds by default). |
 | `metadata` | Becomes machine labels, next to `create.labels` and job attribution. |
 | `ports` | Not supported; the provider refuses a spec that sets them. |
 | `provider_options` | `from_snapshot` overrides `create.from_snapshot` for one sandbox. `resource_requests` is accepted and ignored: the machine size comes from `resources`. |
@@ -152,13 +153,24 @@ machine, boxd stops the command's process group at the deadline. In a container,
 the `docker exec` client, and the process inside the container ends when the sandbox stops, as with
 the `docker` provider.
 
-Machine creation and commands are never retried, because either may already have taken effect. A
-command whose stream ends without an exit status raises `provider_command_outcome_unknown`. Delete,
-connect, and file calls retry transport failures `operations.retries` times.
+Machine creation is never retried, and a command that may have started is never run again, because
+either may already have taken effect. A command whose stream ends without an exit status raises
+`provider_command_outcome_unknown`. Readiness, delete, connect, pause, resume, and file calls retry
+transport failures `operations.retries` times. Those are the only retries: the provider turns off
+the SDK client's own, so the two never multiply.
 
-Commands with a deadline over 15 minutes, or none, write a NUL byte to stderr every 5 minutes, so
-idle-connection timeouts between the client and the machine never end the stream of a command that
-prints nothing for a long time. The provider removes NUL bytes from those commands' stderr.
+Long silent commands get a keepalive: a command with a deadline over 15 minutes, or none, writes a
+short marker to stderr every 5 minutes. The marker is unique to the call, and the provider removes
+it from the command's stderr, so the output you get is the command's own.
+
+## Lifetime
+
+Every machine carries a lifetime, and boxd deletes the machine when it ends, whether or not
+`stop()` ran. The lifetime is `SandboxSpec.ttl_s` when the spec sets it, and `create.max_lifetime_s`
+otherwise: 3600 seconds in the shipped config, the same default as the E2B provider's
+`create.timeout_s`. It counts from creation and keeps counting while a machine is paused. Raise it
+for longer work, or set `create.max_lifetime_s: null` to create machines without a lifetime when
+`ttl_s` is unset.
 
 ## Pause and Resume
 
@@ -181,8 +193,11 @@ Allocation, readiness, lifecycle, and transport failures raise `NgFailureEvent` 
 | A command's stream ended without an exit status | `provider_command_outcome_unknown` |
 | The container did not answer the readiness probe | `provider_not_ready` |
 
-A failed create deletes the machine it made before raising. Command exits, including nonzero exits,
-return `SandboxExecResult`.
+When create fails after the machine exists, or the caller is cancelled, the provider deletes the
+machine before raising. A create call that ends without an answer may still make its machine, so
+the provider looks for it by name for 15 seconds and deletes it when it appears. If a delete fails,
+or the machine appears later than that, its lifetime removes it. Command exits, including nonzero
+exits, return `SandboxExecResult`.
 
 ## Security and Isolation
 
@@ -192,5 +207,6 @@ the process that creates sandboxes. Outbound internet access is available for pa
 image pulls.
 
 Values in `SandboxSpec.env` reach the sandbox, so pass only what the workload needs. `stop()` deletes
-the machine; set `ttl_s` so boxd also deletes machines that a crashed process leaves behind. Use
+the machine, and the machine's lifetime (see [Lifetime](#lifetime)) deletes machines that a crashed
+process leaves behind. Use
 `labels` and job attribution to find a run's machines with `boxd.machines.list(labels=...)`.

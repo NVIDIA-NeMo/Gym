@@ -159,6 +159,13 @@ class FakeMachines:
         self.create_error: BaseException | None = None
         # Fail the create call after the machine was made, as a lost answer would.
         self.create_error_after_create: BaseException | None = None
+        # With create_error_after_create: the machine shows up only at this lookup by name.
+        self.create_lands_at_lookup = 0
+        self.pending: FakeMachine | None = None
+        self.lookups = 0
+        # The create call makes the machine and then never answers.
+        self.create_never_answers = False
+        self.transient_errors: dict[str, list[BaseException]] = {}
         self.ready_error: BaseException | None = None
         self.delete_errors: list[BaseException] = []
         self.get_error: BaseException | None = None
@@ -170,10 +177,19 @@ class FakeMachines:
         if self.create_error is not None:
             raise self.create_error
         machine = FakeMachine(id=f"m-{len(self.machines) + 1}", name=name, labels=dict(kwargs.get("labels") or {}))
-        self.machines[machine.id] = machine
+        if self.create_lands_at_lookup:
+            self.pending = machine
+        else:
+            self.machines[machine.id] = machine
+        if self.create_never_answers:
+            await asyncio.Event().wait()
         if self.create_error_after_create is not None:
             raise self.create_error_after_create
         return machine
+
+    def fail_next(self, method: str) -> None:
+        if self.transient_errors.get(method):
+            raise self.transient_errors[method].pop(0)
 
     def resolve(self, machine_id: str) -> str:
         """The SDK takes a machine's id or its name."""
@@ -183,6 +199,7 @@ class FakeMachines:
         return machine_id
 
     async def wait_until_ready(self, machine_id: str, *, timeout: float) -> FakeMachine:
+        self.fail_next("wait_until_ready")
         if self.ready_error is not None:
             raise self.ready_error
         return self.machines[machine_id]
@@ -190,6 +207,9 @@ class FakeMachines:
     async def get(self, machine_id: str) -> FakeMachine:
         if self.get_error is not None:
             raise self.get_error
+        self.lookups += 1
+        if self.pending is not None and self.lookups >= self.create_lands_at_lookup:
+            self.machines[self.pending.id], self.pending = self.pending, None
         machine_id = self.resolve(machine_id)
         if machine_id not in self.machines:
             raise NotFoundError(f"machine {machine_id} not found", code="not_found")
@@ -204,10 +224,12 @@ class FakeMachines:
         self.deleted.append(machine_id)
 
     async def hibernate(self, machine_id: str) -> None:
+        self.fail_next("hibernate")
         self.hibernated.append(machine_id)
         self.machines[machine_id].status = "hibernated"
 
     async def wake(self, machine_id: str) -> None:
+        self.fail_next("wake")
         self.woken.append(machine_id)
         self.machines[machine_id].status = "running"
 
@@ -258,6 +280,8 @@ class FakeSdk(types.SimpleNamespace):
 def sdk(monkeypatch: pytest.MonkeyPatch) -> FakeSdk:
     fake = FakeSdk()
     monkeypatch.setattr(boxd_provider, "_require_boxd_sdk", lambda: fake)
+    monkeypatch.setattr(boxd_provider, "ORPHAN_LOOKUP_S", 0.2)
+    monkeypatch.setattr(boxd_provider, "ORPHAN_LOOKUP_INTERVAL_S", 0.01)
     return fake
 
 
@@ -335,6 +359,7 @@ def test_shipped_config_selects_the_provider_and_keeps_the_key_out() -> None:
     assert set(block) == {"default_metadata", "boxd"}
     assert "api_key" not in block["boxd"]["connection"]
     assert block["boxd"]["create"]["isolated"] is True
+    assert block["boxd"]["create"]["max_lifetime_s"] == 3600.0
     resolved = OmegaConf.to_container(config.sandbox.boxd, resolve=True)
     BoxdProvider(**resolved)
 
@@ -399,8 +424,7 @@ def test_create_machine_mode_is_isolated_and_labelled(sdk: FakeSdk) -> None:
     assert kwargs["org"] == "acme"
     assert kwargs["labels"] == {"team": "rl", "task": "t1"}
     assert (kwargs["vcpu"], kwargs["memory"]) == (4, "16G")
-    assert "delete_after" not in kwargs
-    assert sdk.clients[0].kwargs == {"api_key": "k", "region": "fra"}
+    assert sdk.clients[0].kwargs == {"api_key": "k", "region": "fra", "max_retries": 0}
     assert handle.sandbox_id == "m-1"
     assert handle.provider_name == "boxd"
     assert handle.raw.container is None
@@ -415,6 +439,41 @@ def test_create_uses_configured_size_and_ttl(sdk: FakeSdk) -> None:
     assert (kwargs["vcpu"], kwargs["memory"]) == (8, "32G")
     assert kwargs["delete_after"] == 91
     assert "org" not in kwargs
+
+
+def test_every_machine_gets_a_lifetime_unless_it_is_turned_off(sdk: FakeSdk) -> None:
+    _run(_provider().create(SandboxSpec()))
+    _run(_provider(create={"max_lifetime_s": 120.2}).create(SandboxSpec()))
+    _run(_provider(create={"max_lifetime_s": 120}).create(SandboxSpec(ttl_s=30)))
+    _run(_provider(create={"max_lifetime_s": None}).create(SandboxSpec()))
+    lifetimes = [kwargs.get("delete_after") for _, kwargs in sdk.machines.create_calls]
+    assert lifetimes == [3600, 121, 30, None]
+    with pytest.raises(ValueError, match="create.max_lifetime_s must be > 0"):
+        BoxdCreateConfig(max_lifetime_s=0)
+
+
+def test_the_sdk_client_does_not_retry_on_its_own(sdk: FakeSdk) -> None:
+    """Retries are the provider's: a create is sent once, and other calls retry in one layer only."""
+    provider = _provider()
+    sdk.machines.create_error = APIConnectionError("reset")
+    with pytest.raises(NgFailureEvent):
+        _run(provider.create(SandboxSpec()))
+    assert sdk.clients[0].kwargs["max_retries"] == 0
+    assert len(sdk.machines.create_calls) == 1
+
+
+def test_readiness_pause_and_resume_retry_transport_failures(sdk: FakeSdk) -> None:
+    sdk.machines.transient_errors = {
+        "wait_until_ready": [APIConnectionError("reset")],
+        "hibernate": [APIStatusError("down", code="unavailable")],
+        "wake": [APIConnectionError("reset")],
+    }
+    provider = _provider()
+    handle = _run(provider.create(SandboxSpec()))
+    _run(provider.pause(handle))
+    _run(provider.resume(handle))
+    assert sdk.machines.hibernated == sdk.machines.woken == ["m-1"]
+    assert sdk.machines.transient_errors == {"wait_until_ready": [], "hibernate": [], "wake": []}
 
 
 def test_create_from_snapshot_keeps_the_snapshot_size(sdk: FakeSdk, caplog: pytest.LogCaptureFixture) -> None:
@@ -576,6 +635,80 @@ def test_create_that_fails_after_making_the_machine_deletes_it_by_name(sdk: Fake
     assert sdk.machines.machines == {}
 
 
+def test_machine_that_appears_after_a_failed_create_call_is_deleted(sdk: FakeSdk) -> None:
+    sdk.machines.create_error_after_create = APIConnectionError("answer lost")
+    sdk.machines.create_lands_at_lookup = 3
+    with pytest.raises(NgFailureEvent):
+        _run(_provider().create(SandboxSpec()))
+    assert sdk.machines.lookups == 3
+    assert sdk.machines.deleted == ["m-1"]
+
+
+def test_refused_create_looks_for_a_machine_once(sdk: FakeSdk) -> None:
+    sdk.machines.create_error = APIStatusError("bad size", code="invalid_argument")
+    with pytest.raises(NgFailureEvent):
+        _run(_provider().create(SandboxSpec()))
+    assert sdk.machines.lookups == 1
+
+
+@pytest.mark.parametrize("lands_at_lookup", [0, 2])
+def test_cancelled_create_call_deletes_the_machine_it_made(sdk: FakeSdk, lands_at_lookup: int) -> None:
+    sdk.machines.create_never_answers = True
+    sdk.machines.create_lands_at_lookup = lands_at_lookup
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(_provider().create(SandboxSpec()))
+        while not sdk.machines.create_calls:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+    assert sdk.machines.deleted == ["m-1"]
+    assert sdk.machines.machines == {}
+
+
+def test_cleanup_of_a_cancelled_create_survives_a_second_cancel(sdk: FakeSdk) -> None:
+    sdk.machines.create_never_answers = True
+    sdk.machines.create_lands_at_lookup = 5
+
+    async def scenario() -> None:
+        provider = _provider()
+        task = asyncio.ensure_future(provider.create(SandboxSpec()))
+        while not sdk.machines.create_calls:
+            await asyncio.sleep(0)
+        task.cancel()
+        while not sdk.machines.lookups:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sdk.machines.deleted == []
+        await provider.aclose()
+
+    _run(scenario())
+    assert sdk.machines.deleted == ["m-1"]
+
+
+def test_cancel_while_waiting_for_readiness_deletes_the_machine(sdk: FakeSdk) -> None:
+    async def never_ready(machine_id: str, *, timeout: float) -> None:
+        await asyncio.Event().wait()
+
+    sdk.machines.wait_until_ready = never_ready
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(_provider().create(SandboxSpec()))
+        while not sdk.machines.machines:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+    assert sdk.machines.deleted == ["m-1"]
+
+
 def test_create_cleanup_lookup_failure_keeps_the_create_error(sdk: FakeSdk, caplog: pytest.LogCaptureFixture) -> None:
     sdk.machines.create_error = APIConnectionError("reset")
     sdk.machines.get_error = APIConnectionError("still down")
@@ -695,12 +828,15 @@ def test_exec_error_before_the_deadline_is_a_failure_event(sdk: FakeSdk, monkeyp
     assert len(sdk.machines.exec_calls) == 1
 
 
-def test_long_commands_get_a_keepalive_that_is_stripped(sdk: FakeSdk) -> None:
-    sdk.machines.exec_results = [FakeExecResult(stdout="ok\n", stderr="\0warn\0\n", exit_code=0)]
+def test_long_commands_get_a_keepalive_that_is_stripped(sdk: FakeSdk, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boxd_provider.uuid, "uuid4", lambda: types.SimpleNamespace(hex="ab12"))
+    mark = "<nemo-gym-keepalive-ab12>"
+    # The command's own NUL bytes are output like any other and stay.
+    sdk.machines.exec_results = [FakeExecResult(stdout="ok\n", stderr=f"{mark}wa\0rn{mark}\n", exit_code=0)]
     result = _run(_provider().exec(_machine_handle(), "make test", timeout_s=1800))
-    assert result.stderr == "warn\n"
+    assert result.stderr == "wa\0rn\n"
     line = sdk.machines.exec_calls[0][1]
-    assert line.startswith("( while sleep 300 ")
+    assert line.startswith(f"( while sleep 300 >/dev/null 2>&1; do printf %s '{mark}' >&2; done )")
     assert line.endswith("; status=$?; kill $keepalive 2>/dev/null; exit $status")
 
     _run(_provider().exec(_machine_handle(), "true", timeout_s=60))
@@ -717,7 +853,7 @@ def test_keepalive_wrapper_keeps_the_exit_code_and_ends_with_the_command(
     assert time.monotonic() - started < 5
     assert completed.returncode == 3
     assert completed.stdout == b"done\n"
-    assert completed.stderr.count(b"\0") >= 2
+    assert completed.stderr.count(b"<nemo-gym-keepalive-") >= 2
 
 
 def test_exec_stream_that_ends_without_a_status_is_outcome_unknown(

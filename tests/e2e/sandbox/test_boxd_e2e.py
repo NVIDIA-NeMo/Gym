@@ -28,6 +28,8 @@ import asyncio
 import hashlib
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,7 @@ from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.boxd import provider as boxd_provider
 from nemo_gym.sandbox.providers.boxd.provider import BoxdMachine
 
 
@@ -79,7 +82,7 @@ async def _machine(sandbox: AsyncSandbox):
     return await provider._sdk_client().machines.get(sandbox._require_handle().sandbox_id)
 
 
-def test_machine_mode_lifecycle(tmp_path: Path) -> None:
+def test_machine_mode_lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         spec = SandboxSpec(
             workdir="/workspace", env={"SPEC_VAR": "from spec"}, resources={"cpu": 2, "memory_mib": 8192}
@@ -94,6 +97,10 @@ def test_machine_mode_lifecycle(tmp_path: Path) -> None:
             machine = await _machine(sandbox)
             assert machine.networking.isolated is True
             assert machine.labels["suite"] == "nemo-gym-boxd-e2e"
+            # No ttl_s in the spec: the machine carries create.max_lifetime_s, one hour.
+            lifetime_left = (machine.delete_at - datetime.now(timezone.utc)).total_seconds()
+            assert 3300 < lifetime_left <= 3600
+            print(f"[boxd-e2e] default lifetime left: {lifetime_left:.0f}s", flush=True)
             assert await sandbox.status() is SandboxStatus.RUNNING
 
             started = time.monotonic()
@@ -113,6 +120,15 @@ def test_machine_mode_lifecycle(tmp_path: Path) -> None:
             assert result.error_type == "timeout" and result.return_code == 124
             check = await sandbox.exec("pgrep -f '[s]leep 30' || echo none", timeout_s=30)
             assert check.stdout.strip() == "none"
+
+            # A keepalive every 2 s on a silent command: the markers are removed, the command's own bytes stay.
+            monkeypatch.setattr(boxd_provider, "KEEPALIVE_AFTER_S", 1.0)
+            monkeypatch.setattr(boxd_provider, "KEEPALIVE_INTERVAL_S", 2)
+            started = time.monotonic()
+            result = await sandbox.exec("sleep 7; printf 'a\\0b' >&2; echo quiet; exit 5", timeout_s=60)
+            _timed("silent command with keepalive", started)
+            assert (result.stdout, result.stderr, result.return_code) == ("quiet\n", "a\0b", 5)
+            monkeypatch.undo()
 
             data = os.urandom(5 * 1024 * 1024)
             source = tmp_path / "blob.bin"
@@ -208,6 +224,33 @@ def test_container_mode_runs_the_image(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(("image", "cancel_after_s"), [(None, 0.0), (None, 0.1), (None, 0.4), (IMAGE, 1.5)])
+def test_cancelled_start_leaves_no_machine(image: str | None, cancel_after_s: float) -> None:
+    """Cancel start() before and during the create call, and during the image pull: no machine is left."""
+    run_label = uuid.uuid4().hex[:12]
+
+    async def scenario() -> None:
+        config = _provider_config()
+        config["boxd"]["create"]["labels"]["cancel-run"] = run_label
+        sandbox = AsyncSandbox(config, SandboxSpec(image=image))
+        client = sandbox._provider._sdk_client()
+        start = asyncio.ensure_future(sandbox.start())
+        await asyncio.sleep(cancel_after_s)
+        start.cancel()
+        started = time.monotonic()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        _timed(f"cancel after {cancel_after_s}s, cleanup", started)
+        # Past the window in which the provider looks for a machine that appears late.
+        await asyncio.sleep(boxd_provider.ORPHAN_LOOKUP_S + 5)
+        left = await client.machines.list(org=os.getenv("BOXD_ORG"), labels={"cancel-run": run_label})
+        print(f"[boxd-e2e] machines left after cancel at {cancel_after_s}s: {[m.id for m in left]}", flush=True)
+        assert list(left) == []
+        await sandbox._provider.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_wrong_api_key_is_a_credentials_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOXD_API_KEY", "not-a-real-key")
     monkeypatch.delenv("BOXD_TOKEN", raising=False)
@@ -225,7 +268,7 @@ def test_wrong_api_key_is_a_credentials_failure(monkeypatch: pytest.MonkeyPatch)
 def test_missing_api_key_is_a_credentials_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BOXD_API_KEY")
     monkeypatch.delenv("BOXD_TOKEN", raising=False)
-    # Outside a boxd machine there is no machine credential to fall back to; drop the hints that say otherwise.
+    # Leave nothing in the environment that names a boxd credential.
     for name in ("BOXD_VM_ID", "BOXD_VM_NAME", "BOXD_PROXY_ENDPOINT"):
         monkeypatch.delenv(name, raising=False)
 
