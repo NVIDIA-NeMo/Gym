@@ -1,0 +1,62 @@
+config_paths:
+- resources_servers/pdf_analyst_qa/configs/pdf_analyst_qa.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# OpenCode reads PDFs in the resources-owned sandbox and calls Gym's policy model.
+absolute_ip_server_types:
+- responses_api_models
+pdf_analyst_qa_document_image: ${oc.env:PDF_ANALYST_QA_DOCUMENT_IMAGE}
+pdf_analyst_qa_opencode_binary_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_SHA256}
+pdf_analyst_qa_dataset_root: ???
+pdf_analyst_qa_document_prefix: ???
+pdf_analyst_qa_node_cache_host_path: null
+pdf_analyst_qa_agent_timeout_s: 3000
+
+pdf_analyst_qa_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: pdf_analyst_qa_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.19.4
+      sandbox_executable_path: /opt/cli/opencode
+      sandbox_executable_sha256: ${pdf_analyst_qa_opencode_binary_sha256}
+      image_input: true
+      context_window: 262144
+      max_output_tokens: 8192
+      timeout: ${pdf_analyst_qa_agent_timeout_s}
+      network_access: inherit
+      opencode_config:
+        permission:
+          '*': allow
+          webfetch: deny
+          websearch: deny
+          task: deny
+        compaction:
+          auto: false
+        agent:
+          build:
+            steps: 60
+      datasets: ???
+
+pdf_analyst_qa_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: pdf_analyst_qa_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: pdf_analyst_qa_agent
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 600
+      # Allow time for queueing, sandbox setup, the agent, verification, and cleanup.
+      default_episode_timeout_seconds: 4500
+      cleanup_timeout_seconds: 180

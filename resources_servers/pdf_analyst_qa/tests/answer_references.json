@@ -1,0 +1,139 @@
+[
+  {
+    "task_id": "task_000e48f56daf98c14b881f00",
+    "workspace_id": "workspace_e37d8e0e9348f1e307823130",
+    "data_split": "rl",
+    "question": "Across the two quarterly Treasury Survey of Ownership reference dates published in the Treasury Bulletin's October 1979 and November 1979 issues\u2014August 31, 1979 and September 30, 1979\u2014what is the combined par value, in millions of dollars, of the government-agency securities covered by the survey that were held by commercial banks, savings and loan associations, and corporations, reported separately for each survey date? Use the survey's par-value holdings-by-investor-category schedule for government-agency securities, reading the survey's total row for the government-agency securities covered by the survey. Round numerical results to 0 decimal places only at the end. Return only a bracketed list. The result lists numerical values only. Express values in millions of dollars without repeating units in the answer. Give values in this period order: [\"August 31, 1979\", \"September 30, 1979\"]. Round numerical values to 0 decimal places without thousands separators; round halfway cases away from zero. Quote labels; write rank as an integer.",
+    "final_answer": "[1125, 1259]",
+    "answer_contract": "bracket_list",
+    "units": null,
+    "answer_program": {
+      "nodes": [
+        {
+          "parameters": {
+            "compact_columns": {
+              "a1": []
+            },
+            "task": {
+              "outputs": [
+                "a1"
+              ],
+              "answer_shape": "ordered_list"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "task_id": "task_0012c6be544dabd3dc675573",
+    "workspace_id": "workspace_2cf2a86f2f23a105b118cc4f",
+    "data_split": "rl",
+    "question": "Using the December 1948 Treasury Bulletin, compute the Pearson correlation coefficient between the average month-end total interest-bearing public debt (in millions of dollars) and the average monthly yield on long-term taxable Treasury bonds (percent per annum), as published in \"Interest-Bearing Public Debt\" and \"Average Yields of Long-Term Bonds by Periods\" respectively. For each of the three complete calendar quarters of January-September 1948 (first quarter = January-March, second quarter = April-June, third quarter = July-September), take the mean of the three month-end debt levels and the mean of the three monthly taxable Treasury bond yields, then correlate the three quarterly debt averages with the three quarterly yield averages aligned by quarter. Report the single correlation coefficient to three decimal places. Round numerical results to 3 decimal places only at the end. Return only the answer value without restating its unit.",
+    "final_answer": "0.932",
+    "answer_contract": "bare_value",
+    "units": "correlation",
+    "answer_program": {
+      "nodes": [
+        {
+          "parameters": {
+            "compact_columns": {
+              "S3": []
+            },
+            "task": {
+              "outputs": [
+                "S3"
+              ],
+              "answer_shape": "scalar"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "task_id": "task_0029b5f1081b886b8ae3055e",
+    "workspace_id": "workspace_f3fc7dba9cc6a128c9144c97",
+    "data_split": "rl",
+    "question": "Using the Treasury Survey of Ownership as of December 31, 1949, published in the March 1950 issue of the Treasury Bulletin, for the six investor categories reported in that survey - commercial banks, mutual savings banks, life insurance companies, fire, casualty, and marine insurance companies, the U.S. Government investment account and Federal Reserve Banks, and all other investors - compute for each category a marketable-securities composition reindex, defined as the ratio, expressed as a fraction, of the category's share (percent) of the combined six-category holdings of interest-bearing public marketable securities to the category's share (percent) of the combined six-category holdings of all interest-bearing securities (public marketable, public nonmarketable, and special issues), both measured at par value as of December 31, 1949. Report the six categories in a single list ranked in descending order of that reindex, with each reindex shown to 2 decimal places. Round numerical results to 2 decimal places only at the end. Return only a bracketed list. The result is a list of bracketed entries with these slots in order: entity, group, rank, value. Express values in ratio without repeating units in the answer. Within each partition, sort by unrounded value descending, then lexicographically by entity, period, group for ties, using only present fields. Keep the first 6 results and all ties at the cutoff. Rank is an integer equal to one plus the number of strictly better candidates in its partition. Round numerical values to 2 decimal places without thousands separators; round halfway cases away from zero. Quote labels; write rank as an integer. Use these entity spellings when applicable: [\"All other investors\", \"Commercial banks\", \"Fire, casualty, and marine insurance companies\", \"Life insurance companies\", \"Mutual savings banks\", \"U.S. Government investment account and Federal Reserve Banks\"]. This vocabulary does not specify which results qualify. Use these group spellings when applicable: [\"Held by all other investors\", \"Held by investors covered in Treasury Survey\"]. This vocabulary does not specify which results qualify.",
+    "final_answer": "[[\"Commercial banks\", \"Held by investors covered in Treasury Survey\", 1, 1.60], [\"Life insurance companies\", \"Held by investors covered in Treasury Survey\", 2, 1.58], [\"Mutual savings banks\", \"Held by investors covered in Treasury Survey\", 3, 1.55], [\"Fire, casualty, and marine insurance companies\", \"Held by investors covered in Treasury Survey\", 4, 1.41], [\"U.S. Government investment account and Federal Reserve Banks\", \"Held by investors covered in Treasury Survey\", 5, 0.68], [\"All other investors\", \"Held by all other investors\", 6, 0.66]]",
+    "answer_contract": "bracket_list",
+    "units": null,
+    "answer_program": {
+      "nodes": [
+        {
+          "parameters": {
+            "compact_columns": {
+              "s6_rank": [
+                "entity",
+                "group",
+                "rank"
+              ]
+            },
+            "task": {
+              "outputs": [
+                "s6_rank"
+              ],
+              "answer_shape": "ordered_list"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "task_id": "task_0034d521d3815399ab97ba02",
+    "workspace_id": "workspace_736099981805e48a85b44568",
+    "data_split": "rl",
+    "question": "What is the combined total of U.S. Federal Government 'other' budget expenditures for the calendar months of April 1948 and May 1948, in millions of dollars, where each April 1948 component is read from the June 1948 issue of the Treasury Bulletin and each May 1948 component is read from the August 1948 issue, using the principal 'other' expenditure categories (aid to agriculture, social security program, public works, housing and home finance, and miscellaneous; 'direct and work relief' is not separately classified for these months) (source: Daily Treasury Statement)? Round numerical results to 0 decimal places only at the end. Return only the answer value without restating its unit.",
+    "final_answer": "957",
+    "answer_contract": "bare_value",
+    "units": "millions of dollars",
+    "answer_program": {
+      "nodes": [
+        {
+          "parameters": {
+            "compact_columns": {
+              "grand_total": []
+            },
+            "task": {
+              "outputs": [
+                "grand_total"
+              ],
+              "answer_shape": "scalar"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "task_id": "task_00390247af3a823582ab1e99",
+    "workspace_id": "workspace_50b20e4d33870892b2a67f23",
+    "data_split": "rl",
+    "question": "Compute the percent change, from June 1978 to June 1979, in the ratio of the worldwide net position in Canadian dollars to the worldwide net position in German marks of U.S. nonbanking firms' foreign currency positions, as reported in the currency-by-currency summaries of nonbanking firms' positions in the November 1978 and January 1980 issues of the Treasury Bulletin. All figures are printed in millions of the stated foreign currency. Express the ratio in Canadian dollars per German mark (removing the printed millions scale from both currencies), and report a single scalar percentage equal to (June 1979 ratio minus June 1978 ratio) divided by the absolute value of the June 1978 ratio, times 100. Round numerical results to 2 decimal places only at the end. Return only the answer value without restating its unit.",
+    "final_answer": "-16.86",
+    "answer_contract": "bare_value",
+    "units": "percent",
+    "answer_program": {
+      "nodes": [
+        {
+          "parameters": {
+            "compact_columns": {
+              "growth_ratio": [
+                "entity",
+                "period"
+              ]
+            },
+            "task": {
+              "outputs": [
+                "growth_ratio"
+              ],
+              "answer_shape": "scalar"
+            }
+          }
+        }
+      ]
+    }
+  }
+]
