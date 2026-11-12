@@ -29,6 +29,25 @@ gym eval run --no-serve --agent bird_sql_agentic_simple_agent \
 `data/example.jsonl` is produced from `bird_sql`'s examples by `create_examples.py`, which only swaps
 the system prompt and adds the tool declaration.
 
+## Limitations
+
+- **No BIRD evidence.** Like `bird_sql`, the prompt does not include BIRD's per-question
+  `evidence` hints, so questions that depend on a domain formula are harder than in the official
+  BIRD setting.
+- **Strict scoring.** Exact result-set matching marks some essentially correct answers as wrong,
+  for example when the query returns an extra column or uses a precomputed column whose values
+  were rounded differently. The verifier is kept identical to `bird_sql` so results stay comparable.
+- **Little incentive to explore.** The prompt still contains the full schema and sample rows
+  inherited from `bird_sql`, so untrained models often answer after a single tool call or none.
+
+## Future work
+
+- `include_evidence` option to add BIRD evidence to the prompt (off by default).
+- `schema_only` prompt option without sample rows, so inspecting the data requires the tool.
+- A `tested_final_query` metric: whether the model ran its final SQL with the tool before answering.
+- A diagnostic `relaxed_match` metric that ignores extra columns and small rounding differences,
+  to measure false negatives. The reward would still use exact matching.
+
 ## Licensing
 
 - Code: Apache 2.0
