@@ -332,3 +332,17 @@ example even though semantic turns are unavailable. Token totals include only ob
 Collection adds measured wall-clock latency when available. `ng_perf` is absent when observability
 is disabled or no valid trajectory invocation exists. Aggregate metrics include `perf_summary`
 when rollouts contain `ng_perf`.
+
+Each dispatched rollout's saved row or failure row also records `_ng_transport_resends`: the transport resends
+of its `/run` dispatch, in the collection driver and in every Gym server below it. A transport resend is another
+attempt of the same HTTP request after a connection failure; a model client's retries of 429 and 5xx replies and
+rollout retries are not included. Each Gym server reports the resends made while serving a request in its reply's
+`X-NG-Transport-Resend-Count` header, sent only when there were any, and the caller adds them to its own. The count
+is a lower bound: resends a server makes after its reply has started, or by a Gym server without the header, are not
+seen. A row that was never dispatched has no count, and an intentional omission keeps the count of the dispatch
+that produced it.
+
+The run's exported metrics add these up over every saved attempt, failed and omitted ones included:
+`transport/resends` is the total and `transport/attempts_counted` the number of attempts that carried a count.
+Both are left out when no attempt carried one, and shards written by Gym versions that did not record resends add
+nothing to either.

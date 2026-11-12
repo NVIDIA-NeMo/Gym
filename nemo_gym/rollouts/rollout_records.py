@@ -200,6 +200,15 @@ class RolloutRecord:
         return row
 
 
+# Transport resends started for one `/run` dispatch, across the Gym servers below it (a lower bound).
+NG_TRANSPORT_RESENDS_KEY = "_ng_transport_resends"
+
+
+def _transport_resends(row: dict) -> int | None:
+    value = row.get(NG_TRANSPORT_RESENDS_KEY)
+    return value if type(value) is int and value >= 0 else None
+
+
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     record: RolloutRecord
@@ -220,6 +229,8 @@ class _Outcome:
     masked_infrastructure: bool = False
     # The masked result an operator approved to run again (``masked_kept_answer_kind``): counted as the line above.
     rerun_approved: bool = False
+    # Transport resends the collector counted for this attempt's /run dispatch; None when the row carries no count.
+    transport_resends: int | None = None
 
 
 # A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
@@ -575,6 +586,8 @@ class RolloutRecords:
         # An unanswered reservation cannot erase an earlier outcome's stop decision.
         self.replay_blocked: set[str] = set()
         self.unresolved_dispatches: set[str] = set()
+        # Transport resends of failed dispatches saved as evidence, not outcomes (route_failures_to_sidecar off).
+        self.unrouted_transport_resends: dict[tuple[str, int], int] = {}
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
         # Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`).
         self.attempt_extension = 0
@@ -635,6 +648,12 @@ class RolloutRecords:
             ):
                 raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
         return key
+
+    def record_unrouted_transport_resends(self, row: dict) -> None:
+        """Keep the resend count of a failed dispatch saved as evidence; a drained row was never dispatched."""
+        resends = _transport_resends(row)
+        if row.get("_ng_unrouted_run_error") and resends is not None:
+            self.unrouted_transport_resends[self._key(row)] = resends
 
     def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False, count_failure: bool = True) -> None:
         key = self.check_outcome(row, legacy=legacy)
@@ -711,6 +730,7 @@ class RolloutRecords:
             ),
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
+            transport_resends=_transport_resends(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
             # replace it. Not when a server-side fault cut the agent's window short: that answer is not its result.
             saved_answer=failure_class is not None
@@ -769,6 +789,7 @@ class RolloutRecords:
                 ):
                     # Keep diagnostics out of outcome selection and scoring. An unresolved current dispatch,
                     # however, cannot be replayed merely because its outcome was lost with the response.
+                    state.record_unrouted_transport_resends(payload)
                     if payload.get("_ng_unrouted_run_error") and has_unclassified_execution_failure(payload):
                         key = state._key(payload)
                         state.check_run_identity(payload, legacy=import_legacy)
