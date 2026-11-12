@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -803,7 +803,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     @staticmethod
     def _model_request_not_sent(response: NeMoGymResponse) -> bool:
-        """A selected connector failure is safe only if every attempt of that operation never connected."""
+        """A selected connector failure is safe only if every attempt of that operation never connected.
+
+        A connection that was refused and one that timed out connecting were both never made.
+        """
         report = FailureReport.model_validate(response.model_extra["failure_report"])
         selected = report.events[report.failure_id]
         if (
@@ -821,12 +824,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if any(not event.operation_id or not event.attempt_id for event in observed):
             return False
         attempts = [event for event in observed if event.operation_id == selected.operation_id]
-        connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+        unconnected_types = {
+            f"{error_type.__module__}.{error_type.__qualname__}"
+            for error_type in (ClientConnectorError, ConnectionTimeoutError)
+        }
         return len({event.attempt_id for event in attempts}) == len(attempts) and all(
             isinstance(event.details, ModelFailureDetails)
             and event.details.request_upload_complete is False
             and event.foreign_error is not None
-            and event.foreign_error.exception_type == connector_type
+            and event.foreign_error.exception_type in unconnected_types
             for event in attempts
         )
 

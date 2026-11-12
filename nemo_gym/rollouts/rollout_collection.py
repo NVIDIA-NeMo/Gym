@@ -43,7 +43,7 @@ from uuid import uuid4
 
 import aiohttp
 import orjson
-from aiohttp import ClientConnectorError, ClientError
+from aiohttp import ClientConnectorError, ClientError, ConnectionTimeoutError
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
@@ -218,6 +218,7 @@ from nemo_gym.agents.skills import SkillsConfig, load_skill_directory
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
+    is_unsent_connection_failure,
     raise_for_status,
     request,
 )
@@ -5521,13 +5522,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                                     ),
                                 )
                                 break
-                            except ClientConnectorError:
-                                # Every attempt so far was refused, so /run was never delivered and resending it
-                                # cannot start a second episode. A connection that was made keeps the strict limit.
+                            except (ClientConnectorError, ConnectionTimeoutError):
+                                # Every attempt so far was refused or timed out connecting, so /run was never
+                                # delivered and resending it cannot start a second episode. A connection that was
+                                # made keeps the strict limit.
                                 if _max_num_tries is None or time.monotonic() >= connect_deadline:
                                     raise
                                 if not attempt_errors or not all(
-                                    isinstance(error, ClientConnectorError) for error in attempt_errors
+                                    is_unsent_connection_failure(error) for error in attempt_errors
                                 ):
                                     raise
                                 await asyncio.sleep(0.5)
@@ -5608,11 +5610,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
                     if (
                         isinstance(failed_outcome, RolloutFailureRecord)
-                        and isinstance(e, ClientConnectorError)
-                        and all(isinstance(error, ClientConnectorError) for error in attempt_errors)
+                        and is_unsent_connection_failure(e)
+                        and all(is_unsent_connection_failure(error) for error in attempt_errors)
                     ):
                         # A connection that was never made cannot have delivered /run: every attempt failed to
-                        # connect. One that connected first may have delivered it.
+                        # connect, or timed out connecting. One that connected first may have delivered it.
                         failed_outcome = failed_outcome.model_copy(update={"delivery": "not_sent"})
                     return _CompletedRollout(
                         row=row,

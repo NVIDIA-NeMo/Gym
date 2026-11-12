@@ -42,6 +42,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ClientTimeout,
     ConnectionTimeoutError,
     ServerDisconnectedError,
 )
@@ -2234,7 +2235,7 @@ class TestRolloutCollection:
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
         )
-        transport = MagicMock()
+        transport = MagicMock(timeout=ClientTimeout())
         failure = (
             ClientConnectorError(MagicMock(), ConnectionRefusedError("not sent"))
             if connection_refused
@@ -2254,6 +2255,29 @@ class TestRolloutCollection:
         for call in transport.request.call_args_list:
             assert call.kwargs["url"] == "http://agent:1234/run"
             assert "_resend_after_disconnect" not in call.kwargs
+
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_examples_resends_a_handshake_timeout_even_without_replay(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool
+    ) -> None:
+        """A /run whose connection timed out connecting was never sent, so the replay switch does not apply."""
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
+        )
+        transport = MagicMock(timeout=ClientTimeout())
+        transport.request = AsyncMock(
+            side_effect=[ConnectionTimeoutError("handshake timed out"), FakeResponse(200, {"reward": 1})]
+        )
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", AsyncMock())
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests))
+
+        assert result["reward"] == 1
+        assert transport.request.await_count == 2
 
     @pytest.mark.parametrize("route_failures_to_sidecar", [False, True])
     @pytest.mark.parametrize("retry_requests", [True, False])
