@@ -44,7 +44,9 @@ def test_agentic_configs_resolve_and_keep_separate_environment(tmp_path):
     parsed = OpenCodeVideoAgentConfig(name="agentic", host="127.0.0.1", port=8002, **agent)
     assert parsed.execution_failure_reward_zero and parsed.network_access == "model_only"
     # The sandbox resources are the provider-neutral ones every provider accepts.
-    assert SandboxResources.from_mapping(parsed.sandbox_config["resources"]) == SandboxResources(cpu=2, memory_mib=8192)
+    assert SandboxResources.from_mapping(parsed.sandbox_config["resources"]) == SandboxResources(
+        cpu=2, memory_mib=8192
+    )
     assert (
         config["videomme_v2_agentic_environment"]["environment_servers"]["legacy_agent"]["agent_server"]["name"]
         == "videomme_v2_agentic"

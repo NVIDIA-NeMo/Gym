@@ -209,7 +209,9 @@ async def test_videos_outside_the_workdir_share_the_media_workspace(setup, monke
     agent._sandbox_id_to_run_result["sid"] = {"opencode_failed": False}
     monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(return_value="native-response"))
     request = SimpleNamespace(
-        state=SimpleNamespace(_ng_video_binding=binding), cookies={"sandbox_id": "sid"}, session={SESSION_ID_KEY: "sid"}
+        state=SimpleNamespace(_ng_video_binding=binding),
+        cookies={"sandbox_id": "sid"},
+        session={SESSION_ID_KEY: "sid"},
     )
     assert await agent.responses(request, MagicMock()) == "native-response"
     assert uploads["/testbed/video/invented.mp4"] == str(binding.source)

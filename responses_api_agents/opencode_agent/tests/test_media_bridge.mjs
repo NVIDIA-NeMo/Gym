@@ -7,8 +7,11 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { bridgeMessages, bridgePrompt, fixedDescriptorBytes, restoreNativeVideo, restoreToolMedia, TOOL_MEDIA_MIME_PREFIX, VIDEO_BRIDGE_MIME } from "../media_bridge.mjs";
-import { createNemotronMedia } from "../nemotron_media_provider.mjs";
-import NemotronMediaPlugin from "../nemotron_media_plugin.mjs";
+
+// The provider and plugin load OpenCode's pinned SDK from the media runtime when imported.
+const runtime = { skip: process.env.NEMOTRON_OPENCODE_DEPENDENCY_ROOT ? false : "NEMOTRON_OPENCODE_DEPENDENCY_ROOT is unset" };
+const loadProvider = async () => (await import("../nemotron_media_provider.mjs")).createNemotronMedia;
+const loadPlugin = async () => (await import("../nemotron_media_plugin.mjs")).default;
 
 const bytes = Buffer.from("NEMOTRON_FIXED_VIDEO_V1\n" + JSON.stringify({ archive_path: "/external/a.npz", sha256: "a".repeat(64) }));
 const url = `data:video/mp4;base64,${bytes.toString("base64")}`;
@@ -37,7 +40,8 @@ test("malformed descriptors and remote videos fail closed", () => {
   for (const data of ["https://invalid.test/a.mp4", "data:video/mp4;base64,YWJj", Buffer.from("ordinary video"), Buffer.from("NEMOTRON_FIXED_VIDEO_V1\n{}")]) assert.throws(() => fixedDescriptorBytes(data));
 });
 
-test("the actual pinned SDK puts native video inside its bound tool result", async () => {
+test("the actual pinned SDK puts native video inside its bound tool result", runtime, async () => {
+  const createNemotronMedia = await loadProvider();
   let sent;
   const provider = createNemotronMedia({ name: "nemo", baseURL: "http://model.test/v1", fetch: async (_, init) => {
     sent = JSON.parse(init.body);
@@ -59,7 +63,8 @@ test("the actual pinned SDK puts native video inside its bound tool result", asy
   assert.equal(JSON.stringify(sent).includes(VIDEO_BRIDGE_MIME), false);
 });
 
-test("streaming uses the same native-video transport", async () => {
+test("streaming uses the same native-video transport", runtime, async () => {
+  const createNemotronMedia = await loadProvider();
   let sent;
   const provider = createNemotronMedia({ name: "nemo", baseURL: "http://model.test/v1", fetch: async (_, init) => {
     sent = JSON.parse(init.body);
@@ -84,7 +89,8 @@ test("initial videos are recognized as media for native compaction without chang
   assert.equal(original[0].parts[0].mime, "video/mp4");
 });
 
-test("OpenCode hooks mutate caller arrays in place and seed only once", async () => {
+test("OpenCode hooks mutate caller arrays in place and seed only once", runtime, async () => {
+  const NemotronMediaPlugin = await loadPlugin();
   const dir = await mkdtemp(path.join(os.tmpdir(), "nemotron-media-hook-"));
   const previous = process.env.NEMOTRON_OPENCODE_MEDIA_LAUNCHER;
   try {
@@ -121,7 +127,8 @@ test("OpenCode hooks mutate caller arrays in place and seed only once", async ()
   }
 });
 
-test("media plugin leaves native compaction prompts unmodified and keeps visual tools", async () => {
+test("media plugin leaves native compaction prompts unmodified and keeps visual tools", runtime, async () => {
+  const NemotronMediaPlugin = await loadPlugin();
   const dir = await mkdtemp(path.join(os.tmpdir(), "nemotron-compaction-hook-"));
   const previous = process.env.NEMOTRON_OPENCODE_MEDIA_LAUNCHER;
   try {
@@ -164,7 +171,8 @@ test("multiple images remain grouped inside one call, while user images are unch
   assert.equal(original[0].parts[0].state.attachments[0].mime, "image/png");
 });
 
-test("pinned SDK preserves parallel mixed-media call order, including failures", async () => {
+test("pinned SDK preserves parallel mixed-media call order, including failures", runtime, async () => {
+  const createNemotronMedia = await loadProvider();
   let sent;
   const provider = createNemotronMedia({ name: "nemo", baseURL: "http://model.test/v1", fetch: async (_, init) => {
     sent = JSON.parse(init.body);
@@ -215,7 +223,8 @@ test("the observed OpenCode file-data wrapper and unadapted media both restore",
   }
 });
 
-test("English video receipt stays with the native attachment and the original call ID", async () => {
+test("English video receipt stays with the native attachment and the original call ID", runtime, async () => {
+  const createNemotronMedia = await loadProvider();
   const receipt = "Frames: 120 total, 108 unique source frames (10.0% repeated)\nVisual tokens: 8640\nSampling interval: 0.5 s";
   const original = [{ info: { role: "assistant" }, parts: [{ type: "tool", tool: "watch_video", callID: "receipt1",
     state: { status: "completed", output: receipt, attachments: [{ type: "file", mime: "video/mp4", url }] } }] }];

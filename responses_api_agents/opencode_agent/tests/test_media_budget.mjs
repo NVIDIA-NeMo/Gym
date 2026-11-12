@@ -7,6 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { IMAGE_MAX_PIXELS, VIDEO_MAX_FRAME_PIXELS, imageToolDescription, videoToolDescription } from "../media_budget.mjs";
 
+// The media plugin loads OpenCode's pinned SDK from the media runtime when imported.
+const runtime = { skip: process.env.NEMOTRON_OPENCODE_DEPENDENCY_ROOT ? false : "NEMOTRON_OPENCODE_DEPENDENCY_ROOT is unset" };
+
 const profile = { schema_version: 1, patch_size: 16, temporal_patch_size: 2, downsample_ratio: 0.5,
   max_context_tokens: 262144, reserved_output_tokens: 32768, safety_tokens: 4096,
   video_max_pixels: 67108864, max_materialized_bytes: 8589934592 };
@@ -97,7 +100,7 @@ test("invalid geometry and pixel caps fail before advertising the tool", () => {
   assert.throws(() => videoToolDescription({ ...profile, video_max_target_token: 655360 }), /was removed/);
 });
 
-test("model-facing schema excludes trusted budget overrides", async () => {
+test("model-facing schema excludes trusted budget overrides", runtime, async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "nemotron-budget-test-"));
   const prior = process.env.NEMOTRON_OPENCODE_MEDIA_LAUNCHER;
   try {
