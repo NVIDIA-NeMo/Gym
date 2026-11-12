@@ -262,6 +262,46 @@ def test_a_masked_namespaced_kind_without_a_retry_it_may_take_is_kept(tmp_path, 
     assert (decision.action.value, decision.counts) == ("stop", {"scored": 1, "masked": 1})
 
 
+def _retry_at(stage):
+    """A masked model timeout whose owner recorded ``retry``, at ``stage``, with the attempt's partial transcript.
+
+    The shape of the AutomationBench rows: the stage sits only on the selected failure event, and the response has
+    output items but no status.
+    """
+    tool_turn = {"type": "function_call", "call_id": "c1", "name": "search", "arguments": "{}"}
+    return _masked("model_transport_error") | {
+        "failure_outcome_action": "retry",
+        "failure_outcome_attribution": "evaluation",
+        "_ng_failure_id": "f1",
+        "_ng_failure_events": {
+            "f1": {
+                "stage": stage,
+                "boundary": "model",
+                "failure_kind": "model_transport_error",
+                "operation": "model_request",
+            }
+        },
+        "response": {"object": "response", "id": "r1", "status": None, "error": None, "output": [tool_turn] * 50},
+    }
+
+
+def test_a_masked_agent_stage_retry_with_a_partial_transcript_is_retried(tmp_path):
+    output, _ = _run(tmp_path, [[_retry_at("agent")]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.coverage()["masked_retryable"] == 1
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
+
+
+def test_a_masked_verification_stage_retry_with_a_response_keeps_its_answer(tmp_path):
+    output, _ = _run(tmp_path, [[_retry_at("verification")]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == []
+    assert store.coverage()["masked_retryable"] == 0
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "masked": 1}, decision.reason
+
+
 def test_a_masked_infrastructure_result_with_only_a_no_generation_placeholder_is_still_retried(tmp_path):
     from nemo_gym.artifacts.rollout_rows import NG_NO_GENERATION_METADATA
 

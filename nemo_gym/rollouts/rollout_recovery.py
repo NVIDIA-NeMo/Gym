@@ -503,10 +503,14 @@ def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
 
     Same facts as recovery's saved-answer test: a collector projection's own flag, else the retained generation of the
     response (``has_saved_generation``, which leaves out a no-generation placeholder) or of a native partial response.
+    An agent-stage fault whose owner recorded ``retry`` keeps no answer: its response is the failed attempt's partial
+    transcript, whatever its status.
     """
     flag = row.get("_ng_collected_saved_answer")
     if isinstance(flag, bool):
         return flag
+    if failure_stage(row) == "agent" and row.get("failure_outcome_action") == OutcomeAction.RETRY:
+        return False
     answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
     return has_saved_generation({"response": answer}) or keeps_partial_response(row)
 
