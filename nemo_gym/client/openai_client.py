@@ -720,7 +720,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and is_global_aiohttp_client_request_debug_enabled():
-            print(f"Request kwargs: {json.dumps(request_kwargs)}")
+            # A diagnostic only: request_kwargs can hold transport objects such as a ClientTimeout, and a failure to
+            # serialize them must not replace the upstream error raised below.
+            print(f"Request kwargs: {json.dumps(request_kwargs, default=str)}")
 
         await _raise_exhausted(response, None, getattr(response, "_ng_attempt_failure", None))
 

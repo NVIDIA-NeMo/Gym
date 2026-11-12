@@ -242,3 +242,32 @@ async def test_request_timeout_bounds_each_read_of_a_relayed_stream_not_the_whol
                     pass
         finally:
             stalled.release()
+
+
+@pytest.mark.parametrize("request_timeout_seconds", [0.5, None])
+@pytest.mark.parametrize("debug_enabled", [True, False])
+async def test_an_upstream_error_keeps_its_status_and_body_with_request_debug_on_or_off(
+    gym_http_client, monkeypatch, capsys, debug_enabled, request_timeout_seconds
+) -> None:
+    # With request debugging on, the diagnostic print of the request must not replace the provider's error, even
+    # though a relayed stream's request carries its own ClientTimeout.
+    monkeypatch.setattr(http_client, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+    error_body = b'{"error":{"code":"context_length_exceeded"}}'
+
+    async def reject(request: web.Request) -> web.Response:
+        return web.Response(status=400, body=error_body, content_type="application/json")
+
+    application = web.Application()
+    application.router.add_post("/v1/responses", reject)
+    async with TestServer(application) as upstream:
+        client = NeMoGymAsyncOpenAI(
+            base_url=str(upstream.make_url("/v1")),
+            api_key="dummy_key",  # pragma: allowlist secret
+            request_timeout_seconds=request_timeout_seconds,
+        )
+        with pytest.raises(ClientResponseError) as raised:
+            await client.create_response_stream(**CODEX_REQUEST)
+
+    assert raised.value.status == 400
+    assert raised.value.response_content == error_body
+    assert ("Request kwargs:" in capsys.readouterr().out) is debug_enabled
