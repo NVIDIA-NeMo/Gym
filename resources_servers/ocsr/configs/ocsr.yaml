@@ -1,0 +1,31 @@
+ocsr:
+  resources_servers:
+    ocsr:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Optical chemical structure recognition (molecule image to SMILES), scored by RDKit canonical SMILES
+      value: Evaluate reading a molecule's structure from a drawing
+ocsr_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ocsr
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/ocsr/data/example.jsonl
+ocsr_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ocsr_simple_agent
+      resources_tool_transports:
+      - direct_http
