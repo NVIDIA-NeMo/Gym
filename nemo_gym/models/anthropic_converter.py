@@ -52,6 +52,7 @@ from uuid import uuid4
 from anthropic.types.message_create_params import MessageCreateParams
 
 from nemo_gym.core.responses_api_types import (
+    TOKEN_METADATA_FIELDS,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -65,6 +66,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    TokenIDLogProbMixin,
 )
 from nemo_gym.models.anthropic_utils import NeMoGymAnthropicMessage
 
@@ -89,7 +91,16 @@ class AnthropicConverter:
         thinking_budget_tokens: Optional[int],
         extra_body: Dict[str, Any],
     ) -> Dict[str, Any]:
-        body_dict = body.model_dump(exclude_unset=True)
+        # Anthropic requests carry no token metadata, so skip copying the token lists of training variants.
+        # A nested exclude slows the dump even when nothing matches, so apply it only when an input item
+        # carries token metadata.
+        carries_token_metadata = not isinstance(body.input, str) and any(
+            isinstance(item, TokenIDLogProbMixin) for item in body.input
+        )
+        body_dict = body.model_dump(
+            exclude_unset=True,
+            exclude={"input": {"__all__": TOKEN_METADATA_FIELDS}} if carries_token_metadata else None,
+        )
         anthropic_body = dict(extra_body)
         anthropic_body.update(
             {
@@ -211,13 +222,19 @@ class AnthropicConverter:
         usage = self._usage_to_responses_usage(anthropic_response.get("usage"))
         stop_reason = anthropic_response.get("stop_reason")
         incomplete_details = self._incomplete_details_from_stop_reason(stop_reason)
+        # The items are already validated, so the response takes them as is instead of a dump to
+        # validate again. A rebuilt item would have every field marked as set, and exclude_unset dumps
+        # such as request replay read that, so mark them the same way. Their nested parts are built
+        # with every field passed explicitly, so they are marked already.
+        for item in output:
+            item.__pydantic_fields_set__ = set(type(item).model_fields)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model,
             object="response",
-            output=[item.model_dump() for item in output],
+            output=output,
             tool_choice=request_body.tool_choice,
             parallel_tool_calls=request_body.parallel_tool_calls,
             tools=request_body.tools,
@@ -537,9 +554,16 @@ class AnthropicConverter:
         return message.model_dump(mode="json", exclude_none=True)
 
     def _iter_output_dicts(self, response: NeMoGymResponse) -> List[Dict[str, Any]]:
+        # The Anthropic mapping drops token metadata, so skip copying the token lists of training variants
+        # into the dumps. The exclude slows the dump even when nothing matches, so apply it only to them.
         items = []
         for item in response.output or []:
-            items.append(item if isinstance(item, dict) else item.model_dump())
+            if isinstance(item, dict):
+                items.append(item)
+            elif isinstance(item, TokenIDLogProbMixin):
+                items.append(item.model_dump(exclude=TOKEN_METADATA_FIELDS))
+            else:
+                items.append(item.model_dump())
         return items
 
     def _output_message_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -846,6 +870,8 @@ class AnthropicConverter:
                     NeMoGymResponseOutputText(
                         annotations=[],
                         text="".join(pending_text),
+                        type="output_text",
+                        logprobs=None,
                     )
                 ],
                 role="assistant",

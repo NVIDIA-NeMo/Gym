@@ -11,6 +11,7 @@ from typing import ClassVar
 
 from fastapi import HTTPException
 
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.mini_swe_agent.app import MiniSWEAgent, MiniSWEAgentRunRequest, MiniSWEAgentVerifyResponse
 
 
@@ -27,3 +28,6 @@ class MiniSWESessionsAgent(MiniSWEAgent):
 
 if __name__ == "__main__":
     MiniSWESessionsAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MiniSWESessionsAgent.run_webserver()  # noqa: F401

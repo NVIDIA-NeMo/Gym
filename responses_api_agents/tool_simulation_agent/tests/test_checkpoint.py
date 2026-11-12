@@ -7,6 +7,7 @@ import json
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -76,6 +77,13 @@ def request(capture_key: str) -> Request:
     )
 
 
+def run_request(routing_id: str | None) -> Request:
+    app = SimpleNamespace(state=SimpleNamespace())
+    if routing_id is not None:
+        app.state.nemo_gym_routing_id = routing_id
+    return Request({"type": "http", "path": "/run", "query_string": b"", "headers": [], "app": app})
+
+
 class Reply:
     ok = True
 
@@ -140,6 +148,9 @@ class Harness:
             server_client=client,
         )
         self.tasks: list[asyncio.Task] = []
+        self.self_call_headers: list = []
+        # Without session routing (one worker), a server has no routing ID.
+        self.routing_id: str | None = None
 
     async def post(self, *, server_name, url_path, json, **kwargs):
         if server_name == "model":
@@ -148,6 +159,7 @@ class Harness:
             await self.model_release.wait()
             return Reply(MODEL_REPLY)
         if server_name == "agent":
+            self.self_call_headers.append(kwargs.get("headers"))
             capture_key = re.search(r"/ng-rollout/([^/]+)", url_path)[1]
             if self.detached_dispatch:
                 # Cancelling an HTTP caller need not cancel the server's handler.
@@ -180,7 +192,7 @@ class Harness:
         raise AssertionError((server_name, url_path))
 
     def start(self, attempt: int = 0) -> asyncio.Task:
-        task = asyncio.create_task(self.agent.run(row(attempt)))
+        task = asyncio.create_task(self.agent.run(run_request(self.routing_id), row(attempt)))
         self.tasks.append(task)
         return task
 
@@ -429,3 +441,15 @@ async def test_real_verifier_seed_advertises_replay_without_restart(harnesses):
         assert response.status_code == 200, response.text
         assert response.headers["x-ng-checkpoint-verify"] == "replay"
         assert response.headers.get("x-ng-checkpoint-restart") != "1"
+
+
+@pytest.mark.parametrize("routing_id", [None, "worker-b"])
+async def test_the_model_call_returns_to_the_worker_that_holds_the_episode(harnesses, routing_id):
+    harness = harnesses()
+    harness.routing_id = routing_id
+    harness.model_release.set()
+    result = await asyncio.wait_for(harness.start(), 2)
+
+    assert result.reward == 1.0
+    # With several workers, session routing sends a call that names its owner back to that worker.
+    assert harness.self_call_headers == [{"x-ng-session-owner": routing_id} if routing_id else {}]

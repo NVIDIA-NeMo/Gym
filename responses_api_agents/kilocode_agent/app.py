@@ -81,6 +81,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     SandboxObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
@@ -388,7 +389,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
     Kilo runs its own tools internally; we parse its JSON event stream into Gym format and use the
     resources server to verify. Kilo's model calls go through ``model_server`` when one is set — see
-    that field. Eval-only either way: token IDs and logprobs are not wired up.
+    that field, under the rollout's prefix, so ``token_id_capture`` applies to them.
     """
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
@@ -1133,3 +1134,6 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     KiloCodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = KiloCodeAgent.run_webserver()  # noqa: F401
