@@ -30,6 +30,7 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteComparisonResult,
     SuiteFailureSummary,
     SuiteMetricResult,
+    summary_sources,
 )
 from nemo_gym.package_info import __version__
 
@@ -59,18 +60,21 @@ def build_suite_comparison(
     for model, benchmarks in manifest.models.items():
         model_cells = []
         for benchmark, sources in benchmarks.items():
-            baseline = load_suite_run(sources.baseline, directory=path.parent)
-            candidate = load_suite_run(sources.candidate, directory=path.parent)
-            for role, run in (("baseline", baseline), ("candidate", candidate)):
-                label = f"{model}/{benchmark} {role}"
-                for source_kind, source_path in (("aggregate", run.aggregate_metrics), ("rollouts", run.rollouts)):
-                    identity = source_kind, source_path.resolve(), run.agent
-                    if identity in observed_sources:
-                        raise ConfigError(
-                            f"{label} reuses the same {source_kind} file and agent as {observed_sources[identity]}. "
-                            "Suite Welch comparisons require independent source observations."
-                        )
-                    observed_sources[identity] = label
+            baseline = tuple(load_suite_run(source, directory=path.parent) for source in sources.baseline)
+            candidate = tuple(load_suite_run(source, directory=path.parent) for source in sources.candidate)
+            for role, runs in (("baseline", baseline), ("candidate", candidate)):
+                for index, run in enumerate(runs, 1):
+                    label = f"{model}/{benchmark} {role}"
+                    if len(runs) > 1:
+                        label += f" source {index}"
+                    for source_kind, source_path in (("aggregate", run.aggregate_metrics), ("rollouts", run.rollouts)):
+                        identity = source_kind, source_path.resolve(), run.agent
+                        if identity in observed_sources:
+                            raise ConfigError(
+                                f"{label} reuses the same {source_kind} file and agent as {observed_sources[identity]}. "
+                                "Suite Welch comparisons require independent source observations."
+                            )
+                        observed_sources[identity] = label
             cell = compare_suite_cell(
                 model=model,
                 benchmark=benchmark,
@@ -108,14 +112,16 @@ def build_suite_comparison(
     failures_by_path: dict[Path, SuiteFailureSummary | None] = {}
     uses_by_path: dict[Path, list[str]] = {}
     for cell in result.cells:
-        for role, run in (("baseline", cell.baseline), ("candidate", cell.candidate)):
-            if run.rollouts not in failures_by_path:
-                failures_by_path[run.rollouts] = read_saved_failures(run.rollouts)
-                uses_by_path[run.rollouts] = []
-            run.failures = failures_by_path[run.rollouts]
-            label = f"{cell.model}/{cell.benchmark} {role}"
-            if label not in uses_by_path[run.rollouts]:
-                uses_by_path[run.rollouts].append(label)
+        for role, collection in (("baseline", cell.baseline), ("candidate", cell.candidate)):
+            for index, run in enumerate(summary_sources(collection), 1):
+                if run.rollouts not in failures_by_path:
+                    failures_by_path[run.rollouts] = read_saved_failures(run.rollouts)
+                    uses_by_path[run.rollouts] = []
+                run.failures = failures_by_path[run.rollouts]
+                source_label = f"{role} source {index}" if collection.sources else role
+                label = f"{cell.model}/{cell.benchmark} {source_label}"
+                if label not in uses_by_path[run.rollouts]:
+                    uses_by_path[run.rollouts].append(label)
     for path, summary in failures_by_path.items():
         if summary is not None:
             warning = saved_failure_warning(summary)

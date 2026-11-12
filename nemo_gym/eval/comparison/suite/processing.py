@@ -17,7 +17,7 @@
 from dataclasses import asdict, replace
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     BenchmarkSamples,
     MetricScale,
@@ -27,7 +27,9 @@ from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     normalize_score,
     summarize_sample,
 )
+from nemo_gym.eval.comparison.suite.coverage import check_collection_coverage, recorded_task_sets, run_coverage
 from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun, _repeat_count
+from nemo_gym.eval.comparison.suite.pooling import pool_suite_summaries
 from nemo_gym.eval.comparison.suite.schema import (
     SuiteAggregateResult,
     SuiteCellResult,
@@ -38,50 +40,6 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteStatistics,
 )
 from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES
-
-
-def _task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str], bool]:
-    """Read identities already recorded by aggregation; never derive repeat scores."""
-    tasks: dict[int, set[int]] = {}
-    seen_groups = set()
-    notes = []
-    has_all_infos = bool(run.groups)
-    for group in run.groups:
-        task = group.get(TASK_INDEX_KEY_NAME)
-        if not isinstance(task, int) or isinstance(task, bool) or task < 0:
-            raise ConfigError(f"'{run.aggregate_metrics}' has an invalid group task index {task!r}.")
-        if task in seen_groups:
-            raise ConfigError(f"'{run.aggregate_metrics}' has duplicate task group {task}.")
-        seen_groups.add(task)
-        missing = group.get("missing_num_rollouts", 0)
-        if isinstance(missing, (int, float)) and missing > 0:
-            notes.append(f"Task {task} is missing planned rollouts.")
-        infos = group.get("rollout_infos")
-        if not isinstance(infos, list) or not infos:
-            has_all_infos = False
-            continue
-        for info in infos:
-            if not isinstance(info, dict):
-                raise ConfigError(f"'{run.aggregate_metrics}' has a non-object rollout summary for task {task}.")
-            if info.get(TASK_INDEX_KEY_NAME, task) != task:
-                raise ConfigError(f"'{run.aggregate_metrics}' rollout task identity disagrees with group {task}.")
-            repeat = info.get(ROLLOUT_INDEX_KEY_NAME)
-            if not isinstance(repeat, int) or isinstance(repeat, bool) or repeat < 0:
-                raise ConfigError(f"'{run.aggregate_metrics}' task {task} has invalid rollout index {repeat!r}.")
-            target = tasks.setdefault(repeat, set())
-            if task in target:
-                raise ConfigError(f"'{run.aggregate_metrics}' duplicates task {task}, repeat {repeat}.")
-            target.add(task)
-        expected = group.get("expected_num_rollouts")
-        if isinstance(expected, int) and expected > len(infos):
-            notes.append(f"Task {task} is missing planned rollouts.")
-    return {repeat: frozenset(indices) for repeat, indices in tasks.items()}, notes, has_all_infos
-
-
-def _task_indices(tasks: set[int]) -> str:
-    """Keep task indices useful for locating missing inputs without overwhelming reports."""
-    preview = ", ".join(str(task) for task in sorted(tasks)[:10])
-    return f"{preview}, ... (+{len(tasks) - 10} more)" if len(tasks) > 10 else preview
 
 
 def _select_metric_repeats(run: LoadedSuiteRun, metrics: list[SuiteMetricResult]) -> LoadedSuiteRun:
@@ -96,7 +54,7 @@ def _select_metric_repeats(run: LoadedSuiteRun, metrics: list[SuiteMetricResult]
     if not omitted:
         return run
     rows = tuple(row for row in run.repeat_rows if row[ROLLOUT_INDEX_KEY_NAME] not in omitted)
-    recorded, _, complete_identities = _task_sets(run)
+    recorded, _, complete_identities = recorded_task_sets(run)
     # A valid single-repeat run also has only token summaries. Its scored task records
     # distinguish that case from repeats with no usable measurements.
     unscored = omitted - recorded.keys() if complete_identities else omitted
@@ -108,131 +66,6 @@ def _select_metric_repeats(run: LoadedSuiteRun, metrics: list[SuiteMetricResult]
         ),
         unscored_repeat_indices=tuple(sorted(unscored)),
     )
-
-
-def _coverage(run: LoadedSuiteRun) -> SuiteCoverage:
-    recorded, notes, complete_identities = _task_sets(run)
-    incomplete = bool(notes)
-    if run.unscored_repeat_indices:
-        incomplete = True
-        indices = ", ".join(map(str, run.unscored_repeat_indices))
-        notes.append(
-            f"Repeats with no scored task observations are excluded from score calculations (indices: {indices})."
-        )
-    for metric in ("coverage/masked_rollouts", "coverage/fully_masked_tasks"):
-        count = run.agent_metrics.get(metric, 0)
-        if isinstance(count, (int, float)) and count > 0:
-            incomplete = True
-            notes.append(f"Aggregate metrics report {metric}={count}; scored coverage is incomplete.")
-    reported_repeats = run.agent_metrics.get("num_repeats")
-    if isinstance(reported_repeats, int) and reported_repeats != run.repeat_count:
-        incomplete = True
-        notes.append("Reported repeat count differs from the number of scored repeats available for comparison.")
-    sample_counts = {row["sample_count"] for row in run.repeat_rows if isinstance(row.get("sample_count"), int)}
-    if len(sample_counts) > 1:
-        incomplete = True
-        notes.append("Stored repeat metrics report unequal task sample counts.")
-    if recorded and len(set(recorded.values())) > 1:
-        incomplete = True
-        notes.append("Recorded task sets differ between repeats.")
-    if complete_identities and run.repeat_rows:
-        recorded_indices = set(recorded)
-        metric_indices = {row[ROLLOUT_INDEX_KEY_NAME] for row in run.repeat_rows}
-        if recorded_indices != metric_indices:
-            incomplete = True
-            notes.append("Stored repeat metric indices differ from recorded rollout indices.")
-    for row in run.repeat_rows:
-        missing = row.get("missing_count", 0)
-        count = row.get("sample_count")
-        if isinstance(missing, (int, float)) and missing > 0:
-            incomplete = True
-            notes.append(f"Repeat {row[ROLLOUT_INDEX_KEY_NAME]} reports missing task observations.")
-        expected_count = len(recorded.get(row[ROLLOUT_INDEX_KEY_NAME], ())) if complete_identities else len(run.groups)
-        if isinstance(count, int) and expected_count and count != expected_count:
-            incomplete = True
-            notes.append(f"Repeat {row[ROLLOUT_INDEX_KEY_NAME]} sample_count disagrees with recorded task identities.")
-    planned_count = None
-    verified = False
-    if run.planned_tasks_by_repeat is not None:
-        planned = run.planned_tasks_by_repeat
-        planned_tasks = set().union(*planned.values())
-        planned_count = len(planned_tasks)
-        group_tasks = {group[TASK_INDEX_KEY_NAME] for group in run.groups}
-        if run.groups and group_tasks != planned_tasks:
-            incomplete = True
-            missing_tasks = planned_tasks - group_tasks
-            unplanned_tasks = group_tasks - planned_tasks
-            if missing_tasks:
-                notes.append(
-                    f"Results are missing {len(missing_tasks)} of {planned_count} planned tasks "
-                    f"(task indices: {_task_indices(missing_tasks)})."
-                )
-            if unplanned_tasks:
-                noun = "task" if len(unplanned_tasks) == 1 else "tasks"
-                notes.append(
-                    f"Results include {len(unplanned_tasks)} unplanned {noun} "
-                    f"(task indices: {_task_indices(unplanned_tasks)})."
-                )
-        if len(set(planned.values())) > 1:
-            incomplete = True
-            notes.append("Planned task sets differ between repeats.")
-        if complete_identities:
-            if recorded != planned:
-                incomplete = True
-                missing_rollouts = sum(
-                    len(tasks - recorded.get(repeat, frozenset())) for repeat, tasks in planned.items()
-                )
-                unplanned_rollouts = sum(
-                    len(tasks - planned.get(repeat, frozenset())) for repeat, tasks in recorded.items()
-                )
-                if missing_rollouts:
-                    notes.append(
-                        f"Results are missing {missing_rollouts} of {sum(map(len, planned.values()))} planned rollouts."
-                    )
-                if unplanned_rollouts:
-                    noun = "rollout" if unplanned_rollouts == 1 else "rollouts"
-                    notes.append(f"Results include {unplanned_rollouts} unplanned {noun}.")
-            else:
-                verified = True
-        else:
-            notes.append("Planned inputs exist, but recorded task identities are insufficient to verify coverage.")
-    else:
-        notes.append("Planned coverage is unverified: materialized inputs are unavailable.")
-    if not complete_identities:
-        notes.append("Recorded repeat task coverage is unverified: group rollout identities are unavailable.")
-    status = "incomplete" if incomplete else "verified" if verified else "unverified"
-    return SuiteCoverage(
-        status=status,
-        recorded_task_count=len(run.groups),
-        planned_task_count=planned_count,
-        notes=list(dict.fromkeys(notes)),
-    )
-
-
-def _check_paired_coverage(
-    baseline: LoadedSuiteRun,
-    candidate: LoadedSuiteRun,
-    baseline_coverage: SuiteCoverage,
-    candidate_coverage: SuiteCoverage,
-) -> None:
-    # Group identities remain evidence even when per-repeat rollout identities are absent.
-    baseline_set = {group[TASK_INDEX_KEY_NAME] for group in baseline.groups} if baseline.groups else None
-    candidate_set = {group[TASK_INDEX_KEY_NAME] for group in candidate.groups} if candidate.groups else None
-    reasons = []
-    if baseline_set is not None and candidate_set is not None and baseline_set != candidate_set:
-        reasons.append(
-            "Candidate and baseline have results for different tasks "
-            f"(candidate: {len(candidate_set)} tasks; baseline: {len(baseline_set)} tasks)."
-        )
-    if baseline.planned_tasks_by_repeat is not None and candidate.planned_tasks_by_repeat is not None:
-        planned_baseline = set().union(*baseline.planned_tasks_by_repeat.values())
-        planned_candidate = set().union(*candidate.planned_tasks_by_repeat.values())
-        if planned_baseline != planned_candidate:
-            reasons.append("Baseline and candidate planned task sets differ.")
-    for coverage in (baseline_coverage, candidate_coverage):
-        if reasons:
-            coverage.status = "incomplete"
-            coverage.notes.extend(reasons)
 
 
 def _metric_values(run: LoadedSuiteRun, metrics: list[SuiteMetricResult]) -> list[list[float]]:
@@ -290,37 +123,70 @@ def _statistics(cells: list[SuiteCellResult], *, confidence_level: float) -> Sui
     return result
 
 
+def _collection_summary(
+    runs: tuple[LoadedSuiteRun, ...],
+    coverages: list[SuiteCoverage],
+    scores: tuple[float, ...],
+    collection_notes: list[str],
+) -> SuiteRunSummary:
+    summaries = []
+    offset = 0
+    for run, coverage in zip(runs, coverages, strict=True):
+        count = len(run.repeat_rows)
+        summaries.append(_run_summary(run, coverage, scores[offset : offset + count]))
+        offset += count
+    return pool_suite_summaries(summaries, runs=runs, collection_notes=collection_notes)
+
+
 def compare_suite_cell(
     *,
     model: str,
     benchmark: str,
-    baseline: LoadedSuiteRun,
-    candidate: LoadedSuiteRun,
+    baseline: LoadedSuiteRun | tuple[LoadedSuiteRun, ...],
+    candidate: LoadedSuiteRun | tuple[LoadedSuiteRun, ...],
     metrics: list[SuiteMetricResult],
     confidence_level: float,
 ) -> SuiteCellResult:
-    """Build one benchmark comparison, excluding single-repeat sources as a pair."""
-    baseline = _select_metric_repeats(baseline, metrics)
-    candidate = _select_metric_repeats(candidate, metrics)
-    baseline_coverage = _coverage(baseline)
-    candidate_coverage = _coverage(candidate)
-    _check_paired_coverage(baseline, candidate, baseline_coverage, candidate_coverage)
-    if baseline.repeat_count < 2 or candidate.repeat_count < 2:
+    """Compare concatenated independent repeat samples, retaining source-level evidence."""
+    baseline_runs = baseline if isinstance(baseline, tuple) else (baseline,)
+    candidate_runs = candidate if isinstance(candidate, tuple) else (candidate,)
+    if not baseline_runs or not candidate_runs:
+        raise ConfigError("Baseline and candidate source collections must not be empty.")
+    baseline_runs = tuple(_select_metric_repeats(run, metrics) for run in baseline_runs)
+    candidate_runs = tuple(_select_metric_repeats(run, metrics) for run in candidate_runs)
+    baseline_coverage = [run_coverage(run) for run in baseline_runs]
+    candidate_coverage = [run_coverage(run) for run in candidate_runs]
+    collection_notes = check_collection_coverage(
+        baseline=baseline_runs,
+        candidate=candidate_runs,
+        baseline_coverage=baseline_coverage,
+        candidate_coverage=candidate_coverage,
+    )
+    baseline_count = sum(run.repeat_count for run in baseline_runs)
+    candidate_count = sum(run.repeat_count for run in candidate_runs)
+    if baseline_count < 2 or candidate_count < 2:
         return SuiteCellResult(
             model=model,
             benchmark=benchmark,
             eligible=False,
             exclusion_reason=(
                 "Excluded: at least two repeats are required on each side "
-                f"(baseline={baseline.repeat_count}, candidate={candidate.repeat_count})."
+                f"(baseline={baseline_count}, candidate={candidate_count})."
             ),
-            baseline=_run_summary(baseline, baseline_coverage, ()),
-            candidate=_run_summary(candidate, candidate_coverage, ()),
+            baseline=_collection_summary(baseline_runs, baseline_coverage, (), collection_notes),
+            candidate=_collection_summary(candidate_runs, candidate_coverage, (), collection_notes),
             metrics=metrics,
         )
+    for run in (*baseline_runs, *candidate_runs):
+        if run.repeat_count and not run.repeat_rows:
+            raise ConfigError(
+                f"'{run.aggregate_metrics}' agent '{run.agent}' has no stored repeat rows. "
+                "Pooling requires stored metrics for every scored repeat; regenerate aggregate metrics "
+                "with `gym eval aggregate`. Suite comparison does not reconstruct repeat metrics."
+            )
     scales = [MetricScale(metric.low, metric.high, metric.higher_is_better) for metric in metrics]
-    baseline_values = _metric_values(baseline, metrics)
-    candidate_values = _metric_values(candidate, metrics)
+    baseline_values = [row for run in baseline_runs for row in _metric_values(run, metrics)]
+    candidate_values = [row for run in candidate_runs for row in _metric_values(run, metrics)]
     try:
         baseline_scores = normalize_and_average_metrics_per_repeat(baseline_values, scales)
         candidate_scores = normalize_and_average_metrics_per_repeat(candidate_values, scales)
@@ -336,8 +202,8 @@ def compare_suite_cell(
         benchmark=benchmark,
         eligible=True,
         metrics=metrics,
-        baseline=_run_summary(baseline, baseline_coverage, baseline_scores),
-        candidate=_run_summary(candidate, candidate_coverage, candidate_scores),
+        baseline=_collection_summary(baseline_runs, baseline_coverage, baseline_scores, collection_notes),
+        candidate=_collection_summary(candidate_runs, candidate_coverage, candidate_scores, collection_notes),
     )
     cell.statistics = _statistics([cell], confidence_level=confidence_level)
     return cell

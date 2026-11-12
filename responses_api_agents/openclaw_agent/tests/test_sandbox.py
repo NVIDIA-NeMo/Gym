@@ -1075,7 +1075,7 @@ def test_sandbox_usage_details_preserve_positive_counts_and_treat_defaulted_zero
             "input_tokens": expected_input,
             "output_tokens": 5,
             "total_tokens": expected_input + 5,
-            "input_tokens_details": {"cached_tokens": expected_cache},
+            "input_tokens_details": {"cached_tokens": expected_cache, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": None},
         }
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
@@ -1100,7 +1100,7 @@ def test_missing_call_usage_keeps_sandbox_cache_aggregate_unknown(setup, second_
             "input_tokens": 12,
             "output_tokens": 3,
             "total_tokens": 15,
-            "input_tokens_details": {"cached_tokens": None},
+            "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": None},
         }
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))

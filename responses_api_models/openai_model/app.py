@@ -16,7 +16,7 @@ import asyncio
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
-from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
 from openai.types.shared import ReasoningEffort
@@ -138,6 +138,14 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
     )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_key_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the session key to the upstream endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "observability_enabled or token capture."
+        ),
+    )
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
 
@@ -197,12 +205,13 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
     propagate_upstream_http_status_codes: frozenset[int] = Field(
-        default_factory=frozenset,
+        default_factory=lambda: frozenset({401, 403, 429}),
         description=(
             "Upstream HTTP error statuses returned to the caller with that status "
             "and the provider's error body, instead of HTTP 500. A status that "
             "upstream_retry_policy retries until it is exhausted still returns "
-            "HTTP 500. Empty keeps the historical generic exception behavior."
+            "HTTP 500. The default forwards a rejected credential (401, 403) and a rate limit (429), "
+            "so a caller names the real cause; an empty set keeps the historical generic exception behavior."
         ),
     )
     upstream_retry_policy: UpstreamRetryPolicy = Field(
@@ -259,6 +268,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
+            session_key_headers=self.config.session_key_headers,
             max_num_tries=self.config.upstream_max_num_tries,
             # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP
             # error; left unset, the transport would retry the connection forever.

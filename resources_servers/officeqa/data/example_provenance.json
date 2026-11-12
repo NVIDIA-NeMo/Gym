@@ -1,0 +1,55 @@
+{
+  "purpose": "Bounded public-example PDF retrieval/arithmetic smoke; not a benchmark accuracy estimate",
+  "model": "Kimi K3",
+  "harness": "stock Gym OpenCode 1.19.4 sessions",
+  "image": "OfficeQA OpenCode image (ARM64; internal registry reference redacted)",
+  "provider": "local Podman through Gym Docker CLI adapter",
+  "network_access": "inherit",
+  "timeout_s": 600,
+  "max_output_tokens": 8192,
+  "sampling_overrides": {
+    "temperature": 1.0,
+    "top_p": 0.95
+  },
+  "concurrency": 2,
+  "limitations": [
+    "Local Podman, not the remote OpenSandbox deployment; no network-isolation qualification.",
+    "Shortened time/output budgets for public smoke only."
+  ],
+  "source_hashes": {
+    "resources_servers/officeqa/app.py": "19b3b8b22c45ea7168e71e89a8f16982d15f7b47d2de45ab003f275f4eddc150",
+    "benchmarks/officeqa_pro/examples.py": "ae4e2b4ebefcba5a1ef878d93b201d72475c4e52d72f8c161bce3b933789ada0",
+    "benchmarks/officeqa_pro/configs/examples.yaml": "e78f6ec437f422b4066f2616e0b5b16677508ef289af201389a73f4474188ac3"
+  },
+  "generated_on": "2026-11-06",
+  "source_commit": "66904369f8f32fae1ca9ac6417ee9702a3b303ca",
+  "correct": 5.0,
+  "total": 5,
+  "responses": [
+    {
+      "uid": "officeqa_example_1",
+      "reward": 1.0,
+      "response_sha256": "80bf8fbb910f3162cac8ae7806a0a642431f07589f5e463b513ab3b04b02bdfb"
+    },
+    {
+      "uid": "officeqa_example_2",
+      "reward": 1.0,
+      "response_sha256": "8462a1e0cfe3047f8294e13e368fe830ec1898dfb35fcf9e5d577ebc72d3e3a8"
+    },
+    {
+      "uid": "officeqa_example_3",
+      "reward": 1.0,
+      "response_sha256": "e7c7acdd52a0f9fdd8e1e3bbe34ad347a75752a195092ef6b96368f7bc1b957d"
+    },
+    {
+      "uid": "officeqa_example_4",
+      "reward": 1.0,
+      "response_sha256": "0d868759f2be94dcc5ca3202712f0025f3d474ad34157a4fe0ef07cf9ba4209e"
+    },
+    {
+      "uid": "officeqa_example_5",
+      "reward": 1.0,
+      "response_sha256": "690819008c65b0e68ade958c7656692f47ce0bed8151d5369e9fcc6907f64ed9"
+    }
+  ]
+}

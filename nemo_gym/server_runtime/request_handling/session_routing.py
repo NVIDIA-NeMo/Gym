@@ -441,6 +441,7 @@ class ResourcesSessionLifetimes:
       opens the session: its ownership lasts until the session ends.
     - A successful ``/close_session`` or ``/verify``, or ``SimpleResourcesServer.checkpoint_session_ended``,
       ends it, unless the request says a close follows, as an environment server's ``/verify`` does.
+      ``session_release_pending`` also keeps ownership while a successful verification's cleanup needs retry.
     - A session that is not open keeps its owner ``close_retry_window_seconds`` after the last request for it.
       The caller's retried or cleanup close reaches the owner within that window.
       A delayed seed after a close reaches it too, where the server refuses it while the session is fenced.
@@ -457,11 +458,13 @@ class ResourcesSessionLifetimes:
         starts: tuple[str, ...],
         ends: tuple[str, ...],
         close_follows_header: Optional[str] = None,
+        session_release_pending: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.close_retry_window_seconds = close_retry_window_seconds
         self._starts = _paths(starts)
         self._ends = _paths(ends)
         self._close_follows = close_follows_header.lower().encode("latin-1") if close_follows_header else None
+        self._session_release_pending = session_release_pending
         # Each session's ownership lasts until this time, infinite while it is open.
         self._until: dict[str, float] = {}
         # One entry per session with a finite time, earliest first, so the heap never outgrows ``_until``.
@@ -478,7 +481,10 @@ class ResourcesSessionLifetimes:
         path = scope["path"]
         succeeded = status is not None and 200 <= status < 300
         is_open = self._until.get(session_id) == math.inf
-        if succeeded and self._starts.fullmatch(path):
+        if self._session_release_pending is not None and self._session_release_pending(session_id):
+            # A successful score can leave failed cleanup; its close must still reach this worker after the window.
+            self._until[session_id] = math.inf
+        elif succeeded and self._starts.fullmatch(path):
             self._until[session_id] = math.inf
         elif is_open and not (succeeded and self._ends.fullmatch(path) and not self._close_follows_in(scope)):
             pass
@@ -969,6 +975,7 @@ def install_session_routing(
     session_starts: tuple[str, ...] = (),
     session_ends: tuple[str, ...] = (),
     close_follows_header: Optional[str] = None,
+    session_release_pending: Optional[Callable[[str], bool]] = None,
     backlog: int = DEFAULT_UVICORN_BACKLOG,
 ) -> Optional[str]:
     """Route this worker's requests by session ID, and serve forwarded requests on a private socket.
@@ -979,7 +986,8 @@ def install_session_routing(
     also stored in ``app.state.nemo_gym_routing_id``.
     Pass the agent for an agent server, whose own records decide how long it owns its sessions,
     or the close retry window and the session start and end routes for a resources server
-    (see ``ResourcesSessionLifetimes``).
+    (see ``ResourcesSessionLifetimes``). Its optional ``session_release_pending`` callback keeps ownership
+    while a successful score has left cleanup to retry.
     """
     route_by = dict(
         kind=kind,
@@ -1006,6 +1014,7 @@ def install_session_routing(
             starts=(kind.seed_path, *session_starts),
             ends=(kind.close_path, *session_ends),
             close_follows_header=close_follows_header,
+            session_release_pending=session_release_pending,
         )
         app.state.nemo_gym_resources_session_lifetimes = resources_lifetimes
         lifetimes = resources_lifetimes

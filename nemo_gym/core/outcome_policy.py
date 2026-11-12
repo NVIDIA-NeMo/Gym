@@ -200,6 +200,26 @@ class StageOutcomePolicyConfig(BaseModel):
             dict_fields=("by_failure_kind", "by_status_code", "by_failure_class"),
         )
 
+    @classmethod
+    def overlay(cls, defaults: "StageOutcomePolicyConfig", override: object) -> object:
+        """Merge an explicit override over a boundary's own defaults instead of the shared ones.
+
+        Rules the override does not mention keep the boundary's default. Anything that is not a policy mapping or
+        model is returned unchanged for validation to reject.
+        """
+        if isinstance(override, StageOutcomePolicyConfig):
+            override = override.model_dump(exclude_unset=True)
+        if not isinstance(override, dict):
+            return override
+        return {
+            **override,
+            "by_stage": _merge_stage_overrides(
+                defaults.by_stage,
+                override.get("by_stage", {}),
+                dict_fields=("by_failure_kind", "by_status_code", "by_failure_class"),
+            ),
+        }
+
 
 def choose_stage_outcome(
     *,

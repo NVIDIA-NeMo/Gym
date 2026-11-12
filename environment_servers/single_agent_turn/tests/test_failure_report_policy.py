@@ -6,7 +6,13 @@ import pytest
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON
-from nemo_gym.core import MODEL_POLICY_RESPONSE_TIMEOUT
+from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    FailureBoundary,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    failure_report_for,
+)
 from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
 
 
@@ -96,8 +102,10 @@ async def test_unproven_timeout_never_counts_as_zero_or_verifies(damage):
     "case,retryable",
     [
         ("connector", True),
+        ("handshake_timeout", True),
         ("upload_only", False),
         ("wrong_type", False),
+        ("read_timeout", False),
         ("unknown_upload", False),
         ("after_upload", False),
         ("earlier_uploaded", False),
@@ -119,6 +127,10 @@ async def test_only_proven_unconnected_selected_operation_retains_retry(case, re
     events = {"selected": event}
     if case == "upload_only":
         event.pop("foreign_error")
+    elif case == "handshake_timeout":
+        event["foreign_error"]["exception_type"] = "aiohttp.client_exceptions.ConnectionTimeoutError"
+    elif case == "read_timeout":
+        event["foreign_error"]["exception_type"] = "aiohttp.client_exceptions.SocketTimeoutError"
     elif case == "wrong_type":
         event["foreign_error"]["exception_type"] = "TimeoutError"
     elif case == "unknown_upload":
@@ -238,6 +250,76 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     (verify,) = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
     assert verify["response"]["status"] == "failed"
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
+
+
+RETRYABLE_PROVIDER_KINDS = [
+    "provider_unavailable",
+    "provider_io_timeout",
+    "provider_status_unavailable",
+    "provider_command_outcome_unknown",
+    "provider_protocol_error",
+    "provider_request_failed",
+    "provider_internal_error",
+    "provider_pty_unavailable",
+]
+
+
+def _provider_failure_response(kind, *, http_status):
+    """The failed response a sandbox agent returns: its own event caused by the provider's event, as the agent builds it."""
+    provider = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=kind,
+        failure_reason="Sandbox provider request failed",
+        http_status=http_status,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1"),
+        operation="sandbox.exec",
+        stage="agent",
+    )
+    reported = NgFailureEvent(
+        boundary=FailureBoundary.AGENT,
+        failure_kind=kind,
+        failure_reason=provider.failure_reason,
+        operation="agent.run",
+        stage="agent",
+    )
+    reported.__cause__ = provider
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        output=[],
+        error={"code": "server_error", "message": provider.failure_reason},
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind).model_dump_json()},
+        failure_report=failure_report_for(reported).model_dump(mode="json"),
+    )
+    return provider, response
+
+
+@pytest.mark.parametrize("kind", RETRYABLE_PROVIDER_KINDS)
+@pytest.mark.parametrize("http_status", [None, 404])
+@pytest.mark.parametrize("configured", [None, "fail"])
+async def test_provider_failure_from_an_agent_follows_the_configured_kind_rule_not_the_cause_status(
+    kind, http_status, configured
+):
+    """Transient provider kinds retry the episode by default; a configured kind rule decides instead, and the cause stays."""
+    environment, client = _environment_server()
+    policy = {"by_failure_kind": {kind: configured}} if configured else {}
+    terminal = configured == "fail"
+    environment.config.agent_outcome_policy = environment.config.agent_outcome_policy.model_validate(policy)
+    provider, response = _provider_failure_response(kind, http_status=http_status)
+    client.responses[2] = _Response(response)
+    del client.responses[4]
+    result = await environment.run_request(_request())
+    assert result.result is None and result.failure.terminal is terminal
+    assert result.failure.failure_kind == kind
+    kept = result.failure_report.events[provider.event_id]
+    assert (kept.failure_kind, kept.http_status, kept.operation) == (kind, http_status, "sandbox.exec")
+    assert kept.details == provider.details
+    chain, event_id = [], result.failure_report.failure_id
+    while event_id is not None:
+        chain.append(event_id)
+        event_id = result.failure_report.events[event_id].cause_id
+    assert chain[-1] == provider.event_id and len(chain) >= 2
+    assert not any(path == "/verify" for _, path, _ in client.calls)
 
 
 @pytest.mark.parametrize("omitted", [False, True])

@@ -4,7 +4,9 @@ Runs OpenClaw CLI (`openclaw agent --local --json`).
 OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
-Minimal, meant to be extended, and currently eval-only. 
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Quick start
 
@@ -289,7 +291,6 @@ Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
 Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 
-This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;
 unit tests alone do not establish runtime compatibility or benchmark accuracy. Process/memory/setup
 and close-latency overhead have not been benchmarked at scale.
@@ -332,14 +333,6 @@ It sets `network_access: model_only`, so the sandbox reaches only the model serv
 overrides it with `model_and_tools`. A restricted sandbox cannot download OpenClaw, so supply
 `sandbox_runtime_dir`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.

@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models.token_capture import TokenCaptureStore
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import (
     VLLMContextCompactionResponseCreateParams,
@@ -43,6 +44,21 @@ def test_rejects_forward_unvalidated_reasoning_effort() -> None:
 
 def test_tokenize_route_is_non_generating() -> None:
     assert ("POST", "/tokenize") in VLLMModelWithCompaction.non_generating_model_routes
+
+
+@pytest.mark.parametrize(("path", "incomplete"), [("/context/measure", False), ("/unlisted", True)])
+def test_inherited_measure_route_keeps_captured_rollout_complete(tmp_path, path: str, incomplete: bool) -> None:
+    """The /tokenize declaration extends VLLMModel's routes, so a context measurement is not a generation."""
+    model = _make_model()
+    model.server_client.global_config_dict = {"token_id_capture": {"enabled": True, "dir": str(tmp_path)}}
+    app = model.setup_webserver()
+    # Deployed only under source_history capture; a stub isolates the request classification.
+    app.post(path)(lambda: {"prompt_token_count": 1})
+
+    response = TestClient(app).post(f"/ng-rollout/measure-roll0/training-token-capture{path}", json={})
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("measure-roll0").incomplete is incomplete
 
 
 def test_base_vllm_model_has_no_compaction_routes() -> None:
@@ -250,3 +266,40 @@ def test_tokenize_endpoint_forwards_exact_prefix_without_sampling() -> None:
     assert captured_kwargs["required_prefix_token_ids"] == [10, 11]
     assert "logprobs" not in captured_kwargs
     assert "return_token_ids" not in captured_kwargs
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "recorded"),
+    [("stop", "stop"), ("tool_calls", "tool_calls"), ("length", "max_output_tokens")],
+)
+async def test_responses_note_the_finish_reason_for_the_model_call_record(
+    finish_reason, recorded, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionMessage, NeMoGymChoice
+    from nemo_gym.trajectory import build_model_call_record
+
+    model = _make_model()
+    completion = NeMoGymChatCompletion(
+        id="chatcmpl-test",
+        created=1,
+        model="dummy_model",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason=finish_reason,
+                message=NeMoGymChatCompletionMessage(role="assistant", content="ok", tool_calls=[]),
+            )
+        ],
+    )
+    monkeypatch.setattr(VLLMModelWithCompaction, "chat_completions", AsyncMock(return_value=completion))
+    request = MagicMock(state=SimpleNamespace())
+
+    response = await model.responses(
+        request, VLLMContextCompactionResponseCreateParams(input="hi", required_prefix_token_ids=[1])
+    )
+
+    exchange = {"response": response.model_dump(mode="json"), **request.state.nemo_gym_model_execution}
+    assert build_model_call_record(exchange, call_index=0).finish_reason == recorded

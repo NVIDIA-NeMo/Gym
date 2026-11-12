@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import (
     GRADED_ANSWER_KEY,
@@ -549,6 +551,16 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             }
             async with self._log_lock:
                 with open(log_path, "a", encoding="utf-8") as fout:
+                    # The asyncio lock covers this worker only.
+                    # With num_workers > 1, every worker appends to this file,
+                    # and a long record can reach it in several writes.
+                    # The file lock keeps records from different workers from interleaving.
+                    # A filesystem without file locks (NFS without lockd, Lustre mounted noflock) raises here;
+                    # the record is still written, unlocked, as it was before workers shared the file.
+                    try:
+                        fcntl.flock(fout, fcntl.LOCK_EX)
+                    except OSError:
+                        pass
                     fout.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as exc:
             LOG.warning("[competitive_coding_challenges] Failed to append log_jsonl %s: %s", log_path, exc)
@@ -556,3 +568,6 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CompetitiveCodingChallengesResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CompetitiveCodingChallengesResourcesServer.run_webserver()  # noqa: F401

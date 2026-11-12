@@ -1,16 +1,17 @@
 # Sandboxed mini-SWE
 
 > [!WARNING]
-> **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
-> (for example [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml)),
-> this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
-> That path will be removed after the environment-server migration, and the agent logs a deprecation
-> warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
+> **`miniswe_sandboxed_agent` is deprecated in favor of `mini_swe_agent` agent sessions.**
+> For Harbor task folders without `[agent].user`, use `gym eval run <tasks> --agent mini_swe_agent/mini_swe_agent_sandboxed`
+> with the same model and sandbox options. See [the replacement's agent sessions](../mini_swe_agent/README.md#agent-sessions).
+> Both legacy and session configurations log one warning at startup. Existing entrypoints and configs keep working;
+> no removal date is set for this adapter. Use the replacement for new integrations.
 >
-> Episode sessions under an environment server are not deprecated: see [Harbor episodes](#harbor-episodes).
-> Terminal Bench 4 runs that way from its Harbor task folders (`gym eval run terminal_bench_4 --agent
-> miniswe_sandboxed_agent`; see [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)).
-> Terminal-Bench-Science has no session path yet and stays on `/run` until it does.
+> Legacy `/run` benchmark presets (for example [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml))
+> must stay on this adapter until their environment-server migration; changing only the agent name is insufficient.
+> Terminal-Bench-Science also stays on `/run` until it has a session path. Tasks with `[agent].user` must keep this
+> adapter because the replacement refuses a task user. Other Harbor task folders can migrate now;
+> the replacement does not establish new benchmark qualification or guarantee identical scores.
 
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.

@@ -61,6 +61,35 @@ The JSON report records the selected delta confidence level in the top-level `co
 
 Without `--output-dir`, reports are written beside the candidate's rollout file. Repeating the command in the same output directory replaces the report files. See the [CLI Reference](/main/reference/cli-commands#gym-eval-compare) for aggregate-file overrides and all options.
 
+### Pool independent runs
+
+Use `--baseline-runs` and `--candidate-runs` to combine independent collections of the same benchmark into one comparison:
+
+```bash
+gym eval compare \
+    --baseline-runs results/baseline-1/rollouts.jsonl,results/baseline-2/rollouts.jsonl \
+    --candidate-runs results/candidate-1/rollouts.jsonl,results/candidate-2/rollouts.jsonl,results/candidate-3/rollouts.jsonl \
+    --output-dir results/pooled-comparison
+```
+
+Two baseline runs of eight repeats contribute **16 baseline observations**; three candidate runs of eight repeats contribute **24 candidate observations**. NeMo Gym concatenates the repeat estimates and calculates one Welch interval for candidate minus baseline. Each repeat has equal weight, so a run with more repeats contributes more observations. NeMo Gym does not average run means or combine existing interval endpoints. Local repeat indices may restart at zero in each source.
+
+Either side can stay a single run: use `--baseline` with `--candidate-runs`, or `--baseline-runs` with `--candidates`. Choose one input option per side. `--baseline-runs-agg-metrics` supplies aggregate-file overrides in baseline source order; `--candidates-agg-metrics` also accepts overrides in `--candidate-runs` order. Use `--baseline-agents` and `--candidate-agents` for agent selectors in the corresponding source order. A singular `--baseline-agent NAME` applies the same agent to every baseline source; use `--baseline-agents` when those names differ.
+
+Use a dedicated `--output-dir`, as in the example, to keep pooled reports separate from per-run reports. Without it, the last source in `--candidate-runs` determines the output directory. Reordering those sources changes that directory, and writing there replaces any existing `compare_report.*` files.
+
+Metrics other than completion-token accounting must have finite numeric values in every scored repeat of every contributing source; missing estimates in a scored repeat are errors. Token-only rows with no scored task observations are excluded from quality samples. Quality repeat counts describe the scored samples, while source provenance also records the stored repeat rows.
+
+Completion-token metrics use their available repeat observations, even when token accounting is absent from some repeats or an entire source. Notes identify those sources and local repeat indices. Their observation counts can therefore differ from quality repeat counts. A present malformed or nonfinite value still causes an error; missing accounting does not become a zero measurement.
+
+Every source needs stored repeat-level estimates for the quality metrics being compared. Current single-repeat aggregates contain no quality repeat estimates, including when only one repeat has scored tasks. Collect at least two scored repeats per source and regenerate aggregation before pooling those runs. Whole-run metrics such as pass@k cannot supply missing repeat observations. Each pooled side's separate 95% interval is recomputed from its concatenated repeat sample.
+
+In `compare_report.json`, a pooled baseline or candidate's top-level `rollouts_jsonl_fpath` and `aggregate_metrics_fpath` identify its first source for compatibility. The ordered `sources` list is authoritative for the complete collection, selected agents, and per-source counts; the comparison statistics describe the combined samples. Source files are read without modification.
+
+<Note>
+Pool independent collections with the same dataset, task ordering, limit, scoring settings, and configuration within each side. A copy, symlink, resumed history, or re-aggregation of the same observations does not provide additional independent repeats. Gym rejects reused source identities where artifact paths reveal the duplication; it cannot establish independence or identical experimental settings from aggregate files alone.
+</Note>
+
 ## Read the Report
 
 **Delta is candidate minus baseline.** A positive delta means the candidate's metric is numerically higher. Whether that is better depends on the metric: higher reward is usually better, while lower latency is usually better. Metrics retain their original units; this command does not normalize or combine them into a single score.
@@ -124,7 +153,7 @@ These are long-run false-positive rates at the specified cutoff, not the probabi
 
 ## Compare a benchmark suite
 
-`gym eval compare-suite` calculates one score difference per model–benchmark pair, one aggregate per model, and one overall aggregate. Configure exactly one baseline and one candidate run for each included pair. Sources are not pooled.
+`gym eval compare-suite` calculates one score difference per model–benchmark pair, one aggregate per model, and one overall aggregate. Configure a baseline and a candidate side for each included pair. Either side accepts one run or a list of independent runs whose repeat estimates are pooled.
 
 Save a manifest such as `suite.yaml`:
 
@@ -199,6 +228,20 @@ Each `baseline` or `candidate` mapping supports:
 
 Aggregate metrics must be available as the rollout file's companion; materialized inputs are optional, but planned coverage remains unverified when they are missing. Symlinked rollout files use the same companion-aware path resolution as `gym eval compare`, rejecting conflicting companion locations. Suite sources do not support separate aggregate-metrics or materialized-input paths.
 
+Either side can also be a nonempty list of these mappings. For example, replace a model–benchmark pair with:
+
+```yaml
+baseline:
+  - rollouts: runs/baseline-1/rollouts.jsonl
+  - rollouts: runs/baseline-2/rollouts.jsonl
+candidate:
+  - rollouts: runs/candidate-1/rollouts.jsonl
+  - rollouts: runs/candidate-2/rollouts.jsonl
+  - rollouts: runs/candidate-3/rollouts.jsonl
+```
+
+Gym pools the selected repeat estimates within each side before computing that cell's mean, sample variance, and Welch interval. Eight repeats in each source give 16 baseline and 24 candidate observations. A single mapping can be paired with a list, and source repeat counts can differ. Adding runs increases the repeat sample size; it does not increase the cell's benchmark or overall weight. Reports retain every source's paths, local repeat indices, coverage, and saved failure counts when available.
+
 Selection happens independently for every baseline and candidate source. If neither selector is set, the aggregate must contain exactly one entry. If a selector is set, exactly one entry must match; when both are set, that entry must match both. Missing or ambiguous matches are errors that list the available choices.
 
 For example, baseline and candidate may use different environment servers and agents for the same benchmark:
@@ -271,11 +314,11 @@ Confidence intervals are not clipped to the score bounds. A constant-score cell 
 
 A repeat with no scored tasks can still contain token-usage accounting. When such a token-only row lacks a selected quality metric, suite comparison preserves the accounting in the source aggregate and omits the repeat from quality estimates, without assigning a zero score. The report lists the unscored repeat indices, warns about incomplete coverage, and suppresses affected confidence intervals. If a token-usage metric itself is selected, its available repeat observations remain usable.
 
-Each side needs at least two repeats with estimates for the selected metrics. If either side has fewer, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
+Each side needs at least two repeats with estimates for the selected metrics, counting across its sources when pooling. If either side has fewer, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
 
 Every selected metric must be present in every included repeat. Gym does not silently remove missing metric values or change metric weights between repeats.
 
-Recorded task sets must agree across repeats and sides. When materialized inputs are available, Gym also verifies planned coverage. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results.
+Recorded task sets must agree across repeats, constituent sources, and sides. When materialized inputs are available, Gym also verifies planned coverage for each source. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results. Pooling does not hide incomplete coverage in one source.
 
 ## Read saved failure counts
 
@@ -291,6 +334,8 @@ When recorded, `failures_counted_as_zero` becomes JSON `counts.counted_as_zero`:
 
 Missing coverage files leave failure counts unknown without a warning. An existing file with unavailable, unreadable, or malformed counts produces a brief unavailable warning. Counts of zero produce no warning. Failure reporting does not change scores, weights, coverage decisions, or confidence intervals. Per-source JSON `failures` records the `source` path, `scope`, `counts`, and any `unavailable_reason`.
 
+For pooled sides, Gym reads each constituent's snapshot and labels warnings with its source number. Each entry in `sources` retains its own `failures`; the pooled summary's `failures` is `null`, because a saved count describes one entire rollout file. Counts are not added into a synthetic pooled snapshot, including when different agents select the same file.
+
 ## Read the reports
 
 `gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
@@ -300,7 +345,7 @@ Missing coverage files leave failure counts unknown without a warning. An existi
 | `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, coverage notes, and saved failure warnings. |
 | `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, saved failure counts, and provenance. |
 
-The suite JSON report has its own versioned format with `"schema_version": "1"`. Its filename identifies the report type; it has no `level` field.
+The suite JSON report has its own versioned format with `"schema_version": "1"`. Its filename identifies the report type; it has no `level` field. For a pooled side, representative path and identity fields such as `rollouts`, `aggregate_metrics`, `materialized_inputs`, and `agent` come from its first source. Use that side's ordered `sources` list for complete per-source provenance; its repeat scores, coverage, and statistics describe the combined collection.
 
 Use `--report-format md`, `json`, or `both` (default). After quantifying the differences, use [Diagnose Results](/main/evaluation/diagnose-results) to investigate task-level causes and possible improvements.
 
