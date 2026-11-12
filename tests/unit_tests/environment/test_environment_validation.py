@@ -1040,3 +1040,17 @@ def test_a_file_is_not_a_task_folder_target(tmp_path: Path) -> None:
     task_file.write_text("")
     with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
         validate_environment(_harbor_asset(tmp_path / "file", config_target=str(task_file)))
+
+
+def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    (manifest_path.parent / "data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    report = validate_environment(manifest_path, validate_datasets=False)
+    assert report.datasets == ()
+    assert report.components
+    # Dataset-free validation must still catch a stale manifest composition.
+    _replace_manifest(manifest_path, resources_server="wrong_server")
+    with pytest.raises(EnvironmentValidationError, match="composition is stale"):
+        validate_environment(manifest_path, validate_datasets=False)
