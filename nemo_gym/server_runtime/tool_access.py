@@ -13,7 +13,7 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 TOOL_ERROR_HEADER = "X-NeMo-Gym-Tool-Error"
 
 # The ID the model gave a tool call (its `call_id`), which an agent may send with a direct HTTP call, so the server can
-# join its record to the agent's trajectory and answer a resent call without running the tool again.
+# join its record to the agent's trajectory.
 TOOL_CALL_ID_HEADER = "X-NeMo-Gym-Tool-Call-Id"
 
 

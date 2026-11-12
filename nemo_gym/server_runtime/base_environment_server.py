@@ -604,8 +604,6 @@ class _OpenEpisode:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # The call that holds the lock, so the end of the episode can stop it.
     running: Optional[asyncio.Task] = None
-    # The reply to the last recorded call, which a resend of that call gets again.
-    last_reply: Optional[tuple[int, JsonValue, bool]] = None
 
 
 class _EpisodeTokensOpenOnlyTools:
@@ -644,15 +642,15 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode token
     reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and each is
     recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call that runs
-    longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects does not
-    cancel its call, because uvicorn does not cancel the request.
+    longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
+    cancels its call, which is recorded.
 
     The tool route takes every one-segment ``POST`` path that the server does not route when ``setup_webserver``
     returns, so a subclass that adds its own routes gives them more than one path segment.
 
-    An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``; the record keeps it. A call with the
-    same ID, tool and arguments as the episode's last recorded call is a resend after a dropped connection: it gets
-    that call's reply, and the tool does not run again.
+    An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``; the record keeps it, to join the call
+    to the agent's trajectory. Every call runs, as on a Resources Server: an agent's client that resends a call after
+    a dropped connection runs it again.
 
     The base refuses ``checkpoint_mode = "exported"``: a restored attempt has a new episode ID, and the agent's
     grant still names the old one.
@@ -758,24 +756,9 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             # The episode can end while this call waits for its body or for the calls before it.
             if self._open_episodes.get(claims.episode_id) is not episode:
                 return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
-            last = episode.calls[-1] if episode.calls else None
-            if (
-                call_id is not None
-                and episode.last_reply is not None
-                and last is not None
-                and (last.call_id, last.name, last.arguments) == (call_id, tool_name, arguments)
-            ):
-                # The agent's client resends a call whose connection dropped, and the resend waits behind the call it
-                # repeats; it gets that call's reply, so the tool does not run, or charge, twice.
-                status, output, is_error = episode.last_reply
-                return JSONResponse(
-                    status_code=status, content=output, headers={TOOL_ERROR_HEADER: "true"} if is_error else None
-                )
-            episode.last_reply = None  # until this call answers, so a recorded call with no reply is never replayed
             episode.running = asyncio.ensure_future(self._call_tool(episode, tool_name, arguments, call_id))
             try:
                 status, output, is_error = await episode.running
-                episode.last_reply = (status, output, is_error)
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling():
                     raise
