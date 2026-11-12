@@ -74,6 +74,7 @@ from nemo_gym.config.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOWED_AGENTS_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     MODEL_SAMPLING_KEY_NAME,
@@ -478,6 +479,11 @@ def _dataset_admitted_agents(
         names = [declared] if isinstance(declared, str) else [str(name) for name in declared]
         admitted.append((str(entry.get("name")), names))
     return admitted
+
+
+def _environment_server_routes_of(global_config_dict: Optional[DictConfig]) -> dict[str, str]:
+    routes = None if global_config_dict is None else global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    return {} if routes is None else dict(OmegaConf.to_container(routes, resolve=True))
 
 
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
@@ -3544,7 +3550,9 @@ class RolloutCollectionHelper(BaseModel):
         their agents here; leave it None to defer that to ``run_examples``, which does it against
         the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
         stored in each row (see ``nemo_gym.data.task_selection.select_tasks``), each task once before
-        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
+        repetition. Materialized task rows are routed by the config's ``environment_server_routes``, so pass
+        ``global_config_dict`` when the rows include any. Input rows are not mutated; the expanded, stamped copies
+        are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -3553,6 +3561,7 @@ class RolloutCollectionHelper(BaseModel):
             fan_out=fan_out,
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
+            environment_server_routes=_environment_server_routes_of(global_config_dict),
         )
         selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
@@ -3561,7 +3570,9 @@ class RolloutCollectionHelper(BaseModel):
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
-            self.resolve_task_sources(rows, global_config_dict)
+            self.resolve_task_sources(
+                [row for row in rows if NG_ENVIRONMENT_SERVER_KEY not in row], global_config_dict
+            )
         return rows
 
     @staticmethod
