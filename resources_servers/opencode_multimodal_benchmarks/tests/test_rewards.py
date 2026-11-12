@@ -203,7 +203,7 @@ def trajectory(status="completed", *, child=False):
 
 
 def tool_response(answer="A"):
-    from resources_servers.opencode_multimodal_benchmarks.tests.test_app import completion
+    from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import completion
 
     response = completion(answer)
     return type(response).model_validate(

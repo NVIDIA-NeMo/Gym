@@ -16,32 +16,7 @@ from resources_servers.opencode_multimodal_benchmarks.app import (
     VisualVerifyRequest,
 )
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
-
-
-def completion(text, *, mask=False, kind=None):
-    return NeMoGymResponse(
-        id="response",
-        created_at=0,
-        model="test",
-        object="response",
-        tools=[],
-        parallel_tool_calls=True,
-        tool_choice="auto",
-        output=[
-            {
-                "id": "answer",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
-        metadata={
-            "instance_config": json.dumps({"mask_sample": mask}),
-            "metrics": json.dumps({"agent_error_kind": kind}),
-            "input": "[]",
-        },
-    )
+from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import completion
 
 
 def task(benchmark="VStarBench", answer="A"):
