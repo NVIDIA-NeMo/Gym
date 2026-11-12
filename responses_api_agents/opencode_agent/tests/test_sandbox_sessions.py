@@ -1074,6 +1074,19 @@ def test_compaction_and_build_steps_reach_opencode(setup, mode):
     assert agent.config.opencode_config == {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
 
 
+def test_compaction_reserved_reaches_opencode(setup):
+    """OpenCode then compacts after a call of 32000 - 8000 tokens, instead of 32000 - min(20000, 4096)."""
+    agent, sandbox = setup
+    agent.config.opencode_config = {"compaction": {"auto": True, "reserved": 8000}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["compaction"] == {"auto": True, "reserved": 8000}
+    assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]["input"] == 32000
+
+
 def test_request_sampling_joins_the_configured_build_steps(setup):
     agent, sandbox = setup
     agent.config.opencode_config = {"agent": {"build": {"steps": 8}}}
@@ -1167,9 +1180,15 @@ def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, pass
     ("opencode_config", "detail"),
     [
         ({"provider": {"other": {}}}, "unsupported: ['provider']"),
-        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto"),
+        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto and reserved"),
+        ({"compaction": {"reserved": 8000, "prune": False}}, "compaction supports only auto and reserved"),
         ({"compaction": {"auto": "false"}}, "compaction.auto must be true or false"),
-        ({"compaction": None}, "compaction supports only auto"),
+        ({"compaction": None}, "compaction supports only auto and reserved"),
+        ({"compaction": {"reserved": 0}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": -8000}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": 8000.5}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": "8000"}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"reserved": True}}, "compaction.reserved must be a positive integer"),
         ({"agent": {"plan": {"steps": 4}}}, "agent supports only build"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),

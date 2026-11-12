@@ -178,8 +178,8 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and
-`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
+Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto`,
+`compaction.reserved` and `agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
 `agent.build.steps` (see below).
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
@@ -188,6 +188,10 @@ adapter then omits `tools` and passes `permission` exactly as given.
 Setting `compaction.auto: false` keeps OpenCode from
 summarizing the session and continuing from the summary, in model calls that training cannot join
 to the scored call; a run that fills the context then ends with a context-limit error.
+`compaction.reserved` (a positive integer) is the token buffer OpenCode keeps below `context_window`:
+automatic compaction starts after a call whose tokens reach `context_window` minus this buffer. Unset,
+the buffer is the smaller of 20000 and `max_output_tokens`. It moves only that trigger;
+`compaction.prune`, which rewrites old tool output, stays refused.
 `agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
 prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
 asks for a text answer. It still offers the tools, so a model that keeps calling them runs past

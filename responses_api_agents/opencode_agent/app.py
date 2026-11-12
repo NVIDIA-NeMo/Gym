@@ -332,6 +332,10 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
       summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
       context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
+    - ``compaction.reserved`` (a positive integer): the token buffer OpenCode keeps below ``context_window``.
+      Automatic compaction starts after a call whose tokens reach ``context_window`` minus this buffer; unset, the
+      buffer is the smaller of 20000 and ``max_output_tokens``. It moves only that trigger. ``compaction.prune``
+      stays refused: it rewrites old tool output, so later calls stop extending the earlier calls' prefix.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
@@ -341,14 +345,16 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
     if unsupported:
         return (
-            "supports permission, tools, attachment, compaction.auto and agent.build.steps only; "
-            f"unsupported: {unsupported}"
+            "supports permission, tools, attachment, compaction.auto, compaction.reserved and agent.build.steps "
+            f"only; unsupported: {unsupported}"
         )
     compaction = opencode_config.get("compaction", {})
-    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
-        return "compaction supports only auto"
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved"}:
+        return "compaction supports only auto and reserved"
     if "auto" in compaction and not isinstance(compaction["auto"], bool):
         return "compaction.auto must be true or false"
+    if "reserved" in compaction and (type(compaction["reserved"]) is not int or compaction["reserved"] <= 0):
+        return "compaction.reserved must be a positive integer"
     agent = opencode_config.get("agent", {})
     if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
         return "agent supports only build, the agent a session runs"
