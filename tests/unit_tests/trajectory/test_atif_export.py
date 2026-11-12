@@ -1940,10 +1940,74 @@ def test_transcript_to_atif_maps_developer_to_system_and_keeps_pending_calls_ope
     assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == ["call_9"]
 
 
+def _mcp_call(item_id: str, **fields: Any) -> dict[str, Any]:
+    """An ``mcp_call`` as an NVIDIA-hosted gpt-oss endpoint returns it for the model's built-in container tool."""
+    return {
+        "id": item_id,
+        "type": "mcp_call",
+        "name": "exec",
+        "server_label": "container",
+        "arguments": json.dumps({"cmd": ["bash", "-lc", "ls -l /app/logs"], "timeout": 10000}),
+        "approval_request_id": None,
+        "error": None,
+        "output": None,
+        "status": "completed",
+        **fields,
+    }
+
+
+def test_transcript_to_atif_exports_an_endpoint_tool_call_the_harness_never_ran() -> None:
+    """gpt-oss calls its container tool though Terminus declares none; the endpoint returns the call unrun."""
+    trajectory = _transcript(
+        "Summarize the logs",
+        [
+            _reasoning("rs_1", "List the logs first."),
+            _mcp_call("mcp_1"),
+            {"role": "user", "content": "No valid JSON found in your response."},
+            _assistant_message("msg_1", "Task complete."),
+        ],
+    )
+
+    assert [step.source for step in trajectory.steps] == ["user", "agent", "agent"]
+    call_step = trajectory.steps[1]
+    assert call_step.message == "" and call_step.reasoning_content == "List the logs first."
+    [call] = call_step.tool_calls
+    assert (call.tool_call_id, call.function_name) == ("mcp_1", "exec")
+    assert call.arguments == {"cmd": ["bash", "-lc", "ls -l /app/logs"], "timeout": 10000}
+    assert call.extra == {"nemo_gym": {"source_item_type": "mcp_call", "server_label": "container"}}
+    # The harness's next prompt is what the step observed; the call itself has no result.
+    [observed] = call_step.observation.results
+    assert observed.source_call_id is None and observed.content == "No valid JSON found in your response."
+    conversion = trajectory.extra["nemo_gym"]["conversion"]
+    assert conversion["status"] == "complete" and conversion["open_tool_calls"] == ["mcp_1"]
+    harbor_trajectory = pytest.importorskip("harbor.models.trajectories.trajectory", reason="Harbor is optional")
+    harbor_trajectory.Trajectory.model_validate(json.loads(encode_atif_trajectory(trajectory)))
+
+
+@pytest.mark.parametrize(
+    ("fields", "content", "extra"),
+    [
+        ({"output": "2025-08-10_db.log\n"}, "2025-08-10_db.log\n", None),
+        ({"error": "container unavailable"}, "container unavailable", {"nemo_gym": {"error": True}}),
+    ],
+    ids=["output", "error"],
+)
+def test_transcript_to_atif_an_endpoint_tool_result_is_the_calls_observation(
+    fields: dict[str, Any], content: str, extra: dict[str, Any] | None
+) -> None:
+    trajectory = _transcript("go", [_mcp_call("mcp_1", **fields), _assistant_message("msg_1", "done")])
+
+    [result] = trajectory.steps[1].observation.results
+    assert (result.source_call_id, result.content, result.extra) == ("mcp_1", content, extra)
+    assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == []
+
+
 @pytest.mark.parametrize(
     ("output_items", "message"),
     [
         ([_function_output("call_404", "x")], "matches no pending call"),
+        ([_mcp_call("mcp_1"), _mcp_call("mcp_1")], "duplicate function call ID"),
+        ([_mcp_call("mcp_1", id=None)], "MCP calls need an id and a name"),
         ([_assistant_message("m", "a"), {"role": "system", "content": "later"}], "later system or developer"),
         ([_reasoning("rs", "thinking"), {"role": "system", "content": "later"}], "later system or developer"),
         ([{"role": "assistant", "content": "copied"}], "copied assistant context"),

@@ -43,6 +43,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymMessage,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputItem,
+    NeMoGymResponseMcpCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
@@ -464,7 +465,7 @@ def _live_reasoning_text(items: list[NeMoGymResponseReasoningItem], *, path: str
 
 
 def _live_arguments(
-    call: NeMoGymResponseFunctionToolCall, *, reasons: set[str]
+    call: NeMoGymResponseFunctionToolCall | NeMoGymResponseMcpCall, *, reasons: set[str]
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """The live profile's tool arguments: a string that is not a JSON object becomes ``{}``, kept verbatim.
 
@@ -1212,6 +1213,11 @@ def transcript_to_atif(
     partial``, ``reasons``); raises :class:`AtifExportError` only for what the mapping cannot represent at
     all (a copied assistant turn, a later system turn, a result for no call or a second
     ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
+
+    An ``mcp_call`` is a tool call the model endpoint handled itself: gpt-oss calls its built-in
+    ``container.exec`` tool even when the request declares no tools, and NVIDIA-hosted endpoints return the
+    call without running it. It exports as an agent step with that one tool call. The endpoint's output or
+    error becomes the step's observation; a call with neither stays in ``open_tool_calls``, since no one ran it.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")
@@ -1224,6 +1230,8 @@ def transcript_to_atif(
     steps: list[AtifStep] = []
     agent_steps: list[AtifStep] = []
     open_calls: dict[str, AtifStep] = {}
+    # Tool calls the model endpoint returned without a result; nothing later in the transcript answers them.
+    unanswered_endpoint_calls: list[str] = []
     pending_reasoning: list[NeMoGymResponseReasoningItem] = []
     reasons: set[str] = set()
     seen_agent_output = False
@@ -1314,6 +1322,49 @@ def transcript_to_atif(
             steps.append(step)
             agent_steps.append(step)
             continue
+        if isinstance(item, NeMoGymResponseMcpCall):
+            if not item.id or not item.id.strip() or not item.name.strip():
+                raise _path_error(path, "MCP calls need an id and a name")
+            if item.id in open_calls or item.id in unanswered_endpoint_calls:
+                raise _path_error(path, f"duplicate function call ID {item.id!r}")
+            arguments, argument_extra = _live_arguments(item, reasons=reasons)
+            call_extra = {"source_item_type": "mcp_call"} | (
+                {"server_label": item.server_label} if item.server_label else {}
+            )
+            observation = None
+            if item.output is not None or item.error is not None:
+                is_error = item.output is None
+                observation = AtifObservation(
+                    results=[
+                        AtifObservationResult(
+                            source_call_id=item.id,
+                            content=item.error if is_error else item.output,
+                            extra={"nemo_gym": {"error": True}} if is_error else None,
+                        )
+                    ]
+                )
+            else:
+                unanswered_endpoint_calls.append(item.id)
+            step = AtifStep(
+                step_id=len(steps) + 1,
+                source="agent",
+                message="",
+                reasoning_content=_live_reasoning_text(pending_reasoning, path=f"{path}.reasoning", reasons=reasons),
+                tool_calls=[
+                    AtifToolCall(
+                        tool_call_id=item.id,
+                        function_name=item.name,
+                        arguments=arguments,
+                        extra={"nemo_gym": call_extra | (argument_extra or {})},
+                    )
+                ],
+                observation=observation,
+            )
+            pending_reasoning = []
+            steps.append(step)
+            agent_steps.append(step)
+            index += 1
+            continue
         if isinstance(item, NeMoGymFunctionCallOutput):
             flush_reasoning(path)
             step = open_calls.pop(item.call_id, None)
@@ -1366,7 +1417,7 @@ def transcript_to_atif(
     conversion: dict[str, Any] = {
         "profile": TRANSCRIPT_EXPORT_PROFILE,
         "status": "partial" if reasons else "complete",
-        "open_tool_calls": sorted(open_calls),
+        "open_tool_calls": sorted([*open_calls, *unanswered_endpoint_calls]),
     }
     if reasons:
         conversion["reasons"] = sorted(reasons)
