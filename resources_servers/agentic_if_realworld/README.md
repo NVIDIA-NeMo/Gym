@@ -17,7 +17,8 @@ original policy documents and private receipts are never examples in Git.
 Only independently constructed synthetic fixtures are committed.
 
 `REVERIFY_MODE=STATELESS` supports saved native Gym responses. The adaptive
-profile additionally verifies immutable upstream delivery receipts. A shared
+profile additionally verifies immutable Gym Responses delivery receipts. The
+`raw_receipt.yaml` profile retains the earlier upstream HTTP receipts. A shared
 receipt filesystem must support POSIX advisory locks. Duplicate live callers
 share one saved grade; an abandoned in-flight dispatch requires
 [receipt reconciliation](../../benchmarks/agentic_if_realworld/reconciliation.md).
@@ -43,7 +44,9 @@ Then run from the Gym root:
 ```bash
 python -m resources_servers.agentic_if_realworld.benchmark.synthetic "$AGENTIC_IF_DATA_DIR" --examples
 gym eval prepare --benchmark agentic_if_realworld
-gym eval run --benchmark agentic_if_realworld --split benchmark --num-repeats 1 \
+gym eval run --benchmark agentic_if_realworld --model-type vllm_model --split benchmark --num-repeats 1 \
+  ++policy_base_url=$AGENTIC_IF_POLICY_BASE_URL ++policy_model_name=$AGENTIC_IF_POLICY_MODEL \
+  ++policy_api_key='${oc.env:AGENTIC_IF_POLICY_API_KEY}' \
   --concurrency 1 --output /private/agentic-if/ci/rollouts.jsonl \
   ++observability_enabled=true ++model_call_capture_dir=/private/agentic-if/ci/captures \
   ++overwrite_metrics_conflicts=true

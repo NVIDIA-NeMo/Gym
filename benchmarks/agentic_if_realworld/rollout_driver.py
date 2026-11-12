@@ -29,7 +29,7 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
 from resources_servers.agentic_if_realworld.benchmark.registry import private_path
 from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
 from resources_servers.agentic_if_realworld.benchmark.scoring import validate_judge_config
-from resources_servers.agentic_if_realworld.benchmark.transport import delivered
+from resources_servers.agentic_if_realworld.benchmark.transport import delivered, gym_response_completion
 
 
 LOGGER = logging.getLogger(__name__)
@@ -57,8 +57,20 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     validate_judge_config(resource["judge_endpoint"], resource["judge_model"])
     if not os.environ.get(resource["judge_api_key_env"]):
         raise ValueError(f"{resource['judge_api_key_env']} is not set")
-    model = global_config_dict["policy_model"]["responses_api_models"]["agentic_if_text"]
-    reasoning_effort = model.get("reasoning_effort")
+    models = global_config_dict["policy_model"]["responses_api_models"]
+    if len(models) != 1:
+        raise ValueError("Select one policy model server")
+    model_type, model = next(iter(models.items()))
+    raw_receipt = model_type == "agentic_if_text"
+    if not raw_receipt and model_type != "vllm_model":
+        raise ValueError("The seeded adaptive profile requires vllm_model; use native.yaml for other clients")
+    if not raw_receipt and resource.get("response_source") != "gym_response":
+        raise ValueError("Standard model clients require response_source=gym_response")
+    reasoning_effort = (
+        model.get("reasoning_effort")
+        if raw_receipt
+        else (model.get("chat_template_kwargs") or {}).get("reasoning_effort")
+    )
     if reasoning_effort not in (None, "max"):
         raise ValueError("Policy reasoning effort must be null or max")
     dataset = Dataset(resource["dataset_dir"], synthetic=resource["synthetic"])
@@ -66,11 +78,18 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         source_preflight(resource["split_registry_path"], resource["ground_truth_path"], directory=dataset.directory)
     directory = private_path(Path(resource["receipt_dir"]))
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    settings = {
-        "policy": {
+    if raw_receipt:
+        policy = {
             **{k: model[k] for k in ["endpoint", "model", "api_key_env"]},
             "reasoning_effort": reasoning_effort,
-        },
+        }
+    else:
+        # Gym's own listen address can change when servers restart; it is not a generation setting.
+        policy_config = OmegaConf.create({key: value for key, value in model.items() if key not in {"host", "port"}})
+        recursively_hide_secrets(policy_config)
+        policy = {"model_type": model_type, "config": OmegaConf.to_container(policy_config, resolve=True)}
+    settings = {
+        "policy": policy,
         "judge": {
             k: resource[k]
             for k in [
@@ -165,13 +184,53 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     max_output_tokens=cap,
                     metadata={"seed": str(seed), "receipt_id": receipt_id},
                 )
+                path = directory / "model" / (receipt_id + ".json")
+                if not raw_receipt:
+                    attempt["responses_create_params"]["metadata"]["extra_body"] = json.dumps({"seed": seed})
+                    if path.exists():
+                        raise ValueError("Existing model receipt requires reconciliation")
+                    request = {
+                        **dataset.request(prepared["task_id"]),
+                        "seed": seed,
+                        "max_tokens": cap,
+                        "temperature": 0.7,
+                    }
+                    receipt = {
+                        "status": "started",
+                        "response_format": "gym_responses_v1",
+                        "request_source": "frozen_logical_request",
+                        "request_body": request,
+                        "request_sha256": judge.sha(request),
+                        "responses_create_params": copy.deepcopy(attempt["responses_create_params"]),
+                        "raw_attempts": [],
+                    }
+                    write(path, receipt)
                 completions = helper.run_examples([attempt], route_failures_to_sidecar=True)
                 try:
                     request_row, agent_result = await next(iter(completions))
                     rollout = {**request_row, **agent_result}
                 finally:
                     await completions.aclose()
-                path = directory / "model" / (receipt_id + ".json")
+                if not raw_receipt:
+                    from nemo_gym.core import NeMoGymResponse
+
+                    if "response" in rollout:
+                        response = NeMoGymResponse.model_validate(rollout["response"])
+                        response_path = path.with_suffix(".response.json")
+                        write(response_path, rollout["response"])
+                        receipt.update(
+                            status="generated",
+                            dispatch_status="response_received",
+                            terminal=bool(response.error)
+                            or (response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true",
+                            response=gym_response_completion(response),
+                            raw_attempts=[{"path": str(response_path), "sha256": digest(response_path)}],
+                        )
+                    else:
+                        receipt.update(
+                            status="delivery_error", dispatch_status="unknown", reason="missing_gym_response"
+                        )
+                    write(path, receipt)
                 if not path.exists():
                     # Failed /run may have dispatched upstream: never automatically regenerate.
                     raise ValueError("Missing model receipt; reconcile ambiguous agent dispatch")
@@ -183,9 +242,13 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     complete = True
                 except (ValueError, TypeError, KeyError):
                     canonical, complete = None, False
-                if complete and (
-                    "response" not in rollout
-                    or (rollout["response"].get("metadata") or {}).get("receipt_id") != receipt_id
+                if (
+                    complete
+                    and raw_receipt
+                    and (
+                        "response" not in rollout
+                        or (rollout["response"].get("metadata") or {}).get("receipt_id") != receipt_id
+                    )
                 ):
                     raise ValueError("Complete delivery missing trusted Gym projection; reconcile receipt")
                 return {

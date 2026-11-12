@@ -30,7 +30,7 @@ def test_adaptive_policy_ignores_generic_model_settings(generic_model_env, monke
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.create(
-                {"config_paths": ["benchmarks/agentic_if_realworld/config.yaml"]}
+                {"config_paths": ["benchmarks/agentic_if_realworld/raw_receipt.yaml"]}
             ),
             skip_load_from_cli=True,
             offline=True,
@@ -44,7 +44,17 @@ def test_adaptive_policy_ignores_generic_model_settings(generic_model_env, monke
     assert adapter.model == model
 
 
-def test_native_profile_uses_stock_model_settings(generic_model_env, monkeypatch):
+@pytest.mark.parametrize(
+    "profile,model_type,base_field,model_field",
+    [
+        ("config.yaml", "vllm_model", "base_url", "model"),
+        ("native.yaml", "vllm_model", "base_url", "model"),
+        ("native.yaml", "openai_model", "openai_base_url", "openai_model"),
+    ],
+)
+def test_profiles_use_stock_model_settings(
+    generic_model_env, monkeypatch, profile, model_type, base_field, model_field
+):
     monkeypatch.setenv("AGENTIC_IF_POLICY_ENDPOINT", "https://benchmark-provider.invalid/v1/chat/completions")
     monkeypatch.setenv("AGENTIC_IF_POLICY_MODEL", "benchmark-model")
     resolved = GlobalConfigDictParser().parse(
@@ -52,8 +62,8 @@ def test_native_profile_uses_stock_model_settings(generic_model_env, monkeypatch
             initial_global_config_dict=OmegaConf.create(
                 {
                     "config_paths": [
-                        "benchmarks/agentic_if_realworld/native.yaml",
-                        "responses_api_models/openai_model/configs/openai_model.yaml",
+                        f"benchmarks/agentic_if_realworld/{profile}",
+                        f"responses_api_models/{model_type}/configs/{model_type}.yaml",
                     ]
                 }
             ),
@@ -62,7 +72,7 @@ def test_native_profile_uses_stock_model_settings(generic_model_env, monkeypatch
         )
     )
     assert resolved.config_regression_sentinel == "loaded-from-env-yaml"
-    adapter = resolved.policy_model.responses_api_models.openai_model
-    assert adapter.openai_base_url == "https://generic-provider.invalid/v1"
-    assert adapter.openai_model == "generic-model"
+    adapter = resolved.policy_model.responses_api_models[model_type]
+    assert adapter[base_field] == "https://generic-provider.invalid/v1"
+    assert adapter[model_field] == "generic-model"
     assert "agentic_if_text" not in resolved.policy_model.responses_api_models
