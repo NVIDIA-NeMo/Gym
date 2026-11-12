@@ -1023,6 +1023,24 @@ async def test_append_keeps_the_explicit_local_agent_selector(tmp_path) -> None:
     assert run.call_args.args[-3:] == ("--agent", "plan", "user task")
 
 
+@pytest.mark.parametrize("returncode", [None, 0], ids=["exits_during_the_kill", "exited_before_the_kill"])
+async def test_timeout_tolerates_a_process_that_has_already_exited(tmp_path, returncode) -> None:
+    """OpenCode can exit on its own as the timeout fires, and killing an exited process raises ProcessLookupError.
+
+    The run must still end as a timeout instead of failing with that error.
+    """
+    agent = _make_agent(workspace_root=str(tmp_path))
+    process = MagicMock(returncode=returncode)
+    process.communicate = AsyncMock(side_effect=[asyncio.TimeoutError(), (b"", b"")])
+    process.kill.side_effect = ProcessLookupError
+    with patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process):
+        output, _, _, observations = await agent._run_opencode("user task", None, collect_observations=False)
+    assert output == []
+    assert [gap.code for gap in observations.gaps] == ["agent_run_timeout"]
+    # A process that has not reported an exit is still killed.
+    assert process.kill.called == (returncode is None)
+
+
 @pytest.mark.parametrize("model_server", [POLICY_REF, None], ids=["gym_model_server", "direct_endpoint"])
 async def test_local_run_splits_a_reply_only_when_opencode_calls_a_gym_model_server(tmp_path, model_server) -> None:
     reply = "<think>r</think>\n\n4"
