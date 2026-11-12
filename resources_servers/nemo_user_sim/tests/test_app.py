@@ -24,6 +24,7 @@ from resources_servers.nemo_user_sim.app import (
     _ResourcesModelFacade,
     _scorer_for_row,
     _validate_resolved_row,
+    installed_usersim_revision,
 )
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
@@ -32,8 +33,8 @@ from resources_servers.nemo_user_sim.episode_contracts import (
 )
 
 
-REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
-PERSONAS_VERSION = "0.0.2"
+REVISION = installed_usersim_revision()
+PERSONAS_VERSIONS = {"en_US": "0.0.2", "ja_JP": "0.0.2", "ko_KR": "0.0.1"}
 
 
 def _resolved_row(probe_type: str = "tool_calling", *, provenance_as_text: bool = True) -> dict:
@@ -159,7 +160,7 @@ def _install_evaluator_scripts(
 @pytest.mark.parametrize("as_text", [True, False])
 def test_resolved_row_accepts_json_and_legacy_mapping_provenance(as_text: bool) -> None:
     row = _resolved_row(provenance_as_text=as_text)
-    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
     assert _decode_provenance(row["usersim_provenance"])["bank_version"] == {}
 
 
@@ -216,7 +217,57 @@ def test_resolved_row_rejects_invalid_provenance(provenance: object, message: st
     row = _resolved_row()
     row["usersim_provenance"] = provenance
     with pytest.raises(ValueError, match=message):
-        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+
+
+def _distribution(commit: str | None) -> SimpleNamespace:
+    direct_url = json.dumps({"vcs_info": {"commit_id": commit}}) if commit else None
+    return SimpleNamespace(read_text=lambda filename: direct_url if filename == "direct_url.json" else None)
+
+
+def test_installed_revision_ignores_the_superseded_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    distributions = {
+        "nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"),
+        "usersim": _distribution("e6282672a5e5359bccbed20f42753c3054dd6209"),
+    }
+    monkeypatch.setattr(usersim_app.metadata, "distribution", distributions.__getitem__)
+    monkeypatch.setattr(
+        usersim_app.metadata, "packages_distributions", lambda: {"usersim": ["nemo-usersim", "usersim"]}
+    )
+
+    assert installed_usersim_revision() == "e6282672a5e5"
+
+
+@pytest.mark.parametrize("distributions", [{}, {"usersim": _distribution(None)}])
+def test_installed_revision_requires_a_git_install_of_usersim(
+    monkeypatch: pytest.MonkeyPatch, distributions: dict[str, SimpleNamespace]
+) -> None:
+    distributions = {"nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"), **distributions}
+
+    def distribution(name: str) -> SimpleNamespace:
+        if name not in distributions:
+            raise usersim_app.metadata.PackageNotFoundError(name)
+        return distributions[name]
+
+    monkeypatch.setattr(usersim_app.metadata, "distribution", distribution)
+
+    with pytest.raises(RuntimeError, match="records no git commit"):
+        installed_usersim_revision()
+
+
+@pytest.mark.parametrize("suffix", ["", "359bccbed20f42753c3054dd6209"])  # pragma: allowlist secret
+def test_resolved_row_accepts_short_and_full_revisions(suffix: str) -> None:
+    row = _resolved_row()
+    row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+
+
+@pytest.mark.parametrize("suffix", ["-not-a-commit", "0", "0" * 27, "0" * 29])
+def test_resolved_row_rejects_malformed_revisions_that_share_the_prefix(suffix: str) -> None:
+    row = _resolved_row()
+    row["usersim_provenance"] = json.dumps({"code_sha": REVISION + suffix, "nemotron_personas_version": "synthetic"})
+    with pytest.raises(ValueError, match="does not match"):
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
 
 
 @pytest.mark.asyncio
@@ -233,7 +284,7 @@ async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> N
         )
     assert error.value.status_code == 422
 
-    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_version
+    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_versions["en_US"]
     response = await server.seed_session(
         _request("pinned-personas-version"),
         _seed_body(row, taskset="nemo_user_sim:validation"),
@@ -694,3 +745,18 @@ def test_the_session_keeps_its_owner_at_least_as_long_as_the_tombstone(overrides
     for name, value in overrides.items():
         setattr(server.config, name, value)
     assert server.owned_session_routing()["close_retry_window_seconds"] == window
+
+
+@pytest.mark.parametrize(
+    ("locale", "version", "accepted"),
+    [("ko_KR", "0.0.1", True), ("ko_KR", "0.0.2", False), ("ja_JP", "0.0.2", True), ("xx_XX", "0.0.2", False)],
+)
+def test_resolved_row_checks_personas_version_of_its_locale(locale: str, version: str, accepted: bool) -> None:
+    row = _resolved_row(provenance_as_text=False)
+    row["locale"] = locale
+    row["usersim_provenance"]["nemotron_personas_version"] = version
+    if accepted:
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+    else:
+        with pytest.raises(ValueError, match=f"for locale {locale!r}"):
+            _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)

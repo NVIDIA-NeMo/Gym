@@ -21,6 +21,7 @@ import socket
 import time
 from contextlib import nullcontext
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
@@ -78,9 +79,11 @@ from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     CaptureStore,
     ChatCompletionsConverter,
+    ModelCallCaptureConfig,
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
+    install_model_call_capture,
     start_model_execution,
 )
 from nemo_gym.models.token_capture import (
@@ -93,14 +96,16 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
 )
 from nemo_gym.models.token_capture.staging import CaptureAdmission
-from nemo_gym.rollouts import is_terminal_failure
+from nemo_gym.rollouts import is_terminal_failure, read_model_call_records, run_health_checks
 from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.server_runtime import (
     CheckpointRequest,
     GenerationCutInventory,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
+from nemo_gym.trajectory import ModelCallRecord
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
@@ -113,6 +118,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModelConfig,
     _append_transport_io,
     _ContextErrorMiddleware,
+    _is_context_length_error,
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
@@ -839,7 +845,52 @@ def _engine_bad_request_error(message: str, status: int = 400) -> ClientResponse
     return error
 
 
+@mark.parametrize(
+    "status, message",
+    [
+        (400, "Unknown tool schema"),
+        (401, "The decoder prompt is longer than the maximum model length"),
+        (500, "CUDA unspecified launch failure"),
+        (500, "The decoder prompt is longer than the maximum model length"),
+    ],
+)
+def test_context_normalization_preserves_unrelated_provider_failures(status, message):
+    error = ClientResponseError(MagicMock(), (), status=status)
+    error.response_content = json.dumps({"error": {"message": message}}).encode()
+    assert not _is_context_length_error(error)
+
+
 class TestApp:
+    @mark.parametrize(
+        "status, code", [(429, "insufficient_quota"), (401, "invalid_api_key"), (403, "invalid_api_token")]
+    )
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_permanent_endpoint_failure_preserves_http_contract(
+        self, monkeypatch: MonkeyPatch, status: int, code: str, use_completions_api: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.use_completions_api = use_completions_api
+        error = PermanentEndpointError(MagicMock(), (), status=status, message="upstream permanent failure")
+        error.response_content = json.dumps({"error": {"code": code}}).encode()
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = AsyncMock(side_effect=error)
+        client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [client]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        assert response.status_code == status
+        assert response.json() == {"error": {"code": code}}
+        used = client.create_completion if use_completions_api else client.create_chat_completion
+        unused = client.create_chat_completion if use_completions_api else client.create_completion
+        used.assert_awaited_once()
+        unused.assert_not_called()
+
     def _setup_server(
         self,
         monkeypatch: MonkeyPatch,
@@ -851,6 +902,7 @@ class TestApp:
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
+        session_key_headers: list[str] | None = None,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -868,6 +920,7 @@ class TestApp:
             endpoint_failure_threshold=endpoint_failure_threshold,
             endpoint_retry_after_s=endpoint_retry_after_s,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
+            session_key_headers=session_key_headers or [],
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -1690,6 +1743,16 @@ class TestApp:
 
             assert header == capture_key
             assert capture_key in server._session_id_to_client
+
+    def test_session_key_headers_reach_every_endpoint_client(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, session_key_headers=["X-Session-Id"])
+
+        assert [client.session_key_headers for client in server._clients] == [["X-Session-Id"]]
+
+    def test_no_session_key_headers_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+
+        assert [client.session_key_headers for client in server._clients] == [[]]
 
     def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch)
@@ -4404,7 +4467,9 @@ class TestChatCompletionsConverter:
         assert expected_messages == actual_messages
 
     @staticmethod
-    def _chat_client_capturing_upstream(**config_overrides: Any) -> tuple[TestClient, dict[str, Any]]:
+    def _chat_client_capturing_upstream(
+        *, response_payload: dict[str, Any] | None = None, **config_overrides: Any
+    ) -> tuple[TestClient, dict[str, Any]]:
         """Chat-path vllm_model behind a TestClient; returns the kwargs sent upstream."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -4425,6 +4490,8 @@ class TestChatCompletionsConverter:
         async def mock_create_chat_completion(**kwargs):
             captured_kwargs.clear()
             captured_kwargs.update(kwargs)
+            if response_payload is not None:
+                return deepcopy(response_payload)
             return NeMoGymChatCompletion(
                 id="chtcmpl",
                 object="chat.completion",
@@ -4443,6 +4510,50 @@ class TestChatCompletionsConverter:
         mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
         server._clients = [mock_client]
         return TestClient(app), captured_kwargs
+
+    @mark.parametrize("responses_api", [False, True], ids=["chat", "responses"])
+    @mark.parametrize("stop_reason", [None, "repetition_detected"], ids=["native-finish-only", "stock-stop"])
+    def test_default_chat_path_preserves_repetition_termination(
+        self, responses_api: bool, stop_reason: str | None
+    ) -> None:
+        choice = {
+            "index": 0,
+            "finish_reason": "repetition",
+            "message": {"role": "assistant", "content": "Retained answer."},
+        }
+        if stop_reason is not None:
+            choice["stop_reason"] = stop_reason
+        payload = {
+            "id": "chatcmpl-repetition",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [choice],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        client, upstream = self._chat_client_capturing_upstream(response_payload=payload)
+        body = {"input": "Question"} if responses_api else {"messages": [{"role": "user", "content": "Question"}]}
+
+        response = client.post("/v1/responses" if responses_api else "/v1/chat/completions", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "messages" in upstream
+        assert "prompt" not in upstream
+        if responses_api:
+            saved = NeMoGymResponse.model_validate_json(response.content)
+            assert saved.status == "completed"
+            assert saved.incomplete_details is None
+            assert saved.output_text == "Retained answer."
+            assert saved.native_finish_reason == "repetition"
+            assert getattr(saved, "native_stop_reason", None) == stop_reason
+            assert (saved.usage.input_tokens, saved.usage.output_tokens, saved.usage.total_tokens) == (3, 2, 5)
+        else:
+            saved = NeMoGymChatCompletion.model_validate_json(response.content)
+            assert saved.choices[0].finish_reason == "stop"
+            assert saved.choices[0].native_finish_reason == "repetition"
+            assert getattr(saved.choices[0], "stop_reason", None) == stop_reason
+            assert saved.choices[0].message.content == "Retained answer."
+            assert (saved.usage.prompt_tokens, saved.usage.completion_tokens, saved.usage.total_tokens) == (3, 2, 5)
 
     @mark.parametrize("stream", [False, True])
     @mark.parametrize("aws_region_name", [None, "us-east-1", 123, {"ignored": ["value"]}])
@@ -5957,6 +6068,78 @@ class TestCompletionsBackendEndToEnd:
         # Reset the per-session client routing so the new mock is picked up.
         model._session_id_to_client = {}
         return fake_client, captured
+
+    @mark.parametrize("render_chat_template", [False, True], ids=["raw", "chat-template"])
+    @mark.parametrize("responses_api", [False, True], ids=["chat", "responses"])
+    @mark.parametrize(
+        ("finish_reason", "stop_reason"),
+        [
+            ("stop", None),
+            ("stop", 0),
+            ("stop", 11),
+            ("stop", "repetition_detected"),
+            ("repetition", "repetition_detected"),
+        ],
+        ids=["missing", "zero", "eos", "repetition", "stock-repetition"],
+    )
+    def test_provider_stop_reason_survives_completion_translation(
+        self,
+        monkeypatch: MonkeyPatch,
+        render_chat_template: bool,
+        responses_api: bool,
+        finish_reason: str,
+        stop_reason: str | int | None,
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
+        model = _make_chat_template_model()[0] if render_chat_template else _make_completions_backend_model()
+        choice = {"index": 0, "text": "Retained answer.", "finish_reason": finish_reason}
+        if stop_reason is not None:
+            choice["stop_reason"] = stop_reason
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-stopped",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [choice],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            },
+        )
+        body = {"input": "Question"} if responses_api else {"messages": [{"role": "user", "content": "Question"}]}
+
+        response = TestClient(model.setup_webserver()).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions", json=body
+        )
+
+        assert response.status_code == 200, response.text
+        if responses_api:
+            saved = NeMoGymResponse.model_validate_json(response.content)
+            observed_stop_reason = getattr(saved, "native_stop_reason", None)
+            observed_native_finish_reason = getattr(saved, "native_finish_reason", None)
+            assert ("native_finish_reason" in saved.model_dump()) is (finish_reason == "repetition")
+            assert ("native_stop_reason" in saved.model_dump()) is (stop_reason is not None)
+            assert saved.status == "completed"
+            assert saved.incomplete_details is None
+            assert saved.output_text == "Retained answer."
+            assert (saved.usage.input_tokens, saved.usage.output_tokens, saved.usage.total_tokens) == (3, 2, 5)
+        else:
+            saved = NeMoGymChatCompletion.model_validate_json(response.content)
+            observed_stop_reason = getattr(saved.choices[0], "stop_reason", None)
+            observed_native_finish_reason = getattr(saved.choices[0], "native_finish_reason", None)
+            assert ("native_finish_reason" in saved.choices[0].model_dump()) is (finish_reason == "repetition")
+            assert ("stop_reason" in saved.choices[0].model_dump()) is (stop_reason is not None)
+            assert saved.choices[0].finish_reason == "stop"
+            assert saved.choices[0].message.content == "Retained answer."
+            assert (saved.usage.prompt_tokens, saved.usage.completion_tokens, saved.usage.total_tokens) == (3, 2, 5)
+        assert observed_stop_reason == stop_reason
+        assert type(observed_stop_reason) is type(stop_reason)
+        assert observed_native_finish_reason == ("repetition" if finish_reason == "repetition" else None)
+        assert captured["kwargs"]["prompt"] == (
+            "<|user|>Question<|assistant|>" if render_chat_template else "Question"
+        )
 
     def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
@@ -7607,6 +7790,15 @@ class TestEndpointFile:
         )
         params.update(overrides)
         return VLLMModel(config=VLLMModelConfig(**params), server_client=MagicMock(spec=ServerClient))
+
+    def test_rebound_clients_keep_session_key_headers(self, tmp_path) -> None:
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1000, 1000))
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0, session_key_headers=["X-Session-Id"])
+
+        server._maybe_rebind_endpoint()
+
+        assert [client.session_key_headers for client in server._clients] == [["X-Session-Id"]]
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
@@ -9937,3 +10129,171 @@ async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
 
     assert raised.value is error
     assert [message["status"] for message in sent] == [200]
+
+
+def _capture_vllm_messages(tmp_path: Path, *, stream: bool, completions: bool, finish: str, stop: str | int | None):
+    server = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="",
+            name="srv",
+            base_url="http://127.0.0.1:8001/v1",
+            api_key="synthetic",
+            model="synthetic-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            use_completions_api=completions,
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+    choice = {"index": 0, "finish_reason": finish}
+    choice.update(
+        {"text": "Retained answer."}
+        if completions
+        else {"message": {"role": "assistant", "content": "Retained answer."}}
+    )
+    if stop is not None:
+        choice["stop_reason"] = stop
+    provider = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://127.0.0.1:8001/v1")
+    generation = AsyncMock(
+        return_value={
+            "id": "provider-response",
+            "created": 1,
+            "object": "text_completion" if completions else "chat.completion",
+            "model": "synthetic-model",
+            "choices": [choice],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+    )
+    if completions:
+        provider.create_completion = generation
+    else:
+        provider.create_chat_completion = generation
+    server._clients = [provider]
+    app = server.setup_webserver()
+    capture_dir = tmp_path / "capture"
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=capture_dir),
+        model_server_name="srv",
+        assistant_message_header=b"x-assistant-message-id",
+    )
+    with TestClient(app) as client:
+        received = client.post(
+            "/ng-rollout/messages-native/v1/messages",
+            json={
+                "model": "caller-model",
+                "max_tokens": 32,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "Question"}],
+            },
+        )
+    assert received.status_code == 200, received.text
+    generation.assert_awaited_once()
+    forwarded = generation.await_args.kwargs
+    assert ("prompt" in forwarded) is completions
+    assert ("messages" in forwarded) is not completions
+    store = CaptureStore(capture_dir)
+    [exchange] = store.read("messages-native")
+    [call] = read_model_call_records(store, "messages-native")
+    return received, exchange, call
+
+
+def _health_for_messages_call(tmp_path: Path, call: ModelCallRecord, *, bound: bool = True):
+    indices = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    result = {
+        "response": {
+            "output": [{"type": "message", "role": "assistant", "content": "Retained answer."}],
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+        "ng_trajectory": {
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "task_id": "0",
+                    "rollout_id": "0-0",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "answer": "Retained answer.",
+                    "step_count": 1,
+                    "model_calls": [{"model_call_id": call.model_call_id if bound else "not-captured"}],
+                }
+            ],
+            "model_calls": [],
+        },
+        "ng_model_call_capture": {"calls": [call.model_dump(mode="json")]},
+    }
+    result["ng_trajectory"] = _build_trajectory_record(indices, result).model_dump(mode="json")
+    saved = tmp_path / "rollouts.jsonl"
+    saved.write_text(json.dumps({**indices, **result}) + "\n")
+    before = saved.read_bytes()
+    [digest] = run_health_checks(saved, output_dir=tmp_path / "health", workers=1).rollouts
+    assert saved.read_bytes() == before
+    return digest
+
+
+@mark.parametrize("stream", [False, True], ids=["json", "sse"])
+@mark.parametrize("completions", [False, True], ids=["chat-backend", "completions-backend"])
+@mark.parametrize(
+    "finish,stop,runaway",
+    [
+        ("repetition", "repetition_detected", True),
+        ("repetition", None, True),
+        ("stop", "repetition_detected", True),
+        ("stop", 0, False),
+        ("stop", 11, False),
+        ("stop", None, False),
+    ],
+)
+def test_messages_preserve_native_provider_causes_and_saved_response_population(
+    tmp_path: Path, stream: bool, completions: bool, finish: str, stop: str | int | None, runaway: bool
+) -> None:
+    received, exchange, call = _capture_vllm_messages(
+        tmp_path, stream=stream, completions=completions, finish=finish, stop=stop
+    )
+    if stream:
+        events = [json.loads(line[6:]) for line in received.text.splitlines() if line.startswith("data: ")]
+        served = next(event["message"] for event in events if event["type"] == "message_start")
+        assert events[-1]["type"] == "message_stop"
+        assert [event["delta"]["text"] for event in events if event["type"] == "content_block_delta"] == [
+            "Retained answer."
+        ]
+    else:
+        served = received.json()
+        assert served["content"] == [{"type": "text", "text": "Retained answer."}]
+    assert served["stop_reason"] == "end_turn"
+    assert served["usage"] == {"input_tokens": 3, "output_tokens": 2}
+    native_finish = "repetition" if finish == "repetition" else None
+    for key, value in (("native_stop_reason", stop), ("native_finish_reason", native_finish)):
+        assert served.get(key) == value
+        assert type(served.get(key)) is type(value)
+        assert (key in served) is (value is not None)
+        assert exchange["response"].get(key) == value
+        assert type(exchange["response"].get(key)) is type(value)
+        assert (key in exchange["response"]) is (value is not None)
+    if stream:
+        assert exchange["response_raw"] == received.text
+    else:
+        assert exchange["response"] == received.json()
+    assert exchange["response"]["content"] == [{"type": "text", "text": "Retained answer."}]
+    assert exchange["response"]["stop_reason"] == "end_turn"
+    assert exchange["response"]["usage"] == {"input_tokens": 3, "output_tokens": 2}
+    assert call.dialect == "messages" and call.finish_reason == "end_turn"
+    assert (call.tokens_in, call.tokens_out, call.tokens_total) == (3, 2, 5)
+    assert call.tokens_reasoning is None
+    digest = _health_for_messages_call(tmp_path, call)
+    assert digest.responses == {"selected": [call.model_call_id], "faulted": [call.model_call_id] if runaway else []}
+    assert ("model_call_runaway_generation" in {finding.check for finding in digest.findings}) is runaway
+    assert not digest.unobserved
+
+
+def test_messages_repetition_capture_does_not_invent_a_bound_response(tmp_path: Path) -> None:
+    _, _, call = _capture_vllm_messages(
+        tmp_path, stream=True, completions=False, finish="repetition", stop="repetition_detected"
+    )
+    digest = _health_for_messages_call(tmp_path, call, bound=False)
+    assert digest.responses is None
+    assert "model_call_runaway_generation" in digest.unobserved

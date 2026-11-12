@@ -132,6 +132,10 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
+    # Whether assistant thinking is folded into message text as ``<think>...</think>``. None keeps the default:
+    # folded unless training-token capture is enabled. False emits thinking as separate ``reasoning`` items, so
+    # the final message holds only the answer (e.g. for answer-only grading). Capture requires unfolded output.
+    fold_thinking: Optional[bool] = None
     # Runtime capability knobs. The default (bare=True, no mcp_config/settings) reproduces the original
     # isolated behavior: Claude Code skips hooks, LSP, plugin sync, attribution, auto-memory, background
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
@@ -225,6 +229,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 token_capture=self._token_id_capture_enabled(),
             )
         return base_url
+
+    def _fold_thinking(self) -> bool:
+        """Fold thinking into message text unless capture is on or the config turns folding off."""
+        capture = self._token_id_capture_enabled()
+        if self.config.fold_thinking is None:
+            return not capture
+        if self.config.fold_thinking and capture:
+            raise ValueError("fold_thinking=True is incompatible with training-token capture")
+        return self.config.fold_thinking
 
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
@@ -392,7 +405,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 # Keep the actual partial work so capture can corroborate the terminal call.
                 output_items, run_metadata = parse_stream_json(
-                    stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
+                    stdout.decode(errors="replace"), fold_thinking=self._fold_thinking()
                 )
                 run_metadata.update(
                     status="incomplete",
@@ -412,9 +425,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(
-                stdout_text, fold_thinking=not self._token_id_capture_enabled()
-            )
+            output_items, run_metadata = parse_stream_json(stdout_text, fold_thinking=self._fold_thinking())
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
@@ -800,7 +811,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             items, run_metadata = await asyncio.to_thread(
                 parse_stream_json,
                 artifacts.events,
-                fold_thinking=not self._token_id_capture_enabled(),
+                fold_thinking=self._fold_thinking(),
             )
         cleanup = state.session.cleanup
         if cleanup and cleanup["timed_out"]:
