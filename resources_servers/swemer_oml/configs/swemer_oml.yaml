@@ -15,6 +15,8 @@ swemer_oml_resources_server:
       verified: false
 
       # The packages' own [verifier] timeout_sec is 3000 for 4,994 of 5,000 tasks.
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
       evaluation_timeout: 3000
       is_verifying_golden_patch: false
       apply_anti_cheating: true
@@ -46,6 +48,8 @@ swemer_oml_golden_patch_resources_server:
       domain: coding
       verified: false
 
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
       evaluation_timeout: 3000
       is_verifying_golden_patch: true
 

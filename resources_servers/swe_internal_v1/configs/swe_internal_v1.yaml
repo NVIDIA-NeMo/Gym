@@ -16,6 +16,8 @@ swe_internal_v1_resources_server:
       verified: false
 
       # The vendor's recorded evaluation_time is < 1 min for 95% of rows, < 10 min for all.
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
       apply_anti_cheating: true
@@ -47,6 +49,8 @@ swe_internal_v1_golden_patch_resources_server:
       domain: coding
       verified: false
 
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
       evaluation_timeout: 1800
       is_verifying_golden_patch: true
 

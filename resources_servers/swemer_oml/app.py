@@ -31,6 +31,7 @@ from pathlib import Path
 from time import time
 from traceback import format_exc
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import Request
@@ -85,8 +86,9 @@ class SwemerOmlResourcesServerConfig(BaseResourcesServerConfig):
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
     # The packages' own [verifier] budget is 3000s for all but a handful of tasks.
-    verification_log_dir: Path | None = None
     evaluation_timeout: int | None = 3000
+    # None disables disk logs. Set an output directory to retain per-task, per-attempt logs.
+    verification_log_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
@@ -135,6 +137,7 @@ class SwemerOmlVerifyRequest(SwemerOmlInstanceRequest, BaseVerifyRequest):
 
 
 class SwemerOmlVerifyResponse(BaseVerifyResponse):
+    verification_log_dir: str | None = None
     evaluation_completed: bool
     resolved: bool
     patch_applied: bool
@@ -416,7 +419,11 @@ class SwemerOmlResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = (self.config.verification_log_dir or (Path(__file__).parent / "logs")) / uuid4().hex
+        log_dir = (
+            self.config.verification_log_dir / f"instance-{quote(body.instance_id, safe='')}" / uuid4().hex
+            if self.config.verification_log_dir is not None
+            else None
+        )
 
         files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -441,7 +448,7 @@ class SwemerOmlResourcesServer(SandboxSessionResourcesServer):
                     sandbox=sandbox,
                     inputs=inputs,
                     timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}",
+                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -474,6 +481,7 @@ class SwemerOmlResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
+                "verification_log_dir": str(log_dir) if log_dir is not None else None,
                 **(
                     {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
                     if not result.completed

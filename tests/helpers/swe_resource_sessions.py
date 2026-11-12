@@ -6,11 +6,18 @@ import importlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    taskset_environment_server_name,
+)
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
@@ -40,13 +47,27 @@ def check_swe_resource_episode(
     server_type = getattr(app, prefix + "ResourcesServer")
     config_type = getattr(app, prefix + "ResourcesServerConfig")
     sandboxes = []
-    completed = scenario != "incomplete"
-    resolved = scenario not in {"incorrect", "incomplete", "git_failure"}
+    completed = scenario not in {"incomplete", "provider_error"}
+    resolved = scenario not in {
+        "incorrect",
+        "incomplete",
+        "git_failure",
+        "timeout",
+        "legacy_timeout",
+        "provider_error",
+    }
 
     async def create(self, body, files=None, *, session_id=None, verifier_session_id=None):
         sandbox = MagicMock()
         sandbox.sandbox_id = f"sb-{len(sandboxes)}"
         sandbox.exec = AsyncMock(return_value=SandboxExecResult(return_code=0, stdout="seed-base\n", stderr=""))
+        if verifier_session_id is not None and scenario in {"timeout", "legacy_timeout", "provider_error"}:
+            sandbox.exec.return_value = SandboxExecResult(
+                return_code=125 if scenario == "provider_error" else 124,
+                error_type="sandbox" if scenario == "provider_error" else "timeout",
+                stdout="partial output",
+                stderr="",
+            )
         sandbox.serialize = AsyncMock(return_value={"sandbox_id": sandbox.sandbox_id})
         sandbox.stop = AsyncMock()
         sandboxes.append(sandbox)
@@ -58,7 +79,7 @@ def check_swe_resource_episode(
 
     capture = AsyncMock(return_value=PatchCapture.static("agent patch", "worktree", "worktree"))
     if scenario == "capture_unavailable":
-        capture.side_effect = CaptureCommandError("provider timed out", return_code=None, error_type="timeout")
+        capture.side_effect = CaptureCommandError("provider unavailable", return_code=125, error_type="sandbox")
     elif scenario == "git_failure":
         capture.side_effect = CaptureCommandError("git failed", return_code=128, error_type=None)
     grade = AsyncMock(
@@ -71,6 +92,8 @@ def check_swe_resource_episode(
             error=None if completed else "provider unavailable",
         )
     )
+    if scenario in {"timeout", "legacy_timeout", "provider_error"}:
+        grade = AsyncMock(wraps=verification.run_verification)
     monkeypatch.setattr(server_type, "_create_sandbox", create)
     monkeypatch.setattr(app, "prepare_git_for_commits", AsyncMock())
     monkeypatch.setattr(app, "capture_model_patch", capture)
@@ -86,7 +109,7 @@ def check_swe_resource_episode(
             sandbox_provider="docker",
             sandbox_config={},
             apply_anti_cheating=False,
-            verification_log_dir=tmp_path,
+            verification_log_dir=None if scenario == "logs_disabled" else tmp_path,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -103,7 +126,7 @@ def check_swe_resource_episode(
             server.setup_webserver(), ResourcesSeedSessionRequest.model_validate(seed), keeps_state=True
         )
         return
-    legacy = scenario == "legacy"
+    legacy = scenario in {"legacy", "legacy_timeout"}
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=row if legacy else seed)
         assert seeded.status_code == 200, seeded.text
@@ -141,6 +164,14 @@ def check_swe_resource_episode(
             assert body["mask_sample"] is True and body["evaluation_completed"] is False
             grade.assert_not_awaited()
         else:
+            if scenario == "logs_disabled":
+                assert body["verification_log_dir"] is None
+                assert grade.call_args.kwargs["log_dir"] is None
+                assert not list(tmp_path.iterdir())
+            else:
+                logs = Path(body["verification_log_dir"])
+                assert logs.parent == tmp_path / f"instance-{quote(row['instance_id'], safe='')}"
+                assert grade.call_args.kwargs["log_dir"].parent == logs
             assert body["evaluation_completed"] is completed
             assert body["reward"] == float(resolved)
             assert bool(body.get("mask_sample")) is (not completed)
@@ -157,9 +188,7 @@ def check_swe_resource_episode(
     assert all(s.stop.await_count >= 1 for s in sandboxes)
 
 
-async def check_swe_verifier_interruption(
-    tmp_path: Path, module_name: str, prefix: str, error_type: str | None
-) -> None:
+async def check_swe_verifier_interruption(tmp_path: Path, module_name: str, prefix: str, error_type: str) -> None:
     app = importlib.import_module(f"resources_servers.{module_name}.app")
     verification = importlib.import_module(f"resources_servers.{module_name}.verification")
     row = json.loads((Path(app.__file__).parent / "data/example.jsonl").read_text().splitlines()[0])
@@ -180,7 +209,7 @@ async def check_swe_verifier_interruption(
     sandbox = MagicMock()
     sandbox.exec = AsyncMock(
         return_value=SandboxExecResult(
-            return_code=0 if error_type else None,
+            return_code=124 if error_type == "timeout" else 125,
             error_type=error_type,
             stdout="partial passing-test output",
             stderr="interrupted",
@@ -188,7 +217,34 @@ async def check_swe_verifier_interruption(
     )
     kwargs = {"parser": MagicMock()} if module_name == "swe_rebench" else {}
     result = await verification.run_verification(sandbox, inputs, log_dir=tmp_path, **kwargs)
-    assert result.completed is False and result.resolved is False
-    assert result.error == f"Test execution did not complete: {error_type or 'missing exit code'}"
+    assert result.completed is (error_type == "timeout")
+    assert result.resolved is False
+    assert result.error == f"Test execution did not complete: {error_type}"
     assert "partial passing-test output" in result.test_output
     assert (tmp_path / "test_output.log").read_text() == result.test_output
+
+
+def check_swe_session_config(module_name: str) -> None:
+    root = Path(__file__).resolve().parents[2]
+    path = root / "resources_servers" / module_name / "configs" / f"{module_name}_single_agent_turn.yaml"
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, OmegaConf.load(path)
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    env_name = taskset_environment_server_name(config, module_name)
+    environment = config[env_name]["environment_servers"]["single_agent_turn"]
+    resources = config[environment["resources_server"]["name"]]["resources_servers"][module_name]
+    agent = config[environment["agent_server"]["name"]]["responses_api_agents"]["opencode_agent"]
+    assert resources["allowed_agents"] == ["opencode_agent"]
+    assert resources["datasets"][0]["taskset"] == module_name
+    assert (root / resources["datasets"][0]["jsonl_fpath"]).is_file()
+    assert resources["verification_log_dir"] is None
+    assert agent["resources_server"] is None
+    assert environment["resources_tool_transports"] == []
+    assert environment["default_episode_timeout_seconds"] <= resources["sandbox_config"]["ttl_s"]
