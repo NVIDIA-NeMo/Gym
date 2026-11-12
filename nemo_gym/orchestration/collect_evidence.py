@@ -426,6 +426,103 @@ def trial_items(value, key, fields):
 changed_while_reading = set()
 # Artifacts that exist but cannot be read, relative to the job dir: recorded as unknown, never a crash.
 unreadable = set()
+# A line longer than BIG_LINE bytes is read in chunks and parsed with the long strings of its bulky top-level values
+# elided (``Pruner``), so a read holds what the collector keeps of a row, not the row: ``ng_trajectory`` repeats each
+# model call's whole request, so one row grows with the square of its conversation and reaches gigabytes.
+BIG_LINE = 16 << 20
+CHUNK = 4 << 20
+PRUNED_KEYS = (b"ng_trajectory", b"ng_agent_observations")
+# The collector reads only identities, names, statuses and counts from those values, none of them this long.
+ELIDE_ABOVE = 1024
+STRUCTURE = re.compile(rb'["{}\[\],:]')
+NESTED = re.compile(rb'["{}\[\]]')
+STRING_BODY = re.compile(rb'[^"\\]*(?:\\.[^"\\]*)*', re.S)
+class Pruner:
+    # Copies one JSON object in chunks, replacing each string longer than ELIDE_ABOVE bytes inside a PRUNED_KEYS value
+    # with "<elided N bytes>". Only top-level keys are matched; any other value is copied byte for byte.
+    def __init__(self):
+        self.out, self.depth, self.in_string, self.escape = [], 0, False, False
+        self.expect_key, self.key, self.last_key, self.target = False, None, None, False
+        self.buffer, self.size = None, 0
+    def body(self, data):
+        if self.buffer is not None:
+            self.size += len(data)
+            self.buffer = b"" if self.size > ELIDE_ABOVE else self.buffer + data
+        elif self.key is not None and len(self.key) < 64:
+            self.key += data
+    def feed(self, chunk):
+        pos, size, copy = 0, len(chunk), None if self.buffer is not None else 0
+        while pos < size:
+            if self.in_string:
+                if self.escape:
+                    self.escape = False
+                    self.body(chunk[pos:pos + 1])
+                    pos += 1
+                    continue
+                end = STRING_BODY.match(chunk, pos).end()
+                self.body(chunk[pos:end])
+                pos = end
+                if pos >= size:
+                    break
+                if chunk[pos] == 0x5C:
+                    self.escape, pos = True, pos + 1
+                    self.body(b"\\")
+                    continue
+                pos += 1
+                self.in_string = False
+                if self.buffer is not None:
+                    self.out.append(b'"<elided %d bytes>"' % self.size if self.size > ELIDE_ABOVE else b'"' + self.buffer + b'"')
+                    self.buffer, copy = None, pos
+                elif self.key is not None:
+                    self.last_key, self.key = bytes(self.key), None
+                continue
+            found = (STRUCTURE if self.depth <= 1 else NESTED).search(chunk, pos)
+            if found is None:
+                break
+            char, start, pos = found.group(), found.start(), found.end()
+            if char == b'"':
+                self.in_string = True
+                if self.depth == 1 and self.expect_key:
+                    self.key, self.expect_key = bytearray(), False
+                elif self.target:
+                    if copy is not None:
+                        self.out.append(chunk[copy:start])
+                    self.buffer, self.size, copy = b"", 0, None
+            elif char in (b"{", b"["):
+                self.depth += 1
+                self.expect_key = self.depth == 1 and char == b"{"
+            elif char in (b"}", b"]"):
+                self.depth -= 1
+                self.target = self.target and self.depth > 0
+            elif self.depth == 1:
+                if char == b",":
+                    self.expect_key, self.target = True, False
+                elif self.last_key is not None:
+                    self.target = self.last_key in PRUNED_KEYS
+        if copy is not None:
+            self.out.append(chunk[copy:])
+    def result(self):
+        return b"".join(self.out)
+def lines(fh, digest):
+    # Each line with its number; a line longer than BIG_LINE comes back pruned. Every byte read goes into the digest.
+    number = 0
+    while True:
+        line = fh.readline(BIG_LINE + 1)
+        if not line:
+            return
+        digest.update(line)
+        if len(line) > BIG_LINE and not line.endswith(b"\n"):
+            pruner = Pruner()
+            pruner.feed(line)
+            while not line.endswith(b"\n"):
+                line = fh.readline(CHUNK)
+                if not line:
+                    break
+                digest.update(line)
+                pruner.feed(line)
+            line = pruner.result()
+        yield number, line
+        number += 1
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -440,8 +537,7 @@ def rows(name, skip=0):
         unreadable.add(os.path.relpath(p, d))
         return None
     with source as fh:
-        for i, line in enumerate(fh):
-            read.update(line)
+        for i, line in lines(fh, read):
             if i < skip or not line.strip():
                 continue
             try:
