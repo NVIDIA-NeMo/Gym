@@ -1,0 +1,1 @@
+{"responses_create_params": {"input": [{"role": "user", "content": "Answer the question."}]}, "options": [{"A": "Paris"}, {"B": "Rome"}], "expected_answer": "A", "grading_mode": "strict_single_letter_boxed"}

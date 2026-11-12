@@ -195,17 +195,17 @@ class _ObservedDependencies(_Client):
             return await super().post(server_name, url_path, **kwargs)
 
         if self.verifier is not None:
-            from resources_servers.opencode_multimodal_benchmarks.string_match_tool_rewards import (
+            from resources_servers.opencode_string_match_tool_rewards.app import (
                 ToolRewardConfig,
                 ToolRewardServer,
             )
             from resources_servers.string_match.app import StringMatchResourcesServer, StringMatchResourcesServerConfig
 
             if self.verifier == "math_tool_rewards":
-                from resources_servers.opencode_multimodal_benchmarks.math_with_judge_tool_rewards import (
+                from resources_servers.opencode_math_tool_rewards.app import (
                     ToolRewardConfig as MathConfig,
                 )
-                from resources_servers.opencode_multimodal_benchmarks.math_with_judge_tool_rewards import (
+                from resources_servers.opencode_math_tool_rewards.app import (
                     ToolRewardServer as MathServer,
                 )
 
@@ -214,7 +214,7 @@ class _ObservedDependencies(_Client):
                         name=server_name,
                         host="127.0.0.1",
                         port=1,
-                        entrypoint="math_with_judge_tool_rewards.py",
+                        entrypoint="app.py",
                         tool_rewards={
                             "correct_only": False,
                             "correct_tool_call_bonuses": [0.0, 0.1],
@@ -232,7 +232,7 @@ class _ObservedDependencies(_Client):
                         name=server_name,
                         host="127.0.0.1",
                         port=1,
-                        entrypoint="string_match_tool_rewards.py",
+                        entrypoint="app.py",
                         tool_rewards={"correct_tool_call_bonuses": [0.0, 0.1]},
                     ),
                     server_client=self,

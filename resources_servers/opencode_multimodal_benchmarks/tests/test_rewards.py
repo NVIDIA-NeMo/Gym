@@ -248,7 +248,7 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
-    from resources_servers.opencode_multimodal_benchmarks.string_match_tool_rewards import (
+    from resources_servers.opencode_string_match_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,
@@ -259,7 +259,7 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
             name="test",
             host="127.0.0.1",
             port=1,
-            entrypoint="string_match_tool_rewards.py",
+            entrypoint="app.py",
             tool_rewards=bonus_config(),
         ),
         server_client=MagicMock(spec=ServerClient),
@@ -312,7 +312,7 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
     from unittest.mock import AsyncMock, MagicMock
 
     from nemo_gym.client import ServerClient
-    from resources_servers.opencode_multimodal_benchmarks.string_match_tool_rewards import (
+    from resources_servers.opencode_string_match_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,
@@ -332,7 +332,7 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
             name="test",
             host="127.0.0.1",
             port=1,
-            entrypoint="string_match_tool_rewards.py",
+            entrypoint="app.py",
             tool_rewards=bonus_config(),
         ),
         server_client=MagicMock(spec=ServerClient),
@@ -354,9 +354,10 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
 
     if resource == "math_with_judge":
         pytest.importorskip("math_verify")
-    entrypoint = importlib.import_module(f"resources_servers.opencode_multimodal_benchmarks.{resource}_tool_rewards")
+    component = {"mcqa": "opencode_mcqa_tool_rewards", "math_with_judge": "opencode_math_tool_rewards"}[resource]
+    entrypoint = importlib.import_module(f"resources_servers.{component}.app")
     request_type = entrypoint.ToolRewardVerifyRequest
-    config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": f"{resource}_tool_rewards.py"}
+    config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": "app.py"}
     config["tool_rewards"] = bonus_config().model_dump()
     if resource == "math_with_judge":
         config.update(
@@ -394,7 +395,7 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, monke
     from nemo_gym.core import rollout_context
     from nemo_gym.server_runtime import observe_verifier
     from nemo_gym.trajectory import grading_result_binding
-    from resources_servers.opencode_multimodal_benchmarks.math_with_judge_tool_rewards import (
+    from resources_servers.opencode_math_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,
@@ -414,7 +415,7 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, monke
             name="math",
             host="127.0.0.1",
             port=1,
-            entrypoint="math_with_judge_tool_rewards.py",
+            entrypoint="app.py",
             tool_rewards=bonus_config(),
             judge_model_server={"type": "responses_api_models", "name": "judge"},
             judge_responses_create_params={"input": []},

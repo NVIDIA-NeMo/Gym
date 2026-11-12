@@ -196,16 +196,18 @@ Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
 
 For existing math, MCQA, and string-match training tasks, use the
-`opencode_multimodal_benchmarks` Resources component with entrypoint
-`math_with_judge_tool_rewards.py`, `mcqa_tool_rewards.py`, or
-`string_match_tool_rewards.py`, respectively. These thin adapters import the
+`opencode_math_tool_rewards`, `opencode_mcqa_tool_rewards`, or
+`opencode_string_match_tool_rewards` Resources component, respectively, each with
+`entrypoint: app.py`. Each component owns its inherited grader's dataset schema,
+so strict dataset collation accepts native training rows without visual benchmark
+metadata. These thin adapters import the
 existing graders and retain their task schemas. For example:
 
 ```yaml
 training_string:
   resources_servers:
-    opencode_multimodal_benchmarks:
-      entrypoint: string_match_tool_rewards.py
+    opencode_string_match_tool_rewards:
+      entrypoint: app.py
       tool_rewards: {}
 ```
 
@@ -221,3 +223,7 @@ to a separate profile with `network_access: inherit` and appropriate tool permis
 The policy is fixed when the owned sandbox is created. Configure OpenSandbox in
 both profiles. Native Exa activation and a configurable bash timeout are separate
 stock-agent follow-ups; the default benchmark profile does not enable web tools.
+
+Training configurations previously selecting `*_tool_rewards.py` under
+`opencode_multimodal_benchmarks` must use the corresponding component above with
+`entrypoint: app.py`. Keep the instance name and environment bindings unchanged.
