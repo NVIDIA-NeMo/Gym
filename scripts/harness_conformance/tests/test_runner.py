@@ -13,7 +13,7 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _compaction_settings, _config
+from scripts.harness_conformance.episode import HARNESSES, _config, _settings
 from scripts.harness_conformance.provider import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
@@ -410,7 +410,7 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 @pytest.mark.parametrize("harness,tool_steps,low_usage", [("opencode", 2, 500), ("hermes", 14, 1000)])
 def test_compaction_is_scripted_independently_of_request_text(tmp_path, compaction, harness, tool_steps, low_usage):
     scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=tool_steps)
-    settings = _compaction_settings(harness, scenario)
+    settings = _settings(harness, tmp_path, 30, scenario)
     probe = Probe(scenario, tmp_path, harness=harness, **settings.probe_overrides)
     messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}

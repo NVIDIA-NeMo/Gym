@@ -193,10 +193,10 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
     )
 
 
-def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
-    """Scenario-specific overrides, applied after constructing the base settings."""
+def _context_control_settings(harness: str, scenario: Scenario) -> DictConfig:
+    """Settings and ordinary replies shared by the context control and compaction scenarios."""
     steps = scenario.tool_steps + 4
-    context = {"context_window": 32768 if scenario.compaction else 65536, "max_output_tokens": 8192}
+    context = {"context_window": 65536, "max_output_tokens": 8192}
     settings = {
         "simple": {"harness_overrides": {"max_steps": steps}},
         "opencode": {
@@ -205,7 +205,6 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 "responses": [
                     {"kind": "tool", "input_tokens": 500, "output_tokens": 8},
                     {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    *([{"kind": "summary", "input_tokens": 500, "output_tokens": 11}] if scenario.compaction else []),
                     *[
                         {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
                         for _ in range(scenario.tool_steps - 2)
@@ -220,7 +219,7 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
         "hermes": {
             "harness_overrides": {
                 "compression_enabled": True,
-                "context_length": 32768 if scenario.compaction else 65536,
+                "context_length": 65536,
                 "compression_threshold": 0.5,
                 "max_turns": steps,
             },
@@ -231,7 +230,6 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                         for _ in range(scenario.tool_steps - 1)
                     ],
                     {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    *([{"kind": "summary", "input_tokens": 500, "output_tokens": 11}] if scenario.compaction else []),
                     {"kind": "final", "input_tokens": 100, "output_tokens": 8},
                 ],
             },
@@ -241,12 +239,41 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
         "terminus_2_sandboxed": {
             "harness_overrides": {
                 "max_turns": steps,
-                "enable_summarize": scenario.compaction,
+                "enable_summarize": False,
                 "model_context_limit": 32768,
             },
         },
     }.get(harness, {})
     return OmegaConf.create(settings)
+
+
+def _compaction_settings(harness: str, settings: DictConfig) -> DictConfig:
+    """Override the control settings to trigger compaction and supply its summary."""
+    responses = settings.get("probe_overrides", {}).get("responses", [])
+    summary = {"kind": "summary", "input_tokens": 500, "output_tokens": 11}
+    return OmegaConf.create(
+        {
+            "opencode": {
+                "harness_overrides": {"context_window": 32768},
+                "probe_overrides": {"responses": [*responses[:2], summary, *responses[2:]]},
+            },
+            "pi": {"harness_overrides": {"context_window": 32768}},
+            "hermes": {
+                "harness_overrides": {"context_length": 32768},
+                "probe_overrides": {"responses": [*responses[:-1], summary, *responses[-1:]]},
+            },
+            "terminus_2_sandboxed": {"harness_overrides": {"enable_summarize": True}},
+        }.get(harness, {})
+    )
+
+
+def _settings(harness: str, directory: Path, timeout: float, scenario: Scenario | None = None) -> DictConfig:
+    settings = _base_settings(harness, directory, timeout)
+    if scenario is not None and scenario.compaction is not None:
+        settings = OmegaConf.merge(settings, _context_control_settings(harness, scenario))
+        if scenario.compaction:
+            settings = OmegaConf.merge(settings, _compaction_settings(harness, settings))
+    return settings
 
 
 def _config(
@@ -265,9 +292,7 @@ def _config(
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
     defaults = OmegaConf.load(defaults_path)[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
-    settings = _base_settings(harness, directory, timeout)
-    if scenario is not None and scenario.compaction is not None:
-        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    settings = _settings(harness, directory, timeout, scenario)
     for module_name in settings.get("required_imports", []):
         importlib.import_module(module_name)
     mode = settings["session" if use_agent_sessions else "legacy"]
@@ -341,9 +366,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    settings = _base_settings(harness, directory, timeout)
-    if scenario.compaction is not None:
-        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    settings = _settings(harness, directory, timeout, scenario)
     probe_module, probe_name = settings.probe.split(":")
     probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
     probe = probe_cls(scenario, directory, harness=harness, **settings.get("probe_overrides", {}))
