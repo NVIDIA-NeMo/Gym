@@ -57,13 +57,17 @@ def test_agents_serve_sessions_through_the_base_hooks() -> None:
 def test_resources_servers_close_through_the_base_route() -> None:
     """The base serves /close_session before subclass routes, so a server's own registration never runs."""
     violations = []
-    # A shared base class, such as SandboxSessionResourcesServer, can serve the close for its subclasses.
-    closing_bases = {
+    # A shared base class, such as SandboxSessionResourcesServer, can serve the close for its subclasses,
+    # including through a subclass of its own, such as CheckpointedSandboxSessionResourcesServer.
+    classes = [cls for path in _sources("resources_servers") for cls in _classes(path)]
+    closing_bases = {cls.name for cls in classes if "close_resources_session" in _methods(cls)}
+    while inherited := {
         cls.name
-        for path in _sources("resources_servers")
-        for cls in _classes(path)
-        if "close_resources_session" in _methods(cls)
-    }
+        for cls in classes
+        if cls.name not in closing_bases
+        and any(isinstance(base, ast.Name) and base.id in closing_bases for base in cls.bases)
+    }:
+        closing_bases |= inherited
     for path in _sources("resources_servers"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
