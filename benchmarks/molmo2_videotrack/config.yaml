@@ -1,0 +1,32 @@
+# Molmo2-VideoTrackEval: text-referred point tracking over frames 1 second apart, points on a 0-1000 grid.
+config_paths:
+- resources_servers/molmo2_videotrack/configs/molmo2_videotrack.yaml
+
+molmo2_videotrack_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: molmo2_videotrack_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+molmo2_videotrack_resources_server:
+  resources_servers:
+    molmo2_videotrack:
+      datasets:
+      - name: molmo2_videotrack
+        type: benchmark
+        jsonl_fpath: benchmarks/molmo2_videotrack/data/molmo2_videotrack_benchmark.jsonl
+        prepare_script: benchmarks/molmo2_videotrack/prepare.py
+        # prepare.py reads the annotation parquet files with pyarrow.
+        prepare_dependencies: [pyarrow]
+        num_repeats: 1
+molmo2_videotrack_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: molmo2_videotrack_agent

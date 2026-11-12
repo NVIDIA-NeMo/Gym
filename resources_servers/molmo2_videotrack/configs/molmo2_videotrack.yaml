@@ -1,0 +1,13 @@
+molmo2_videotrack_resources_server:
+  resources_servers:
+    molmo2_videotrack:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Molmo2-VideoTrackEval verifier for text-referred point tracking on a 0-1000 grid
+      value: Match predicted points to visible objects in each frame, count a point correct when it lies inside the object's segmentation mask, and report precision, recall and F1 overall and per category
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/molmo2_videotrack/data/example.jsonl
+        num_repeats: 1
