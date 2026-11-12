@@ -65,7 +65,7 @@ original request and response payloads.
 ### Buffered SSE with external token staging
 
 With `token_id_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
-on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
+on Chat Completions, Responses, and Anthropic Messages.
 Gym requests a complete, non-streaming answer from the inference worker. The worker stages
 training tokens before returning commit coordinates. Gym removes internal token fields,
 converts the answer to the client-visible API format, and serializes the SSE events before
