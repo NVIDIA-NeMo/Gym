@@ -832,6 +832,30 @@ async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     sandbox.stop.assert_not_awaited()
 
 
+def staged_path(sandbox) -> str:
+    """PATH as the runner's setup leaves it for Pi, starting from the sandbox's own PATH."""
+    script = 'source /dev/stdin; PATH=/sandbox/bin; eval "${setup-}"; printf "%s" "$PATH"'
+    params = sandbox.files[f"{sandbox.directory}/params.sh"]
+    return subprocess.run(["bash", "-c", script], input=params, capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.parametrize(
+    "prefix,expected",
+    [
+        ([], "/sandbox/bin"),
+        (["/mnt/tools/bin", "/opt/rg dir"], "/mnt/tools/bin:/opt/rg dir:/sandbox/bin"),
+    ],
+)
+async def test_sandbox_path_prefix_comes_first_on_pi_path(setup, prefix, expected):
+    agent, sandbox = setup
+    agent.config.sandbox_path_prefix = prefix
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await task).status == "completed"
+    assert staged_path(sandbox) == expected
+    assert "PATH" not in staged(sandbox)["env"]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
 @pytest.mark.parametrize("enable_tools", [True, False])
 async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools):
     agent, sandbox = setup

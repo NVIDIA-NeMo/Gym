@@ -206,6 +206,7 @@ class PiSandboxSession(AgentSessionState):
         close_timeout: float,
         files: dict[str, str | Path] | None = None,
         deadline: float | None = None,
+        path_prefix: Sequence[str] = (),
     ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events.
 
@@ -213,7 +214,7 @@ class PiSandboxSession(AgentSessionState):
         """
         return await self.session.execute(
             stage_activation=lambda: self.stage_activation(
-                command=command, env=env, prompt=prompt, media=media, files=files
+                command=command, env=env, prompt=prompt, media=media, files=files, path_prefix=path_prefix
             ),
             collect=self.collect_artifacts,
             timeout=timeout,
@@ -229,12 +230,14 @@ class PiSandboxSession(AgentSessionState):
         prompt: str,
         media: Sequence[MediaFile] = (),
         files: dict[str, str | Path] | None = None,
+        path_prefix: Sequence[str] = (),
     ) -> SandboxCommand:
         """Stage the invocation and return the Pi worker command.
 
         ``files`` maps paths under the session directory to text or to a local source file, and ``media`` are prompt
         images. Both are uploaded here, inside the session's execute, so that close cancels and waits for the uploads
-        before it releases the sandbox, and the activation deadline bounds them.
+        before it releases the sandbox, and the activation deadline bounds them. ``path_prefix`` directories come first
+        on ``PATH`` for Pi and the tools it runs.
         """
         directory = self.session.session_dir
         for name, content in (files or {}).items():
@@ -254,6 +257,9 @@ class PiSandboxSession(AgentSessionState):
             "stderr": f"{directory}/stderr.log",
             "events": f"{directory}/events.jsonl",
         }
+        if path_prefix:
+            # Preinstalled tools come first; the sandbox's own PATH still follows.
+            params["setup"] = f"PATH={quote(':'.join(path_prefix))}:$PATH\n"
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{self.directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
