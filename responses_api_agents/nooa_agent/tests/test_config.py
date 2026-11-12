@@ -84,6 +84,24 @@ def test_agent_config_rejects_unknown_fields() -> None:
     assert error["loc"] == ("max_step",)
 
 
+def test_agent_config_accepts_the_datasets_a_harbor_taskset_declares() -> None:
+    # `gym eval run <task folder>` declares the taskset's rows on the agent block, as nemo_gym.data.tasks.harbor
+    # writes them; rollout collection reads them from there.
+    entry = {"name": "mercor", "type": "benchmark", "verified": False, "jsonl_fpath": "/runs/tasks_agent.jsonl"}
+
+    datasets = agent_config(datasets=[entry]).datasets
+
+    assert [(dataset.name, dataset.type, str(dataset.jsonl_fpath)) for dataset in datasets] == [
+        ("mercor", "benchmark", "/runs/tasks_agent.jsonl")
+    ]
+    assert agent_config().datasets is None
+
+
+def test_agent_config_rejects_a_malformed_dataset_entry() -> None:
+    with pytest.raises(ValidationError, match="jsonl_fpath"):
+        agent_config(datasets=[{"name": "mercor", "type": "benchmark"}])
+
+
 def test_agent_config_names_policy_call_budget_explicitly() -> None:
     assert agent_config().max_policy_calls is None
     assert agent_config(max_policy_calls=None).max_policy_calls is None
