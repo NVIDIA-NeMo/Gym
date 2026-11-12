@@ -97,12 +97,12 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 "event=webvoyager_judge_short_circuit task=%s reason=missing_judge_evidence "
                 "valid_sample=%s elapsed_seconds=%.3f",
                 body.task.task_id,
-                True,
+                False,
                 time.monotonic() - started,
             )
             return WebVoyagerJudgeResponse(
                 result=WebVerifierResult(
-                    valid_sample=True,
+                    valid_sample=False,
                     failure_kind="web:missing_judge_evidence",
                     verifier_version=self.config.verifier_version,
                 )

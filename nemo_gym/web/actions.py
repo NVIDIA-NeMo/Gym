@@ -220,20 +220,25 @@ def parse_nano_omni_tool_calls(
         try:
             try:
                 arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
-            except json.JSONDecodeError as exc:
+            except ValueError as exc:
                 raise ActionParseError(f"invalid JSON arguments for Nano Omni tool {name!r}") from exc
             if arguments is None:
                 arguments = {}
             if not isinstance(arguments, dict):
                 raise ActionParseError(f"Nano Omni tool {name!r} arguments must be an object")
-            if name not in NANO_OMNI_TOOL_NAMES:
+            if not isinstance(name, str) or name not in NANO_OMNI_TOOL_NAMES:
                 raise ActionParseError(f"unsupported Nano Omni browser tool: {name!r}")
-            arguments, computer_actions = _validate_native_tool_arguments(
-                name,
-                arguments,
-                max_computer_actions=max_computer_actions,
-                limits=limits,
-            )
+            try:
+                arguments, computer_actions = _validate_native_tool_arguments(
+                    name,
+                    arguments,
+                    max_computer_actions=max_computer_actions,
+                    limits=limits,
+                )
+            except ActionParseError:
+                raise
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ActionParseError(f"invalid arguments for Nano Omni tool {name!r}") from exc
         except ActionParseError as exc:
             if (
                 calls

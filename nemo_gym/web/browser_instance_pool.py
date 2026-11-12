@@ -33,6 +33,10 @@ from nemo_gym.web.browser_session import BrowserSessionError, BrowserSessionHand
 LOG = logging.getLogger("nemo_gym.web.browser_instance_pool")
 
 
+class _LaunchRollbackError(BrowserSessionError):
+    """A partial instance could not be confirmed stopped after launch failed."""
+
+
 @dataclass
 class _Slot:
     index: int
@@ -81,9 +85,20 @@ class LocalBrowserInstancePoolProvider:
         self._leased: dict[int, _Slot] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._startup_cleanup: asyncio.Task[None] | None = None
+        self._recycling: dict[tuple[int, int], asyncio.Task[None]] = {}
+        self._close_task: asyncio.Task[None] | None = None
+        self._closing = False
 
     async def start(self) -> None:
+        closing = self._close_task
+        if closing is not None:
+            await asyncio.shield(closing)
         async with self._lifecycle_lock:
+            if closing is not None and self._close_task is closing:
+                self._close_task = None
+                self._closing = False
+            if self._closing:
+                raise BrowserSessionError("local_instance_pool is closing")
             if self._startup_cleanup is not None:
                 await asyncio.shield(self._startup_cleanup)
                 self._startup_cleanup = None
@@ -123,9 +138,15 @@ class LocalBrowserInstancePoolProvider:
                 raise result
 
     async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
-        if self._idle is None:
+        idle = self._idle
+        if idle is None or self._closing:
             raise BrowserSessionError("local_instance_pool has not been started")
-        slot = await self._idle.get()
+        try:
+            slot = await idle.get()
+        except asyncio.QueueShutDown as exc:
+            raise BrowserSessionError("local_instance_pool is closing") from exc
+        if self._closing or self._idle is not idle:
+            raise BrowserSessionError("local_instance_pool is closing")
         slot.leases += 1
         self._leased[slot.index] = slot
         LOG.info(
@@ -142,6 +163,7 @@ class LocalBrowserInstancePoolProvider:
             endpoint=f"http://{self._host}:{slot.port}",
             metadata={
                 "slot": slot.index,
+                "lease_generation": slot.leases,
                 "display": slot.display,
                 "token": slot.token,
                 "request_timeout_seconds": self._request_timeout,
@@ -150,43 +172,89 @@ class LocalBrowserInstancePoolProvider:
         )
 
     async def release(self, handle: BrowserSessionHandle) -> None:
-        slot = self._leased.pop(int(handle.metadata["slot"]), None)
-        if slot is None:
+        slot = self._leased.get(int(handle.metadata["slot"]))
+        if slot is None or handle.metadata.get("lease_generation") != slot.leases:
             return
-        healthy = await asyncio.to_thread(self._idle_and_healthy, slot)
-        if not healthy:
-            LOG.warning("event=browser_instance_restart slot=%d display=%s", slot.index, slot.display)
-            await asyncio.to_thread(self._stop, slot)
-            slot.restarts += 1
-            try:
-                await asyncio.to_thread(self._launch, slot)
-            except Exception:
-                # Keep the slot out of rotation rather than lending a broken
-                # display; capacity shrinks and the failure stays visible.
-                LOG.exception("event=browser_instance_restart_failed slot=%d", slot.index)
+        key = slot.index, slot.leases
+        recycling = self._recycling.get(key)
+        if recycling is None:
+            if self._closing:
+                assert self._close_task is not None
+                await asyncio.shield(self._close_task)
                 return
-        assert self._idle is not None
-        self._idle.put_nowait(slot)
+            assert self._idle is not None
+            # RPC cancellation must not discard a thread that is still checking,
+            # stopping or replacing the instance. Retries join this same owner.
+            recycling = asyncio.create_task(self._recycle(slot, key, self._idle))
+            self._recycling[key] = recycling
+        await asyncio.shield(recycling)
+
+    async def _recycle(self, slot: _Slot, key: tuple[int, int], idle: asyncio.Queue[_Slot]) -> None:
+        try:
+            healthy = await asyncio.to_thread(self._idle_and_healthy, slot)
+            if not healthy:
+                LOG.warning("event=browser_instance_restart slot=%d display=%s", slot.index, slot.display)
+                await asyncio.to_thread(self._stop, slot)
+                slot.restarts += 1
+                try:
+                    await asyncio.to_thread(self._launch, slot)
+                except _LaunchRollbackError:
+                    raise
+                except Exception:
+                    # _launch has rolled back. Retire this slot, rather than
+                    # lending a failed replacement or starting it twice.
+                    LOG.exception("event=browser_instance_restart_failed slot=%d", slot.index)
+                    self._leased.pop(slot.index)
+                    self._recycling.pop(key)
+                    return
+        except Exception:
+            # Retain the failed task and its lease until close can stop the
+            # instance. A duplicate release must not report uncertain cleanup
+            # as success merely because the first waiter stopped awaiting it.
+            LOG.exception("event=browser_instance_recycling_failed slot=%d", slot.index)
+            raise
+        self._leased.pop(slot.index)
+        self._recycling.pop(key)
+        if not self._closing and self._idle is idle:
+            idle.put_nowait(slot)
 
     async def close(self) -> None:
+        if self._close_task is not None and self._close_task.done() and self._close_task.exception() is not None:
+            self._close_task = None
+        if self._close_task is None:
+            self._closing = True
+            if self._idle is not None:
+                self._idle.shutdown(immediate=True)
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         async with self._lifecycle_lock:
+            if self._idle is not None:
+                self._idle.shutdown(immediate=True)
             if self._startup_cleanup is not None:
                 await asyncio.shield(self._startup_cleanup)
                 self._startup_cleanup = None
+            if self._recycling:
+                await asyncio.gather(*tuple(self._recycling.values()), return_exceptions=True)
             results = await asyncio.gather(
                 *(asyncio.to_thread(self._stop, slot) for slot in self._slots), return_exceptions=True
             )
-            self._idle = None
-            self._leased.clear()
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
+            self._idle = None
+            self._leased.clear()
+            self._recycling.clear()
 
     def _launch(self, slot: _Slot) -> None:
         try:
             self._launch_slot(slot)
         except BaseException:
-            self._stop(slot)
+            try:
+                self._stop(slot)
+            except Exception as exc:
+                raise _LaunchRollbackError(f"browser instance rollback failed for slot {slot.index}") from exc
             raise
 
     def _launch_slot(self, slot: _Slot) -> None:

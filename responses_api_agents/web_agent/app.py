@@ -217,7 +217,7 @@ def _parse_response_action(
     if qwen_state is None:
         raise ActionParseError("Qwen policy state is required for qwen_xml_computer_use")
     return parse_qwen_action(
-        qwen_response_text(response),
+        _extract_output_text(response),
         coordinate_type=qwen_state.coordinate_type,
         original_size=qwen_state.original_size,
         processed_size=qwen_state.processed_size,
