@@ -182,9 +182,17 @@ Add `.toolname/` to the server's `.gitignore`.
 
 ## YAML Config Pattern
 
-A single YAML file in `configs/` defines both the resources server and its agent pairing(s):
+A single YAML file in `configs/` defines the resources server, the agent, and the `single_agent_turn` Environment Server that runs each episode:
 
 ```yaml
+config_paths:
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+# Route each taskset's rows to the Environment Server
+environment_server_routes:
+  my_benchmark: my_benchmark_environment_server
+  my_benchmark_example: my_benchmark_environment_server
+
 # Resources server instance
 my_benchmark:
   resources_servers:
@@ -195,8 +203,23 @@ my_benchmark:
       num_processes: 8
       timeout_secs: 30
       debug: false
+      datasets:
+      - name: my_dataset
+        type: train
+        taskset: my_benchmark        # collation turns each row into task_id + task_input
+        jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
+        gitlab_identifier:
+          dataset_name: my_benchmark
+          version: 0.0.1
+          artifact_fpath: my_dataset.jsonl
+        license: MIT                 # required for train/validation
+        num_repeats: 1
+      - name: example
+        type: example
+        taskset: my_benchmark_example
+        jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
 
-# Simple agent pairing (single-turn)
+# The agent that runs the agent turn
 my_benchmark_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -207,46 +230,22 @@ my_benchmark_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model           # defined in env.yaml or policy config
-      datasets:
-      - name: my_dataset
-        type: train
-        jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-        gitlab_identifier:
-          dataset_name: my_benchmark
-          version: 0.0.1
-          artifact_fpath: my_dataset.jsonl
-        license: MIT                 # required for train/validation
-        num_repeats: 1
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
 
-# Optional: custom agent pairing (multi-turn)
-my_benchmark_eval_agent:
-  responses_api_agents:
-    my_eval_agent:
-      entrypoint: app.py
+# The Environment Server: seed, agent turn, verify, close
+my_benchmark_environment_server:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
       resources_server:
         type: resources_servers
         name: my_benchmark
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      max_correction_turns: 3
-      datasets:
-      - name: my_dataset
-        type: train
-        jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-        gitlab_identifier:
-          dataset_name: my_benchmark
-          version: 0.0.1
-          artifact_fpath: my_dataset.jsonl
-        license: MIT
-        num_repeats: 1
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
+      agent_server:
+        type: responses_api_agents
+        name: my_benchmark_simple_agent
+      resources_tool_transports: [direct_http]   # omit when the model calls no resources-server tools
 ```
+
+To pair another agent, such as a session harness for a task sandbox, point `agent_server` at it; the resources server and datasets stay as they are.
 
 ### Key rules
 
@@ -257,6 +256,9 @@ my_benchmark_eval_agent:
 - Dataset `type` must be one of: `train`, `validation`, `example`.
 - `gitlab_identifier` is required for `train`/`validation` datasets. `jsonl_fpath` is the local download path. Both fields coexist.
 - `example` datasets don't have `gitlab_identifier` — they're committed to git directly.
+- Every `taskset` needs a route in `environment_server_routes`. Run an `example` dataset by collating it first (`gym dataset collate ... --mode example_validation --output-dir <dir>`) and passing `<dir>/example.jsonl` to `gym eval run --no-serve --input`.
+- Flat rows (no `taskset`) are accepted through `single_agent_turn_legacy`: include `environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml`, inherit `single_agent_turn_legacy`, and bind the same `resources_server` and `agent_server`. See `resources_servers/example_single_tool_call/configs/example_single_tool_call_single_agent_turn.yaml`.
+- Do not front the agent with a `legacy_agent` relay. `gym env init` generates one as `<name>_environment_server`; replace it.
 
 ---
 
@@ -299,91 +301,29 @@ Convert from source format to Gym JSONL using a conversion script. See [Data Con
 
 ## Agent Patterns
 
+The Environment Server calls the agent only for the agent turn, inside an agent session (`/v1/agent_sessions`, `/v1/responses`, `/v1/agent_sessions/close`). Seed, verify and close belong to the Environment Server, so an agent never calls `/seed_session` or `/verify` itself.
+
 ### Simple agent (default — no custom code needed)
 
-For single-turn benchmarks (model generates once, verify). Just reference `simple_agent` in YAML config.
+For single-turn benchmarks (model generates once, verify) and tool-calling benchmarks. Reference `simple_agent` as the Environment Server's `agent_server`; set `resources_tool_transports: [direct_http]` when the model calls resources-server tools.
 
-### Multi-turn correction agent (e.g. `proof_refinement_agent`)
+### Multi-turn feedback
 
 For benchmarks where the model gets error feedback and retries:
 
-```python
-from nemo_gym.agents import (
-    BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent,
-)
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.client import raise_for_status
+- **Feedback as a tool.** Add a resources-server route that checks an attempt and returns the errors, such as `POST /check_answer`, and declare it in the row's `responses_create_params.tools`. `simple_agent` calls it like any other tool within the agent turn, and `/verify` scores the final answer. The loop stays inside one agent turn, so it needs no custom agent.
+- **Feedback the environment decides.** When the environment, not the model, decides each next turn (a user simulator, turn-based feedback), implement that loop in an Environment Server, as `environment_servers/nemo_user_sim` does.
 
-class MyAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
-    model_server: ModelServerRef
-    max_correction_turns: int = 3
-
-class MyAgent(SimpleResponsesAPIAgent):
-    config: MyAgentConfig
-
-    async def responses(self, request, response, body=Body()):
-        # Forward to model server, return NeMoGymResponse
-        model_response = await self.server_client.post(
-            server_name=self.config.model_server.name,
-            url_path="/v1/responses",
-            json=body,
-            cookies=request.cookies,
-        )
-        await raise_for_status(model_response)
-        return NeMoGymResponse.model_validate(await model_response.json())
-
-    async def run(self, request, body):
-        cookies = request.cookies
-
-        # 1. Seed session
-        seed = await self.server_client.post(
-            self.config.resources_server.name, "/seed_session",
-            json=body.model_dump(), cookies=cookies,
-        )
-        cookies = seed.cookies
-
-        current_input = body.responses_create_params
-        for turn in range(self.config.max_correction_turns + 1):
-            # 2. Generate
-            gen = await self.server_client.post(
-                self.config.name, "/v1/responses",
-                json=current_input, cookies=cookies,
-            )
-            cookies = gen.cookies
-            model_json = await gen.json()
-
-            # 3. Verify
-            verify_data = body.model_dump()
-            verify_data["response"] = model_json
-            verify = await self.server_client.post(
-                self.config.resources_server.name, "/verify",
-                json=verify_data, cookies=cookies,
-            )
-            cookies = verify.cookies
-            result = await verify.json()
-
-            if result.get("reward", 0.0) == 1.0:
-                break
-            if turn >= self.config.max_correction_turns:
-                break
-
-            # 4. Build correction prompt from errors
-            current_input = {"input": [{"role": "user", "content": build_correction(result)}]}
-
-        return result
-```
+Do not write a custom `run()` that seeds, generates, verifies and retries in a loop. `proof_refinement_agent` works that way, so it runs only behind a `legacy_agent` relay and is not a pattern for new benchmarks.
 
 ### Key rules
 
 - Propagate cookies through every server call: `cookies=request.cookies`, then update with `response.cookies`. This is critical for stateful environments that track per-task sessions.
 - Call `raise_for_status()` after every inter-server call
-- The agent calls itself (`self.config.name`) for `/v1/responses` to keep middleware chain intact
 - Use `ConfigDict(extra="allow")` on request/response models for flexible field forwarding
 - **Token ID propagation**: model responses include `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`. Propagate these from each model response into the next turn's input — required for RL training. See `swe_agents/app.py` for the implementation pattern.
 - **Monotonic trajectories**: NeMo RL requires the token sequence across multi-turn rollouts to only grow. Never summarize, truncate, or modify prior turns between steps.
-- **Thinking model compatibility**: thinking models emit `<think>`/`<thinking>` blocks. Strip these before parsing tool calls from model output, or parsing will break. See `harbor_agent` for the handling pattern.
+- **Thinking model compatibility**: thinking models emit `<think>`/`<thinking>` blocks. Strip these before parsing tool calls from model output, or parsing will break. See `_parse_think_tags` in `nemo_gym/models/chat_completions_converter.py` for the handling pattern.
 - **Concurrency control for external services**: if the agent calls external services (Docker containers, APIs), use `asyncio.Semaphore` to throttle concurrent calls — external services may not handle thousands of simultaneous requests.
 
 ---
@@ -617,29 +557,13 @@ gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark
 
 ## External Benchmark Integration
 
-When wrapping a 3rd-party benchmark library (e.g. SWE-bench, BigCodeBench), integrate at the agent server level:
+When wrapping a 3rd-party benchmark library (e.g. SWE-bench, BigCodeBench), integrate at the agent server level, as an agent that serves agent sessions:
 
-```python
-class ExternalBenchmarkAgent(SimpleResponsesAPIAgent):
-    config: ExternalBenchmarkAgentConfig
-
-    async def responses(self, request, response, body=Body()):
-        raise NotImplementedError("Use /run endpoint directly")
-
-    async def run(self, request, body):
-        # 1. Pre-process: Gym schema → library input
-        library_input = preprocess(body)
-
-        # 2. Call external library
-        library_result = await run_external(library_input)
-
-        # 3. Post-process: library result → BaseVerifyResponse
-        return BaseVerifyResponse(
-            **body.model_dump(),
-            reward=1.0 if library_result.passed else 0.0,
-            response=library_result.response,
-        )
-```
+- `SimpleResponsesAPIAgent` registers `/v1/agent_sessions`, `/v1/responses` and `/v1/agent_sessions/close`. The adapter implements `_seed_agent_session_state()` (keep the tool and sandbox grants for the session), the session branch of `responses()` (pre-process the Gym request into library input, call the library, post-process its result into a `NeMoGymResponse`), and `_close_agent_session_state()` (release what the session holds and return its observations). `responses_api_agents/simple_agent/app.py` implements all three; `responses_api_agents/langchain_deepagents_agent` subclasses it to run an agent framework.
+- The `single_agent_turn` Environment Server drives the episode, and the resources server's `verify()` scores the response.
+- When the library's tasks bring their own environment and verifier, task folders in the Harbor format, run by the `harbor` Environment Server, are an equal choice.
+- Do not wrap the library in `run()` behind a `legacy_agent` relay.
+- The [`add-harness`](../../add-harness/SKILL.md) skill and the "Add or Update a Harness" page (`fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx`) have the full session contract.
 
 Add the dependency in `pyproject.toml`, then run `uv lock` and commit `uv.lock`.
 

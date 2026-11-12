@@ -16,17 +16,24 @@ The Gym page [Add a benchmark](../../../fern/versions/latest/pages/contribute/en
 
 ## Determine Integration Type
 
-Before starting, determine which type of benchmark you're adding:
+Before starting, choose the task format. Gym JSONL rows with a resources server and task folders in the Harbor format are equal choices. Task folders carry their own environment and verifier and run on the `harbor` Environment Server with no resources server; for them, follow "Task-folder benchmarks" in the Add a benchmark page instead of this workflow. The rest of this skill covers JSONL rows.
+
+Every new benchmark runs through an Environment Server's agent sessions:
+- **Preferred:** the `single_agent_turn` Environment Server with a typed taskset. Declare `taskset` on each dataset and map it in `environment_server_routes`; collation turns each row into `task_id` and `task_input`. The Environment Server seeds the resources session (`ResourcesSeedSessionRequest`), opens the agent session, runs the agent turn, verifies, and closes both sessions.
+- **Accepted:** `single_agent_turn_legacy` with flat rows. It runs the same steps for rows without a taskset.
+- **Not allowed in new work:** a `legacy_agent` relay, which sends each row to an agent's `/run`. `gym env init` still generates one; replace it (Step 4).
+
+Then determine which type of benchmark you're adding:
 
 **Native benchmark** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
-- Agent server orchestrates model calls (use `simple_agent` for single-turn, or custom agent for multi-turn)
+- The agent turn uses an agent that serves agent sessions: `simple_agent` for single-turn and tool-calling benchmarks, or a session harness for a task sandbox (Step 4)
 - Example: `code_gen`, `instruction_following`, `math_with_judge`
 
 **External benchmark** — wrapping a 3rd-party library that has its own orchestration:
-- Integrate at the agent server level (not resources server)
-- Agent's `/run` endpoint wraps the external library
-- Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
+- Integrate at the agent server level (not resources server): the library runs inside the agent turn of an agent session (`/v1/agent_sessions`, `/v1/responses`, `/v1/agent_sessions/close`), and `single_agent_turn` drives the episode. The [`add-harness`](../add-harness/SKILL.md) skill covers the session contract
+- Do not wrap the library in an agent's `/run`
+- Pre-process from Gym schema to library input, post-process the library's result into the agent's response, which the resources server's `verify()` scores
 - Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
 - Add the dependency in `pyproject.toml` and commit its `uv.lock`
 
@@ -52,7 +59,7 @@ resources_servers/my_benchmark/
 └── README.md
 ```
 
-For external benchmarks, create the agent server manually under `responses_api_agents/my_agent/` with the same structure.
+For external benchmarks, create the agent server under `responses_api_agents/my_agent/` with the same structure and the agent session routes (see `add-harness`).
 
 ### Step 2: Prepare data
 
@@ -133,6 +140,7 @@ If the server keeps state per session (a sandbox handle, a connection, a session
 - Implement the state hooks `has_session_state()`, `initialize_session_state()` and `release_session_state()`, and set `seed_request_model`; the base then serves seed, close and checkpoint retirement under a per-session lock. Score inside `async with self.verifying(session_id) as verification`; mask `verification.is_lost`, and use `verification.retain(payload)` for compact retry evidence. Call `retain` before an awaited judge; use `retain(None)` explicitly only when the request contains everything needed to score a retry. Omitting retention makes the retry `session_lost`, including after a judge failure. The context releases state even when scoring raises. Cleanup failure is observed without replacing the score or original scoring exception, and ownership stays available for close or retirement to retry release. Release hooks must be async, idempotent, and retain handles on failure. Exported servers restore ownership through `restore_session_identity()` or `restore_session_identities()`. Use `verifying(session_id, allow_missing=True)` for a request-scored verifier that accepts an unseeded call. A seed override that widens the cookie arm declares it as `Annotated[CookieModel, BeforeValidator(reject_partial_typed_seed)]`. Override `seed_session()` and `close_resources_session()` only when the hooks cannot express the lifecycle, refuse an unfixable seed with `ResourcesSeedRejectedError` (422) or `ResourcesSessionConflictError` (409) and never a plain exception, and never add your own `/close_session` route. Close must succeed for a session that is already closed or never seeded, must not let a later seed recreate the session, and must raise if the release fails
 - A custom lifecycle holds a per-session `asyncio.Lock` around the session dict, so a close racing a seed cannot leak a sandbox
 - If seed fails after allocating a resource, free it before re-raising
+- `resources_servers/math_with_code` implements the hooks and its tests call `check_resources_session_contract`; use it as the reference
 - Export `VERIFIER_FIXTURE` (`gym env test` needs it). Set `REVERIFY_MODE = ReverifyMode.STATELESS` on the config only when `verify()` uses just the request payload
 
 ### Step 3b: Auto-install external tools (if applicable)
@@ -147,14 +155,16 @@ Key points:
 
 ### Step 4: Wire YAML config
 
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+Edit `configs/my_benchmark.yaml`. Define the resources server instance, the agent, and the `single_agent_turn` Environment Server that pairs them. See `references/patterns.md` § "YAML Config Pattern".
 
 Key points:
 - `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
 - `license` is required for `train` and `validation` datasets
-- Agent references resources server and model server by instance name
+- Declare `taskset` on each dataset and map every taskset in `environment_server_routes` to the Environment Server
+- The Environment Server references the resources server and the agent by instance name; the agent references the model server. Set `resources_tool_transports: [direct_http]` when the model calls the resources server's tools
+- The scaffold's `<name>_environment_server` block is a `legacy_agent` relay; replace it with `single_agent_turn` (or `single_agent_turn_legacy` for flat rows)
 
-For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
+For multi-turn benchmarks, keep the loop inside the agent turn (a resources-server tool that returns feedback) or drive it from an Environment Server, as `nemo_user_sim` does. `proof_refinement_agent` runs its loop in `/run`, so it is not a pattern for new benchmarks. See `references/patterns.md` § "Agent Patterns".
 
 For a coding harness in a task sandbox, pair the resources server with a session harness (`pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `hermes_agent`) through an environment server; see [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Do not wire a new benchmark to `opencode_sandboxed_agent`, `pi_sandboxed_agent` or `hermes_sandboxed_agent`, or to the `/run` path of `terminus_2_sandboxed_agent` or `miniswe_sandboxed_agent`: that legacy path is deprecated, even though older presets still use it.
 
@@ -191,15 +201,20 @@ Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong o
 ### Step 6: Smoke test end-to-end
 
 ```bash
+# Collate the example rows into typed tasks (the taskset route needs task_id and task_input)
+gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
+    --mode example_validation \
+    --output-dir results/my_benchmark_example
+
 # Start servers
 gym env start \
     --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
     --model-type openai_model
 
-# Quick test with example data
+# Quick test with example data; the taskset route picks the Environment Server, so no --agent
 gym eval run --no-serve \
-  --agent my_benchmark_simple_agent \
-  --input resources_servers/my_benchmark/data/example.jsonl \
+  --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
+  --input results/my_benchmark_example/example.jsonl \
   --output results/example_rollouts.jsonl \
   --num-repeats 1 \
   --max-output-tokens 16384 \
@@ -289,7 +304,7 @@ Use the [`add-harness`](../add-harness/SKILL.md) skill. It covers the session co
 - **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.client.http_client.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx` for the rationale.
 - Pass configuration through Gym config (YAML), not environment variables
 - Code must run on Linux
-- `/run` endpoint must be async
+- Server endpoints must be async: agent session routes and `/v1/responses`, resources-server tools, `/seed_session`, `/verify` and `/close_session`
 - Errors from tool execution or bad model output must return error responses, not crash
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
 
