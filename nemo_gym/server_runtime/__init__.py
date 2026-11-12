@@ -126,6 +126,9 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.testing.checkpoint_conformance import (
         FakeSandboxProvider,
         FakeSnapshotProvider,
+        HarnessFixture,
+        LocalExecProvider,
+        check_harness_adapter,
         check_sandbox_session_checkpoints,
         checkpointing_config,
     )
@@ -177,7 +180,9 @@ _PUBLIC_API = {
     "GenerationCutInventory": "_checkpoint.generation_cut",
     "GenerationCutPrefixAck": "_checkpoint.generation_cut",
     "GenerationCutReceipt": "_checkpoint.generation_cut",
+    "HarnessFixture": "testing.checkpoint_conformance",
     "LegacyRun": "_checkpoint.agent",
+    "LocalExecProvider": "testing.checkpoint_conformance",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
     "LentSandboxes": "sandbox_lending",
@@ -217,6 +222,7 @@ _PUBLIC_API = {
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
     "ToolAccess": "tool_access",
+    "check_harness_adapter": "testing.checkpoint_conformance",
     "check_resources_session_contract": "testing.session_conformance",
     "check_sandbox_session_checkpoints": "testing.checkpoint_conformance",
     "checkpoint_settings": "_checkpoint.settings",

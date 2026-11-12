@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
+    from nemo_gym.agents.utils.run_until_parked import Finished, Stopped, run_until_parked
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
     from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime, probe_sandbox_platform
@@ -71,10 +72,13 @@ if TYPE_CHECKING:
         HARNESS_RUNNER_FAILED,
         HARNESS_RUNNER_FILE,
         HARNESS_RUNNER_SCRIPT,
+        HarnessPauseResult,
+        NothingCapturedError,
         SandboxCommand,
         SandboxSession,
         shell_assignments,
     )
+    from nemo_gym.agents.utils.setup_retry import exec_idempotent
     from nemo_gym.agents.utils.supervisor_client import (
         CLEANUP_PHASE_COUNT,
         DEFAULT_CLEANUP_TIMEOUT,
@@ -117,11 +121,14 @@ _PUBLIC_API = {
     "CLEANUP_PHASE_COUNT": "utils.supervisor_client",
     "CleanupReceipt": "utils.supervisor_client",
     "DEFAULT_CLEANUP_TIMEOUT": "utils.supervisor_client",
+    "Finished": "utils.run_until_parked",
     "HARNESS_COMMAND_NOT_STARTED": "utils.sandbox_session",
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
     "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
+    "HarnessPauseResult": "utils.sandbox_session",
+    "NothingCapturedError": "utils.sandbox_session",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
@@ -136,10 +143,12 @@ _PUBLIC_API = {
     "SandboxPythonRuntime": "utils.sandbox_python",
     "SandboxSession": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
+    "Stopped": "utils.run_until_parked",
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
+    "exec_idempotent": "utils.setup_retry",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",
@@ -151,6 +160,7 @@ _PUBLIC_API = {
     "resolve_agent_timeout": "utils.task_timeout",
     "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",
+    "run_until_parked": "utils.run_until_parked",
     "sandbox_server_url": "agent_tools",
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
