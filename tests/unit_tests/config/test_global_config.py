@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ast
 import importlib
 import importlib.metadata
 import sys
@@ -2927,6 +2928,71 @@ class TestModelServerPairing:
         assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
 
 
+# Agent apps that inherit `_seed_agent_session_state` from a session agent but do not serve agent sessions, so an
+# --agent-type swap must relay them through legacy_agent. Remove an entry, and list the agent in
+# AGENT_SESSION_AGENT_TYPES, once its session path does what its /run does.
+INHERITED_SESSIONS_NOT_SERVED = {
+    "agentic_turn_simulation_agent": "refuses an agent session: every episode needs the seed its /run opens",
+    "gdp_pdf_agent": "delivers the task's document only in its run()",
+    "labbench2_vlm_agent": "embeds the task's media only in its run()",
+    "langchain_deepagents_agent": "its responses() replaces simple_agent's and uses no tool grant",
+    "pi_sandboxed_agent": "deprecated; routes the model only through its own seeded /run",
+    "vision2code_agent": "runs its verifier-guided revision passes (num_passes > 1) only in its run()",
+}
+
+
+def _agent_apps_with_sessions(agents_root: Path) -> tuple[set[str], set[str]]:
+    """Return the agent apps that define ``_seed_agent_session_state``, and those whose agent inherits it.
+
+    Read from source, since config composition never imports agent apps: a class inherits sessions when one of its
+    bases is a session class of its own app or one it imports from another agent's app.
+    """
+    trees = {app.parent.name: ast.parse(app.read_text(encoding="utf-8")) for app in agents_root.glob("*/app.py")}
+    implementing = {
+        name for name in trees if "def _seed_agent_session_state(" in (agents_root / name / "app.py").read_text()
+    }
+    session_classes = {
+        name: {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "_seed_agent_session_state"
+                for item in node.body
+            )
+        }
+        for name, tree in trees.items()
+    }
+    imports = {
+        name: {
+            alias.asname or alias.name: (node.module.split(".")[1], alias.name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.module.startswith("responses_api_agents.")
+            and node.module.endswith(".app")
+            for alias in node.names
+        }
+        for name, tree in trees.items()
+    }
+    changed = True
+    while changed:
+        changed = False
+        for name, tree in trees.items():
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef) or node.name in session_classes[name]:
+                    continue
+                for base in node.bases:
+                    if not isinstance(base, ast.Name):
+                        continue
+                    source_app, source_class = imports[name].get(base.id, (name, base.id))
+                    if source_class in session_classes.get(source_app, set()):
+                        session_classes[name].add(node.name)
+                        changed = True
+                        break
+    return implementing, {name for name, classes in session_classes.items() if classes} - implementing
+
+
 class TestComposeUnboundAgent:
     """Composition of a standalone agent config onto the environment's agent instances."""
 
@@ -3532,15 +3598,45 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
-        """Every agent app that seeds agent sessions is listed, and nothing else is."""
-        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
-        implementing = {
-            app.parent.name
-            for app in agents_root.glob("*/app.py")
-            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
-        }
+        """Every agent app that seeds agent sessions, itself or by inheriting them, is listed, and nothing else is.
 
-        assert implementing == AGENT_SESSION_AGENT_TYPES
+        A subclass of a session agent is listed so its --agent-type swaps keep agent sessions, unless
+        INHERITED_SESSIONS_NOT_SERVED names it with the reason its session path does not serve it.
+        """
+        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        implementing, inheriting = _agent_apps_with_sessions(agents_root)
+        not_served = set(INHERITED_SESSIONS_NOT_SERVED)
+
+        assert not_served <= inheriting, (
+            f"stale INHERITED_SESSIONS_NOT_SERVED entries: {sorted(not_served - inheriting)}"
+        )
+        expected = implementing | (inheriting - not_served)
+        assert AGENT_SESSION_AGENT_TYPES == expected, (
+            f"missing: {sorted(expected - AGENT_SESSION_AGENT_TYPES)}, "
+            f"not session agents: {sorted(AGENT_SESSION_AGENT_TYPES - expected)}"
+        )
+
+    def test_agent_apps_that_inherit_sessions_are_found(self, tmp_path: Path) -> None:
+        apps = {
+            "base_agent": "class BaseAgent:\n    async def _seed_agent_session_state(self, body): ...\n",
+            "child_agent": (
+                "from responses_api_agents.base_agent.app import BaseAgent as Parent\n"
+                "class ChildAgent(Parent):\n    pass\n"
+            ),
+            "grandchild_agent": (
+                "from responses_api_agents.child_agent.app import ChildAgent\nclass GrandchildAgent(ChildAgent): ...\n"
+            ),
+            # Importing a session agent's module, or subclassing another class from it, is not inheriting sessions.
+            "config_only_agent": (
+                "from responses_api_agents.base_agent.app import BaseAgent, BaseConfig\n"
+                "class OtherConfig(BaseConfig): ...\nclass OtherAgent: ...\n"
+            ),
+        }
+        for name, source in apps.items():
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "app.py").write_text(source)
+
+        assert _agent_apps_with_sessions(tmp_path) == ({"base_agent"}, {"child_agent", "grandchild_agent"})
 
     def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
         config = self._session_environment_config("langgraph_agent")
