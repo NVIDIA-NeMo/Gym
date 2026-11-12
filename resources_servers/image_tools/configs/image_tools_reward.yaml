@@ -1,0 +1,13 @@
+image_tools_reward:
+  resources_servers:
+    image_tools:
+      entrypoint: tool_reward_app.py
+      domain: agent
+      description: Adds the image tools agent's tool reward to the task verifier's
+        reward, recomputed from the rollout.
+      value: Run the image tools agent under an Environment Server with the same reward
+        as its own /run.
+      agent_server:
+        type: responses_api_agents
+        name: image_tools_simple_agent
+      verified: false

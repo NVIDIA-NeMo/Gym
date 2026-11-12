@@ -15,6 +15,19 @@ The agent configuration controls:
 
 See `configs/image_tools_agent.yaml` for the available settings.
 
+## Agent sessions
+
+The agent serves the agent sessions API, and `configs/image_tools_agent.yaml` runs it through a
+`single_agent_turn_legacy` Environment Server. A session takes no granted tools and no sandbox: the image tools
+run in the agent. The session's one activation runs the same tool loop; a retried activation returns the rollout it
+already ran. The session does not know the row's dataset name, so its crops go under `<crop_dir>/unknown/` instead of
+`<crop_dir>/<dataset>/`. The response names the agent and lists the crop files the rollout wrote under `image_tools_rollout`.
+
+The `image_tools_reward` resources server verifies, as the agent's own `/run` does: it routes each row
+by `image_tools_base_agent_ref`, verifies the final answer and adds the tool reward, which it recomputes from the
+rollout (see `resources_servers/image_tools/README.md`). The reward rule is the same: the verifier's reward plus the
+tool reward, at most 1.0.
+
 ## Testing
 
 ```bash
