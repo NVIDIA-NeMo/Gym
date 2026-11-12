@@ -8,6 +8,7 @@ Every attempt also carries a total timeout and a cap on connection-error retries
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,9 +16,11 @@ import pytest
 from aiohttp import ClientTimeout
 
 import resources_servers.browsecomp_advanced_harness.app as app_module
+from nemo_gym.client import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     ExaAIOHTTPClient,
     TavilySearchAIOHTTPClient,
+    TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,
 )
 
@@ -32,6 +35,16 @@ def _http_response(status: int, body: dict | None = None):
     response.content.read = AsyncMock(return_value=json.dumps(body or {}).encode())
     response.json = AsyncMock(return_value=body or {})
     return response
+
+
+def _responses(status: int, count: int = 40) -> list:
+    """A finite supply of one status.
+
+    The mock runs out and raises if a call retries more than expected, so a regression to unbounded retries fails
+    at once instead of hanging: the fake clock's sleep never yields to the event loop, so a timeout cannot
+    interrupt it.
+    """
+    return [_http_response(status) for _ in range(count)]
 
 
 @pytest.fixture
@@ -75,7 +88,7 @@ class TestProviderRetryBounds:
     async def test_a_rate_limit_that_never_clears_ends_the_call_after_the_wait_budget(
         self, monkeypatch, clock, make_client, call, status: int
     ) -> None:
-        fake_request = AsyncMock(return_value=_http_response(status))
+        fake_request = AsyncMock(side_effect=_responses(status))
         monkeypatch.setattr(app_module, "request", fake_request)
 
         with pytest.raises(ProviderGaveUp):
@@ -98,7 +111,7 @@ class TestProviderRetryBounds:
     async def test_a_zero_wait_budget_spends_attempts_from_the_first_rate_limit(
         self, monkeypatch, clock, make_client, call
     ) -> None:
-        fake_request = AsyncMock(return_value=_http_response(429))
+        fake_request = AsyncMock(side_effect=_responses(429))
         monkeypatch.setattr(app_module, "request", fake_request)
 
         with pytest.raises(ProviderGaveUp):
@@ -107,7 +120,7 @@ class TestProviderRetryBounds:
         assert fake_request.await_count == 3
 
     async def test_a_server_error_is_still_three_attempts(self, monkeypatch, clock, make_client, call) -> None:
-        fake_request = AsyncMock(return_value=_http_response(500))
+        fake_request = AsyncMock(side_effect=_responses(500))
         monkeypatch.setattr(app_module, "request", fake_request)
 
         with pytest.raises(ProviderGaveUp):
@@ -128,22 +141,31 @@ class TestProviderRetryBounds:
         assert kwargs["_max_connection_retries"] == 3
 
 
-def test_the_server_config_bounds_provider_calls_by_default() -> None:
+_EXCLUDE_DOMAINS_FILE = str(Path(__file__).parent / "dummy_exclude_domains_file.json")
+
+
+@pytest.mark.parametrize(
+    ("limits", "expected"),
+    [
+        ({}, (600.0, 120.0)),
+        ({"provider_rate_limit_wait_seconds": 7.0, "provider_request_timeout_seconds": 9.0}, (7.0, 9.0)),
+    ],
+)
+def test_the_configured_bounds_reach_every_client_the_server_builds(limits: dict, expected: tuple) -> None:
+    """The server forwards its limits to each Tavily and Exa client (several keys make several clients)."""
     config = TavilySearchResourcesServerConfig(
-        host="h", port=1, entrypoint="app.py", name="n", exclude_domains_file_path="x.json", tavily_api_key="k"
+        host="h",
+        port=1,
+        entrypoint="app.py",
+        name="n",
+        exclude_domains_file_path=_EXCLUDE_DOMAINS_FILE,
+        tavily_api_key=["tavily-key-1", "tavily-key-2"],  # pragma: allowlist secret
+        exa_api_key=["exa-key-1", "exa-key-2"],  # pragma: allowlist secret
+        **limits,
     )
 
-    assert (config.provider_rate_limit_wait_seconds, config.provider_request_timeout_seconds) == (600.0, 120.0)
+    server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-
-def test_the_configured_bounds_reach_the_tavily_client() -> None:
-    from httpx import AsyncClient
-
-    client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
-        AsyncClient(base_url="https://api.tavily.com"),
-        False,
-        rate_limit_wait_seconds=7.0,
-        request_timeout_seconds=9.0,
-    )
-
-    assert (client.rate_limit_wait_seconds, client.request_timeout_seconds) == (7.0, 9.0)
+    clients = [tavily._client for tavily in server._async_tavily_clients] + list(server._exa_clients)
+    assert len(clients) == 4
+    assert {(client.rate_limit_wait_seconds, client.request_timeout_seconds) for client in clients} == {expected}
