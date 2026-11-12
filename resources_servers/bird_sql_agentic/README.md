@@ -18,6 +18,8 @@ Verify output adds `num_tool_calls` and `num_sql_errors`; aggregate metrics add 
 
 ## Example usage
 
+The BIRD databases are shared with `bird_sql` and are downloaded automatically on first server startup (see [`bird_sql`](../bird_sql/README.md#database-download)).
+
 ```bash
 gym env test --resources-server bird_sql_agentic
 gym env start --resources-server bird_sql_agentic --model-type openai_model

@@ -6,8 +6,8 @@ Kept free of any server/framework code so it can be tested directly.
 """
 
 import re
-import sqlite3  # noqa: F401  (needed once you fill in the TODOs; delete this noqa then)
-import time  # noqa: F401  (needed once you fill in the TODOs; delete this noqa then)
+import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,7 +35,7 @@ def check_sql_allowed(sql: str) -> Optional[str]:
 
 
 def _has_unquoted_semicolon(sql: str) -> bool:
-    """True if ``sql`` contains a ';' that is not inside '...', "..." or `...`. (Given, no TODO.)"""
+    """True if ``sql`` contains a ';' that is not inside '...', "..." or `...`."""
     quote: Optional[str] = None
     for ch in sql:
         if quote:

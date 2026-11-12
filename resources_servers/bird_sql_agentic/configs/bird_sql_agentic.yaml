@@ -17,7 +17,7 @@ bird_sql_agentic_resources_server:
       domain: coding
       verified: false
       description: Multi-turn text-to-SQL on BIRD dev with a read-only execute_sql tool. Binary reward from unordered result-set equality, same as bird_sql.
-      value: Train and evaluate tool-using SQL agents that inspect data and fix errors before answering, with a reward directly comparable to single-turn bird_sql.
+      value: Train and evaluate SQL agents that inspect data and fix errors before answering, with a reward comparable to single-turn bird_sql.
 
 bird_sql_agentic_simple_agent:
   responses_api_agents:

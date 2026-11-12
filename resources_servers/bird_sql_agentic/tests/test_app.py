@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import sqlite3
-import time  # noqa: F401  (needed once you fill in the TODOs; delete this noqa then)
+import time
 from http.cookiejar import CookieJar
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -24,7 +24,7 @@ from resources_servers.bird_sql_agentic.app import (
     BirdSqlAgenticResourcesServer,
     BirdSqlAgenticResourcesServerConfig,
 )
-from resources_servers.bird_sql_agentic.sql_tool import (  # noqa: F401  (format_rows is for your TODO tests)
+from resources_servers.bird_sql_agentic.sql_tool import (
     check_sql_allowed,
     format_rows,
     run_readonly_query,
