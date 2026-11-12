@@ -15,6 +15,7 @@
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 from resources_servers.ether0.setup_ether0 import ensure_ether0
@@ -34,8 +35,10 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
 from resources_servers.ether0 import local_oracles  # noqa: E402
 from resources_servers.ether0.graders import EVAL_FUNCTIONS  # noqa: E402
+from resources_servers.ether0.verifier_fixture import create_server  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -194,6 +197,13 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
             elif isinstance(content, str):
                 texts.append(content)
     return "\n".join(texts).strip()
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_server,
+    request_model=Ether0VerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":

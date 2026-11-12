@@ -18,6 +18,7 @@ import pytest
 from app import (
     EVAL_FUNCTIONS,
     ORACLE_NOT_CONFIGURED,
+    VERIFIER_FIXTURE,
     Ether0ResourcesServer,
     Ether0ResourcesServerConfig,
     Ether0VerifyRequest,
@@ -26,6 +27,7 @@ from app import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.core.failure_kinds import VERIFIER_ERROR
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.ether0 import graders, local_oracles
 
 
@@ -292,3 +294,12 @@ class TestOracleRows:
         assert install.call_count == installs
         if installs:
             install.assert_called_once_with("/assets/model.pt", "/assets/zinc20.bloom")
+
+
+async def test_verifier_fixture() -> None:
+    await exercise_verifier_fixture(
+        VERIFIER_FIXTURE,
+        reward_range=(0.0, 1.0),
+        higher_is_better=True,
+        determinism="unknown",
+    )
