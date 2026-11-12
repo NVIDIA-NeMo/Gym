@@ -483,7 +483,7 @@ def _dataset_admitted_agents(
 
 def _environment_server_routes_of(global_config_dict: Optional[DictConfig]) -> dict[str, str]:
     routes = None if global_config_dict is None else global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
-    return {} if routes is None else dict(OmegaConf.to_container(routes))
+    return {} if routes is None else dict(OmegaConf.to_container(routes, resolve=True))
 
 
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
@@ -3570,7 +3570,9 @@ class RolloutCollectionHelper(BaseModel):
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
-            self.resolve_task_sources(rows, global_config_dict)
+            self.resolve_task_sources(
+                [row for row in rows if NG_ENVIRONMENT_SERVER_KEY not in row], global_config_dict
+            )
         return rows
 
     @staticmethod

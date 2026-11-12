@@ -23,6 +23,7 @@ from nemo_gym.environment.in_process import (
     serve_benchmark,
 )
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
@@ -516,11 +517,11 @@ class TestTaskRunner:
     def _registry_config(monkeypatch: pytest.MonkeyPatch, config: dict) -> list:
         reads: list = []
 
-        def setup_server_client(self, head_server_config=None):
+        def setup_server_client(head_server_config=None):
             reads.append(head_server_config)
             return type("Client", (), {"global_config_dict": OmegaConf.create(config)})()
 
-        monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", setup_server_client)
+        monkeypatch.setattr(rollout_collection, "setup_server_client_utils", setup_server_client)
         return reads
 
     async def test_runs_a_materialized_task_on_the_environment_server_its_taskset_routes_to(
@@ -539,7 +540,7 @@ class TestTaskRunner:
         assert sent["_ng_environment_server"] == "bench_env"
         assert sent["_ng_rollout_id"] == "trial-1"
 
-    async def test_selects_flat_and_materialized_tasks_by_id_and_reads_the_routes_once(
+    async def test_selects_flat_and_materialized_tasks_by_id_and_shares_one_registry_read(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         runner = TaskRunner([_row("flat"), self._typed_row("typed")], registry_server=HEAD)
@@ -551,11 +552,43 @@ class TestTaskRunner:
         assert reads == []
         await runner.run_task("typed")
         await runner.run_task("typed")
+        runner._helper.setup_server_client(HEAD)  # what `run_outcomes` calls when it dispatches
 
         assert runner.task_ids() == ["flat", "typed"]
         assert "_ng_environment_server" not in runs.sent[0][0]
         assert [sent[0].get("_ng_environment_server") for sent in runs.sent[1:]] == ["bench_env", "bench_env"]
         assert reads == [HEAD]
+
+    async def test_a_materialized_task_keeps_its_dataset_label_and_gains_no_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([{**self._typed_row("a"), "task_source": "bench"}], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        await runner.run_task("a")
+
+        (sent,) = runs.sent[0]
+        assert sent["task_source"] == "bench"
+        assert sent["_ng_environment_server"] == "bench_env"
+        assert "agent_ref" not in sent
+
+    async def test_a_route_given_as_an_interpolation_is_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(
+            monkeypatch,
+            {
+                "environment_server_name": "bench_env",
+                "environment_server_routes": {"bench": "${environment_server_name}"},
+            },
+        )
+
+        await runner.run_task("a")
+
+        assert runs.sent[0][0]["_ng_environment_server"] == "bench_env"
 
     async def test_a_materialized_task_without_a_route_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)

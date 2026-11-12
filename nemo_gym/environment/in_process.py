@@ -316,24 +316,18 @@ class TaskRunner:
 
     The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row, sends it
     through the agent's `/run`, or a materialized row through the environment server its taskset routes to, and
-    returns the rollout's outcome. Concurrent calls in one event loop are supported.
+    returns the rollout's outcome. The running servers' configuration is read from the registry server once and shared
+    by every call. Concurrent calls in one event loop are supported.
     """
 
     @experimental(once=True)
     def __init__(self, rows: Sequence[Mapping[str, Any]], *, registry_server: BaseServerConfig):
-        self._helper = RolloutCollectionHelper()
+        self._helper = RolloutCollectionHelper(reuse_server_client=True)
         self._registry_server = registry_server
         self._row_of_task = _first_row_of_each_task(rows)
-        self._global_config_dict: Optional[DictConfig] = None
 
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
-
-    def _running_global_config_dict(self) -> DictConfig:
-        """The running servers' config, read once from the registry server."""
-        if self._global_config_dict is None:
-            self._global_config_dict = self._helper.setup_server_client(self._registry_server).global_config_dict
-        return self._global_config_dict
 
     @experimental(once=True)
     async def run_task(self, task_id: str, *, rollout_id: Optional[str] = None) -> RolloutOutcome:
@@ -350,7 +344,11 @@ class TaskRunner:
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
         task_row = self._row_of_task[task_id]
-        global_config_dict = self._running_global_config_dict() if is_materialized_task_row(task_row) else None
+        global_config_dict = (
+            self._helper.setup_server_client(self._registry_server).global_config_dict
+            if is_materialized_task_row(task_row)
+            else None
+        )
         with ignoring_command_line():
             rows = self._helper.preprocess_examples(
                 [task_row], task_ids=[task_id], num_repeats=1, global_config_dict=global_config_dict
