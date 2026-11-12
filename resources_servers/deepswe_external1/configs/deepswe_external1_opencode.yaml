@@ -1,36 +1,66 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Runs the self-contained DeepSWE rows with OpenCode agent sessions under single_agent_turn. The resources server
+# starts each task's agent sandbox, lends it to opencode_agent, and after the agent closes grades the committed patch
+# in a fresh verifier sandbox. deepswe_external1_opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the
+# legacy_agent relay. The base deepswe_external1.yaml config alone runs golden- and null-patch validation.
+#
+# On providers that enforce the sandbox network policy, the agent sandbox denies network except the model host, so
+# OpenCode cannot download its runtime there. Pin opencode_agent's offline bundle (sandbox_executable_*,
+# sandbox_ripgrep_* and sandbox_plugin_dependencies_*) to files already in the sandbox, or use images that ship the
+# runtime at /tmp/nemo-gym-opencode-runtime-<opencode_version> and rg on PATH. Both choices still require
+# sandbox_plugin_dependencies_path and sandbox_plugin_dependencies_sha256 for each private config (see the README).
+#
+#   gym env start --config resources_servers/deepswe_external1/configs/deepswe_external1_opencode.yaml
 
-# Wires the OpenCode sandboxed agent to the resources server for model runs.
-# Keep agent wiring separate so golden- and null-patch validation can use the base config alone.
 config_paths:
-  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
   - resources_servers/deepswe_external1/configs/deepswe_external1.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
-deepswe_external1_opencode_resources_server:
-  _inherit_from: deepswe_external1_resources_server
+environment_server_routes:
+  deepswe_external1: deepswe_external1_opencode_single_agent_turn
+
+deepswe_external1_resources_server:
   resources_servers:
     deepswe_external1:
-      domain: coding
+      allowed_agents: [opencode_agent]
       verified: false
+      # The agent sandbox may reach this model server's host, and nothing else.
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
+      datasets:
+        - name: example
+          type: example
+          taskset: deepswe_external1
+          jsonl_fpath: resources_servers/deepswe_external1/data/example.jsonl
+          num_repeats: 1
+          license: Apache 2.0
 
-deepswe_external1_opencode_sandboxed_agent:
-  _inherit_from: opencode_sandboxed_agent
+deepswe_external1_opencode_agent:
+  _inherit_from: opencode_agent
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
+      resources_server: null
+
+deepswe_external1_opencode_single_agent_turn:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
       resources_server:
         type: resources_servers
-        name: deepswe_external1_opencode_resources_server
-
-      sandbox_timeout: 10800
-
-deepswe_external1_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+        name: deepswe_external1_resources_server
       agent_server:
         type: responses_api_agents
-        name: deepswe_external1_opencode_sandboxed_agent
+        name: deepswe_external1_opencode_agent
+      resources_tool_transports: []
+      # Admit episodes at the agent's rate (opencode_agent's `concurrency`, 8 by default). An admitted episode seeds
+      # its agent sandbox at once, so without this every row would hold a sandbox while it waits for an OpenCode slot.
+      # Raise both to run faster.
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 604800
+      # Above OpenCode's run (10800) plus seed, installation and verification, and no longer than the sandbox's
+      # ttl_s (18000 in deepswe_external1.yaml), so the provider does not reclaim a sandbox mid-episode.
+      default_episode_timeout_seconds: 18000
