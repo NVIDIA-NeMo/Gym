@@ -18,6 +18,9 @@ import json
 import logging
 import os
 import socket
+import subprocess
+import sys
+import textwrap
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -10004,3 +10007,31 @@ async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
 
     assert raised.value is error
     assert [message["status"] for message in sent] == [200]
+
+
+@mark.parametrize(
+    ("old_name", "new_name"),
+    [
+        ("VLLMConverter", "ChatCompletionsConverter"),
+        ("VLLMConverterResponsesToChatCompletionsState", "ChatCompletionsConverterState"),
+    ],
+)
+def test_converter_aliases_resolve_from_this_module_with_a_warning(old_name: str, new_name: str) -> None:
+    # In a fresh interpreter: each old path warns only on its first use in a process.
+    code = textwrap.dedent(
+        f"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from responses_api_models.vllm_model.app import {old_name} as old
+        from nemo_gym.models.chat_completions_converter import {new_name} as new
+        assert old is new, (old, new)
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning and "{old_name}`" in str(w.message)]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    # The repository root puts responses_api_models on the path, wherever pytest was started.
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=PARENT_DIR)

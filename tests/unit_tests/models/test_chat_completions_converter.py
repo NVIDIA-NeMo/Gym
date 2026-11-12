@@ -51,8 +51,6 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.models.chat_completions_converter import (
     ChatCompletionsConverter,
     ChatCompletionsConverterState,
-    VLLMConverter,
-    VLLMConverterResponsesToChatCompletionsState,
     _usage_detail,
     chat_completion_usage_to_response_usage,
     split_responses_input_output_items,
@@ -111,16 +109,6 @@ def converter() -> ChatCompletionsConverter:
 @pytest.fixture(autouse=True)
 def _fixed_uuid(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
-
-
-# ===========================================================================
-# Backward-compatible aliases
-# ===========================================================================
-
-
-def test_backwards_compatible_aliases():
-    assert VLLMConverter is ChatCompletionsConverter
-    assert VLLMConverterResponsesToChatCompletionsState is ChatCompletionsConverterState
 
 
 def test_usage_detail_ignores_ambiguous_top_level_names():

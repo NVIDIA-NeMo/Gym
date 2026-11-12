@@ -1539,9 +1539,5 @@ def split_responses_input_output_items(
     return items[:split_at], items[split_at:]
 
 
-# Backward-compatible aliases
-VLLMConverter = ChatCompletionsConverter
-VLLMConverterResponsesToChatCompletionsState = ChatCompletionsConverterState
-
-# Names this module had before ResponsesConverter was renamed ChatCompletionsConverter, with a warning.
+# Names this module had before the converter was renamed ChatCompletionsConverter, with a warning.
 __getattr__ = moved_names_getattr(__name__)
