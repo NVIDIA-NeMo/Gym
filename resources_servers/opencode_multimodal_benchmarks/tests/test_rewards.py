@@ -346,7 +346,10 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resource,answer", [("mcqa", "A"), ("math_with_judge", "2")])
 @pytest.mark.parametrize("correct", [True, False])
-async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evidence(resource, answer, correct):
+@pytest.mark.parametrize("split_blocks", [False, True])
+async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evidence(
+    resource, answer, correct, split_blocks
+):
     import importlib
     from unittest.mock import MagicMock
 
@@ -369,6 +372,13 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
         config=entrypoint.ToolRewardConfig.model_validate(config), server_client=MagicMock(spec=ServerClient)
     )
     response = tool_response("<think>private reasoning</think>\\boxed{" + answer + "}")
+    if split_blocks:
+        message = response.output[-1]
+        text = message.content[0].text
+        split = text.index("boxed") + 2
+        message.content = [
+            message.content[0].model_copy(update={"text": part}) for part in (text[:split], text[split:])
+        ]
     body = request_type.model_validate(
         {
             "responses_create_params": {"input": []},
@@ -388,7 +398,8 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
 
 
 @pytest.mark.parametrize("verdict,base,calls", [("[[A=B]]", 1.0, 2), ("[[A!=B]]", 0.0, 1), ("unclear", 0.0, 1)])
-async def test_math_judge_records_final_shaped_grade(verdict, base, calls, monkeypatch):
+@pytest.mark.parametrize("reply_state", ["completed", "omitted", "incomplete", "failed", "error", "second_incomplete"])
+async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply_state, monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
 
     from nemo_gym.client import ServerClient
@@ -405,6 +416,14 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, monke
     replies = []
     for i in range(calls):
         payload = tool_response(verdict).model_dump(mode="json") | {"id": f"judge-{i}"}
+        if reply_state == "omitted":
+            payload.pop("status", None)
+        elif reply_state in {"incomplete", "failed", "completed"}:
+            payload["status"] = reply_state
+        elif reply_state == "error":
+            payload["error"] = {"code": "server_error", "message": "Judge unavailable"}
+        elif reply_state == "second_incomplete" and i == 1:
+            payload["status"] = "incomplete"
         http = MagicMock(status=200)
         http.json = AsyncMock(return_value=payload)
         http.read = AsyncMock(return_value=json.dumps(payload).encode())
@@ -441,5 +460,6 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, monke
     [grade] = invocation["grading_operations"]
     assert grade["kind"] == "llm_judge"
     assert grade["result_binding_sha256"] == grading_result_binding(saved)
-    assert grade["outcome"] == ("unknown" if verdict == "unclear" else "completed")
+    unusable = reply_state in {"incomplete", "failed", "error"} or (reply_state == "second_incomplete" and calls == 2)
+    assert grade["outcome"] == ("unknown" if verdict == "unclear" or unusable else "completed")
     assert len(grade["dependencies"]) == calls == client.post.await_count

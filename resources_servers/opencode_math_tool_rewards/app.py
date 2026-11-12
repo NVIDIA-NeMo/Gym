@@ -43,7 +43,11 @@ class ToolRewardServer(ToolRewardVerifier, LibraryJudgeMathResourcesServer):
 
     async def _generate_judge_evaluation(self, question, first_answer, second_answer):
         matched, evaluation = await super()._generate_judge_evaluation(question, first_answer, second_answer)
-        if evaluation.verdict_label in {self.JUDGE_EQUAL_LABEL, self.JUDGE_NOT_EQUAL_LABEL}:
+        if (
+            evaluation.verdict_label in {self.JUDGE_EQUAL_LABEL, self.JUDGE_NOT_EQUAL_LABEL}
+            and evaluation.response.status not in {"incomplete", "failed"}
+            and evaluation.response.error is None
+        ):
             record_parsed_judge_verdict()
         return matched, evaluation
 

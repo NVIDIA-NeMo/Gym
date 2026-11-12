@@ -4,7 +4,7 @@
 
 import json
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -12,13 +12,13 @@ from nemo_gym.server_runtime import BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
 
-def final_assistant_text(output: list[dict[str, Any]]) -> str:
+def final_assistant_text(output: list[dict[str, Any]], *, block_separator: str = "") -> str:
     """Return the last assistant answer, stopping at an unfinished reasoning or tool turn."""
     for item in reversed(output):
         if item.get("type") in {"reasoning", "function_call"}:
             break
         if item.get("type") == "message" and item.get("role") == "assistant":
-            return "".join(part["text"] for part in item["content"] if part["type"] == "output_text")
+            return block_separator.join(part["text"] for part in item["content"] if part["type"] == "output_text")
     return ""
 
 
@@ -151,9 +151,9 @@ def score_opencode_tools(
     ).for_answer(base_reward, config)
 
 
-def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
+def final_answer(output: list[dict], *, strip_reasoning: bool = False, block_separator: str = "") -> str:
     """Extract the scoring copy; optional training cleanup never mutates history."""
-    text = final_assistant_text(output)
+    text = final_assistant_text(output, block_separator=block_separator)
     if not strip_reasoning:
         return text
     text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
@@ -214,6 +214,8 @@ class ToolRewardVerifyResponse(BaseVerifyResponse, extra="allow"):
 class ToolRewardVerifier:
     """Apply the existing training schedule at the verifier boundary, preserving capture."""
 
+    _answer_block_separator: ClassVar[str] = ""
+
     async def verify(self, body):
         original = body.response
         scoring = original.model_dump(mode="json")
@@ -230,6 +232,7 @@ class ToolRewardVerifier:
                         "text": final_answer(
                             scoring["output"],
                             strip_reasoning=self.config.strip_reasoning_for_grading,
+                            block_separator=self._answer_block_separator,
                         ),
                     }
                 ],

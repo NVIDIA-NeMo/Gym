@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Optional tool-reward schedule over the existing string_match verifier."""
 
+from typing import ClassVar
+
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.opencode_multimodal_benchmarks.rewards import (
     ToolRewardEvidence,
@@ -26,6 +28,7 @@ class ToolRewardVerifyRequest(ToolRewardEvidence, StringMatchVerifyRequest):
 
 class ToolRewardServer(ToolRewardVerifier, StringMatchResourcesServer):
     config: ToolRewardConfig
+    _answer_block_separator: ClassVar[str] = "\n"
 
     async def verify(self, body: ToolRewardVerifyRequest) -> ToolRewardVerifyResponse:
         return ToolRewardVerifyResponse.model_validate(await super().verify(body))
