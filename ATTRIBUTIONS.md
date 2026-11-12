@@ -27,6 +27,18 @@ external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
 
+## ether0 reward overrides
+
+`resources_servers/ether0/graders.py` adapts `oracle_solubility_eval` from
+[Future-House/ether0](https://github.com/Future-House/ether0/blob/b77e0d8eb06f62c8528da72bff22d4c7fee11371/src/ether0/rewards.py),
+file `src/ether0/rewards.py`, revision `b77e0d8eb06f62c8528da72bff22d4c7fee11371`, under
+Apache-2.0 (the upstream file carries no per-file copyright notice; the repository `LICENSE` is
+the Apache-2.0 text). Local changes are requiring every listed functional group instead of any
+one, looking helpers up on `ether0.rewards` at call time, and comment formatting. `str_eval` and
+`get_largest_mol` in the same file are independent implementations that replace the upstream
+functions of the same name. The ether0 package itself is not vendored: `setup_ether0.py` clones
+it into an ignored local directory at runtime.
+
 ## MCP-Atlas
 
 The MCP-Atlas integration adapts material from
