@@ -328,6 +328,36 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
     return context
 
 
+def _log_web_completion(response: dict[str, Any], context: dict[str, Any]) -> None:
+    """Retain upstream stop diagnostics without logging model text or images."""
+
+    if context.get("adapter") != "web_agent":
+        return
+    choices = response.get("choices") or []
+    if not choices:
+        return
+    choice = choices[0]
+    message = choice.get("message") or {}
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    usage = response.get("usage") or {}
+    LOG.info(
+        "event=web_upstream_completion task=%s step=%s parse_attempt=%s response_id=%s "
+        "finish_reason=%s stop_reason=%r tool_calls=%d reasoning_tool_markup=%s "
+        "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+        context.get("task_id", "unknown"),
+        context.get("step"),
+        context.get("parse_attempt"),
+        response.get("id"),
+        choice.get("finish_reason"),
+        choice.get("stop_reason"),
+        len(message.get("tool_calls") or []),
+        "<tool_call>" in reasoning or "<function=" in reasoning,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
+
+
 def _jsonable(value: Any) -> Any:
     """Return a JSON-compatible representation for transport logs."""
 
@@ -633,6 +663,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_key_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the current session key to the engine endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "observability_enabled or token capture."
+        ),
+    )
 
     # Optional path to a file that publishes the current backend base_url.
     # Used for shared serving jobs that move hosts when they restart.
@@ -1039,7 +1077,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
+                session_key_headers=self.config.session_key_headers,
                 max_connection_retries=(
                     self.config.endpoint_connection_retries
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
@@ -1887,6 +1928,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        _log_web_completion(chat_completion_dict, log_context)
         # An aborted request is an infrastructure failure, not a token-limit
         # completion. Failing before conversion prevents grading partial text;
         # the rollout collector can retain the failure for retry on resume.
@@ -2496,6 +2538,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         }
 
+        if choice_dict.get("stop_reason") is not None:
+            chat_completion_dict["choices"][0]["stop_reason"] = choice_dict["stop_reason"]
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
         if completion_dict.get("metrics") is not None:
@@ -2575,7 +2619,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
+                session_key_headers=self.config.session_key_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
