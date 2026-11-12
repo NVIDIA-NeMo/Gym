@@ -21,21 +21,44 @@ then executes steps sequentially, substituting prior results. Last,
 a solver synthesizes all results into a final answer.
 
 Graph: plan -> worker -> (loop for each step) -> solve -> END
+
+Retained notice for the original tutorial material:
+MIT License
+
+Copyright (c) 2024 LangChain, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
 
 import re
 from typing import Annotated, List, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
-from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import ConfigDict
 
-from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import raise_for_status
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 
 
 ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system"}
@@ -98,6 +121,7 @@ class ReWOOState(TypedDict):
     policy_outputs: list
     policy_usages: list
     cookies: dict
+    model_url_path: str
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
     task: str
@@ -124,7 +148,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         request_body = state["request_body"].model_copy(update={"input": input_messages})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=state["model_url_path"],
             json=request_body,
             cookies=state["cookies"],
         )
@@ -147,7 +171,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -177,7 +201,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
                     AIMessage(content=text),
                 ],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -201,7 +225,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -239,6 +263,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             "policy_outputs": [],
             "policy_usages": [],
             "cookies": cookies,
+            "model_url_path": "/v1/responses",
             "request_body": body,
             "last_policy_response": None,
             "task": task,
@@ -251,36 +276,9 @@ class ReWOOAgent(LangGraphAgentAdapter):
     def extract_outputs(self, final_state: dict) -> list:
         return response_output_items(final_state["policy_outputs"])
 
-    async def run(self, request: Request, body: ReWOORunRequest) -> ReWOOVerifyResponse:
-        cookies = request.cookies
-
-        seed = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed)
-        cookies = seed.cookies
-
-        resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
-        )
-        await raise_for_status(resp)
-
-        verify_request = ReWOOVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(resp)}
-        )
-
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=resp.cookies,
-        )
-        await raise_for_status(verify)
-        return ReWOOVerifyResponse.model_validate(await get_response_json(verify))
-
 
 if __name__ == "__main__":
     ReWOOAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ReWOOAgent.run_webserver()  # noqa: F401

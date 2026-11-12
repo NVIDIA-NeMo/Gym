@@ -21,8 +21,15 @@ from environment_servers.single_agent_turn.app import (
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import MaterializedTask, SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.core import (
+    EpisodeId,
+    MaterializedTask,
+    ModelCallSampling,
+    NeMoGymResponse,
+    TaskId,
+    encode_model_sampling,
+)
+from nemo_gym.server_runtime import SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -198,6 +205,8 @@ def test_legacy_adapter_preserves_task_identity_and_data():
             cleanup_timeout_seconds=10,
             resources_server={"type": "resources_servers", "name": "resources"},
             agent_server={"type": "responses_api_agents", "name": "agent"},
+            # Explicit, like resources_server, so the server never reads the agent's config from this bare client.
+            tool_servers=[],
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -210,6 +219,28 @@ def test_legacy_adapter_preserves_task_identity_and_data():
         "verifier_metadata": {"answer": "expected"},
     }
     assert request.episode_id.attempt == 1
+
+
+def test_a_rows_sampling_values_reach_the_agents_activation_url() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    sampling = {"temperature": 0.6, "top_p": 0.95, "max_output_tokens": 64}
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={
+            "task_id": "task",
+            "_ng_rollout_id": "trained",
+            "_ng_model_sampling": sampling,
+            "responses_create_params": {"input": "task"},
+        },
+    )
+
+    assert response.status_code == 200
+    segment = encode_model_sampling(ModelCallSampling(**sampling))
+    assert client.calls[2][1] == f"/ng-rollout/trained/ng-sampling/{segment}/v1/responses"
+    # The task the agent and the Resources Server see is unchanged.
+    assert "_ng_model_sampling" not in orjson.dumps(client.calls[0][2]["json"]).decode()
 
 
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
@@ -325,35 +356,31 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
         )
 
 
-def _unbound_adapter() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
-    # A server that replaced a legacy_agent relay names no resources server and binds its agent's.
+def _adapter_with_different_agent_resources() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
     environment_server, client = _environment_server()
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
-    )
-    return SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client), client
+    return SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client), client
 
 
-@pytest.mark.parametrize("task_source", [None, "agents_resources"])
-def test_an_unbound_adapter_takes_its_agents_resources_server_as_the_taskset(task_source: str | None) -> None:
-    adapter, _ = _unbound_adapter()
+@pytest.mark.parametrize("task_source", [None, "resources"])
+def test_adapter_uses_its_own_resources_binding_as_the_taskset(task_source: str | None) -> None:
+    adapter, _ = _adapter_with_different_agent_resources()
     row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "task"}}
 
     request = adapter._episode_request_from_row(row if task_source is None else {**row, "task_source": task_source})
 
-    assert request.task.task_id.taskset == "agents_resources"
+    assert request.task.task_id.taskset == "resources"
 
 
-def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> None:
-    adapter, _ = _unbound_adapter()
+def test_adapter_rejects_a_row_naming_the_agents_other_resources_server() -> None:
+    adapter, _ = _adapter_with_different_agent_resources()
 
     with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
         adapter._episode_request_from_row(
             {
-                "task_source": "resources",
+                "task_source": "agents_resources",
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
                 "responses_create_params": {"input": "task"},
@@ -361,14 +388,14 @@ def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> N
         )
 
 
-def test_an_unbound_adapter_forwards_aggregate_metrics_to_its_agents_resources_server() -> None:
-    adapter, client = _unbound_adapter()
+def test_adapter_forwards_aggregate_metrics_to_its_own_resources_server() -> None:
+    adapter, client = _adapter_with_different_agent_resources()
     client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
 
     response = TestClient(adapter.setup_webserver()).post("/aggregate_metrics", json={"verify_responses": []})
 
     assert response.status_code == 200
-    assert [(server, path) for server, path, _ in client.calls] == [("agents_resources", "/aggregate_metrics")]
+    assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
@@ -402,9 +429,28 @@ async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     )
 
     legacy_result = await legacy_adapter.run_legacy(flat_row)
-    episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
+    episode_reply = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
-    assert episode_result == legacy_result
+    assert "result" not in legacy_result and "episode_id" not in legacy_result
+    assert episode_reply["episode_id"] == {"rollout_id": "3-2", "attempt": 1}
+    assert episode_reply["task_id"] == {"taskset": "resources", "task_id": "task"}
+    assert episode_reply["failure"] is None
+    projected = {
+        key: value for key, value in episode_reply["result"].items() if value is not None or key in legacy_result
+    }
+    projected["agent_ref"] = legacy_result["agent_ref"]
+    assert projected == legacy_result
+
+    from nemo_gym.rollouts.rollout_collection import _native_episode_record
+
+    row = {
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+        "task_id": {"taskset": "resources", "task_id": "task"},
+        "task_input": {},
+    }
+    assert _native_episode_record(row, episode_reply)["_ng_task_id"] == episode_reply["task_id"]
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -422,8 +468,9 @@ async def test_protocol_failure_metadata_survives_collection(
     from unittest.mock import AsyncMock
 
     import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.core import EpisodeFailure
     from nemo_gym.rollouts import RolloutFailureRecord, RolloutStore, logical_rollout_id
-    from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
+    from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     environment, client = _environment_server()
@@ -594,3 +641,100 @@ async def test_legacy_rows_take_part_in_checkpoints() -> None:
     assert prepared.json()["phase"] == "prepared"
     assert record.boundary["next"] == "invoke_agent"
     assert result.json()["reward"] == 1.0
+
+
+def _chain_report(model_status: int):
+    from nemo_gym.core import FailureBoundary, NgFailureEvent, failure_report_for
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="model body failed" if model_status == 200 else "model HTTP 503",
+        operation="model_request",
+        operation_id="op",
+        attempt_id="op-1",
+        http_status=model_status,
+    )
+    agent = NgFailureEvent(
+        boundary=FailureBoundary.AGENT, failure_kind="agent_route_failed", failure_reason="agent", operation="run"
+    )
+    environment = NgFailureEvent(
+        boundary=FailureBoundary.ENVIRONMENT,
+        failure_kind="environment_server_failed",
+        failure_reason="environment",
+        operation="activation",
+    )
+    agent.__cause__ = model
+    environment.__cause__ = agent
+    return failure_report_for(environment), environment, model
+
+
+@pytest.mark.parametrize("model_status", [200, 503])
+def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) -> None:
+    from nemo_gym.core import FailureReportRow
+    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.server_runtime import SingleAgentTurnResponse
+
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    report, environment, model = _chain_report(model_status)
+    response = SingleAgentTurnResponse.model_validate(
+        {
+            "episode_id": {"rollout_id": "r", "attempt": 1},
+            "task_id": {"taskset": "resources", "task_id": "t"},
+            "failure": {"failure_reason": "environment", "terminal": False, "stage": "agent"},
+            "failure_report": report.model_dump(mode="json"),
+        }
+    )
+    row = adapter._legacy_result(response)
+    assert row["_ng_failure_terminal"] is False and row["_ng_failure_stage"] == "agent"
+    assert FailureReportRow.report(row) == report
+    assert row[FailureReportRow.FAILURE_ID] == environment.event_id
+    assert row[FailureReportRow.EVENTS][model.event_id]["http_status"] == model_status
+    # A model body failure after successful headers keeps the agent from running again; a 503 stays retryable.
+    assert has_unclassified_execution_failure(row) is (model_status == 200)
+
+
+@pytest.mark.parametrize("own_failure", [False, True])
+def test_the_flat_result_keeps_its_reward_selection_and_cleanup_observations(own_failure: bool) -> None:
+    from nemo_gym.core import FailureReport, FailureReportRow
+    from nemo_gym.server_runtime import SingleAgentTurnResponse
+
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    from nemo_gym.core import FailureBoundary, NgFailureEvent, failure_report_for
+
+    judge = failure_report_for(
+        NgFailureEvent(boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="judge")
+    )
+    model = NgFailureEvent(boundary=FailureBoundary.AGENT, failure_kind="agent_route_failed", failure_reason="cleanup")
+    cleanup = FailureReport(events=failure_report_for(model).events)
+    result = {
+        "responses_create_params": {"input": "task"},
+        "response": {
+            "id": "resp",
+            "created_at": 0,
+            "model": "m",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+        "reward": 1.0,
+    }
+    if own_failure:
+        result |= FailureReportRow.fields(judge)
+    response = SingleAgentTurnResponse.model_validate(
+        {
+            "episode_id": {"rollout_id": "r", "attempt": 1},
+            "task_id": {"taskset": "resources", "task_id": "t"},
+            "result": result,
+            "failure_report": cleanup.model_dump(mode="json"),
+        }
+    )
+    row = adapter._legacy_result(response)
+    assert row["reward"] == 1.0
+    assert model.event_id in row[FailureReportRow.EVENTS]
+    # Cleanup diagnostics are observations: they select nothing, and a result's own selection wins.
+    assert row.get(FailureReportRow.FAILURE_ID) == (judge.failure_id if own_failure else None)

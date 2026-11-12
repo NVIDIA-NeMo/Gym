@@ -26,6 +26,10 @@ In `resolved-config.yaml`, `host:VAR` values are written back as `host:VAR`, nev
 
 The local index is written first, because it cannot fail the submit: a failure to write it is reported on stderr and ignored. The resolved config and manifest are then written to the run directory. By that point the jobs are already queued, so if either write fails the command raises an error that names every queued job (`<benchmark>=<slurm job id>`). Record those IDs by hand before collecting results.
 
+### Restoring a lost index entry
+
+A machine that loses its index (a recycled pod, a cleared cache) no longer finds the submission: `gym eval resubmit` fails with `No submission '<id>' in this machine's job index`. Where the run directory is mounted, add `--run-dir <run directory>`. The entry is rebuilt from the run's `gym-job.json` only when that record names the submission, the directory is named after it and is the record's `run_dir`, and every benchmark's job directory lies inside it. Each restore appends a line (source, SHA-256, user, host) to `index-restores.jsonl` in the index directory. An entry that exists is left as it is.
+
 ## Manifest fields
 
 `gym-job.json` is a `SubmissionRecord`:

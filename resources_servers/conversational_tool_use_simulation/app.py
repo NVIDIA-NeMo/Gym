@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -42,7 +43,17 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
+
+# Environment-prefixed failure kinds for masked results; see nemo_gym.core.failure_kinds.
+SIMULATOR_CALL_FAILED = "conversational_tool_use:simulator_call_failed"
+USER_VERDICT_FAILED = "conversational_tool_use:user_message_failed_verification"
+TOOL_VERDICT_FAILED = "conversational_tool_use:tool_result_failed_verification"
+USER_CHECK_FAILED = "conversational_tool_use:user_message_failed_check"
+TOOL_CHECK_FAILED = "conversational_tool_use:tool_result_failed_check"
+TRAJECTORY_INCOMPLETE = "conversational_tool_use:trajectory_incomplete"
+FAILURE_REASON_MAX_CHARS = 2000
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
 AGENT_TRANSFER_INDICATOR = "###TRANSFER###"
@@ -1397,6 +1408,9 @@ Return type in JSON Schema format: {return_type}
                 "result": self._trajectory_result(state),
             }
         )
+        failure_kind, failure_reason = self._masked_failure(state)
+        if failure_kind is not None:
+            response_payload.update(failure_kind=failure_kind, failure_reason=failure_reason)
         verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
         self.session_id_to_state.pop(session_id, None)
         return verified_response
@@ -2401,6 +2415,39 @@ Return type in JSON Schema format: {return_type}
             and state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR
         )
 
+    def _masked_failure(self, state: ConversationSessionState) -> tuple[Optional[str], Optional[str]]:
+        """Name why a masked sample was masked, from evidence already on the state.
+
+        Mirrors ``_should_mask_sample`` and never changes its decision. A simulator call that
+        failed is told apart from a local check failure, a judge failure, a judge verdict that blamed
+        the user or tool simulation, and a trajectory that never completed.
+        """
+        if not self._should_mask_sample(state):
+            return None, None
+        failure_labels = set(state.failure_labels)
+        tool_blamed = VerificationFailureLabel.TOOL_FAILURE in failure_labels
+        user_or_tool_blamed = tool_blamed or VerificationFailureLabel.USER_FAILURE in failure_labels
+        if VerificationFailureLabel.VERIFICATION_GENERATION_ERROR in failure_labels:
+            detail = f"Judge call failed: {state.judge_generation_error or 'no error text recorded'}"
+            return JUDGE_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        if not user_or_tool_blamed:
+            # Only a trajectory that reached verification without a terminal state is masked on
+            # the trajectory label alone; no simulator or judge call failed.
+            detail = f"Trajectory incomplete: {state.terminal_error or 'no error text recorded'}"
+            return TRAJECTORY_INCOMPLETE, detail[:FAILURE_REASON_MAX_CHARS]
+        simulated = "tool result" if tool_blamed else "user message"
+        if state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR:
+            simulator = "tool" if tool_blamed else "user"
+            detail = f"{simulator} simulator call failed: {state.terminal_error or 'no error text recorded'}"
+            return SIMULATOR_CALL_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        reasons = ", ".join(state.invalid_reasons) or "no invalid reason recorded"
+        if state.generation_invalid_reason is not None:
+            # A generated message failed the local check; the judge did not run.
+            kind = TOOL_CHECK_FAILED if tool_blamed else USER_CHECK_FAILED
+            return kind, f"The simulated {simulated} failed the local check: {reasons}"[:FAILURE_REASON_MAX_CHARS]
+        kind = TOOL_VERDICT_FAILED if tool_blamed else USER_VERDICT_FAILED
+        return kind, f"Judge marked the simulated {simulated} invalid: {reasons}"[:FAILURE_REASON_MAX_CHARS]
+
     def _dedupe_strings(self, values: List[Any]) -> List[str]:
         deduped = []
         for value in values:
@@ -2462,3 +2509,6 @@ Return type in JSON Schema format: {return_type}
 
 if __name__ == "__main__":
     ConversationalToolUseSimulationServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ConversationalToolUseSimulationServer.run_webserver()  # noqa: F401

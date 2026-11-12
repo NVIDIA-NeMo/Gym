@@ -61,3 +61,23 @@ python resources_servers/swebench_pro/apply_golden_patch.py \
 ```
 
 The upstream evaluator and bundled task scripts are MIT licensed. NeMo Gym's adapter code is Apache-2.0.
+
+
+### Verifier sandbox observations
+
+Fresh verification responses include verifier_sandbox_observation when the resource server observed an
+AsyncSandbox handle. The teardown_confirmed field records a successful provider-close acknowledgement; false
+means unconfirmed teardown, not proof that the remote container remains alive. The observed_client_interval_s
+field measures the client interval between create and close returns. It does not estimate remote lifetime,
+CPU or memory. A borrowed handle whose creation was not observed has no such interval.
+
+Cleanup errors remain recorded after a later successful close. Cleanup failure does not replace an already
+graded answer or its reward, or the original verification error. These lifecycle facts do not establish test
+execution or grading coverage. Missing observations and unobserved grading dependencies remain unknown to
+trial-health acceptance; historical records are not backfilled.
+
+
+The plural verifier_sandbox_observations field preserves one entry per verification attempt, including earlier
+cleanup failures before a later successful grade. An unavailable observation is null. The singular field remains
+the final attempt in the previous field shape for older consumers; updated OpenCode consumers retain the full list in the existing agent
+observation bundle. Observation-construction failures preserve the grade and leave the observation unavailable.

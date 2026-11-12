@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 import nemo_gym.client.openai_client as openai_client
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NgFailureEvent
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
@@ -207,11 +208,11 @@ def execution(monkeypatch):
         client.post = post
         try:
             return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
-        except app_module.Terminus2InfrastructureError as error:
-            # An infrastructure failure is refused with a 5xx; its observations still ride on the exception.
+        except NgFailureEvent as error:
+            # An infrastructure failure is a typed route failure; its observations still ride on the exception.
             metrics = TypeAdapter(Dict[str, Any]).dump_python(error.metrics, mode="json")
             row = body.model_dump(by_alias=True) | {"_ng_rollout_id": rollout_id}
-            return row | metrics | {"_ng_http_status": error.status_code, "_ng_http_detail": error.detail}
+            return row | metrics | {"_ng_failure_kind": error.__cause__.failure_kind}
 
     def session_run(rollout_id="test-rollout"):
         """seed -> responses -> close over HTTP, the way the environment server drives the harness."""
@@ -222,7 +223,7 @@ def execution(monkeypatch):
         monkeypatch.setattr(app_module, "create_provider", lambda config: MagicMock())
         monkeypatch.setattr(app_module.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
         monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", lambda *_args, **_kwargs: "http://model/v1")
-        http = TestClient(server.setup_webserver())
+        http = TestClient(server.setup_webserver(), raise_server_exceptions=False)
         seed = {
             "agent_session_id": "ag-1",
             "episode_id": {"rollout_id": rollout_id, "attempt": 0},
@@ -309,9 +310,14 @@ async def test_real_harbor_decisions_survive_saved_projection(
 ):
     execution.mode.value = mode
     result = await execution.run(task_id="task-identity")
-    # Infrastructure outcomes are refused, not verified: the model never answered (502) or the run was cancelled (503).
-    expected_http_status = {"all_fail": 502, "cancel_summary": 503, "cancel_tool": 503, "cancel_model": 503}.get(mode)
-    assert result.get("_ng_http_status") == expected_http_status
+    # Infrastructure outcomes are typed failures, not verified: the model never answered or the run was cancelled.
+    expected_failure_kind = {
+        "all_fail": "model_transport_error",
+        "cancel_summary": "cancelled",
+        "cancel_tool": "cancelled",
+        "cancel_model": "cancelled",
+    }.get(mode)
+    assert result.get("_ng_failure_kind") == expected_failure_kind
     trajectory, health = save_and_check(execution, result, tmp_path)
     [invocation] = trajectory["invocations"]
     turns = trajectory["turns"]
@@ -376,13 +382,16 @@ async def test_real_harbor_decisions_survive_saved_projection(
         assert [turn["step_count"] for turn in turns] == [0, 0]
 
 
-@pytest.mark.parametrize(("mode", "call_count"), [("success", 2), ("compaction", 6)])
-def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count):
+@pytest.mark.parametrize(
+    ("mode", "call_count", "rebuilt_ids"),
+    [("success", 2, ["resp_0", "resp_1"]), ("compaction", 6, ["resp_0", "resp_1", "resp_5"])],
+)
+def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count, rebuilt_ids):
     """seed -> responses -> close: the close carries the run's own decisions and the saved record keeps them.
 
     The environment server forwards the close's trajectory on its result. Without it the collector rebuilds
-    one turn per captured model call, so the context-recovery and summarization calls of a compaction count
-    as decisions and the command-batch counts behind each decision are lost.
+    turns from captured model calls. It excludes referenced compaction helpers, but cannot recover the
+    producer's decision grouping or command-batch counts; the unclassified context-recovery call remains.
     """
     execution.mode.value = mode
     turn, close = execution.session_run()
@@ -423,8 +432,8 @@ def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, c
     # The harness named the seeded task the way the collector names the row, so the projection keeps the
     # producer's turns as they are instead of recording an identity mismatch and rewriting every turn.
     assert "producer_trajectory_identity_mismatch" not in gap_codes
-    assert closed["trajectory"]["task_id"] == str(task_id)
-    assert {turn["task_id"] for turn in turns} == {str(task_id)}
+    assert closed["trajectory"]["task_id"] == task_id["task_id"]
+    assert {turn["task_id"] for turn in turns} == {task_id["task_id"]}
     assert "agent_turn_hollow" not in health.unobserved
     if mode == "compaction":
         [compaction] = [r for r in result["ng_agent_observations"]["records"] if r["kind"] == "context_compaction"]
@@ -433,13 +442,14 @@ def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, c
             ref["response_id"] for turn in turns for ref in turn["model_calls"]
         )
 
-    # The symptom this guards against: with the trajectory dropped, every captured call becomes a decision
-    # and no decision keeps its command-batch count.
+    # Dropping the trajectory loses decision grouping and command-batch counts, even though the
+    # compaction observations still exclude their three referenced helpers from rebuilt turns.
     rebuilt_dir = tmp_path / "without_trajectory"
     rebuilt_dir.mkdir()
     rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
-    assert len(rebuilt["turns"]) == call_count
-    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * call_count
+    assert len(rebuilt["model_calls"]) == call_count
+    assert [ref["response_id"] for turn in rebuilt["turns"] for ref in turn["model_calls"]] == rebuilt_ids
+    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * len(rebuilt_ids)
 
 
 @pytest.mark.parametrize(
@@ -451,7 +461,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
 ):
     """A completed decision followed by an infrastructure failure keeps its history on the saved failure row.
 
-    The run is refused with a 5xx, the close still carries the trajectory, and the environment server's failure
+    The run fails with a typed route failure, the close still carries the trajectory, and the environment server's failure
     (``SingleAgentTurnFailure.trajectory``) hands it to the collector's failure projection. Without it the sidecar
     row loses the decision's model-call reference and its command-batch count: ``cancel_summary`` adds a context
     recovery call before the aborted summarization, which a rebuild from the captured calls counts as a decision.
@@ -461,7 +471,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
 
     execution.mode.value = mode
     turn, close = execution.session_run()
-    assert turn.status_code == 503, turn.text
+    assert turn.status_code == 500, turn.text
     assert close.status_code == 200, close.text
     assert len(execution.calls) == call_count
     closed = close.json()
@@ -475,7 +485,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
         task_id=task_id,
         failure=SingleAgentTurnFailure(
             stage="agent",
-            failure_reason=turn.json()["detail"],
+            failure_reason=turn.text,
             terminal=False,
             agent_observations=closed["agent_observations"],
             trajectory=closed["trajectory"],
@@ -499,7 +509,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     [decision] = trajectory["turns"]
     assert (decision["turn_no"], decision["step_count"]) == (1, 0)
     assert [ref["response_id"] for ref in decision["model_calls"]] == ["resp_0"]
-    assert decision["task_id"] == trajectory["task_id"] == str(task_id)
+    assert decision["task_id"] == trajectory["task_id"] == task_id["task_id"]
     gap_codes = {gap["code"] for gap in trajectory["gaps"]}
     assert {"turns_unavailable", "producer_trajectory_identity_mismatch"}.isdisjoint(gap_codes)
     if mode == "cancel_summary":
@@ -510,7 +520,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
         )
 
     # The symptom this guards against: a failure row without the trajectory rebuilds a decision from every
-    # captured call that got an answer, helper calls included, and no decision keeps its command-batch count.
+    # answered call without a compaction reference, and no decision keeps its command-batch count.
     rebuilt_dir = tmp_path / "without_trajectory"
     rebuilt_dir.mkdir()
     rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
@@ -586,7 +596,7 @@ async def test_proactive_summarization_flag_resets_on_cancellation(execution, mo
         app_module.Terminus2, "_check_proactive_summarization", AsyncMock(side_effect=asyncio.CancelledError)
     )
     result = await execution.run()
-    assert result["_ng_http_status"] == 503
+    assert result["_ng_failure_kind"] == "cancelled"
     assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
     assert not result["ng_trajectory"]["turns"]
     assert not execution.agents[0]._is_check_proactive_summarization

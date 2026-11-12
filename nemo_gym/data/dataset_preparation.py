@@ -50,7 +50,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode import TaskId
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,
@@ -70,7 +70,6 @@ from nemo_gym.data.task_data import (
 )
 from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
-from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 
 
 def _ref_name(ref: Any) -> Optional[str]:
@@ -405,7 +404,7 @@ def _sidecar_excluded_dataset_fields(
     """
     excluded = {"agent", "taskset", *_CATALOG_DATASET_FIELDS}
     if preparation and isinstance(dataset, DatasetConfig):
-        excluded.update({"prepare_script", "prepare_dependencies"})
+        excluded.update({"prepare_script", "prepare_dependencies", "prepare_project"})
     return excluded
 
 
@@ -858,7 +857,10 @@ class TrainDataProcessor(BaseModel):
                 state,
                 sample_idx,
                 sample_dict_str,
-                require_responses=dataset_config.taskset is None,
+                # Benchmark prompt templates create the input during collation;
+                # count the original task rows before validating rendered inputs.
+                require_responses=dataset_config.taskset is None
+                and not (dataset_config.type == "benchmark" and dataset_config.prompt_config),
                 dataset_metrics_hook=dataset_metrics_hook,
             )
 
@@ -866,7 +868,9 @@ class TrainDataProcessor(BaseModel):
 
         return state
 
-    def _validate_aggregate_metrics(self, aggregate_metrics_dict: Dict, metrics_fpath: Path) -> Optional[Path]:
+    def _validate_aggregate_metrics(
+        self, aggregate_metrics_dict: Dict, metrics_fpath: Path, *, source_metrics: bool = False
+    ) -> Optional[Path]:
         """
         Returns the conflicting metrics fpath if invalid. Else returns None
         """
@@ -944,7 +948,14 @@ class TrainDataProcessor(BaseModel):
                 diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
 
         diffs: List[str] = []
-        diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
+        previous_comparison = previous_aggregate_metrics_dict
+        current_comparison = aggregate_metrics_dict
+        if source_metrics:
+            # A rendering template does not describe the original dataset. Keep it
+            # significant for collated-output metrics, including existing sidecars.
+            previous_comparison = {k: v for k, v in previous_comparison.items() if k != "prompt_config"}
+            current_comparison = {k: v for k, v in current_comparison.items() if k != "prompt_config"}
+        diff_values(previous_comparison, current_comparison, path="", diffs=diffs)
 
         if diffs:
             print("Differences found in aggregate metrics:")
@@ -981,7 +992,7 @@ class TrainDataProcessor(BaseModel):
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
 
                 maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
-                    aggregate_metrics_dict, metrics_fpath
+                    aggregate_metrics_dict, metrics_fpath, source_metrics=True
                 )
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))

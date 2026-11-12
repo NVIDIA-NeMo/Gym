@@ -5,6 +5,7 @@
 import fcntl
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -71,8 +72,8 @@ def ensure_molopt_runtime(python_path: str | None = None, cache_dir: str | None 
 
 
 def _ensure_runtime(python_path: str | None, cache: Path) -> tuple[Path, Path]:
-    requirements = ROOT / "requirements-molopt.txt"
-    digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+    project = ROOT / "molopt"
+    digest = hashlib.sha256((project / "pyproject.toml").read_bytes() + (project / "uv.lock").read_bytes()).hexdigest()
     # absolute(), not resolve(): following a venv's interpreter symlink loses the venv.
     python = Path(python_path).expanduser().absolute() if python_path else cache / "venv" / "bin" / "python"
     marker = cache / "ready.json"
@@ -94,7 +95,10 @@ def _ensure_runtime(python_path: str | None, cache: Path) -> tuple[Path, Path]:
             # Recreate only our managed venv when its interpreter is missing.
             subprocess.run([uv, "venv", "--clear", "--python", "3.11", str(cache / "venv")], check=True, timeout=600)
         subprocess.run(
-            [uv, "pip", "install", "--python", str(python), "-r", str(requirements)], check=True, timeout=600
+            [uv, "sync", "--locked", "--project", str(project), "--python", "3.11"],
+            env=os.environ | {"UV_PROJECT_ENVIRONMENT": str(cache / "venv")},
+            check=True,
+            timeout=600,
         )
     subprocess.run([str(python), "-c", ORACLE_CHECK], cwd=cache, check=True, timeout=600)
     marker.write_text(json.dumps(signature))

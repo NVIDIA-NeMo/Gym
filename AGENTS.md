@@ -17,6 +17,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
+- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
+  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
+  synonyms.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
@@ -43,6 +46,8 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
   must comment `/ok to test <full 40-character commit SHA>` on the PR (get it with `git rev-parse HEAD`; a short SHA
   is not enough). After the head changes, the new full SHA needs a new comment. If CI checks are missing, check this
   first. That comment authorizes CI to run contributor code, so never post it yourself unless the user explicitly asks.
+  The same approval also triggers suggested reviewers (`# suggest:` lines in `.github/CODEOWNERS`): they are requested
+  only after the `pull-request/<n>` mirror is pushed, so a PR with no suggested reviewers may just be waiting on it.
   Details: [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration-ci).
 - Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
   applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
@@ -55,13 +60,14 @@ An environment is the complete system an agent interacts with to complete a task
 
 ## Architecture
 
-Environments decompose into four concepts:
+Environments decompose into these concepts:
 
 | Concept | NeMo Gym Component |
 |---------|-------------------|
-| Dataset | JSONL: one row per task |
+| Episode order | FastAPI Environment Server (`environment_servers/`): receives each episode and orders seed, agent turn, verification and cleanup; the default `legacy_agent` relays `/run` to the agent |
+| Dataset | JSONL: one row per task, or a folder of task folders (see below) |
 | Agent Harness | FastAPI Agent Server (`responses_api_agents/`) |
-| Verifier + State | FastAPI Resources Server (`resources_servers/`) |
+| Verifier + State | FastAPI Resources Server (`resources_servers/`), or for a task folder its own verifier and the sandbox the `harbor` Environment Server seeds from it |
 | Model | FastAPI Model Server (`responses_api_models/`) or your own |
 
 Base class hierarchy:
@@ -72,6 +78,25 @@ BaseServer (Pydantic model with config + server_client)
     ├── SimpleResponsesAPIModel  →  implement chat_completions(), responses()
     └── SimpleResponsesAPIAgent  →  implement responses(), run()
 ```
+
+`BaseServer` and `SimpleServer` live in `nemo_gym/server_runtime/base_server.py`, `SimpleResourcesServer` in
+`nemo_gym/server_runtime/base_resources_server.py`, `SimpleResponsesAPIModel` in
+`nemo_gym/models/base_responses_api_model.py`, and `SimpleResponsesAPIAgent` in
+`nemo_gym/agents/base_responses_api_agent.py`.
+
+`nemo_gym/` is split into layered packages. From top to bottom: `cli`, `environment`, `eval`, `orchestration`,
+`rollouts`, `data`, `agents`, `models`, `server_runtime`, `artifacts`, `metrics`, `verification`, `trajectory`,
+`sandbox`, `client`, `telemetry`, `core`, `utils`, `config`. A package imports only packages below it. The
+import-linter contract in `pyproject.toml` enforces the order; its `ignore_imports` list holds the known exceptions,
+which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
+Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
+(`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
+
+`nemo_gym.orchestration` is a Gym-aware orchestrator (submit, Slurm/Kubernetes executors, job tracking). It provides no
+core functionality. No module in `nemo_gym/` outside `nemo_gym/orchestration/`, and no server, benchmark or script built on it, may import it, except `nemo_gym/cli/main.py`, which wires the
+orchestration entrypoint into the CLI. If another package needs something that lives there, move that code into the
+package that owns it. Deleting `orchestration/` should leave only the CLI wiring to change.
+`tests/unit_tests/test_orchestration_boundary.py` enforces this.
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
@@ -84,6 +109,8 @@ The typical workflow is to create your own environments tailored to your evaluat
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
 5. **YAML config** — wires the resources server, agent, and model server together
+
+The second way to define tasks is task folders in the Harbor format (`task.toml` and usually `instruction.md`, `environment/`, `tests/`, `solution/`), run by the `harbor` Environment Server: it seeds a sandbox from the folder, runs the agent, then runs the task's own verifier, with no Resources Server. Copy `environments/hello_world`, then read `fern/versions/latest/pages/data/task-folders/harbor-tasks.mdx` (tutorial), `data/task-folders/task-folder-format.mdx` (canonical spec), `data/task-folders/task-folder-verifiers.mdx` and `agent-interactions/harbor.mdx`. For where a new task-folder benchmark goes, its name and the checks before a PR, follow "Task-folder benchmarks" in `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`; `gym dataset validate <folder>`, the oracle run of every `solution/`, must pass, apart from known upstream failures the README lists (leave those out with `--exclude-tasks`).
 
 For guidance on how to build environments, see `fern/versions/latest/pages/environment-tutorials/`. For evaluation, see `fern/versions/latest/pages/get-started/quickstart.mdx`. For training framework integrations, see `fern/versions/latest/pages/training-tutorials/`.
 
@@ -188,6 +215,32 @@ gym dev test
 # Dump merged config
 gym env resolve --config ...
 ```
+
+## Where code and tests go
+
+- New library code goes into the package of `nemo_gym/` whose job it is, never at the `nemo_gym/` root. The root
+  holds only package-wide modules: `__init__.py`, `package_info.py`, `_public_api.py` and `_moved_paths.py`. A
+  helper that imports nothing from `nemo_gym` goes into `nemo_gym/utils/`.
+- Core unit tests mirror the package they test: a test of `nemo_gym/<package>/<module>.py` goes in
+  `tests/unit_tests/<package>/`, and a subpackage gets its own folder where it has many tests
+  (`tests/unit_tests/data/tasks/harbor/`). Put a test with the module it is about; when it exercises several, pick
+  the one the test is named for.
+- Two folders have no `nemo_gym` package. `tests/unit_tests/tooling/` holds tests of `scripts/`, `docker/`, packaging
+  and CI configuration; it cannot be named `scripts/`, because pytest's `norecursedirs` skips that name and the tests
+  would silently stop running. `tests/unit_tests/benchmarks/` holds core-suite tests of benchmark and resources server
+  code.
+- Only tests of the `nemo_gym/` root modules and repository-wide checks stay flat in `tests/unit_tests/`.
+- `tests/` itself holds only the suites (`unit_tests/`, `functional_tests/`, `e2e/`), the shared `conftest.py`, and
+  `tests/helpers/`: setup and assertions that tests in several places import, such as core unit tests and server
+  tests, or the tests of several servers. A helper used by one folder's tests stays beside them.
+- Every folder of test modules has an `__init__.py`, so pytest imports each test under its package name and test
+  modules in different folders can share a file name.
+- A fixture lives in a `fixtures/` folder beside the tests that read it. A fixture that tests in several packages
+  read stays in `tests/unit_tests/fixtures/`.
+- Tests find the repository root with `Path(__file__).resolve().parents[N]`, where N is the test's folder depth
+  under the repository root. When you move a test, update N, the test's imports from other tests, its fixture paths,
+  its key in `scripts/ci/core_test_durations.json`, and any path built from separate segments, such as
+  `root / "tests" / "unit_tests" / "fixtures"`.
 
 ## Imports from nemo_gym
 

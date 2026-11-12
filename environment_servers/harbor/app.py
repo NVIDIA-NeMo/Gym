@@ -97,7 +97,7 @@ from nemo_gym.agents import (
     OutcomeAction,
     agent_outcome_policy,
 )
-from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import get_response_json, raise_boundary_failure, raise_for_status
 from nemo_gym.config import (
     TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -107,7 +107,18 @@ from nemo_gym.config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.core import NeMoGymResponse, TaskId, failure_kinds
+from nemo_gym.core import (
+    EPISODE_FAILED,
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    FailureBoundary,
+    NeMoGymResponse,
+    NgFailureEvent,
+    TaskId,
+    failure_kinds,
+    model_sampling_path_segment,
+    sdk_error_details,
+)
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DATASET_FILE,
@@ -131,22 +142,25 @@ from nemo_gym.data.tasks.harbor import (
     wrap_first_instruction,
 )
 from nemo_gym.metrics import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess, sandbox_credentials_rejected
 from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
     CleanupContext,
-    HandledEpisodeError,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     SingleAgentTurnFailure,
     SingleAgentTurnResult,
     ToolAccess,
     dependency_failure,
+    handled_episode_failure,
+    is_handled_episode_failure,
 )
-from nemo_gym.trajectory import AgentObservationBundle, AtifExportError, TrajectoryRecord
+from nemo_gym.trajectory import (
+    AgentObservationBundle,
+    AtifExportError,
+    TrajectoryRecord,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -522,6 +536,7 @@ class HarborEnvironmentServer(
     config: HarborEnvironmentServerConfig
     request_model = HarborEpisodeRequest
     response_model = HarborEpisodeResponse
+    applies_model_sampling = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -876,17 +891,18 @@ class HarborEnvironmentServer(
             access = await self._sandbox_access(session)
         except HTTPException as error:
             # 4xx: the task or row is at fault and a retry would fail the same way. 5xx: the provider failed.
-            raise self._failure(stage="seed", failure_reason=str(error.detail), terminal=error.status_code < 500)
+            raise self._failure(
+                stage="seed", failure_reason=str(error.detail), terminal=error.status_code < 500
+            ) from error
         except Exception as error:
             # The sandbox exists but cannot be described to the harness (serialize failed): a provider-side
             # seed failure, retried elsewhere; the cleanup stops what was claimed.
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="seed",
                 terminal=False,
                 name_error_type=True,
-            )
+            ) from error
 
         # The task's own time budget bounds the episode from here, the sandbox being ready: the seed (image
         # pulls, their retries, the overlay) has its own bounds and is not charged against it. It fires only
@@ -920,11 +936,11 @@ class HarborEnvironmentServer(
                         agent_observations=agent_observations,
                         trajectory=agent_trajectory,
                     ) from error
-        except TimeoutError:
+        except TimeoutError as error:
             if task_deadline is None or not task_deadline.expired():
                 raise
             # The final unwind closes the agent session and stops the sandbox.
-            raise self._deadline_failure(session.task, budget, progress)
+            raise self._deadline_failure(session.task, budget, progress) from error
 
         result = HarborEpisodeResult(
             responses_create_params=task_input.responses_create_params,
@@ -987,7 +1003,7 @@ class HarborEnvironmentServer(
             task_input.responses_create_params = wrapped(task_input.responses_create_params)
         return request
 
-    def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> HandledEpisodeError:
+    def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> NgFailureEvent:
         """The staged failure of an episode that ran past its task's time budget, with the turn's evidence so far."""
         if task.turns:
             budget_parts = (
@@ -1166,7 +1182,7 @@ class HarborEnvironmentServer(
                 ).model_dump(mode="json"),
                 cookies=handle.cookies,
             )
-            await raise_for_status(close_http_response)
+            await raise_boundary_failure(close_http_response)
             agent_close_response = AgentCloseSessionResponse.model_validate(
                 await get_response_json(close_http_response)
             )
@@ -1199,7 +1215,7 @@ class HarborEnvironmentServer(
                     continuation=AgentContinuationRequirements() if continuation else None,
                 ).model_dump(mode="json"),
             )
-            await raise_for_status(agent_create_http_response)
+            await raise_boundary_failure(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(
                 await get_response_json(agent_create_http_response)
             )
@@ -1235,7 +1251,6 @@ class HarborEnvironmentServer(
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
         return handle
@@ -1262,7 +1277,7 @@ class HarborEnvironmentServer(
                 cookies=handle.cookies,
                 **({"headers": headers} if headers else {}),
             )
-            await raise_for_status(agent_http_response)
+            await raise_boundary_failure(agent_http_response)
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 handle.cookies = response_cookies
@@ -1276,7 +1291,6 @@ class HarborEnvironmentServer(
                 pass  # Final unwind retries the close and logs its failure.
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
                 agent_observations=handle.observations,
                 trajectory=handle.trajectory,
@@ -1307,7 +1321,6 @@ class HarborEnvironmentServer(
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="cleanup",
                 partial_response=partial_response,
             ) from error
@@ -1330,10 +1343,12 @@ class HarborEnvironmentServer(
         progress.stage = "cleanup"
         try:
             await self._close_agent_session(handle, task, progress, partial_response=partial_response)
-        except HandledEpisodeError as error:
+        except NgFailureEvent as error:
+            if not is_handled_episode_failure(error):
+                raise
             LOGGER.warning(
                 f"{task.task_id}: agent session close failed while the episode was ending in a failure, which is "
-                f"kept over the close's: {error.failure.failure_reason}"
+                f"kept over the close's: {error.failure_reason}"
             )
 
     def _route_failed_response(self, agent_response: NeMoGymResponse, handle: _AgentSessionHandle) -> None:
@@ -1370,7 +1385,6 @@ class HarborEnvironmentServer(
                 if error.status not in (404, 405):
                     raise dependency_failure(
                         error,
-                        failure_model=SingleAgentTurnFailure,
                         stage="seed",
                         terminal=False,
                     ) from error
@@ -1378,7 +1392,6 @@ class HarborEnvironmentServer(
             except Exception as error:
                 raise dependency_failure(
                     error,
-                    failure_model=SingleAgentTurnFailure,
                     stage="seed",
                 ) from error
             self._agent_capabilities = capabilities
@@ -1504,7 +1517,9 @@ class HarborEnvironmentServer(
                 )
                 try:
                     self._route_failed_response(response, handle)
-                except HandledEpisodeError:
+                except NgFailureEvent as error:
+                    if not is_handled_episode_failure(error):
+                        raise
                     # The evidence of a continued session arrives with its close.
                     await self._close_agent_session(handle, task, progress, partial_response=response)
                     self._route_failed_response(response, handle)
@@ -1969,11 +1984,22 @@ class HarborEnvironmentServer(
             # name a uid resolved to, or the integer uid when it names no user (OpenSandbox's native `uid=` exec
             # path, where the string the task wrote would be looked up as an account name and fail).
             session.agent_user = sandbox.default_user
-            image_user = await self._image_user_name(sandbox, task, names)
+            # The task healthcheck uses main's container user, independently of the later agent.
+            image_user = None
+            if compose is not None and task.config.environment.healthcheck is not None:
+                image_user = compose.document["services"]["main"].get("user")
+            if image_user in (None, ""):
+                image_user = await self._image_user_name(sandbox, task, names)
+            elif isinstance(image_user, str) and image_user.isdecimal():
+                image_user = int(image_user)
             # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do. For a
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
             # is idempotent there and still makes the whole tree.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            # The task's skills are in place before its entrypoint, healthcheck and agent, as a Dockerfile `COPY`
+            # would leave them. A Compose group's main was already started by the adapter (command and image
+            # healthcheck included), so there they reach the agent only.
+            await self._upload_task_skills(sandbox, task, session.workdir)
             # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
             managed = compose is not None
             launch = session.entrypoint = await self._start_entrypoint(
@@ -1984,7 +2010,7 @@ class HarborEnvironmentServer(
             await self._wait_healthy(
                 sandbox, task, launch, user=image_user, workdir=session.workdir, compose_managed=managed
             )
-            await self._write_task_context(sandbox, task)
+            await self._write_task_context(sandbox, task, session.workdir)
             if launch is not None:
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
                 # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.
@@ -2031,7 +2057,21 @@ class HarborEnvironmentServer(
             except Exception:
                 LOGGER.exception("Failed to stop Harbor sandbox after failed seed")
             LOGGER.exception("Sandbox setup failed for %s", task.task_id)
-            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from exc
+            setup_failure = sandbox_credentials_rejected(
+                exc,
+                operation="sandbox.setup",
+                stage="seed",
+                sdk_message=_opensandbox_message(exc),
+            ) or NgFailureEvent(
+                boundary=FailureBoundary.ENVIRONMENT,
+                failure_kind=EPISODE_FAILED,
+                failure_reason="Sandbox setup failed",
+                operation="sandbox.setup",
+                stage="seed",
+                foreign_error=sdk_error_details(exc, message=_opensandbox_message(exc)),
+            )
+            setup_failure.__cause__ = exc
+            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from setup_failure
         self._sessions[episode_key] = session
         return session
 
@@ -2045,7 +2085,9 @@ class HarborEnvironmentServer(
             bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        # The agent is the one the training framework trains, so its model calls carry the episode's values.
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(
@@ -2057,20 +2099,31 @@ class HarborEnvironmentServer(
         agent_observations: Any = None,
         trajectory: Any = None,
         failure_kind: str | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
-        return HandledEpisodeError(
-            SingleAgentTurnFailure(
-                stage=stage,
-                failure_reason=failure_reason[:2000],
-                terminal=terminal,
-                failure_kind=failure_kind,
-                partial_response=partial_response,
-                agent_observations=agent_observations,
-                trajectory=trajectory,
-            )
+        return handled_episode_failure(
+            boundary=FailureBoundary.ENVIRONMENT,
+            stage=stage,
+            operation="episode",
+            failure_reason=failure_reason[:2000],
+            failure_kind=failure_kind,
+            terminal=terminal,
+            evidence={
+                "partial_response": partial_response,
+                "agent_observations": agent_observations,
+                "trajectory": trajectory,
+            },
         )
+
+
+def _opensandbox_message(exc: Exception) -> str | None:
+    """The message an OpenSandbox SDK error was constructed with, or ``None`` to use the SDK's ``message``.
+
+    OpenSandbox (0.1.15) ``SandboxException`` keeps that message in ``args[0]`` and has no ``message`` field;
+    its ``str()`` appends the error object and request diagnostics, so it is not used.
+    """
+    return exc.args[0] if exc.args and isinstance(exc.args[0], str) else None
 
 
 def _turns_verifier_mode(turns: list[HarborTurnResult]) -> Literal["shared", "separate", "mixed"] | None:

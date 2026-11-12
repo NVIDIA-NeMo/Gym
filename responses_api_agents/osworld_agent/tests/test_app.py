@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 from types import SimpleNamespace
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -1428,7 +1428,8 @@ def test_empty_response_reports_runtime_admission() -> None:
     assert response.verifier_metadata["osworld_termination_reason"] == "rollout_error"
 
 
-def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
+@pytest.mark.parametrize("served_call_output", [False, True])
+def test_exact_trace_keeps_parser_retries_as_distinct_model_calls(served_call_output: bool) -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     calls = []
     for attempt, token_id, accepted in ((1, 20, False), (2, 21, True)):
@@ -1461,7 +1462,7 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
         ],
     }
 
-    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+    response = _build_response(request, result, "test-policy", 1.0, 0.9, served_call_output=served_call_output)
 
     assert len(response.response.output) == 2
     assert [item["accepted"] for item in response.response.completion_evidence or []] == [
@@ -2304,7 +2305,7 @@ def test_child_result_sums_usage_of_every_policy_response_gym_received() -> None
     )
     expected = {
         "input_tokens": 3700,
-        "input_tokens_details": {"cached_tokens": 1536},
+        "input_tokens_details": {"cached_tokens": 1536, "cache_write_tokens": None},
         "output_tokens": 118,
         "output_tokens_details": {"reasoning_tokens": 30},
         "total_tokens": 3818,
@@ -2358,3 +2359,241 @@ def test_child_result_usage_is_unknown_when_a_finished_response_lost_its_usage(u
     assert result["usage"] is None
     response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
     assert response.response.usage is None
+
+
+def _start_timeout_result(http_status: Optional[int] = 502) -> Dict[str, Any]:
+    """What run_osworld_task returns when the sandbox guest never became ready."""
+    return DEFAULT_RUN_RESULT | {
+        "reward": 0.0,
+        "score": 0.0,
+        "finished": False,
+        "steps": [],
+        "evaluation_completed": False,
+        "runtime_eligible": False,
+        "runtime_admission_reason": "rollout_error",
+        "mask_sample": True,
+        "termination_reason": "rollout_error",
+        "error": "RuntimeError: environment start failed\nTraceback (most recent call last): ...",
+        "sandbox_start_failure": {
+            "provider": "docker",
+            "http_status": http_status,
+            "message": f"OSWorld guest did not become ready within 900s: HTTP {http_status}, bytes=0",
+            "sandbox_id": "sbx-1",
+        },
+    }
+
+
+def test_a_sandbox_start_timeout_is_a_typed_infrastructure_error_row() -> None:
+    response = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), _start_timeout_result(), "test-policy", 1.0, 0.9
+    )
+    row = response.model_dump(mode="json")
+
+    assert (row["failure_kind"], row["_ng_failure_class"]) == ("infrastructure_error", "infrastructure_error")
+    assert (row["reward"], row["mask_sample"], row["evaluation_completed"]) == (0.0, True, False)  # no score change
+    assert (row["sandbox_provider"], row["sandbox_http_status"], row["sandbox_id"]) == ("docker", 502, "sbx-1")
+    event = row["_ng_failure_events"][row["_ng_failure_id"]]
+    assert event["operation_id"] == "sbx-1"
+    assert (event["boundary"], event["failure_kind"], event["operation"], event["http_status"]) == (
+        "agent",
+        "infrastructure_error",
+        "osworld.sandbox_start",
+        502,
+    )
+    assert event["failure_reason"] == (
+        "OSWorld sandbox start failed on provider=docker: "
+        "TimeoutError: OSWorld guest did not become ready within 900s: HTTP 502, bytes=0"
+    )
+
+
+def test_a_result_without_a_sandbox_start_failure_has_no_failure_fields() -> None:
+    row = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9
+    ).model_dump(mode="json")
+    assert row.get("failure_kind") is None
+    assert not {"_ng_failure_class", "_ng_failure_events", "sandbox_provider"} & set(row)
+
+
+def test_a_sandbox_start_timeout_is_retried_within_the_attempt_cap_and_then_stops(tmp_path, monkeypatch) -> None:
+    from nemo_gym.rollouts import RolloutStore, RunManifest
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+    rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "osworld"}}]
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(b"".join(json.dumps(row).encode() + b"\n" for row in rows))
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {"osworld": {"responses_api_agents": {}}})
+
+    output = tmp_path / "rollouts.jsonl"
+    failure = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), _start_timeout_result(), "test-policy", 1.0, 0.9
+    ).model_dump(mode="json")
+    for attempt in range(2):
+        with RolloutStore.start_or_resume(output, prepare, resume=attempt > 0) as store:
+            (row,) = store.pending()  # retried: the run still has a failure attempt for this task
+            store.record_dispatch(row)
+            store.record_outcome(row | failure)
+
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        assert store.pending() == []  # stopped: both attempts are spent
+        (saved,) = store.failures()
+        assert saved["failure_kind"] == "infrastructure_error" and saved["sandbox_http_status"] == 502
+
+
+def test_the_ray_child_carries_the_sandbox_start_failure_and_defaults_it_for_other_runners() -> None:
+    failure = {
+        "provider": "docker",
+        "http_status": 502,
+        "message": "OSWorld guest did not become ready within 900s: HTTP 502, bytes=0",
+    }
+
+    carried = _run_child(lambda task_config, **kwargs: _child_result(sandbox_start_failure=failure), [])
+    assert carried["sandbox_start_failure"] == failure
+    # A runner whose own result type has no such attribute still returns a result.
+    assert _run_child(lambda task_config, **kwargs: _child_result(), [])["sandbox_start_failure"] is None
+
+
+# --- Typed runtime-admission refusals: an infrastructure cause is a retryable failure row, a failed policy call a -----
+# --- model failure of the kind the call shows, and a configuration refusal stays as it was. ------------------------
+
+
+def _masked_result(reason: str, *, error: str, steps: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """What run_osworld_task returns when runtime admission refused the rollout for ``reason``."""
+    return DEFAULT_RUN_RESULT | {
+        "reward": 0.0,
+        "score": 0.0,
+        "finished": False,
+        "evaluation_completed": False,
+        "runtime_eligible": False,
+        "runtime_admission_reason": reason,
+        "mask_sample": True,
+        "termination_reason": reason,
+        "error": error,
+        "steps": steps or [],
+    }
+
+
+def _failure_event(row: Dict[str, Any]) -> Dict[str, Any]:
+    return row["_ng_failure_events"][row["_ng_failure_id"]]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["timeout", "action_timeout", "evaluator_error", "proxy_setup_error", "rollout_error", "rollout_state_incomplete"],
+)
+def test_an_infrastructure_admission_reason_is_a_typed_retryable_failure_row(reason: str) -> None:
+    result = _masked_result(reason, error="RuntimeError: the VM controller went away")
+    row = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    row = row.model_dump(mode="json")
+
+    assert (row["failure_kind"], row["_ng_failure_class"]) == ("infrastructure_error", "infrastructure_error")
+    assert (row["reward"], row["mask_sample"], row["evaluation_completed"]) == (0.0, True, False)  # no score change
+    assert row["runtime_admission_reason"] == reason
+    assert row["verifier_metadata"]["osworld_runtime_admission_reason"] == reason
+    event = _failure_event(row)
+    assert (event["boundary"], event["failure_kind"], event["operation"], event["stage"]) == (
+        "agent",
+        "infrastructure_error",
+        f"osworld.{reason}",
+        "agent",
+    )
+    assert reason in event["failure_reason"] and "RuntimeError: the VM controller went away" in event["failure_reason"]
+    assert row["failure_reason"] == event["failure_reason"]
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "status"),
+    [
+        (
+            "agent/model call failed at step 2: Error code: 400 - {'message': \"Input length (64782) exceeds "
+            "model's maximum context length (64000).\"}",
+            "model_context_limit",
+            400,
+        ),
+        ("agent/model call failed at step 2: Error code: 503 - upstream unavailable", "model_request_error", 503),
+        (
+            "model call failed at step 2: ClientOSError: [Errno 104] Connection reset by peer",
+            "model_transport_error",
+            None,
+        ),
+    ],
+)
+def test_a_failed_policy_call_is_a_model_failure_of_the_kind_the_call_shows(
+    error: str, kind: str, status: Optional[int]
+) -> None:
+    result = _masked_result("model_call_failed", error=error)
+    row = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    row = row.model_dump(mode="json")
+
+    assert row["failure_kind"] == kind == row["_ng_failure_class"]
+    assert (row["reward"], row["mask_sample"]) == (0.0, True)
+    event = _failure_event(row)
+    # A saved event carries http_status only when the call recorded one.
+    assert (event["boundary"], event["failure_kind"], event["operation"], event.get("http_status")) == (
+        "agent",
+        kind,
+        "agent.policy_request",
+        status,
+    )
+    assert error in event["failure_reason"]
+
+
+def test_a_policy_call_that_timed_out_is_a_model_response_timeout() -> None:
+    result = _masked_result("model_timeout", error="agent/model call failed at step 1: OSWorldModelTimeoutError: 600s")
+    row = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    row = row.model_dump(mode="json")
+    assert row["failure_kind"] == "model_policy_response_timeout" == row["_ng_failure_class"]
+    assert _failure_event(row)["operation"] == "agent.policy_request"
+
+
+def test_an_end_to_end_timeout_of_the_worker_is_a_typed_infrastructure_failure_row() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    row = _empty_response(
+        request, error="task_timeout exceeded (1800s) during end-to-end rollout", termination_reason="task_timeout"
+    ).model_dump(mode="json")
+    assert (row["failure_kind"], row["_ng_failure_class"]) == ("infrastructure_error", "infrastructure_error")
+    assert (row["reward"], row["mask_sample"], row["evaluation_completed"]) == (0.0, True, False)
+    assert _failure_event(row)["operation"] == "osworld.task_timeout"
+    assert "task_timeout exceeded (1800s)" in _failure_event(row)["failure_reason"]
+
+
+def test_a_crashed_worker_is_a_typed_infrastructure_failure_row() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    row = _empty_response(request, error="RayTaskError: the worker died").model_dump(mode="json")
+    assert row["runtime_admission_reason"] == "rollout_error"
+    assert (row["failure_kind"], row["_ng_failure_class"]) == ("infrastructure_error", "infrastructure_error")
+    assert _failure_event(row)["operation"] == "osworld.rollout_error"
+
+
+@pytest.mark.parametrize(
+    "reason", ["proxy_configuration_error", "proxy_required_but_disabled", "task_configuration_error"]
+)
+def test_a_configuration_refusal_is_a_masked_row_typed_without_a_retry(reason: str) -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    row = _empty_response(request, error=f"{reason}: see the task", termination_reason=reason).model_dump(mode="json")
+    assert (row["mask_sample"], row["runtime_admission_reason"]) == (True, reason)
+    assert row["failure_kind"] == "osworld_agent:configuration_error"
+    assert reason in row["failure_reason"]
+    assert not {"_ng_failure_class", "_ng_failure_events", "_ng_failure_id"} & set(row)
+
+
+def test_a_legacy_masked_result_is_left_as_it_was() -> None:
+    legacy = {
+        key: value
+        for key, value in DEFAULT_RUN_RESULT.items()
+        if key
+        not in ("runtime_eligible", "runtime_admission_reason", "runtime_admission_policy_id", "evaluation_completed")
+    } | {"mask_sample": True, "termination_reason": "rollout_error", "reward": 0.0, "steps": []}
+    row = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), legacy, "test-policy", 1.0, 0.9)
+    row = row.model_dump(mode="json")
+    assert row["mask_sample"] is True and row["runtime_admission_policy_id"] == LEGACY_RUNTIME_ADMISSION_POLICY_ID
+    assert row.get("failure_kind") is None and "_ng_failure_class" not in row
+
+
+def test_a_sandbox_start_failure_keeps_its_own_fields_beside_the_generic_typing() -> None:
+    row = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), _start_timeout_result(), "test-policy", 1.0, 0.9
+    ).model_dump(mode="json")
+    assert _failure_event(row)["operation"] == "osworld.sandbox_start"
+    assert (row["failure_kind"], row["sandbox_provider"]) == ("infrastructure_error", "docker")

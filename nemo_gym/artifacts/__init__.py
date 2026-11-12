@@ -21,15 +21,30 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+    from nemo_gym.artifacts.exporters.base import Exporter, ExportResult, unexportable_reason
+    from nemo_gym.artifacts.exporters.isolated import ExportPreparationError, IsolatedExporter
+    from nemo_gym.artifacts.rollout_rows import (
+        NG_DISPATCH_DRAINED_KEY,
+        NG_FAILURE_CLASS_KEY,
+        NG_NO_GENERATION_METADATA,
+        NG_NO_PERSIST_KEY,
+    )
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "ExportPreparationError": "exporters.isolated",
+    "ExportResult": "exporters.base",
+    "Exporter": "exporters.base",
+    "IsolatedExporter": "exporters.isolated",
     "NG_DISPATCH_DRAINED_KEY": "rollout_rows",
     "NG_FAILURE_CLASS_KEY": "rollout_rows",
+    "NG_NO_GENERATION_METADATA": "rollout_rows",
     "NG_NO_PERSIST_KEY": "rollout_rows",
+    "RunArtifacts": "run_artifacts",
+    "unexportable_reason": "exporters.base",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

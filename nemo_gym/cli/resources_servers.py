@@ -31,7 +31,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.resources_server_registry import discover_resources_servers, read_resources_server_value
+from nemo_gym.environment.resources_server_registry import discover_resources_servers, read_resources_server_value
 
 
 def _inspect_resources_server(name: str, servers: dict, global_config_dict) -> None:

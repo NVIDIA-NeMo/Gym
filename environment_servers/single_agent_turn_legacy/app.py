@@ -22,7 +22,9 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
     EpisodeId,
+    FailureReportRow,
     maybe_rollout_id_from_run_body,
+    model_sampling_from_run_body,
 )
 from nemo_gym.data import materialize_task
 from nemo_gym.server_runtime import (
@@ -57,21 +59,21 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
+        is_episode_request = "episode_id" in row and "task" in row
         request = (
-            SingleAgentTurnRequest.model_validate(row)
-            if "episode_id" in row and "task" in row
-            else self._episode_request_from_row(row)
+            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
-        return self._legacy_result(response)
+        # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
+        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
-        task_source = row.get(TASK_SOURCE_KEY_NAME, self.resources_server_name)
+        task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
         # Collation sets task_source to the instance that declares the dataset: usually the agent,
         # sometimes the Resources Server, and possibly this Environment Server.
-        bound = (self.resources_server_name, self.config.agent_server.name, self.config.name)
+        bound = (self.config.resources_server.name, self.config.agent_server.name, self.config.name)
         if task_source not in bound:
             raise ValueError(
                 f"Row task_source {task_source!r} names none of this Environment Server's instances: {list(bound)}"
@@ -95,6 +97,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return SingleAgentTurnRequest(
             episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
+            model_sampling=model_sampling_from_run_body(row),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:
@@ -118,6 +121,9 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 failure[NG_VERIFIER_INVOCATIONS_KEY] = [
                     invocation.model_dump(mode="json") for invocation in response.failure.verifier_invocations
                 ]
+            # The flat reply keeps the typed reply's events, omission flag and selected failure.
+            if response.failure_report is not None:
+                FailureReportRow.merged_into(failure, response.failure_report)
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
@@ -125,6 +131,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
             result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
         result["agent_ref"] = agent_ref
+        if response.failure_report is not None:
+            FailureReportRow.merged_into(result, response.failure_report)
         return result
 
 

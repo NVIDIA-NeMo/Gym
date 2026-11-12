@@ -123,6 +123,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                         "port": 12345,
                         "entrypoint": "app.py",
                         "num_workers": None,
+                        "uvicorn_reuse_port": None,
                         "datasets": [
                             {
                                 "name": "example",

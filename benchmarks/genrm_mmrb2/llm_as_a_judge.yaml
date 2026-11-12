@@ -23,3 +23,10 @@ genrm_mmrb2_resources_server:
   resources_servers:
     genrm_eval:
       verdict_format: json_ab
+
+genrm_mmrb2_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: genrm_mmrb2_resources_server

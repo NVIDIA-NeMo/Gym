@@ -20,6 +20,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.spider2_lite.eval_utils import (
     compare_multi_result_sets,
     execute_and_compare,
@@ -348,3 +349,6 @@ class Spider2LiteResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     Spider2LiteResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = Spider2LiteResourcesServer.run_webserver()  # noqa: F401

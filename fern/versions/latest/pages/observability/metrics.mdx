@@ -50,6 +50,14 @@ run, recorded after the recovery store accepts the saved outcome. A retry on a l
 resume run is another attempt; an HTTP-level re-send of `/run` inside one dispatch is not.
 Reused cached results do not increment it. Coverage comes from the output files, not this counter.
 
+`TaskRunner.run_task` (the in-process API) also records each returned rollout outcome, without a recovery-store
+write. For this API, `failed` means the outcome has a failure, labeled with its kind and nothing else; `scored` means
+a reward and no failure; `unscored` means neither a reward nor a failure. `gym.rollout.rewarded_total` counts only the
+finite rewards of scored rollouts, masked ones included. A result is a failure when it carries `failure_kind`; a routing
+class alone does not make it one. The collection driver described below folds completions without
+a reward into `scored` and does not use `unscored`. A `TaskRunner` increment does not mean an outcome was saved. The
+persistence and `omitted` rules below describe the collection driver.
+
 `nemo.gym.rollout.outcome` is `scored` (written to the main output, masked and forced-zero
 results and supported unscored completions included), `failed` (a saved failure), or `omitted` (a saved
 intentional omission, including terminal skips and bare no-persist replies). A reported `kill_shaped` failure
@@ -194,6 +202,71 @@ async with resources_operation(self._semaphore, operation="verify", executor="su
 
 Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
 
+### Concurrency Limit Metrics
+
+A wait duration shows that work waited, not why. These metrics show the state of each configured concurrency limit, so a dashboard can show "limit 100, active 100, queued 75" and make clear that the limit is full and work is piling up behind it.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.concurrency.limit` | Up/down counter | slots | The configured number of slots. |
+| `gym.concurrency.active` | Up/down counter | slots | Slots held right now. |
+| `gym.concurrency.available` | Up/down counter | slots | Slots free right now, `limit - active`. |
+| `gym.concurrency.queue_depth` | Up/down counter | count | Callers waiting for a slot right now. |
+| `gym.concurrency.admission_timeouts_total` | Counter | count | Waits that ran out of the limit's admission timeout. Reported only for limits that have one. |
+| `gym.concurrency.admission_cancelled_total` | Counter | count | Waits cancelled before a slot was free, for example because the caller's request was cancelled. |
+
+Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limit_name`, and, for a limit that belongs to a server, `nemo.gym.server.name`. Limits with the same attributes in one process are summed, and separate processes, such as the Uvicorn workers of one server, export their own points. These limits report today:
+
+| Component | `limit_name` | Configured by | Admission timeout |
+| --- | --- | --- | --- |
+| `rollout_driver` | `rollouts` | `num_samples_in_parallel` | None |
+| `model_server` (`openai_model` and servers built on it) | `upstream_requests` | `max_concurrent_requests` | `upstream_pool_timeout_seconds` |
+| `environment_server` | `episodes` | `max_concurrent_episodes` | `queue_timeout_seconds` |
+| `resources_server` (`math_with_judge`) | `library_verifier` | `library_verifier_max_concurrency` | None |
+
+A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
+
+How to read them:
+
+- `active` equal to `limit` with a growing `queue_depth` means the limit is the bottleneck. Raising it helps only if the work behind it, such as the model endpoint, has capacity to spare.
+- `active` below `limit` with slow requests means the time goes elsewhere. Compare `gym.event_loop.lag_ms` and the HTTP connection-pool metrics.
+- A rising `admission_timeouts_total` means callers gave up waiting. For a model server, these are the requests that fail with "Timed out acquiring an upstream provider slot"; for an environment server, the episodes that fail at the `admission` stage.
+- For the rollout driver, `gym.driver.admission_duration_ms` gives the wait per rollout, and `gym.concurrency.queue_depth` the number waiting right now.
+
+A slot costs a few integer updates and no OpenTelemetry call. The exporter's background thread reads the totals, and they are reported whenever metrics are exported.
+
+### Sandbox Metrics
+
+These are recorded whenever metrics are exported, whatever the span groups. `AsyncSandbox` records them for every sandbox provider, except `gym.sandbox.create_retry_total`, which a provider that retries creates records from its own loop (Daytona and OpenSandbox do). Every metric carries `nemo.gym.sandbox.provider`, such as `docker` or `opensandbox`.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.sandbox.active` | Up/down counter | count | Sandboxes this process holds, from the provider handing back a handle until Gym releases it. |
+| `gym.sandbox.startup_duration_ms` | Histogram | ms | Time to provision one sandbox. |
+| `gym.sandbox.exec_duration_ms` | Histogram | ms | Time to run one command in a sandbox. |
+| `gym.sandbox.create_retry_total` | Counter | count | Sandbox-create attempts a provider retried. |
+| `gym.sandbox.transfer_duration_ms` | Histogram | ms | Time to move one file into or out of a sandbox, by `nemo.gym.sandbox.transfer.direction` (`upload` or `download`) and `nemo.gym.sandbox.transfer.outcome` (`ok`, `error`, or `cancelled`). |
+| `gym.sandbox.transfer_bytes_total` | Counter | bytes | Bytes of regular files moved successfully, by `nemo.gym.sandbox.transfer.direction`. |
+
+Transfers include `upload()`, `download()`, and the seed files in `SandboxSpec.files`, which `start()` uploads after the provider returns the sandbox, so seed uploads are not part of `gym.sandbox.startup_duration_ms`. Sidecar downloads are not counted. Transfer spans record the file size but not the paths, because a path can name task content.
+
+A transfer that raises is an `error`, including a download that probes for a file that may not exist yet. A transfer cut short by cancellation is `cancelled`, including one the caller abandons when its own deadline (for example `asyncio.timeout`) expires; a timeout inside the provider is an `error`.
+
+### Run Summary Metrics
+
+When a collection or an aggregation of shards finishes, the run's coverage and retry counts are recorded as gauges, the same numbers sent to MLflow or W&B. They are recorded whether or not an experiment tracker is configured, so a dashboard reading OpenTelemetry sees them too.
+
+Each key becomes one gauge: `coverage/scored` is `gym.run.coverage.scored`, and `retries/at_cap` is `gym.run.retries.at_cap`. Failures by class, `coverage/failed/<class>`, become one gauge, `gym.run.coverage.failed`, with the class in `nemo.gym.run.bucket`. A class that is not a registered failure kind (or `skipped`, or `unknown`) is counted under `unregistered`, so the attribute stays bounded.
+
+`gym.run.coverage.failed` holds two views of the same failures: the total, `coverage/failed`, as a point without `nemo.gym.run.bucket`, and one point per class with it. A run with one failure reports 1 for each, so summing every point counts it twice. Select one view:
+
+- The total: keep the points where `nemo.gym.run.bucket` is not set.
+- The breakdown: keep the points where it is set, and group by it.
+
+`gym.run.info` is 1 for each finished run. Points carry `nemo.gym.run.id`, the run id from the run's records. An aggregation has a run id only when it reads a single shard with attempt history; otherwise it leaves the attribute off, and the `nemo.run.id` resource attribute identifies the job.
+
+A key is recorded only when the run reports it. An unknown count is left out rather than recorded as 0: an aggregation of shards without attempt history, for example, has no `gym.run.coverage.expected`.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.
@@ -220,8 +293,8 @@ these metrics whenever metrics are exported, whether or not the `checkpoint` spa
 | `gym.checkpoint.events_total` | Counter | count | Events that change a checkpoint's outcome without failing a call, by `nemo.gym.checkpoint.event`. |
 
 The operation is one of a participant's control operations (`prepare`, `commit`, `restore`, `resume`,
-`retire`, or `forget`), `lease_reopen` for one attempt to reopen a participant whose lease expired, or
-`coordinate.<operation>` for one call the controller makes to every participant. The participant kind is
+`retire`, `forget`, or `release`), `lease_reopen` for one attempt to reopen a participant whose lease
+expired, or `coordinate.<operation>` for one call the controller makes to every participant. The participant kind is
 the server's role in the checkpoint, such as `model`, `agent`, `resources`, or `environment`, and
 `controller` for coordination.
 

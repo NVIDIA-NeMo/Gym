@@ -15,8 +15,8 @@
 import hashlib
 import json
 import logging
-import re
 import tempfile
+from collections import Counter
 from itertools import batched
 from os import environ
 from pathlib import Path
@@ -36,9 +36,36 @@ from mlflow.utils.validation import (
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.artifacts.exporters import run_failed
-from nemo_gym.artifacts.exporters.base import BaseExporter
+from nemo_gym.artifacts.exporters.base import (
+    BaseExporter,
+    _artifact_version,
+    _live_run_id,
+    _upload_intent,
+    _write_marker_atomically,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _ELISION_MARKER as _ELISION_MARKER,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _INVALID_KEY_CHARS as _INVALID_KEY_CHARS,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _LEADING_DOTS as _LEADING_DOTS,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _canonical_mlflow_key,
+    flatten_aggregate_metrics,
+    health_source_artifacts,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _elide_key as _elide_key,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _normalize_key_path as _normalize_key_path,
+)
 from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
-from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
+from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
@@ -57,39 +84,6 @@ def _flatten_config(value: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
         yield prefix, value
 
 
-_INVALID_KEY_CHARS = re.compile(r"[^/\w.\- :]")
-_LEADING_DOTS = re.compile(r"^\.+")
-# Stands in for the elided middle of an over-long name; must itself be an accepted character.
-_ELISION_MARKER = "___"
-
-
-def _normalize_key_path(key: str) -> str:
-    """Neutralize only the path segments MLflow rejects, leaving the rest of the name intact.
-
-    MLflow requires an already-normalized relative path, so it rejects empty segments (from
-    leading, doubled or trailing slashes) and the traversal forms `.` and `..`.
-    """
-    segments = [segment for segment in key.split("/") if segment]
-    # An all-dot segment is a traversal segment; same length keeps neighbouring names distinct.
-    segments = ["_" * len(segment) if set(segment) == {"."} else segment for segment in segments]
-    # A surviving name may still open with dots ("...x"), which MLflow also reads as traversal.
-    return _LEADING_DOTS.sub(lambda match: "_" * len(match.group()), "/".join(segments))
-
-
-def _elide_key(key: str, limit: int = MAX_ENTITY_KEY_LENGTH) -> str:
-    """Cut an over-long name in the middle, keeping both ends.
-
-    Gym names carry their identity at the edges — benchmark and agent in the prefix, the statistic
-    in the suffix (`gpqa.../simple_agent/mean/reward`) — so the middle is what can be spared.
-    """
-    if len(key) <= limit:
-        return key
-    kept = limit - len(_ELISION_MARKER)
-    # Bias the head, which carries the benchmark and agent names.
-    head, tail = kept - kept // 2, kept // 2
-    return key[:head] + _ELISION_MARKER + (key[-tail:] if tail else "")
-
-
 def _sanitize_key(key: str) -> Optional[str]:
     """Map a metric/param/tag name onto what MLflow accepts: character set, path shape, length.
 
@@ -97,11 +91,7 @@ def _sanitize_key(key: str) -> Optional[str]:
     made only of separators, leaving nothing to sanitize into. Dropping that one entry is
     deliberate: MLflow rejects an entire `log_batch` when any single name is invalid.
     """
-    # `@` is spelled out rather than blanked to `_`, so `pass@1` stays readable as `pass_at_1`.
-    sanitized = _normalize_key_path(_INVALID_KEY_CHARS.sub("_", key.replace("@", "_at_")))
-    # Length is enforced last because `_at_` lengthens a name. Re-normalize: splicing two ends
-    # together can reintroduce a path shape MLflow rejects.
-    sanitized = _normalize_key_path(_elide_key(sanitized))
+    sanitized = _canonical_mlflow_key(key, limit=MAX_ENTITY_KEY_LENGTH)
     if not sanitized:
         logger.warning(f"Dropping entry {key!r}: nothing is left of the name once sanitized.")
         return None
@@ -136,6 +126,11 @@ class MLflowExporter(BaseExporter):
         # The reopened run's status and resume count before this job reopened it, restored by `start_over`.
         self._prior_status: Optional[str] = None
         self._prior_resumes: Optional[str] = None
+        self._pending_operations: list[Any] = []
+        self._live_finalized = False
+        self._delivered_config_digest: bytes | None = None
+        self._delivered_rollouts: Counter[bytes] = Counter()
+        self._delivered_metrics: dict[str, Any] = {}
 
     def setup(self) -> None:
         # The MLflow SDK reads the bearer token from the environment, not from client kwargs.
@@ -168,7 +163,9 @@ class MLflowExporter(BaseExporter):
     def teardown(self) -> None:
         self._flush_pending_config()
         if self.client is not None and self.run_id is not None:
-            self.client.set_terminated(self.run_id, status="FAILED" if run_failed() else "FINISHED")
+            self.client.set_terminated(
+                self.run_id, status="FAILED" if run_failed() or self._delivery_failed else "FINISHED"
+            )
         self.client = None
         self.run_id = None
         self.reopened = False
@@ -208,6 +205,15 @@ class MLflowExporter(BaseExporter):
             raise RuntimeError("MLflow run is not open; call setup() before logging.")
         return self.client, self.run_id
 
+    def _batch_mode(self) -> dict[str, bool]:
+        """`log_batch` arguments: a post-run export waits for each batch.
+
+        With MLflow's async logging (``MLFLOW_ENABLE_ASYNC_LOGGING``) a batch call returns before the server has the
+        batch. The post-run receipt says the whole run reached the backend, so the export logs synchronously and a
+        failed batch raises before the receipt is written. A live run keeps MLflow's default.
+        """
+        return {"synchronous": True} if self._exported_artifacts is not None else {}
+
     def _log_config(self, config_dict: DictConfig) -> None:
         client, run_id = self._active()
         container = OmegaConf.to_container(config_dict)
@@ -235,7 +241,13 @@ class MLflowExporter(BaseExporter):
             client.log_dict(run_id, container, self.CONFIG_ARTIFACT_FILE)
 
         for batch in batched(params, MAX_PARAMS_TAGS_PER_BATCH):
-            client.log_batch(run_id, params=batch)
+            self._retain_operation(client.log_batch(run_id, params=batch, **self._batch_mode()))
+
+        self._delivered_config_digest = self._payload_digest(container)
+
+    @staticmethod
+    def _payload_digest(payload: Any) -> bytes:
+        return hashlib.sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).digest()
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
         client, run_id = self._active()
@@ -255,9 +267,12 @@ class MLflowExporter(BaseExporter):
                 tags.append(RunTag(name, value[:MAX_PARAM_VAL_LENGTH]))
 
         for batch in batched(numeric, MAX_METRICS_PER_BATCH):
-            client.log_batch(run_id, metrics=batch)
+            self._retain_operation(client.log_batch(run_id, metrics=batch, **self._batch_mode()))
         for batch in batched(tags, MAX_PARAMS_TAGS_PER_BATCH):
-            client.log_batch(run_id, tags=batch)
+            self._retain_operation(client.log_batch(run_id, tags=batch, **self._batch_mode()))
+
+        self._delivered_metrics.update({metric.key: metric.value for metric in numeric})
+        self._delivered_metrics.update({tag.key: tag.value for tag in tags})
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         client, run_id = self._active()
@@ -273,6 +288,111 @@ class MLflowExporter(BaseExporter):
         # set across environments. `log_table` appends when the artifact already exists.
         rows = [orjson.dumps(rollout).decode() for rollout in rollouts]
         client.log_table(run_id, data={"Rollout": rows}, artifact_file=self.ROLLOUTS_ARTIFACT_FILE)
+        # log_table uploads synchronously. Record only the exact serialized payload acknowledged by that call.
+        self._delivered_rollouts.update(self._payload_digest(orjson.loads(row)) for row in rows)
+
+    def _retain_operation(self, operation: Any) -> None:
+        if operation is not None:
+            self._pending_operations.append(operation)
+
+    def link_superseding_export(self, live_run_id: str, run_id: str) -> None:
+        """Tag the live run `superseded_by=<run_id>` and the post-run export's run `supersedes=<live_run_id>`.
+
+        A reader that finds two runs for one evaluation picks the one the receipt names. Only tags are set, with this
+        live activation's client: metrics, params and status are untouched, and MLflow accepts tags on a finished
+        run. Each failure is logged and ignored; the receipt is already written.
+        """
+        if self.client is None:
+            logger.warning(f"Exporter {self.name} could not tag runs {live_run_id} and {run_id}: no open client")
+            return
+        for target, key, value in ((live_run_id, "superseded_by", run_id), (run_id, "supersedes", live_run_id)):
+            try:
+                self.client.set_tag(target, key, value)
+            except Exception as e:
+                logger.warning(f"Exporter {self.name} could not tag run {target} {key}={value}: {e}")
+
+    def finalize_live(self, artifacts: RunArtifacts, version: dict[str, str | None]) -> None:
+        """Certify the same fresh live run only after the caller verifies final collection and health files."""
+        if self._live_finalized or self.reopened or self._exported_artifacts is not None:
+            return
+        if self._delivery_failed or run_failed():
+            raise RuntimeError("Live tracking delivery failed; no completion receipt was written.")
+        upload = UploadRolloutsConfigMixin.model_validate(self.global_config_dict).upload_rollouts
+        client, run_id = self._active()
+        marker = artifacts.export_done_fpath(self.name)
+        if marker.exists():
+            raise RuntimeError("An existing completion receipt is never replaced by live finalization.")
+        if _live_run_id(artifacts, self.name) != run_id or self._run_id_fpath() != artifacts.exporter_run_id_fpath(
+            self.name
+        ):
+            raise RuntimeError("Live exporter activation does not own these run artifacts.")
+        if version != _artifact_version(artifacts):
+            raise RuntimeError("Run artifacts changed before live delivery verification.")
+        try:
+            for operation in self._pending_operations:
+                operation.wait()
+            self._pending_operations.clear()
+            saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath))
+            if self._delivered_config_digest != self._payload_digest(saved_config):
+                raise RuntimeError("Delivered configuration differs from the final saved configuration.")
+            if upload != _upload_intent(OmegaConf.create(saved_config)).upload_rollouts:
+                raise RuntimeError("Live upload setting differs from the final saved configuration.")
+            if upload:
+                from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
+
+                with artifacts.rollouts_jsonl_fpath.open("rb") as stream:
+                    rows = (orjson.loads(line) for line in stream if line.strip())
+                    expected = Counter(
+                        self._payload_digest(_rollout_for_export(row))
+                        for row in rows
+                        if not row.get(NG_DISPATCH_DRAINED_KEY)
+                    )
+                if not expected or self._delivered_rollouts != expected:
+                    raise RuntimeError("Acknowledged rollout payloads do not match the final saved output.")
+            run = client.get_run(run_id)
+            if run.info.run_id != run_id:
+                raise RuntimeError("Tracking service returned a different run.")
+            health_version = health_source_artifacts(artifacts, version)
+            metrics = flatten_aggregate_metrics(
+                orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
+            )
+            if not metrics:
+                raise RuntimeError("Final aggregate has no delivery evidence.")
+            for key, value in metrics.items():
+                name = _sanitize_key(key)
+                if name is None or value is None:
+                    continue
+                observed = self._delivered_metrics.get(name)
+                expected_value = (
+                    float(value) if isinstance(value, (bool, int, float)) else str(value)[:MAX_PARAM_VAL_LENGTH]
+                )
+                if observed != expected_value:
+                    raise RuntimeError("Delivered aggregate metrics differ from the final saved aggregate.")
+            client.set_terminated(run_id, status="FINISHED")
+            finished = client.get_run(run_id)
+            if finished.info.run_id != run_id or finished.info.status != "FINISHED":
+                raise RuntimeError("Tracking service did not confirm the same run finished.")
+            if (
+                version != _artifact_version(artifacts)
+                or health_source_artifacts(artifacts, version) != health_version
+            ):
+                raise RuntimeError("Run artifacts changed during live delivery verification.")
+            _write_marker_atomically(
+                marker,
+                orjson.dumps(
+                    {
+                        "version": 1,
+                        "run_id": run_id,
+                        "artifacts": version,
+                        "uploaded_rollouts": upload,
+                        "rollout_projection_version": 1,
+                    }
+                ).decode(),
+            )
+            self._live_finalized = True
+        except Exception:
+            self._delivery_failed = True
+            raise
 
     def _landed_rollout_keys(self, client: MlflowClient, run_id: str) -> set[tuple[Any, Any]]:
         # Read from this run, as `log_table` does when it appends: `load_table` searches the fluent API's global

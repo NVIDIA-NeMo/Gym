@@ -8,15 +8,17 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_kinds import AGENT_REQUEST_FAILED, ENVIRONMENT_SERVER_FAILED
-from nemo_gym.server_runtime.episode_types import EpisodeFailure
+from nemo_gym.core.failure_records import EpisodeFailure
 
 
 class RolloutFailureRecord(BaseModel):
     """Associate one observed failure with a run and an episode attempt.
 
-    ``source`` identifies who reported the failure. ``delivery`` describes the
+    ``source`` identifies who reported the failure, not where it happened: ``collector`` is rollout collection
+    recording what it observed, and the failure's own events carry the causal ``FailureBoundary`` (a collector
+    record can name a model, agent or ``collection`` boundary). ``delivery`` describes the
     collector's evidence about delivery to the Environment Server: ``not_sent``
     requires evidence that the request was not sent, ``possibly_delivered`` covers
     an uncertain outcome, and ``delivered`` means delivery was established. It

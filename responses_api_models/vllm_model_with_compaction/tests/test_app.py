@@ -250,3 +250,40 @@ def test_tokenize_endpoint_forwards_exact_prefix_without_sampling() -> None:
     assert captured_kwargs["required_prefix_token_ids"] == [10, 11]
     assert "logprobs" not in captured_kwargs
     assert "return_token_ids" not in captured_kwargs
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "recorded"),
+    [("stop", "stop"), ("tool_calls", "tool_calls"), ("length", "max_output_tokens")],
+)
+async def test_responses_note_the_finish_reason_for_the_model_call_record(
+    finish_reason, recorded, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionMessage, NeMoGymChoice
+    from nemo_gym.trajectory import build_model_call_record
+
+    model = _make_model()
+    completion = NeMoGymChatCompletion(
+        id="chatcmpl-test",
+        created=1,
+        model="dummy_model",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason=finish_reason,
+                message=NeMoGymChatCompletionMessage(role="assistant", content="ok", tool_calls=[]),
+            )
+        ],
+    )
+    monkeypatch.setattr(VLLMModelWithCompaction, "chat_completions", AsyncMock(return_value=completion))
+    request = MagicMock(state=SimpleNamespace())
+
+    response = await model.responses(
+        request, VLLMContextCompactionResponseCreateParams(input="hi", required_prefix_token_ids=[1])
+    )
+
+    exchange = {"response": response.model_dump(mode="json"), **request.state.nemo_gym_model_execution}
+    assert build_model_call_record(exchange, call_index=0).finish_reason == recorded

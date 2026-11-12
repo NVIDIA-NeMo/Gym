@@ -96,10 +96,11 @@ A browser is released when the rollout is scored (`verify`), when the same
 through `/close_session`. An Environment Server assigns the session id and
 registers that close before it seeds, so an episode that ends before `verify`
 still gets its browser released. A seed that arrives after its close is refused
-with 409 and opens nothing, but only while the server still remembers the close:
+with 409 and opens nothing, but only while the server holds the session's fence:
 for `session_close_retry_window_seconds` (300 seconds by default) and not across a restart
-(`tests/test_resources_sessions.py`). The server keeps browsers in process, so
-it requires `num_workers: 1`.
+(`tests/test_resources_sessions.py`). The server keeps browsers in process; with
+`num_workers` above 1, Gym routes each session's requests to the worker that
+holds its browser.
 
 A rollout whose browser is gone (never seeded, already verified, closed, or lost
 to a restart) is not scored as a zero. A tool call gets HTTP 404 with
@@ -212,7 +213,7 @@ environment runs without its SDK installed.
 - [x] `site/` — bundled offline test site (deterministic tasks/CI)
 - [x] `generate_data.py` + `data/example.jsonl` (offline) + `data/example_remote.jsonl` (live web)
 - [x] `tests/` — backend contract (both backends) + selection/session bookkeeping
-- [x] `requirements.txt`, `README.md`
+- [x] `pyproject.toml`, `uv.lock`, `README.md`
 - [x] `data/example_rollouts.jsonl` — 5 rollouts collected against a Responses-API endpoint (reward 1.0 on the offline site; reward wiring exercised end-to-end)
 - [ ] GRPO training-signal run (train via NeMo-RL's `examples/nemo_gym/run_grpo_nemo_gym.py`)
 

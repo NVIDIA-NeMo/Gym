@@ -19,13 +19,14 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
-    HarnessTerminationError,
-    check_stdlib_runner,
+    is_harness_termination_failure,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
     supervision_timeouts,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
@@ -41,9 +42,6 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
-# Where adapters upload a standard-library Python runner, relative to session_dir. Without a
-# .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
-RUNNER_FILE = "sandbox_runner"
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -57,19 +55,9 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv, run under the bash process supervisor.
-
-    ``stdlib_runner`` declares a Python runner that needs nothing beyond the standard library.
-    Its argv, which must start with the interpreter, then runs under a neutral process name so
-    that ``pkill python3`` in the task cannot stop it. The renamed interpreter is the base
-    interpreter, outside any virtual environment.
-    """
+    """Harness argv, run under the bash process supervisor."""
 
     argv: list[str]
-    stdlib_runner: bool = False
-
-    def __post_init__(self) -> None:
-        check_stdlib_runner(self.argv, stdlib_runner=self.stdlib_runner)
 
 
 def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, str]]) -> str:
@@ -110,7 +98,9 @@ class SandboxSession[Artifacts]:
     """Execute, stop, capture, then release an owned or borrowed sandbox.
 
     Runtime installation belongs in the adapter's seed hook. ``stage_activation``
-    stages input and returns a command; ``collect`` copies harness artifacts
+    stages input and returns a command. Every sandbox write an activation needs
+    belongs there: close cancels staging before it releases the sandbox, but it
+    cannot stop a write made before ``execute``. ``collect`` copies harness artifacts
     to the agent server after cleanup is confirmed. It may run a bounded snapshot
     command, but must not restart the harness. Parsing responses stays in the adapter.
 
@@ -146,8 +136,9 @@ class SandboxSession[Artifacts]:
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
     capture_error: Exception | None = field(default=None, init=False)
-    termination_error: HarnessTerminationError | None = field(default=None, init=False)
+    termination_error: NgFailureEvent | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
+    execution_oom: NgFailureEvent | None = field(default=None, init=False)
     _session_root: str | None = field(default=None, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
     _exec_task: asyncio.Task[SandboxExecResult] | None = field(default=None, init=False)
@@ -248,7 +239,6 @@ class SandboxSession[Artifacts]:
                 command=command.argv,
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
-                stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
@@ -258,7 +248,14 @@ class SandboxSession[Artifacts]:
                     timeout_s=provider_timeout,
                 )
             )
-            result = await asyncio.shield(self._exec_task)
+            try:
+                result = await asyncio.shield(self._exec_task)
+            except NgFailureEvent as error:
+                # The provider confirmed that the whole sandbox died during the
+                # supervised harness command. In-sandbox cleanup is no longer possible.
+                if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
+                    self.execution_oom = error
+                raise
             if result.error_type == "timeout":
                 raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline")
             if result.error_type:
@@ -375,7 +372,12 @@ class SandboxSession[Artifacts]:
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""
-        if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
+        if (
+            self.sandbox_stopped
+            or self.execution_oom is not None
+            or not self.launch_started
+            or self.cleanup is not None
+        ):
             return
         if self.termination_error is not None:
             raise self.termination_error
@@ -388,11 +390,12 @@ class SandboxSession[Artifacts]:
                     timeout=timeout,
                     harness=self.harness,
                 )
-        except HarnessTerminationError as error:
-            self.termination_error = error
-            raise
         except TimeoutError as error:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
+        except NgFailureEvent as error:
+            if is_harness_termination_failure(error):
+                self.termination_error = error
+            raise
 
     async def _finish(self, *, timeout: float) -> None:
         """Join process finalization without releasing the sandbox connection."""
@@ -418,7 +421,7 @@ class SandboxSession[Artifacts]:
         await self.stop_harness(timeout=timeout)
         await self._confirm_unacknowledged_expiry(timeout=timeout)
         if self.launch_started and not self._capture_attempted and self._collect is not None:
-            if self.sandbox_stopped:
+            if self.sandbox_stopped or self.execution_oom is not None:
                 self.capture_error = RuntimeError(f"{self.harness} sandbox stopped before artifact capture")
             else:
                 try:
@@ -466,7 +469,10 @@ class SandboxSession[Artifacts]:
 
     async def _release_exec(self, *, timeout: float) -> None:
         if (
-            self.cleanup is not None or self.termination_error is not None or self.sandbox_stopped
+            self.cleanup is not None
+            or self.termination_error is not None
+            or self.sandbox_stopped
+            or self.execution_oom is not None
         ) and self._exec_task is not None:
             await self._cancel_and_wait(self._exec_task, timeout=timeout)
 
@@ -479,7 +485,7 @@ class SandboxSession[Artifacts]:
         try:
             await self._finish(timeout=timeout)
         except Exception as error:
-            if not self.owns_sandbox and not isinstance(error, HarnessTerminationError):
+            if not self.owns_sandbox and not is_harness_termination_failure(error):
                 raise
             if self.owns_sandbox:
                 LOG.exception("%s session finalization failed; stopping owned sandbox", self.harness)
@@ -494,18 +500,38 @@ class SandboxSession[Artifacts]:
                 self.capture_error = error
         if self.owns_sandbox:
             if not self.sandbox_stopped:
-                async with asyncio.timeout(timeout):
-                    await self.sandbox.stop()
-                self.sandbox_stopped = True
+                try:
+                    if self.cleanup_confirmed and self.execution_oom is None:
+                        # A local sandbox stops its workspace, but session runtimes can
+                        # live outside it. Reclaim them after capture while exec works.
+                        async with asyncio.timeout(timeout):
+                            await remove_session_directory(
+                                self.sandbox,
+                                session_dir=self._session_root or self.session_dir,
+                                workdir=self.workdir,
+                                timeout=timeout,
+                                harness=self.harness,
+                            )
+                except Exception:
+                    # Once stop succeeds, there is no live sandbox in which to retry
+                    # removal. Preserve the release result and report any leftovers.
+                    LOG.warning(
+                        "Could not remove %s session files; stopping owned sandbox", self.harness, exc_info=True
+                    )
+                finally:
+                    async with asyncio.timeout(timeout):
+                        await self.sandbox.stop()
+                    self.sandbox_stopped = True
             await self._release_exec(timeout=timeout)
         else:
             await self._release_exec(timeout=timeout)
             async with asyncio.timeout(timeout):
-                await remove_session_directory(
-                    self.sandbox,
-                    session_dir=self._session_root or self.session_dir,
-                    workdir=self.workdir,
-                    timeout=timeout,
-                    harness=self.harness,
-                )
+                if self.execution_oom is None:
+                    await remove_session_directory(
+                        self.sandbox,
+                        session_dir=self._session_root or self.session_dir,
+                        workdir=self.workdir,
+                        timeout=timeout,
+                        harness=self.harness,
+                    )
                 await self.sandbox.disconnect()

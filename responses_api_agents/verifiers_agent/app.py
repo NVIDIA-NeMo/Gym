@@ -14,10 +14,15 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
+import re
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from http.cookiejar import CookieJar
 from time import time
 from typing import Any, Optional
@@ -25,13 +30,29 @@ from uuid import uuid4
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import DEFAULT_TIMEOUT, AsyncOpenAI, DefaultAsyncHttpxClient, Timeout
-from pydantic import ConfigDict, Field
+from openai import (
+    DEFAULT_TIMEOUT,
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+    Timeout,
+)
+from pydantic import ConfigDict, Field, field_validator
 from verifiers.clients import NeMoRLChatCompletionsClient
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.artifacts import NG_NO_GENERATION_METADATA
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    VERIFIER_ERROR,
+    FailureBoundary,
+    FailureHeader,
+    FailureReportRow,
+    ModelFailureDetails,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -44,9 +65,23 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    OutcomeAction,
+    StageOutcomePolicyConfig,
     accumulate_response_usage,
+    choose_stage_outcome,
+    current_model_sampling_segment,
+    failure_report_for,
+    observe_failure,
+    rebuild_failure,
+    sdk_error_details,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    is_retryable_dependency_status,
+    observe_verifier,
+)
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -55,6 +90,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -197,7 +233,72 @@ def _as_response_usage(usage: Any) -> Optional[NeMoGymResponseUsage]:
     )
 
 
-class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
+@dataclass
+class _ModelCallOutcome:
+    """How the model calls of one rollout last ended: the failure the latest call raised, else None."""
+
+    last_failure: Optional[NgFailureEvent] = None
+
+
+# Set by ``run`` around one rollout; the clients record into it because verifiers keeps only a serialized error.
+_MODEL_CALL_OUTCOME: ContextVar[Optional[_ModelCallOutcome]] = ContextVar(
+    "verifiers_agent_model_call_outcome", default=None
+)
+
+
+def _model_call_failure(error: Exception) -> Optional[NgFailureEvent]:
+    """The model boundary's failure for an error of the policy client's SDK, from what the SDK reports; else None.
+
+    An HTTP reply names its status and nothing else, and a call that got no reply is a transport failure whose
+    delivery is unknown: neither is classified from message text, and no policy is applied here. The SDK's text is
+    not copied, only its type and status. A Gym server's own failure report on the reply is linked as the cause.
+    """
+    if isinstance(error, APIStatusError):
+        kind, status, upload = MODEL_REQUEST_ERROR, error.status_code, True
+        reason = f"HTTP {status} from the model server"
+    elif isinstance(error, APIConnectionError):
+        kind, status, upload = MODEL_TRANSPORT_ERROR, None, None
+        reason = "Model request timed out" if isinstance(error, APITimeoutError) else "Model request transport failed"
+    else:
+        return None
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=kind,
+        failure_reason=reason,
+        operation="model_request",
+        stage="agent",
+        http_status=status,
+        details=ModelFailureDetails(request_upload_complete=upload),
+        foreign_error=sdk_error_details(error, message=""),
+    )
+    forwarded = FailureHeader.decode(getattr(getattr(error, "response", None), "headers", None))
+    failure.__cause__ = rebuild_failure(forwarded) or error
+    return failure
+
+
+class _ModelFailureObservingClient(NeMoRLChatCompletionsClient):
+    """Records each policy-model call that fails in the SDK as a failure event.
+
+    verifiers wraps the SDK error in its own and keeps only a serialized form on the rollout, so the SDK error is
+    only available here, where the call is made.
+    """
+
+    async def get_native_response(self, *args: Any, **kwargs: Any) -> Any:
+        outcome = _MODEL_CALL_OUTCOME.get()
+        if outcome is not None:
+            outcome.last_failure = None
+        try:
+            return await super().get_native_response(*args, **kwargs)
+        except Exception as error:
+            failure = _model_call_failure(error)
+            if failure is not None:
+                observe_failure(failure)
+                if outcome is not None:
+                    outcome.last_failure = failure
+            raise
+
+
+class _ResponseIdRecordingClient(_ModelFailureObservingClient):
     """Records the id of every model response verifiers receives.
 
     `simple_agent` builds its `ModelCallRef`s from `model_response.id` because it
@@ -224,6 +325,60 @@ class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
         return response
 
 
+# Names in a rollout error's class chain (verifiers.errors and the transport errors they wrap) and the kind each
+# suggests, first match wins: a transport timeout or connection error inside a ModelError or a ToolError is named
+# as such. A candidate only: it is recorded for counting and never decides a score, a mask or a retry.
+_ROLLOUT_ERROR_KIND_CANDIDATES = (
+    ("OverlongPromptError", "overlong_prompt"),
+    ("Timeout", "timeout"),
+    ("Connection", "connection"),
+    ("InfraError", "infra"),
+    ("SandboxError", "infra"),
+    ("TunnelError", "infra"),
+    ("ToolError", "tool"),
+    ("ModelResponseError", "model_response"),
+    ("ModelError", "model_response"),
+)
+_STATUS_CODE = re.compile(r"(?:Error code|status(?:_code)?)\s*[:=]?\s*(\d{3})\b", re.IGNORECASE)
+_ROLLOUT_ERROR_MESSAGE_CHARS = 500
+
+
+def _rollout_error_fact(error: Any) -> Optional[dict[str, Any]]:
+    """The error a verifiers rollout ended on, as a typed fact for the row: ``type`` (the raised class),
+    ``chain`` (the class chain, outermost first), ``status_code`` (an HTTP status named in the error, if any),
+    ``kind_candidate`` (``http_5xx``, ``http_429``, ``http_4xx``, then by class, first match in this order:
+    ``overlong_prompt``, ``timeout``, ``connection``, ``infra``, ``tool``, ``model_response``, else ``other``) and
+    ``message_head``.
+    None when the rollout ended without one."""
+    if not error:
+        return None
+    if isinstance(error, Mapping):
+        error_type = error.get("error") if isinstance(error.get("error"), str) else None
+        chain = error.get("error_chain_str") if isinstance(error.get("error_chain_str"), str) else error_type
+        message = error.get("message") or error.get("error_chain_repr") or error_type or ""
+        detail = f"{message} {error.get('error_chain_repr') or ''}"
+    else:
+        error_type, chain, message = None, None, str(error)
+        detail = message
+    match = _STATUS_CODE.search(detail)
+    status_code = int(match.group(1)) if match else None
+    if status_code is not None and status_code >= 500:
+        kind = "http_5xx"
+    elif status_code == 429:
+        kind = "http_429"
+    elif status_code is not None and status_code >= 400:
+        kind = "http_4xx"
+    else:
+        kind = next((kind for name, kind in _ROLLOUT_ERROR_KIND_CANDIDATES if name in (chain or "")), "other")
+    return {
+        "type": error_type,
+        "chain": chain,
+        "status_code": status_code,
+        "kind_candidate": kind,
+        "message_head": str(message)[:_ROLLOUT_ERROR_MESSAGE_CHARS],
+    }
+
+
 class VerifiersNeMoGymResponse(NeMoGymResponse):
     ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
@@ -235,6 +390,8 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
     exported_state: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
+    # The error the rollout ended on (``_rollout_error_fact``), absent when it ended without one.
+    rollout_error: Optional[dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
     parallel_tool_calls: bool = True
     tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
@@ -250,6 +407,87 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The error the rollout ended on, on the row itself so a run's rollout errors can be counted; recorded only, it
+    # does not change the reward or mask the sample.
+    rollout_error: Optional[dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
+
+
+# The reward functions of the request being scored that raised; verifiers scores such a function 0.0 and goes on.
+_RUBRIC_FAILURES: ContextVar[Optional[list[str]]] = ContextVar("verifiers_agent_rubric_failures", default=None)
+
+
+# The bookkeeping rubrics verifiers' own environments add (MultiTurnEnv, ToolEnv): metrics counted from the rollout's
+# state and messages, weight 0, no model asked. A member of exactly one of these classes is left out of the scoring.
+_MONITOR_RUBRICS = {
+    ("verifiers.legacy.envs.multiturn_env", "MultiTurnMonitorRubric"),
+    ("verifiers.legacy.envs.tool_env", "ToolMonitorRubric"),
+}
+
+
+def _monitor_rubric(rubric: Any) -> bool:
+    """Whether ``rubric`` is one of verifiers' own bookkeeping monitors, carrying only weight-0 metrics."""
+    weights = getattr(rubric, "weights", None)
+    return (
+        (type(rubric).__module__, type(rubric).__qualname__) in _MONITOR_RUBRICS
+        and isinstance(weights, list)
+        and all(weight == 0 for weight in weights)
+    )
+
+
+def _plain_rubrics(rubric: Any) -> Optional[list[Any]]:
+    """The plain verifiers ``Rubric`` objects a rubric scores with (itself, or a ``RubricGroup``'s members at any depth,
+    leaving out verifiers' own monitors), or None when any of them is another class.
+
+    A rubric subclass may score without its listed functions (a judge rubric asks a model), so only the two plain
+    classes are read.
+    """
+    if type(rubric) is getattr(vf, "RubricGroup", None):
+        plain: list[Any] = []
+        for member in getattr(rubric, "rubrics", None) or []:
+            if _monitor_rubric(member):
+                continue
+            members = _plain_rubrics(member)
+            if members is None:
+                return None
+            plain.extend(members)
+        return plain
+    if type(rubric) is getattr(vf, "Rubric", None) and isinstance(getattr(rubric, "funcs", None), list):
+        return [rubric]
+    return None
+
+
+def _watch_reward_func(func: Callable[..., Any]) -> Callable[..., Any]:
+    """``func``, recording in ``_RUBRIC_FAILURES`` that it raised before verifiers turns the error into 0.0."""
+
+    @functools.wraps(func)  # keeps the signature verifiers reads to pick the function's arguments
+    def watched(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            failures = _RUBRIC_FAILURES.get()
+            if failures is not None:
+                failures.append(getattr(func, "__name__", repr(func)))
+            raise
+
+    watched._ng_watched_reward_func = True
+    return watched
+
+
+def _programmatic_rubric(vf_env: Any) -> bool:
+    """Whether every reward function of the environment's rubric is synchronous, after watching each for errors.
+
+    Only such a rubric grades without asking a model, so only its rollouts carry the agent's own grading record. The
+    functions are wrapped in place once; any other rubric is left as it is and its rollouts carry no record.
+    """
+    rubrics = _plain_rubrics(getattr(vf_env, "rubric", None))
+    funcs = [f for rubric in rubrics or [] for f in rubric.funcs]
+    if not funcs or any(inspect.iscoroutinefunction(f) or not callable(f) for f in funcs):
+        return False
+    for rubric in rubrics:
+        rubric.funcs[:] = [
+            f if getattr(f, "_ng_watched_reward_func", False) else _watch_reward_func(f) for f in rubric.funcs
+        ]
+    return True
 
 
 class _NoStoreCookieJar(CookieJar):
@@ -264,9 +502,36 @@ class _NoStoreCookieJar(CookieJar):
         return None
 
 
+def _default_outcome_policy() -> StageOutcomePolicyConfig:
+    """What a rollout that ended on a failed policy-model call becomes, by the call's observed status and kind.
+
+    A model-side rejection (400, 413, 422) is the model's result and is counted as a zero. A reply that is worth
+    another attempt, and a call that got no reply, are retried by the collector while the rollout holds no answer.
+    Anything else leaves the rollout ungraded.
+    """
+    return StageOutcomePolicyConfig(
+        by_stage={
+            "agent": {
+                "by_failure_kind": {MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY},
+                "by_status_code": {
+                    **dict.fromkeys(filter(is_retryable_dependency_status, range(400, 600)), OutcomeAction.RETRY),
+                    **dict.fromkeys((400, 413, 422), OutcomeAction.COUNT_AS_ZERO),
+                },
+            }
+        }
+    )
+
+
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_outcome_policy)
     model_name: str = Field(default="", description="Model name")
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this agent's defaults."""
+        return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), value)
 
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
@@ -320,11 +585,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)
+    # Whether each loaded environment's rubric grades without asking a model (``_programmatic_rubric``).
+    programmatic_rubrics: dict[str, bool] = Field(default_factory=dict)
     client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
-            self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
+            env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
+            self.programmatic_rubrics[vf_env_id] = _programmatic_rubric(env)
+            self.envs_cache[vf_env_id] = env
         return self.envs_cache[vf_env_id]
 
     def _rollout_id_for(self, body: Any = None, request: Optional[Request] = None) -> Optional[str]:
@@ -402,7 +671,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         shares the cached client's transport, so calls remain correlated without
         accumulating a connection pool per rollout. ``rollout_id_from_run``
         returns ``None`` when capture is disabled, preserving the shared
-        unprefixed client path.
+        unprefixed client path, unless the rollout carries a training
+        framework's sampling values: its copy's URL carries them, and the
+        shared URL, built for every rollout, carries none.
 
         The per-run client BORROWS that transport rather than owning it, so it
         must never be closed: ``Client.close()`` closes the underlying httpx
@@ -426,11 +697,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
                 **self._policy_client_options(),
             )
-            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
+            self.client_cache[cache_key] = _ModelFailureObservingClient(openai_client)
 
         shared_client = self.client_cache[cache_key]
         rollout_id = self._rollout_id_for(body, request)
-        if rollout_id is None:
+        if rollout_id is None and current_model_sampling_segment() is None:
             return shared_client
 
         model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
@@ -642,6 +913,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 observations = AgentObservationBundle(source="verifiers", records=list(trajectory.invocations))
 
             return VerifiersNeMoGymResponse(
+                # A rollout with no assistant turn holds only the training placeholder: say so, so that a reader
+                # does not take it for a generated answer that a rerun would replace.
+                metadata=None if _assistant_turn_groups(output) else dict(NG_NO_GENERATION_METADATA),
                 ng_trajectory=trajectory,
                 ng_agent_observations=observations,
                 id=f"verifiers-{vf_env_id}-{task_idx}",
@@ -655,6 +929,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 reward=reward,
                 metrics=metrics,
                 exported_state=exported_state,
+                rollout_error=_rollout_error_fact(rollout_output.get("error")),
             )
         except Exception as e:
             logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
@@ -667,16 +942,68 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersAgentVerifyResponse:
-        resp = await self.responses(request, response, body)
+        failures: list[str] = []
+        model_calls = _ModelCallOutcome()
+        token = _RUBRIC_FAILURES.set(failures)
+        outcome_token = _MODEL_CALL_OUTCOME.set(model_calls)
+        try:
+            resp = await self.responses(request, response, body)
+        finally:
+            _RUBRIC_FAILURES.reset(token)
+            _MODEL_CALL_OUTCOME.reset(outcome_token)
 
-        return VerifiersAgentVerifyResponse(
-            ng_trajectory=resp.ng_trajectory,
-            ng_agent_observations=resp.ng_agent_observations,
-            responses_create_params=body.responses_create_params,
-            response=resp,
-            reward=resp.reward,
-        )
+        async def scored() -> VerifiersAgentVerifyResponse:
+            row: dict[str, Any] = {}
+            call_failure = model_calls.last_failure if resp.rollout_error else None
+            if failures:
+                # verifiers scored each reward function that raised as 0.0; that zero is no grade of the answer.
+                row = {
+                    "mask_sample": True,
+                    "failure_kind": VERIFIER_ERROR,
+                    "failure_reason": f"reward function raised: {', '.join(sorted(set(failures)))}",
+                }
+            elif call_failure is not None:
+                # The rollout ended on a policy-model call the SDK reported failing. The event says what was
+                # observed; the configured agent-stage policy says whether the zero is counted or the row is not
+                # graded, and the row keeps both for its readers.
+                decision = choose_stage_outcome(
+                    failure_kind=call_failure.failure_kind,
+                    http_status=call_failure.http_status,
+                    stage="agent",
+                    config=self.config.outcome_policy,
+                )
+                row = {
+                    "mask_sample": decision.action != OutcomeAction.COUNT_AS_ZERO,
+                    "failure_kind": call_failure.failure_kind,
+                    "failure_reason": call_failure.failure_reason,
+                    "failure_outcome_action": decision.action,
+                    "failure_outcome_attribution": decision.attribution,
+                    **FailureReportRow.fields(failure_report_for(call_failure)),
+                }
+            return VerifiersAgentVerifyResponse(
+                ng_trajectory=resp.ng_trajectory,
+                ng_agent_observations=resp.ng_agent_observations,
+                responses_create_params=body.responses_create_params,
+                response=resp,
+                # A selected zero is the result, whatever the rubric scored the rollout that errored.
+                reward=0.0 if row.get("failure_outcome_action") == OutcomeAction.COUNT_AS_ZERO else resp.reward,
+                rollout_error=resp.rollout_error,
+                **row,
+            )
+
+        # This agent is its own verifier: the rubric graded inside the rollout above. Its result is its grading
+        # record when every reward function is synchronous (no model asked), observed like a resources server's.
+        # Any other rubric is not observed at all, as before: an invocation without a record would read as ungraded.
+        vf_env_id = body.vf_env_id or self.config.vf_env_id
+        return await observe_verifier(
+            scored,
+            enabled=self._model_call_capture_enabled() and self.programmatic_rubrics.get(vf_env_id, False),
+            verifier_name=self.config.name,
+        )()
 
 
 if __name__ == "__main__":
     VerifiersAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = VerifiersAgent.run_webserver()  # noqa: F401

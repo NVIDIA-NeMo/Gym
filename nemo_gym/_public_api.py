@@ -28,13 +28,19 @@ from typing import Any
 def lazy_exports(package: str, exports: Mapping[str, str]) -> tuple[Callable[[str], Any], Callable[[], list[str]]]:
     """Build a package's ``__getattr__`` and ``__dir__`` for ``exports``, which maps each name to its submodule."""
 
+    # Built on first use and kept, so its record of warned names lasts and each old name warns once.
+    moved_getattr: Callable[[str], Any] | None = None
+
     def __getattr__(name: str) -> Any:
+        nonlocal moved_getattr
         submodule = exports.get(name)
         if submodule is None:
             # A name the package exported before it moved or was renamed resolves through MOVED_NAMES.
-            from nemo_gym._moved_paths import moved_names_getattr
+            if moved_getattr is None:
+                from nemo_gym._moved_paths import moved_names_getattr
 
-            return moved_names_getattr(package)(name)
+                moved_getattr = moved_names_getattr(package)
+            return moved_getattr(name)
         try:
             module = importlib.import_module(f"{package}.{submodule}")
         except AttributeError as exc:

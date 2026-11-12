@@ -16,7 +16,6 @@ venv_path=$1
 venv_python="${venv_path}/bin/python"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runtime_checker="${script_dir}/runtime_dependencies.py"
-uv_config="${script_dir}/uv.toml"
 if [[ ! -x "${venv_python}" ]]; then
     echo "OSWorld agent Python is not executable: ${venv_python}" >&2
     exit 2
@@ -25,18 +24,18 @@ if [[ ! -r "${runtime_checker}" ]]; then
     echo "OSWorld runtime dependency checker is not readable: ${runtime_checker}" >&2
     exit 2
 fi
-if [[ ! -r "${uv_config}" ]]; then
-    echo "OSWorld agent uv config is not readable: ${uv_config}" >&2
-    exit 2
-fi
 
-torch_backend="$("${venv_python}" -c \
-    'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["pip"]["torch-backend"])' \
-    "${uv_config}")"
-if [[ -z "${torch_backend}" ]]; then
-    echo "OSWorld agent Torch backend is empty in ${uv_config}" >&2
-    exit 2
-fi
+# uv interprets a relative UV_PROJECT_ENVIRONMENT from the selected project.
+# Normalize first so a caller running from benchmarks/osworld targets its venv.
+venv_path="$(cd "${venv_path}" && pwd)"
+venv_python="${venv_path}/bin/python"
+runtime_project="${script_dir}/runtime"
+for filename in pyproject.toml uv.lock; do
+    if [[ ! -r "${runtime_project}/${filename}" ]]; then
+        echo "Missing locked OSWorld runtime project: ${runtime_project}/${filename}" >&2
+        exit 2
+    fi
+done
 
 if "${venv_python}" "${runtime_checker}" check --quiet; then
     echo "[osworld-runtime-deps] Required versions are already installed and importable; skipping."
@@ -44,15 +43,11 @@ if "${venv_python}" "${runtime_checker}" check --quiet; then
 fi
 
 echo "[osworld-runtime-deps] Installing opt-in runtime dependencies..."
-# Match the backend selected by `gym env prefetch`. Without this flag, uv may
-# combine the CPU torch already in this venv with a CUDA torchvision wheel from
-# the default package index. The versions then look compatible while native
-# operators such as torchvision::nms cannot be loaded.
-uv pip install --no-config --torch-backend "${torch_backend}" --python "${venv_python}" \
-    "numpy>=2.1,<2.5" \
-    "cryptography~=46.0" \
-    "opencv-python-headless~=4.10.0.84" \
-    "torchvision==0.26.0"
+# This explicitly opted-in layer is independently locked. Preserve the base
+# agent packages while installing the exact runtime lock; never re-resolve them.
+# The runtime project binds both torch and torchvision to the CPU index.
+UV_PROJECT_ENVIRONMENT="${venv_path}" uv sync --locked --inexact \
+    --project "${runtime_project}" --python "${venv_python}" --no-dev
 
 "${venv_python}" "${runtime_checker}" check
 echo "[osworld-runtime-deps] Done."

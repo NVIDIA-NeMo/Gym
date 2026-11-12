@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import warnings
 
-from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.models.token_capture.consumer import trajectories_from_source
 from nemo_gym.models.token_capture.protocols import TokenSource
 from nemo_gym.models.token_capture.records import apply_capture_incomplete_verdict

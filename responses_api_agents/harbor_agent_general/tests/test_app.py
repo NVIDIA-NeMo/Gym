@@ -286,14 +286,98 @@ async def test_run_job_keeps_graded_agent_timeouts(tmp_path, monkeypatch, failur
     monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
     config = JobConfig(job_name="job", jobs_dir=tmp_path)
 
-    if reward is not None:
-        assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
-        assert result_path.exists()
-    else:
-        # The tests didn't run (e.g. the verifier timed out too): a failure Gym retries, as before.
-        with pytest.raises(RuntimeError, match="AgentTimeoutError"):
-            await HarborAgent.run_job(config.model_dump(mode="json"), "task")
-        assert not result_path.exists()
+    # Without a test result (the sandbox ends at the agent's deadline) the timeout is still the trial's outcome.
+    assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
+    assert result_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exception_type,message",
+    [
+        ("RuntimeError", "Sandbox is not running; call start() first."),
+        ("ConversationRunError", "LLMTimeoutError: the LLM request timed out after 5 retries"),
+    ],
+    ids=["sandbox-not-running-without-a-deadline", "llm-timeout-after-retries"],
+)
+async def test_run_job_retries_the_harbor_failures_that_are_not_agent_timeouts(
+    tmp_path, monkeypatch, exception_type, message
+):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    failure = SimpleNamespace(exception_type=exception_type, exception_message=message)
+    trial = SimpleNamespace(task_name="task", exception_info=failure, verifier_result=None, step_results=[])
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match=exception_type):
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    assert not result_path.exists(), "Gym retries must not reuse the failed trial's result"
+
+
+def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_path, monkeypatch) -> None:
+    """The row is scored 0.0 and completed, unmasked, named agent_timeout: no resume runs it again."""
+    from responses_api_agents.harbor_agent_general import app
+
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    agent = HarborAgent.model_construct()
+    agent.config = app.HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "tasks"}],
+                "agents": [{"name": "opencode", "model_name": "native-model"}],
+            },
+        }
+    )
+    task_dir = tmp_path / "tasks" / "task"
+    task_dir.mkdir(parents=True)
+    app.TaskPaths(task_dir).instruction_path.write_text("Do the task.")
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    app.TrialPaths(trial_dir).result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    trial = SimpleNamespace(
+        id="trial-1",
+        task_name="task",
+        config=SimpleNamespace(task=SimpleNamespace(get_local_path=lambda: task_dir)),
+        exception_info=timeout,
+        verifier_result=None,
+        step_results=[],
+        finished_at=None,
+        compute_token_cost_totals=lambda: (0, 0, 0, 0),
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "task",
+            app.TASK_INDEX_KEY_NAME: 0,
+            app.ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+    )
+
+    row = agent.success_response(body, trial_dir).model_dump()
+    assert (row["reward"], row["failure_kind"], row["evaluation_completed"], row["mask_sample"]) == (
+        0.0,
+        "agent_timeout",
+        True,
+        False,
+    )
+    assert row["response"]["output"] == []
+    assert row["atif_conversion"]["warnings"] == ["the agent timed out before it wrote its trajectory"]
+    assert "_ng_failure_class" not in row
 
 
 @pytest.mark.asyncio
@@ -380,6 +464,17 @@ def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: 
     response = agent.failure_response(body, RuntimeError("trial failed"))
     assert response.response.model == "native-model"
     assert response.response.status == "failed"
+    assert response.failure_reason == "RuntimeError: trial failed"
+
+    # A Ray task error wraps the worker's exception: the reason names Harbor's own failure, not the wrapper.
+    trial = RuntimeError("Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds")
+    wrapped = RuntimeError("ray task traceback ...")
+    wrapped.cause = trial
+    timed_out = agent.failure_response(body, wrapped)
+    assert timed_out.failure_reason == (
+        "RuntimeError: Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds"
+    )
+    assert timed_out.model_dump()["_ng_failure_class"] == "harbor_failed"
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -498,3 +593,53 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
         if nemo_gym.client.http_client.is_global_aiohttp_client_setup():
             loop.run_until_complete(nemo_gym.client.http_client.get_global_aiohttp_client().close())
         loop.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "running, phase",
+    [
+        ({"environment_setup": (True, False)}, "setup"),
+        ({"environment_setup": (True, True), "agent_setup": (True, True), "agent_execution": (True, False)}, "agent"),
+        ({"agent_execution": (True, True), "verifier": (True, False)}, "verify"),
+        ({"agent_execution": (True, True)}, "unknown"),
+    ],
+)
+async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, running, phase):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text("{}")
+    timings = {
+        name: SimpleNamespace(started_at="t0" if started else None, finished_at="t1" if finished else None)
+        for name, (started, finished) in running.items()
+    }
+    failure = SimpleNamespace(exception_type="SandboxApiException", exception_message="sandbox ended")
+    trial = SimpleNamespace(task_name="task", exception_info=failure, step_results=[], **timings)
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    message = str(raised.value)
+    assert message.startswith(f"[sandbox phase={phase} ")
+    assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice

@@ -11,8 +11,8 @@ from typing import Any, Iterable
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import EnvironmentKind, load_manifest
 from nemo_gym.environment.onboarding import VerifierReport
+from nemo_gym.environment.registry import EnvironmentCatalogEntry, discover_environment_catalog
 from nemo_gym.environment.validation import EnvironmentValidationReport
-from nemo_gym.registry import EnvironmentCatalogEntry, discover_environment_catalog
 
 
 class EnvironmentPublicationError(ConfigError):

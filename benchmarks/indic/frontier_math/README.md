@@ -10,7 +10,8 @@ questions; report coverage for incomplete runs.
 Run from the Gym repository root:
 
 ```bash
-python -m pip install -r benchmarks/indic/frontier_math/requirements.txt
+uv sync --locked --project benchmarks/indic/frontier_math
+source benchmarks/indic/frontier_math/.venv/bin/activate
 gym eval prepare --benchmark indic/frontier_math
 ```
 
@@ -105,6 +106,6 @@ normalization uses the verifier's pinned dependencies.
 ## Test
 
 ```bash
-python -m pytest tests/unit_tests/test_indic_frontier_math.py
+python -m pytest tests/unit_tests/benchmarks/test_indic_frontier_math.py
 gym env test +entrypoint=resources_servers/frontiermath +should_validate_data=true
 ```

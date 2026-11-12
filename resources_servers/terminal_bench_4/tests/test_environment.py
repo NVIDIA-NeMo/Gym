@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
 from resources_servers.terminal_bench_4 import environment as module
 from resources_servers.terminal_bench_4.compose_config import merge_patch, resolve_compose
 from resources_servers.terminal_bench_4.environment import (
@@ -22,6 +24,32 @@ from resources_servers.terminal_bench_4.task import TaskSettings
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
+
+
+async def test_preparation_shares_placement_with_verifier_and_logs_helper(tmp_path, monkeypatch):
+    from resources_servers.terminal_bench_4 import lifecycle, shared_logs
+
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"efs_logs_host_path": "/mnt/efs/data/shared"})
+    monkeypatch.setattr(module.Environment, "start", AsyncMock())
+    monkeypatch.setattr(module.Environment, "healthcheck", AsyncMock())
+    helper = MagicMock()
+    monkeypatch.setattr(shared_logs, "AsyncSandbox", helper)
+    monkeypatch.setattr(shared_logs.SharedLogs, "start", AsyncMock())
+    session = lifecycle.Session(
+        identity="one",
+        owner="owner",
+        request=SimpleNamespace(task_name=env.task.name, task_ref="ref"),
+        session_id="episode",
+        directory=tmp_path / "trial",
+        slots=asyncio.Semaphore(1),
+        config=SimpleNamespace(environment=env.config),
+    )
+    await lifecycle.prepare_session(session, SimpleNamespace(load=AsyncMock(return_value=env.task)))
+    group = session.environment.placement_group
+    assert session.verifier_environment.placement_group == group
+    assert helper.call_args.args[1].metadata[PLACEMENT_GROUP_KEY] == group
+    assert session.environment.build_spec().metadata[PLACEMENT_GROUP_KEY] == group
+    assert session.verifier_environment.build_spec().metadata[PLACEMENT_GROUP_KEY] == group
 
 
 def profile_compose_overrides(benchmark):
@@ -118,6 +146,7 @@ def test_specs_keep_resource_units_and_task_deployment(tmp_path, monkeypatch, ag
         "sandbox_provider_options": {"resource_requests": "limits"},
         "sandbox_env_by_task": {"test": {"OVERRIDE": "task"}},
         "sandbox_env": {"OVERRIDE": "global"},
+        "sandbox_metadata": {PLACEMENT_GROUP_KEY: "must-not-override"},
     }
     env, *_ = make_environment(
         tmp_path,
@@ -128,9 +157,14 @@ def test_specs_keep_resource_units_and_task_deployment(tmp_path, monkeypatch, ag
             "verifier": {"environment": {"docker_image": "public/verifier", "gpus": verifier_gpus}},
         },
     )
-    verifier = Environment(env.task, env.config, "verify", tmp_path, verifier=True)
+    verifier = Environment(
+        env.task, env.config, "verify", tmp_path, verifier=True, placement_group=env.placement_group
+    )
     agent_spec, verifier_spec = env.build_spec(), verifier.build_spec()
     assert env.pool == verifier.pool == pool
+    assert agent_spec.metadata[PLACEMENT_GROUP_KEY] == verifier_spec.metadata[PLACEMENT_GROUP_KEY]
+    assert agent_spec.metadata[PLACEMENT_GROUP_KEY] == env.placement_group
+    assert Environment(env.task, env.config, "other", tmp_path).placement_group != env.placement_group
     assert agent_spec.resources.cpu == 2 and agent_spec.resources.memory_mib == 4096
     assert agent_spec.resources.disk_gib == 15
     assert agent_spec.resources.gpu == (agent_gpus or None)
@@ -197,10 +231,12 @@ async def test_cpu_compose_services_follow_gpu_verifier_deployment(tmp_path, mon
     env, _, _, create = make_environment(tmp_path, monkeypatch, compose=True, config={"sandbox_split_endpoints": True})
     await env.start()
     connection = create.call_args.args[0]["opensandbox"]["connection"]
+    assert create.call_args.kwargs["placement_group"] == env.placement_group
     assert connection["domain"] == "gpu.invalid"
     assert connection["api_key"] == "gpu-credential"
     for spec in create.call_args.kwargs["service_specs"].values():
         assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == "gpu"
+        assert spec.metadata[PLACEMENT_GROUP_KEY] == env.placement_group
         assert spec.resources.gpu is None
 
 

@@ -35,7 +35,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
-from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ResponsesConverter, SimpleResponsesAPIModel
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -49,7 +50,7 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
     correlate_via_user_field: bool = False
-    """Forward the current rollout id (see ``nemo_gym.core.episode``) as
+    """Forward the current rollout id (see ``nemo_gym.core.episode_context``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
     provider that inspects it can correlate per-turn calls back to the same
     rollout. A no-op for any provider that ignores ``user``. Never overrides
@@ -63,8 +64,10 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
         )
-        self._converter = ResponsesConverter(
+        self._converter = ChatCompletionsConverter(
             return_token_id_information=False,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,
@@ -88,6 +91,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
             responses_create_params=body,
             chat_completion=chat_completion_response,
         )
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return response.model_copy(update={"created_at": int(time())})
 
     async def chat_completions(

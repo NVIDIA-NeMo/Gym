@@ -71,7 +71,8 @@ resources_servers/my_weather_tool/
 |   +-- __init__.py
 |   +-- test_app.py             # Verifier fixture test
 |   +-- verifier_cases.jsonl    # Verifier test cases
-+-- requirements.txt            # Python dependencies
++-- pyproject.toml              # Python dependencies
++-- uv.lock                     # Locked dependencies
 +-- README.md                   # Documentation
 ```
 
@@ -189,7 +190,7 @@ from typing import ClassVar
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -344,11 +345,14 @@ The agent entry references the resource server and model server by name, wiring 
 
 ## 4. Add Dependencies (Optional)
 
-If your server needs external packages, add them to `requirements.txt`:
+If your server needs external packages, add them to `pyproject.toml`, then run `uv lock` and commit `uv.lock`:
 
-```text
--e nemo-gym[dev] @ ../../
-# Add any other dependencies here
+```toml
+[project]
+dependencies = [
+    "nemo-gym[dev]",
+    # Add any other dependencies here
+]
 ```
 
 ---

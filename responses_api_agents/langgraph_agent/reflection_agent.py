@@ -20,20 +20,43 @@ Generates an initial answer, critiques it, then revises. Repeats until
 <answer> tag found or max_reflections reached.
 
 Graph: generate -> should_continue? -> reflect -> generate (revised) -> ...
+
+Retained notice for the original tutorial material:
+MIT License
+
+Copyright (c) 2024 LangChain, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
 
 from typing import Annotated, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
-from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import ConfigDict
 
-from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import raise_for_status
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 
 
 class ReflectionAgentConfig(LangGraphAgentConfig):
@@ -57,6 +80,7 @@ class ReflectionState(TypedDict):
     policy_outputs: list
     policy_usages: list
     cookies: dict
+    model_url_path: str
     reflections: int
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
@@ -79,7 +103,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=state["model_url_path"],
                 json=request_body,
                 cookies=state["cookies"],
             )
@@ -97,7 +121,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             return {
                 "messages": [AIMessage(content=text)],
                 "policy_outputs": all_outputs,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": resp.cookies,
                 "reflections": state["reflections"],
                 "last_policy_response": policy_response,
@@ -119,7 +143,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=state["model_url_path"],
                 json=request_body,
                 cookies=state["cookies"],
             )
@@ -138,7 +162,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [reflection_prompt] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": resp.cookies,
                 "reflections": state["reflections"] + 1,
                 "last_policy_response": policy_response,
@@ -192,6 +216,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             "policy_outputs": policy_outputs,
             "policy_usages": [],
             "cookies": cookies,
+            "model_url_path": "/v1/responses",
             "reflections": 0,
             "request_body": body,
             "last_policy_response": None,
@@ -200,36 +225,9 @@ class ReflectionAgent(LangGraphAgentAdapter):
     def extract_outputs(self, final_state: dict) -> list:
         return response_output_items(final_state["policy_outputs"])
 
-    async def run(self, request: Request, body: ReflectionAgentRunRequest) -> ReflectionAgentVerifyResponse:
-        cookies = request.cookies
-
-        seed = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed)
-        cookies = seed.cookies
-
-        resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
-        )
-        await raise_for_status(resp)
-
-        verify_request = ReflectionAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(resp)}
-        )
-
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=resp.cookies,
-        )
-        await raise_for_status(verify)
-        return ReflectionAgentVerifyResponse.model_validate(await get_response_json(verify))
-
 
 if __name__ == "__main__":
     ReflectionAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ReflectionAgent.run_webserver()  # noqa: F401

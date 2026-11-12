@@ -25,8 +25,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
-from responses_api_models.vllm_model.app import VLLMConverter
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
 
 
 class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
@@ -46,7 +45,7 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             api_version=self.config.default_query.get("api-version"),
         )
-        self._converter = VLLMConverter(
+        self._converter = ChatCompletionsConverter(
             return_token_id_information=False,
             custom_tool_strategy=self.config.custom_tool_strategy,
         )

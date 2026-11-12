@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 
 
 SOURCE = "claude_code"
+# Compaction format compatibility: tested with Claude Code 2.1.108.
+# This covers the request markers and persisted summary prefix/suffix below;
+# revalidate them together when changing the runtime version.
 _COMPACTION_PROMPT_MARKERS = (
     "Your task is to create a detailed summary of this conversation.",
     "Your task is to create a detailed summary of the conversation so far",
@@ -55,7 +58,7 @@ _COMPACTION_SUFFIX_RE = re.compile(
     r"(?:\n\nYour REPL VM state has been cleared as part of this compaction\. "
     r"Variables defined in REPL calls before this point are no longer accessible "
     r"— redefine any you still need\.)?"
-    r"(?:\n\nContinue the conversation from where it left off without asking the user "
+    r"(?:\n{1,2}Continue the conversation from where it left off without asking the user "
     r"any further questions\. Resume directly — do not acknowledge the summary, do not recap "
     r'what was happening, do not preface with "I\'ll continue" or similar\. '
     r"Pick up the last task as if the break never happened\.)?"

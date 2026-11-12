@@ -22,15 +22,15 @@ trace_context=True)`` names the agent's current span in the URL instead, and
 opens the server span.
 """
 
-import re
-
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
-from nemo_gym.client.server_client import _TRACEPARENT_PATTERN, apply_rollout_prefix, trace_context_path_segment
-from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.client.server_client import apply_rollout_prefix, trace_context_path_segment
+from nemo_gym.core.correlation import TRACEPARENT_PATTERN
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, model_sampling_context
 from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.trace_context import (
@@ -78,7 +78,36 @@ class TestProducer:
         assert no_rollout == f"http://m:8000/ng-trace/{traceparent}"
         assert shared == "http://m:8000", "a URL reused across rollouts must not pin them to this span"
         assert shared_with_rollout == "http://m:8000/ng-rollout/0-0"
-        assert re.fullmatch(_TRACEPARENT_PATTERN, traceparent)
+        assert TRACEPARENT_PATTERN.match(traceparent)
+
+    def test_segment_is_empty_for_a_traceparent_with_a_trailing_newline(self, monkeypatch):
+        import nemo_gym.client.server_client as server_client
+        import nemo_gym.telemetry.contrib as contrib
+
+        monkeypatch.setattr(server_client, "is_trace_exporter_active", lambda: True)
+        monkeypatch.setattr(
+            contrib, "inject_trace_context", lambda carrier: carrier.update(traceparent=TRACEPARENT + "\n")
+        )
+        assert trace_context_path_segment() == ""
+
+        monkeypatch.setattr(contrib, "inject_trace_context", lambda carrier: carrier.update(traceparent=TRACEPARENT))
+        assert trace_context_path_segment() == f"/ng-trace/{TRACEPARENT}"
+
+    @requires_lens
+    def test_the_sampling_segment_comes_before_the_trace_segment(self, traces):  # noqa: F811
+        from opentelemetry import trace
+
+        with (
+            trace.get_tracer("test").start_as_current_span("agent.run"),
+            model_sampling_context(MODEL_SAMPLING_NULL),
+        ):
+            segment = trace_context_path_segment()
+            url = apply_rollout_prefix("http://m:8000", "0-0")
+            shared = apply_rollout_prefix("http://m:8000", None, trace_context=False)
+        # The order nemo_gym.core.correlation reads: the sampling segment, then the trace segment.
+        assert url == f"http://m:8000/ng-rollout/0-0/ng-sampling/null{segment}"
+        # A URL reused across rollouts must not sample later rollouts with this one's values either.
+        assert shared == "http://m:8000"
 
 
 class TestMiddlewarePathRewrite:
@@ -105,6 +134,21 @@ class TestMiddlewarePathRewrite:
                 "/ng-rollout/0-0/training-token-capture/v1/chat/completions",
             ),
             (f"/ng-trace/{TRACEPARENT}/v1/models", "/v1/models"),
+            (
+                f"/ng-rollout/0-0/ng-agent-instance/judge.1/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+                "/ng-rollout/0-0/ng-agent-instance/judge.1/training-token-capture/v1/responses",
+            ),
+            # The sampling segment comes before the trace segment (nemo_gym.core.correlation), with or without a
+            # rollout prefix; it stays in the path for the Model Server's sampling middleware.
+            (
+                f"/ng-rollout/0-0/ng-sampling/null/ng-trace/{TRACEPARENT}/v1/responses",
+                "/ng-rollout/0-0/ng-sampling/null/v1/responses",
+            ),
+            (f"/ng-sampling/null/ng-trace/{TRACEPARENT}/v1/messages", "/ng-sampling/null/v1/messages"),
+            (
+                f"/ng-rollout/0-0/ng-agent-instance/judge.1/ng-sampling/null/ng-trace/{TRACEPARENT}/v1/responses",
+                "/ng-rollout/0-0/ng-agent-instance/judge.1/ng-sampling/null/v1/responses",
+            ),
         ],
     )
     async def test_strips_the_segment_and_adds_the_header(self, recorded, path, routed):
@@ -128,7 +172,7 @@ class TestMiddlewarePathRewrite:
         "path",
         [
             "/ng-rollout/0-0/v1/responses",
-            "/ng-trace/not-a-traceparent/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/judge/v1/responses",
             f"/v1/ng-trace/{TRACEPARENT}/responses",
         ],
     )
@@ -137,6 +181,37 @@ class TestMiddlewarePathRewrite:
         await app({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, None, None)
         assert seen["path"] == path
         assert seen["headers"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/ng-trace/not-a-traceparent/v1/responses",
+            "/ng-rollout/0-0/training-token-capture/ng-agent-instance/judge/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/v1/responses",
+            # What a client's "%0A" decodes to: the name or traceparent must not keep the newline.
+            "/ng-rollout/0-0/ng-agent-instance/judge\n/v1/responses",
+            f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}\n/v1/responses",
+            # A malformed value is malformed whether or not a routed path follows it.
+            "/ng-trace/not-a-traceparent",
+            "/ng-rollout/0-0/ng-agent-instance/Judge",
+            # The sampling segment precedes the trace segment, appears once and carries a value.
+            f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}/ng-sampling/null/v1/responses",
+            "/ng-rollout/0-0/ng-sampling/null/ng-sampling/null/v1/responses",
+            "/ng-rollout/0-0/ng-sampling/v1/responses",
+        ],
+    )
+    async def test_answers_a_malformed_prefix_with_404(self, recorded, path):
+        seen, app = recorded
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await app({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, None, send)
+        assert seen == {}
+        assert sent[0]["status"] == 404
 
 
 class TestRedirectLocation:
@@ -162,6 +237,10 @@ class TestRedirectLocation:
                 "http://m:8000/ng-rollout/0-0/training-token-capture/v1/responses",
                 f"http://m:8000/ng-rollout/0-0/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
             ),
+            (
+                "/ng-rollout/0-0/ng-agent-instance/user/training-token-capture/v1/responses",
+                f"/ng-rollout/0-0/ng-agent-instance/user/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+            ),
         ],
     )
     def test_segment_goes_after_a_restored_prefix_or_at_the_root(self, location, expected):
@@ -176,6 +255,11 @@ class TestRedirectLocation:
 
     def test_non_redirect_responses_are_untouched(self):
         assert self._restored("/v1/responses", status=200) == "/v1/responses"
+
+    def test_a_target_with_a_malformed_prefix_is_untouched(self):
+        # The follow-up request is refused with its own reason, not one the segment would introduce.
+        location = "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses"
+        assert self._restored(location) == location
 
 
 @requires_lens

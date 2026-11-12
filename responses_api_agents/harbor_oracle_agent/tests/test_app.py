@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.agents import raises_agent_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.data.tasks.harbor import answer_write_command
 from nemo_gym.sandbox import TRANSFER_USER, SandboxExecResult
@@ -404,7 +405,8 @@ def test_a_lost_sandbox_on_the_answer_write_is_not_scored(monkeypatch):
     agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
-    with pytest.raises(module.SandboxUnavailableError, match="could not write answer.md in /app"):
+    # The agent route reports the lost sandbox as its typed failure, caused by the original error.
+    with raises_agent_failure(module.SandboxUnavailableError, match="could not write answer.md in /app"):
         client.post("/v1/responses", json=RESPONSES_BODY)
 
 
@@ -426,7 +428,7 @@ def test_a_lost_sandbox_answering_the_answer_probe_or_read_is_not_scored(monkeyp
     agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
-    with pytest.raises(module.SandboxUnavailableError, match=message):
+    with raises_agent_failure(module.SandboxUnavailableError, match=message):
         client.post("/v1/responses", json=RESPONSES_BODY)
     assert sandbox.files == {}
 
@@ -525,7 +527,8 @@ def test_responses_requires_seeded_session(monkeypatch):
 def test_legacy_run_route_is_not_supported(monkeypatch):
     agent, _, _ = make_agent(monkeypatch)
     response = TestClient(agent.setup_webserver()).post("/run", json={"responses_create_params": {"input": []}})
-    assert response.status_code == 501
+    assert response.status_code == 422
+    assert "OracleAgent does not implement /run" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("cap,expected", [(None, 7200.0), (8000.0, 7200.0), (60.0, 60.0), (0.5, 0.5)])
@@ -695,3 +698,13 @@ def test_concurrent_oracle_traces_name_their_task_and_episode(monkeypatch, caplo
         "world: episode r2-a1: running /solution/solve.sh as the sandbox default user in /app with a 120s budget",
         "world: episode r2-a1: /solution/solve.sh exited 3 (failed)",
     ]
+
+
+def test_several_workers_are_allowed() -> None:
+    """Oracle sessions are agent sessions, which session routing follows by agent_session_id."""
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    config = OracleAgentConfig(host="0.0.0.0", port=8081, entrypoint="", name="harbor_oracle_agent", num_workers=2)
+    agent = OracleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    refuse_unsupported_num_workers(agent)
+    assert agent.routes_sessions_to_owner

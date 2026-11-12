@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.requests import Request
 
@@ -867,10 +868,16 @@ async def test_close_preserves_artifacts_collected_after_activation_failure(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completed_calls", [0, 1])
-async def test_timeout_without_trajectory_requires_completed_model_response(completed_calls):
+@pytest.mark.parametrize("trajectory_error", [False, True])
+async def test_timeout_without_trajectory_requires_completed_model_response(
+    completed_calls: int, trajectory_error: bool
+) -> None:
+    """Classify model-free timeouts while preserving failed trajectory reads."""
     server, session = agent(), state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
-    artifacts = PoolArtifacts("", "", "", None, completed_model_calls=completed_calls)
+    artifacts = PoolArtifacts(
+        "", "", "", None, trajectory_error=trajectory_error, completed_model_calls=completed_calls
+    )
     with (
         patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
         patch.object(SandboxSession, "execute", return_value=artifacts),
@@ -879,6 +886,9 @@ async def test_timeout_without_trajectory_requires_completed_model_response(comp
             with pytest.raises(RuntimeError, match="before any model response"):
                 await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
             assert session.failure == "RuntimeError"
+        elif trajectory_error:
+            with pytest.raises(RuntimeError, match="readable root trajectory"):
+                await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         else:
             response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
             assert response.status == "incomplete" and response.output == []
@@ -935,3 +945,9 @@ async def test_eula_opt_in_is_required_before_any_sandbox_work(borrowed):
     config.assert_not_called()
     provider.assert_not_called()
     install.assert_not_called()
+
+
+def test_legacy_run_route_is_not_supported():
+    response = TestClient(agent().setup_webserver()).post("/run", json={"responses_create_params": {"input": []}})
+    assert response.status_code == 422
+    assert "PoolAgent does not implement /run" in response.json()["detail"]

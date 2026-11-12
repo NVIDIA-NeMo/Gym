@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 import shlex
 import shutil
 import sys
@@ -15,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemo_gym.agents import SandboxSession
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.pool_agent.configuration import pool_config
 from responses_api_agents.pool_agent.sandbox import PoolSession
@@ -61,6 +62,9 @@ if mode != 'missing':
 
 class LocalSandbox:
     """Only substitute installation; execute every other sandbox command locally."""
+
+    # Uploads are local file copies, so a stop request never waits behind a running exec.
+    uploads_independent_of_execs = True
 
     def __init__(self):
         self.events = []
@@ -136,6 +140,35 @@ async def execute(state, timeout=10):
     )
 
 
+@pytest.mark.parametrize("resolve", [True, False])
+async def test_stage_supplies_its_own_runner_interpreter(tmp_path, monkeypatch, resolve):
+    state, sandbox = session(tmp_path)
+    await state.install(version="v1.0.16", accept_eula=True, timeout=10)
+    bindir = tmp_path / "interpreter resolver"
+    bindir.mkdir()
+    resolver = bindir / "python3"
+    resolver.write_text("#!/bin/sh\n" + (f"printf '%s\\n' {shlex.quote(sys.executable)}\n" if resolve else "exit 1\n"))
+    resolver.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+    command = await state.stage(prompt="task input", config="{}")
+    assert command.argv[1:] == [
+        "-I",
+        f"{state.session.session_dir}/sandbox_runner",
+        state.session.session_dir,
+        state.session.workdir,
+    ]
+    if resolve:
+        interpreter = Path(command.argv[0])
+        assert interpreter.name == "pool-runner"
+        assert interpreter.is_symlink()
+        result = await sandbox.exec(shlex.join([str(interpreter), "-I", "-c", "print('runner works')"]))
+        assert result.return_code == 0
+        assert result.stdout.strip() == "runner works"
+    else:
+        assert command.argv[0] == "python3"
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
 @pytest.mark.parametrize("ending", ["normal", "timeout", "close", "missing", "stubborn"])
@@ -143,13 +176,18 @@ async def test_real_stage_run_collect_close(tmp_path, ending):
     mode = "term" if ending in ("timeout", "close") else ending
     state, sandbox = session(tmp_path, mode)
     await state.install(version="v1.0.16", accept_eula=True, timeout=10)
-    task = asyncio.create_task(execute(state, timeout=2 if ending in ("timeout", "stubborn") else 20))
+    # The timeout cases expire the activation on purpose once the fake Pool is ready, so no deadline races the
+    # runner, its proxy and the fake Pool starting up and installing the TERM handler.
+    task = asyncio.create_task(execute(state, timeout=60))
     try:
-        if ending == "close":
-            async with asyncio.timeout(10):
+        if ending in ("close", "timeout", "stubborn"):
+            async with asyncio.timeout(30):
                 while not (Path(state.session.workdir) / "ready").exists():
                     await asyncio.sleep(0.02)
+        if ending == "close":
             await asyncio.wait_for(state.close(timeout=10), timeout=30)
+        elif ending in ("timeout", "stubborn"):
+            assert await state.session.expire(timeout=10)
         artifacts = await asyncio.wait_for(task, timeout=30)
         assert state.session.cleanup_confirmed
         assert artifacts.runner_pid > 0
@@ -221,7 +259,9 @@ async def test_bad_termination_evidence_never_collects_before_confirmation(tmp_p
 
     sandbox.download = read
     try:
-        with pytest.raises(RuntimeError):
+        # A receipt that denies cleanup is the typed harness-termination failure of the shared sandbox session; a
+        # malformed one is refused as before.
+        with pytest.raises(NgFailureEvent if confirmed is False else RuntimeError):
             await asyncio.wait_for(execute(state), timeout=30)
         assert state.session.artifacts is None
         assert "read stdout.jsonl" not in sandbox.events

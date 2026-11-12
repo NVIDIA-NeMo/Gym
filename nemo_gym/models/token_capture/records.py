@@ -45,14 +45,14 @@ NAMESPACE_TOOL_DELIMITER = "__"
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 
-# Keep this at version 1 while the initial record contract is under development.
 # Writers and readers may run in different processes or repositories.
 # Records may outlive a deployment.
 # Readers must reject unsupported newer records.
 # ``extra="allow"`` otherwise hides unknown fields.
-TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
+# Version 2 renamed ``rollout_id`` to ``capture_key``; version 1 rows are still read.
+TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 2
 
-# Version 1 is the only supported initial schema.
+# Version 1 is the oldest schema written in production.
 TOKEN_ENTRY_MIN_SCHEMA_VERSION = 1
 
 # Increment this version when the digest encoding changes.
@@ -161,7 +161,7 @@ class EngineRefusalRecord(BaseModel):
 class TokenEntry(BaseModel):
     """Store one model call's content and token metadata.
 
-    The rollout id identifies the training sample.
+    The capture key identifies the training sample: one attempt of one rollout.
     The model call id joins evaluation context.
     ``output_items`` preserves assistant text and tool calls.
     Text-based penalties require that content.
@@ -173,7 +173,7 @@ class TokenEntry(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     schema_version: int = TOKEN_ENTRY_RECORD_SCHEMA_VERSION
-    rollout_id: str
+    capture_key: str
     model_call_id: str
     model: str = ""
     prompt_token_ids: list[int]
@@ -237,6 +237,15 @@ class TokenEntry(BaseModel):
     prefix_requested: bool = False
     # This is true only when generation-time prompt_token_ids prove prefix application.
     prefix_supplied: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_version_1_key(cls, data: Any) -> Any:
+        """Read the capture key of a version 1 row, which names it ``rollout_id``."""
+        if isinstance(data, dict) and data.get("schema_version") == 1 and "capture_key" not in data:
+            data = dict(data)
+            data["capture_key"] = data.pop("rollout_id", None)
+        return data
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":

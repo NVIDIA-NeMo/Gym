@@ -62,7 +62,7 @@ def test_importing_a_package_loads_none_of_its_lazy_submodules(package: str) -> 
     ).format(p=package, lazy=lazy)
     loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     # sandbox's existing eager exports import these submodules; nothing else may load.
-    eager = {"sandbox": ["compose_fields", "config", "providers.base", "utils"]}
+    eager = {"sandbox": ["adapters.docker_compose", "compose_fields", "config", "failures", "providers.base", "utils"]}
     assert loaded.strip() == repr(eager.get(package, []))
 
 
@@ -112,9 +112,12 @@ def _code_outside_the_library() -> list[Path]:
 
 
 def test_the_librarys_tests_import_from_the_module_that_defines_each_name() -> None:
-    # tests/ imports like nemo_gym/: from the defining module, which is also what it patches.
+    # tests/ imports like nemo_gym/: from the defining module, which is also what it patches. The exporter guide's
+    # examples are the guide's code blocks byte for byte, so they import like code outside the library.
     found = []
     for path in _tracked_python("tests"):
+        if path.is_relative_to("tests/unit_tests/artifacts/exporter_guide"):
+            continue
         try:
             tree = ast.parse((REPO / path).read_text(errors="replace"))
         except SyntaxError:

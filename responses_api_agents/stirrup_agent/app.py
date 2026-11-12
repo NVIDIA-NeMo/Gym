@@ -20,13 +20,15 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 import asyncio
 import time
 from asyncio import Semaphore
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
@@ -36,10 +38,12 @@ from nemo_gym.agents import (
     Body,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
     sandbox_server_url,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -55,14 +59,16 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -138,6 +144,17 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
             records.append(ToolCallObservation.model_validate(tool))
         except Exception as error:
             failed(f"tool_calls[{index}]", error)
+    for index, compaction in enumerate(raw.get("compactions") or []):
+        try:
+            event = ContextCompactionObservation.model_validate(
+                {
+                    **compaction,
+                    "model_calls": [{**ref, "model_ref": model_server} for ref in compaction.get("model_calls", [])],
+                }
+            )
+            records.append(event)
+        except Exception as error:
+            failed(f"compactions[{index}]", error)
     return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
 
 
@@ -154,6 +171,10 @@ _REMOVED_OPTIONS = [
     "model_id",
     "task",
 ]
+_REMOVED_OPTION_MESSAGE = (
+    "Stirrup config includes removed options that are no longer supported: `{name}`\n"
+    "See migration guide for details: benchmarks/gdpval/README.md"
+)
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -162,11 +183,19 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_options(cls, data: Any) -> Any:
-        removed = [f"`{name}`" for name in _REMOVED_OPTIONS if name in (data or {})]
+        removed = [name for name in _REMOVED_OPTIONS if name in (data or {})]
         if removed:
-            raise ValueError(
-                f"Stirrup config includes removed options that are no longer supported: {', '.join(removed)}\n"
-                "See migration guide for details: benchmarks/gdpval/README.md"
+            # One error per option, located at its own key, so a config check names the exact field to delete.
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError("removed_option", _REMOVED_OPTION_MESSAGE, {"name": name}),
+                        loc=(name,),
+                        input=data[name],
+                    )
+                    for name in removed
+                ],
             )
         return data
 
@@ -255,6 +284,8 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
 
 class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     config: StirrupAgentWrapperConfig
+    # The runner runs inside the sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -339,6 +370,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("invalid_output"):
+            # Output of the policy model the harness cannot use: graded as the model's result, never retried.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return super().classify_outcome(native_result)
 
     async def _run_sandbox_episode(
@@ -388,10 +422,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "truncation_recovery": self.config.truncation_recovery,
             },
         }
+        # A task row's own budget shortens the run; it never extends the configured one.
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds)
         try:
             output = await state.execute(
                 payload,
-                timeout=self.config.sandbox_runner_timeout_seconds,
+                timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
         except TimeoutError:
@@ -418,6 +454,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             tools=[],
             metadata={
                 "elapsed_seconds": str(output["elapsed_seconds"]),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
             },
             status=output["observations"]["status"],
@@ -451,9 +488,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
-    async def run(self, request: Request, body: BaseRunRequest = Body()):
-        raise HTTPException(409, "Stirrup runs only in agent sessions; use an environment server")
-
 
 if __name__ == "__main__":
     StirrupAgentWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StirrupAgentWrapper.run_webserver()  # noqa: F401

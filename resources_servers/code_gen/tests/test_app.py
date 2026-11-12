@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 from typing import Generator
 from unittest.mock import MagicMock
 
 import app as code_gen_app
 import pytest
-import ray
 from app import (
     CompCodingResourcesServer,
     CompCodingResourcesServerConfig,
@@ -32,13 +32,14 @@ from pydantic import ValidationError
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponse
+from nemo_gym.server_runtime import verifier_observability
+from nemo_gym.trajectory import VerifierInvocation
 from nemo_gym.verification import SandboxVerificationError
 
 
 class TestApp:
     @pytest.fixture(scope="module")
     def code_gen_resources_server_client(self) -> Generator[TestClient, None, None]:
-        ray.init(num_cpus=1)
         server = CompCodingResourcesServer(
             config=CompCodingResourcesServerConfig(
                 host="0.0.0.0",
@@ -48,16 +49,15 @@ class TestApp:
                 num_processes=1,
                 unit_test_timeout_secs=10,
                 debug=False,
+                sandbox_provider={"local": {}},
+                sandbox_config={"image": "unused-local", "python": sys.executable},
             ),
             server_client=MagicMock(spec=ServerClient),
         )
+        server._sandbox_target = ({"local": {}}, {})
         app = server.setup_webserver()
-        try:
-            with TestClient(app) as client:
-                yield client
-        finally:
-            # Stop the local Ray cluster this fixture started instead of leaving it to interpreter exit.
-            ray.shutdown()
+        with TestClient(app) as client:
+            yield client
 
     async def test_verify_pass_via_response(self, code_gen_resources_server_client: TestClient) -> None:
         # Assistant returns a python code block that squares the input
@@ -279,6 +279,10 @@ class TestApp:
 
 
 def _make_server(**config_overrides):
+    config_overrides = {
+        "sandbox_provider": "sandbox",
+        "sandbox_config": {"image": "code-gen-verifier:test"},
+    } | config_overrides
     return CompCodingResourcesServer(
         config=CompCodingResourcesServerConfig(
             host="127.0.0.1",
@@ -331,7 +335,7 @@ class TestSandboxVerify:
 
     def test_sandbox_provider_requires_image(self) -> None:
         with pytest.raises(ValidationError, match="sandbox_config.image is required"):
-            _make_server(sandbox_provider="sandbox")
+            _make_server(sandbox_provider="sandbox", sandbox_config={})
 
     async def test_sandbox_results_are_scored(self, monkeypatch) -> None:
         calls = []
@@ -360,6 +364,59 @@ class TestSandboxVerify:
         assert res.failure_reason == "runner failed (exit=137)"
         assert res.reward == 0.0
         assert res.extracted_model_code == "print(9)"
+
+
+class TestProgrammaticGrading:
+    """A scored verify is one programmatic grade of the saved answer; an infrastructure failure grades nothing."""
+
+    @staticmethod
+    async def _verify_under_invocation(server, request) -> tuple[CompCodingVerifyResponse, VerifierInvocation]:
+        invocation = VerifierInvocation(invocation_id="verify-test")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            response = await server.verify(request)
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        return response, invocation
+
+    @staticmethod
+    def _sandbox_server(result) -> CompCodingResourcesServer:
+        server = _make_server(sandbox_provider="sandbox", sandbox_config={"image": "code-gen-verifier:test"})
+        server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "code_gen"})
+        return server
+
+    @pytest.mark.parametrize("result,reward", [([True, True], 1.0), ([True, -2], 0.0)], ids=["passed", "failed"])
+    async def test_a_unit_test_run_records_one_programmatic_grading_operation(self, monkeypatch, result, reward):
+        async def _run(*args, **kwargs):
+            return result, {"execution time": 0.01}
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _run)
+        response, invocation = await self._verify_under_invocation(
+            self._sandbox_server(result), _verify_request("print(int(input()) ** 2)")
+        )
+        assert response.reward == reward and response.result == result
+        [operation] = invocation.grading_operations
+        assert operation.kind == "programmatic_calculation"
+        assert operation.outcome == "completed" and operation.dependencies == []
+
+    async def test_an_answer_without_code_records_one_programmatic_grading_operation(self) -> None:
+        request = _verify_request("x")
+        request.response.output[0].content[0].text = "no code here"
+        response, invocation = await self._verify_under_invocation(_make_server(), request)
+        assert response.reward == 0.0 and response.result is None
+        [operation] = invocation.grading_operations
+        assert operation.outcome == "completed"
+
+    async def test_an_infrastructure_failure_records_no_grading_operation(self, monkeypatch) -> None:
+        async def _failing(*args, **kwargs):
+            raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
+        response, invocation = await self._verify_under_invocation(
+            self._sandbox_server(None), _verify_request("print(9)")
+        )
+        assert response.mask_sample is True
+        assert invocation.grading_operations is None
 
 
 class TestComputeMetrics:

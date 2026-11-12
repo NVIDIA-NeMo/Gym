@@ -57,6 +57,13 @@ def test_agents_serve_sessions_through_the_base_hooks() -> None:
 def test_resources_servers_close_through_the_base_route() -> None:
     """The base serves /close_session before subclass routes, so a server's own registration never runs."""
     violations = []
+    # A shared base class, such as SandboxSessionResourcesServer, can serve the close for its subclasses.
+    closing_bases = {
+        cls.name
+        for path in _sources("resources_servers")
+        for cls in _classes(path)
+        if "close_resources_session" in _methods(cls)
+    }
     for path in _sources("resources_servers"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -72,12 +79,30 @@ def test_resources_servers_close_through_the_base_route() -> None:
         for cls in _classes(path):
             methods = _methods(cls)
             seed = methods.get("seed_session")
+            if seed is not None and "release_session_state" in methods and "close_resources_session" not in methods:
+                # An inherited close can check ownership only if the seed records it through the base.
+                calls_base_seed = any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "seed_session"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "super"
+                    for node in ast.walk(seed)
+                )
+                if not calls_base_seed:
+                    violations.append(
+                        f"{_location(path, cls)} inherits close but its seed override never calls super().seed_session"
+                    )
             if (
                 seed is not None
                 and "ResourcesSeedSessionRequest" in ast.unparse(seed)
                 and "close_resources_session" not in methods
+                # A server that implements the state hooks closes through the inherited close_resources_session.
+                and "release_session_state" not in methods
+                and not any(isinstance(base, ast.Name) and base.id in closing_bases for base in cls.bases)
             ):
                 violations.append(
-                    f"{_location(path, cls)} accepts a typed seed but does not override close_resources_session"
+                    f"{_location(path, cls)} accepts an episode seed but does not override close_resources_session"
                 )
     assert not violations, "\n".join(violations)

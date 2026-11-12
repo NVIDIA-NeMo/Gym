@@ -1062,6 +1062,11 @@ timeout_sec = 0.05
     failure = response.failure
     assert failure.stage == "agent" and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
     assert "time budget of task 'hello'" in failure.failure_reason and "over 2 turn(s)" in failure.failure_reason
+    assert response.failure_report is not None
+    assert any(
+        event.foreign_error is not None and event.foreign_error.exception_type == "TimeoutError"
+        for event in response.failure_report.events.values()
+    )
     assert not any("test.sh" in call["command"] for call in sandbox.execs)
     # The final unwind still closed the agent session and stopped the sandbox.
     assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
@@ -1461,7 +1466,7 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,
-        LONG_STEPS,
+        LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 1.0"),
         {"plan": "P", "build": "B"},
         default_episode_timeout_seconds=0.1,
         harness_setup_allowance_s=0,
@@ -1469,27 +1474,30 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
         sandbox_ready_timeout_s=1,
         image_pull_retries=0,
     )
-    # Two turns of 0.3 + 0.3 s once the sandbox is ready, and the seed's own bound before that (one attempt of
+    # Two turns of 1 + 1 s once the sandbox is ready, and the seed's own bound before that (one attempt of
     # the ready timeout plus the create grace): well above the run-wide default of 0.1 s.
     seed_bound = 1 + SEED_CREATE_GRACE_S
-    assert server._post_seed_budget_s(task) == pytest.approx(1.2)
+    assert server._post_seed_budget_s(task) == pytest.approx(4.0)
     assert server._seed_bound_s(task) == pytest.approx(seed_bound)
-    assert server._episode_bound_s(task) == pytest.approx(seed_bound + 1.2)
+    assert server._episode_bound_s(task) == pytest.approx(seed_bound + 4.0)
     # The nominal one-start allowance that sizes a sandbox lifetime within the default is unchanged.
-    assert server._task_budget_s(task) == pytest.approx(2.2)
+    assert server._task_budget_s(task) == pytest.approx(5.0)
     # The episode deadline (opened before the seed) and the sandbox lifetime follow the whole bound.
-    assert server._episode_budget_s(task) == pytest.approx(seed_bound + 1.2)
-    assert await server.episode_timeout_seconds(request_for(task)) == pytest.approx(seed_bound + 1.2)
+    assert server._episode_budget_s(task) == pytest.approx(seed_bound + 4.0)
+    # The lookup is bounded by the 0.1 s default and falls back to it when the snapshot is still copying (a slow
+    # runner), so snapshot the task first: this asserts the budget, not the copy speed.
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
+    assert await server.episode_timeout_seconds(request) == pytest.approx(seed_bound + 4.0)
     # A single-turn task keeps the run-wide cap.
     single_server, single_task, _, _ = make_server(
         tmp_path / "single", monkeypatch, default_episode_timeout_seconds=0.1
     )
     assert single_server._episode_budget_s(single_task) == 0.1
     assert await single_server.episode_timeout_seconds(request_for(single_task)) == 0.1
-    # The harness takes 0.2 s per turn: over the 0.1 s default on its own, and the two turns leave 0.8 s of their
-    # 1.2 s budget to the verifier runs and the filesystem work (round 32: 0.5 s turns left 0.2 s and failed on a
-    # loaded node), so both turns are scored. `test_the_task_deadline_ends_an_overrunning_turn` keeps the deadline
-    # firing on a turn that outruns the budget.
+    # Each 0.2 s turn exceeds the 0.1 s default on its own. Leave 3.6 s for verification and filesystem work
+    # on loaded CI runners: this tests the derived budget, not their speed. The separate
+    # `test_the_task_deadline_ends_an_overrunning_turn` still checks deadline enforcement.
     server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
     server.server_client.slow_seconds = 0.2
     with caplog.at_level("WARNING"):
@@ -1497,10 +1505,10 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
     assert (
-        f"hello: its 2 steps need up to 1s once the sandbox is ready (harness setup, setup.sh and healthcheck "
-        f"bounds, agent and verifier budgets, hooks and grace per step), 2s with one sandbox start and up to "
-        f"{seed_bound + 1.2:.0f}s with every image pull retry; default_episode_timeout_seconds=0 is below that "
-        f"bound, so the episode deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 1.2:.0f}s)"
+        f"hello: its 2 steps need up to 4s once the sandbox is ready (harness setup, setup.sh and healthcheck "
+        f"bounds, agent and verifier budgets, hooks and grace per step), 5s with one sandbox start and up to "
+        f"{seed_bound + 4.0:.0f}s with every image pull retry; default_episode_timeout_seconds=0 is below that "
+        f"bound, so the episode deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 4.0:.0f}s)"
     ) in caplog.text
     # The derived deadline is the task's own budget, not a blank cheque: `test_the_task_deadline_ends_an_overrunning_turn`
     # keeps the task deadline firing on a turn that runs past it.
@@ -1568,6 +1576,10 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
         sandbox_ready_timeout_s=1,
         image_pull_retries=0,
     )
+    # Resolve the snapshot before the 0.1 s lookup deadline: this test exercises a slow sandbox seed,
+    # while the separate slow-lookup test covers falling back to the default episode budget.
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
     create = server._create_sandbox
 
     async def slow_create(task, workdir, *, episode_key=None):
@@ -1579,7 +1591,7 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     server.server_client.slow_seconds = 0.2
     started = time.monotonic()
 
-    response = await server.run_request(request_for(task))
+    response = await server.run_request(request)
 
     elapsed = time.monotonic() - started
     assert response.failure is None, response.failure
@@ -1899,7 +1911,7 @@ async def test_a_steps_workdir_is_merged_into_the_working_directory_before_its_a
     # The one root exec clears a link the previous turn's agent planted at any shipped name before it extracts, so
     # a BusyBox tar (which follows a link at a directory member's path) lands the merge where GNU tar and Harbor's
     # docker cp do: the listing loop precedes the extraction in the same shell line (the real tars are exercised in
-    # tests/unit_tests/test_sandbox_transfer.py).
+    # tests/unit_tests/sandbox/test_sandbox_transfer.py).
     extraction = sandbox.execs[index]["command"]
     assert 'if [ -L /app/"$m" ]; then rm -- /app/"$m"; fi; done; tar -xzf' in extraction
     assert extraction.index("tar -tzf") < extraction.index("tar -xzf")
@@ -2659,7 +2671,7 @@ async def test_a_collection_the_sandbox_cannot_serve_masks_the_turn_as_an_outage
 
 
 SLOPCODEBENCH_TASK = (
-    Path(__file__).parents[3] / "tests" / "unit_tests" / "fixtures" / "harbor_slopcodebench" / "code_search"
+    Path(__file__).parents[3] / "tests/unit_tests/data/tasks/harbor/fixtures/harbor_slopcodebench/code_search"
 )
 
 

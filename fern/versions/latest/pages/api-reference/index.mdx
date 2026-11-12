@@ -1,22 +1,166 @@
 ---
 title: "API Reference"
-description: "Auto-generated Python API reference for the nemo_gym library."
+description: "Auto-generated Python API reference for the nemo_gym library, and how the repository is laid out."
 ---
 
 Auto-generated reference documentation for the `nemo_gym` Python package.
 
 This reference is built from docstrings in the [source code](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym). Browse the sidebar to explore modules, classes, and functions.
 
-## Key Modules
+## Repository Layout
 
-| Module | Description |
-|--------|-------------|
-| `nemo_gym.server_runtime.base_resources_server` | Base classes for building resources servers (`SimpleResourcesServer`, `BaseVerifyRequest`, `BaseVerifyResponse`, `BaseMultiRewardVerifyResponse`) |
-| `nemo_gym.agents.base_responses_api_agent` | Base classes for building agent servers (`SimpleResponsesAPIAgent`) |
-| `nemo_gym.models.base_responses_api_model` | Base classes for building model servers (`SimpleResponsesAPIModel`) |
-| `nemo_gym.config.config_types` | Pydantic configuration models for servers, datasets, and CLI |
-| `nemo_gym.server_runtime.base_server` | Server utilities and middleware |
-| `nemo_gym.client` | The shared aiohttp client (`request`) and the server client (`ServerClient`) |
-| `nemo_gym.client.openai_client` | OpenAI API client wrapper |
-| `nemo_gym.core` | Shared definitions: the Responses and Chat Completions types, episode and rollout identity, failure kinds |
-| `nemo_gym.sandbox` | Provider-neutral sandbox API for isolated command execution and file transfer |
+| Directory | What it holds |
+|-----------|---------------|
+| `nemo_gym/` | The library: everything servers, benchmarks, and the `gym` command line share. See [The nemo_gym Package](#the-nemo_gym-package). |
+| `resources_servers/` | Resources servers: one directory per server, with its tools, verifier, configs, and tests. |
+| `responses_api_agents/` | Agent servers: built-in agent harnesses and integrations with external ones. |
+| `responses_api_models/` | Model servers for inference providers and local models, such as vLLM. |
+| `environment_servers/` | Environment servers, such as `single_agent_turn` and `legacy_agent`, that run each episode. |
+| `environments/` | Environment configs that wire a resources server, an agent, and a dataset together. |
+| `benchmarks/` | Benchmark definitions: config, manifest, and data preparation for each benchmark. |
+| `nemotron_recipes/` | Recipe configs for Nemotron models. |
+| `examples/` | Example configs, such as Slurm and Kubernetes launches. |
+| `scripts/` | Repository maintenance and CI scripts. |
+| `tests/` | Unit, functional, and end-to-end tests for the library. Each server keeps its own tests in its directory. |
+| `docker/` | The container image build. |
+| `fern/` | This documentation site. |
+
+## The nemo_gym Package
+
+`nemo_gym` is split into packages, each with one job. The packages form layers: a package builds only on packages below it, so lower packages never depend on higher ones.
+
+```mermaid
+flowchart TB
+    subgraph entry["Commands and workflows"]
+        direction LR
+        cli --> environment --> eval --> orchestration
+    end
+    subgraph runs["Rollouts and task data"]
+        direction LR
+        rollouts --> data
+    end
+    subgraph servers["Servers"]
+        direction LR
+        agents --> models --> server_runtime
+    end
+    subgraph records["Records and scoring"]
+        direction LR
+        artifacts --> metrics --> verification --> trajectory
+    end
+    subgraph infra["Infrastructure"]
+        direction LR
+        sandbox --> client --> telemetry
+    end
+    subgraph base["Foundations"]
+        direction LR
+        core --> utils --> config
+    end
+    entry --> runs --> servers --> records --> infra --> base
+```
+
+Read the diagram top to bottom, and left to right within a group: each package may use any package after it, and none before it.
+
+| Package | What it handles |
+|---------|-----------------|
+| `cli` | The `gym` command line. |
+| `environment` | Authoring environments and benchmarks: manifests, registries, scaffolding, and validation. Also running a benchmark from Python: `plan_benchmark` and `TaskRunner`. |
+| `eval` | Evaluation on top of collected rollouts. |
+| `orchestration` | Submitting jobs to clusters, tracking them, and recovering a submitted run from its saved evidence. |
+| `rollouts` | Collecting rollouts and checking the results. |
+| `data` | Datasets and task data. |
+| `agents` | The shared base for agent servers. |
+| `models` | The shared base for model servers, and converters between model API formats. |
+| `server_runtime` | What runs inside every server, including the resources server and environment server bases. The `supervisor` subpackage starts the servers of a run and sets up their venvs; nothing that runs inside a server imports it. |
+| `artifacts` | The files a run writes and exports. |
+| `metrics` | Rollout metrics, such as reward profiles and pass@k. |
+| `verification` | Helpers resources servers share for verification, such as LLM judges. |
+| `trajectory` | Records of what happened in a rollout. |
+| `sandbox` | Isolated command execution and its providers. See [Sandbox](/main/infrastructure/sandbox). |
+| `client` | HTTP calls to Gym servers and model endpoints, including the OpenAI client. |
+| `telemetry` | Optional OpenTelemetry instrumentation. |
+| `core` | Types every package shares, such as the Responses API types, and the failure types and failure reports passed from one Gym server to the next. |
+| `utils` | General helpers, such as reading the causes, type name, and HTTP status of any Python exception. |
+| `config` | Loading the run config. |
+
+`nemo_gym.verifiers` sits outside the layers. It runs inside a Harbor task's verifier sandbox, so it uses only the standard library.
+
+Servers, benchmarks, and other code outside `nemo_gym/` import from the package, such as `from nemo_gym.server_runtime import ...`, rather than from the modules inside it.
+
+### Old Import Paths
+
+Modules that moved when `nemo_gym` was split into packages keep their old import paths, such as `nemo_gym.server_utils`, until release 0.10.0. Each use of an old path emits a `DeprecationWarning` that names the new one. To update your code, run `python scripts/migrate_imports.py <path>` from a Gym checkout.
+
+## Planning and running single tasks in-process
+
+To run a benchmark task by task from Python, plan it once with `plan_benchmark`, then run each task through
+`TaskRunner.run_task` against Gym servers that are already running:
+
+```python
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.environment import TaskRunner, plan_benchmark
+
+planned = plan_benchmark("ifeval")          # resolve, prepare, plan and collate the benchmark
+runner = TaskRunner(planned.rows, registry_server=BaseServerConfig(host="127.0.0.1", port=11000))
+outcome = await runner.run_task(planned.task_ids()[0])
+print(outcome.reward)
+```
+
+`plan_benchmark` builds the same plan as `gym eval plan` and collates the benchmark's rows. It reads no
+command-line arguments and does not set Gym's process-wide configuration, so a long-lived process can call it.
+Start the servers with `gym env start --benchmark NAME` first. The registry server is the server that serves the
+run's config and the other servers' addresses.
+
+### What is experimental
+
+Import everything from `nemo_gym.environment`: `plan_benchmark`, `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`,
+`RolloutOutcome`, `TaskFailure` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`.
+
+This API is experimental: signatures, result fields and behavior may change or be removed without a deprecation
+period. `plan_benchmark`, `serve_benchmark`, `TaskRunner` and `run_task` warn on stderr the first time they are used
+in a process. A test pins the current names and fields so that a change is deliberate.
+
+`run_task` runs one rollout of a task and returns its typed `RolloutOutcome`:
+
+- `reward` is None when no reward exists, as for a failed `/run`.
+- `failure` is a `TaskFailure` when a failure was reported.
+- `masked` is True when the verifier says the reward is not a valid measurement of the evaluated system, such as a
+  lost session (it reports a reward of 0 and masks it). The outcome keeps that reward, so a caller that computes scores
+  must leave masked rollouts out. A failed `/run` has no sample, so its `masked` is False and its `reward` is None.
+- `prompt` and `output` are `responses_create_params.input` and `response.output` as JSON text, for display. They are
+  None for a result without that shape, such as a native episode result.
+
+A failed `/run` (a client error, a bad JSON body, a timeout or an unusable reply) does not raise: the outcome has a
+`failure` and no reward. A connection that was refused is resent for a minute and one that dropped is sent twice, as
+`gym eval run` does. Any other exception, such as a programming error, and cancellation propagate.
+
+A failure reports what Gym observed and leaves the decision to you:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | Gym's failure kind. The vocabulary is in `nemo_gym/core/failure_kinds.py`; a `<server>:<kind>` kind is an environment's own. When the reporter named no cause, it is `environment_server_failed` or `agent_request_failed`. |
+| `domain` | The layer that observed the failure: the part of the kind before the first `_` or `:`, such as `agent`, `judge`, `session` or `provider`. It is not a fault class: `agent_timeout` and `agent_run_error` are both in `agent`. |
+| `evaluation_side` | True for an evaluation-side fault, False for the model's own outcome (such as `model_request_error` or `agent_timeout`), None for a kind outside Gym's vocabulary. |
+| `source` | Who reported it: `environment` or `collector`. |
+| `delivery` | Whether the `/run` request reached the agent: `not_sent` (every connection was refused, so resending cannot start a second episode), `possibly_delivered` or `delivered`. Use it for a retry decision. |
+| `stage`, `terminal` | Where in the episode it happened, when known, and the reporter's statement that the episode must not be attempted again. `terminal=False` is not a retry hint. |
+| `reason`, `http_status`, `exception_type` | Diagnostics. |
+
+`TaskRunner.run_task` also counts the rollout in `gym.rollout.completed_total`: `failed` when the outcome has a failure
+(labeled with its kind), otherwise `scored` when it has a reward and `unscored` when it has none. This is Gym's record of
+what the rollout returned; a caller may apply another rule to the same outcome. A result is a failure when it carries
+`failure_kind`; a routing class alone does not make it one. A scored rollout with a finite reward is
+also counted in `gym.rollout.rewarded_total`, masked rewards included. They are exported when telemetry is on in the
+calling process: call `nemo_gym.telemetry.setup.init_telemetry` first.
+
+`RolloutOutcome.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part
+of the contract: depend on the other fields, and use `raw` for debugging.
+
+### Constraints
+
+- `serve_benchmark` sets the process's Gym configuration, as `gym env start` does, so serve one benchmark per process.
+- Benchmark names resolve relative to the working directory, `NEMO_GYM_EXTRA_ROOTS` and the install root.
+- Preparing a benchmark's data and installing a server's environment write beside their source, so the Gym checkout or
+  install must be writable.
+- To serve from another process, pass `registry_port` to `serve_benchmark` and build the `TaskRunner` with the same
+  port, for example `BaseServerConfig(host="127.0.0.1", port=port)`. `PlannedBenchmark.to_json` and `from_json` carry a
+  plan between processes.

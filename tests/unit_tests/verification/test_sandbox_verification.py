@@ -25,7 +25,7 @@ from nemo_gym.verification.sandbox_verification import (
     SandboxVerificationError,
     run_verification_sandbox,
 )
-from tests.unit_tests.test_sandbox import FakeSandboxProvider
+from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
 
 
 pytestmark = pytest.mark.sandbox

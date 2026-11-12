@@ -213,7 +213,7 @@ def test_response_finish_reason_speaks_the_chat_vocabulary_for_every_served_payl
 def test_token_entry_rejects_mismatched_generation_arrays():
     with pytest.raises(ValidationError, match="same length"):
         TokenEntry(
-            rollout_id="r0",
+            capture_key="r0",
             model_call_id="c0",
             prompt_token_ids=PTOKS,
             generation_token_ids=GTOKS,
@@ -223,7 +223,7 @@ def test_token_entry_rejects_mismatched_generation_arrays():
 
 def test_token_entry_rejects_inconsistent_parent_resolution():
     common = {
-        "rollout_id": "r0",
+        "capture_key": "r0",
         "model_call_id": "c0",
         "prompt_token_ids": PTOKS,
         "generation_token_ids": GTOKS,
@@ -245,7 +245,7 @@ def test_token_entry_rejects_inconsistent_parent_resolution():
 def test_token_store_round_trip(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="t0-r0",
+        capture_key="t0-r0",
         model_call_id="abc",
         model="m",
         prompt_token_ids=PTOKS,
@@ -263,7 +263,7 @@ def test_token_store_round_trip(tmp_path):
 def test_token_store_put_is_idempotent_and_conflicts_fail_closed(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c0",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -282,7 +282,7 @@ def test_token_store_put_is_idempotent_and_conflicts_fail_closed(tmp_path):
 def test_token_store_append_uses_the_compact_entry_index(tmp_path, monkeypatch):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c0",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -301,7 +301,7 @@ def test_token_store_append_uses_the_compact_entry_index(tmp_path, monkeypatch):
 def test_token_store_recovers_an_unindexed_durable_tail(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c0",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -332,7 +332,7 @@ def test_committed_call_satisfies_its_intent(tmp_path):
     store = TokenCaptureStore(tmp_path)
     asyncio.run(store.begin_call("complete", "c1"))
     entry = TokenEntry(
-        rollout_id="complete",
+        capture_key="complete",
         model_call_id="c1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -354,7 +354,7 @@ def test_register_call_intent_uses_optional_sink_extension():
         async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
             calls.append((rollout_id, model_call_id))
 
-    token = set_token_sink(CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink()))
+    token = set_token_sink(CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink()))
     try:
         asyncio.run(register_call_intent())
     finally:
@@ -368,7 +368,7 @@ def test_a_refused_call_resolves_its_intent_and_the_snapshot_reports_it(tmp_path
     store = TokenCaptureStore(tmp_path)
     asyncio.run(store.begin_call("refused", "c1"))
     entry = TokenEntry(
-        rollout_id="refused",
+        capture_key="refused",
         model_call_id="c1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -458,7 +458,7 @@ def test_record_refusal_uses_the_optional_sink_extension():
         ) -> None:
             calls.append((rollout_id, model_call_id, code, parent_call_id, parent_resolution))
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     context.parent_resolution = LineageResolution(
         ParentResolutionStatus.RESOLVED,
         match=LineageMatch(model_call_id="p", cumulative_token_ids=(1, 2, 3), digest="d"),
@@ -482,7 +482,7 @@ def test_record_refusal_without_a_lineage_decision_records_no_parent():
         ) -> None:
             calls.append((code, lineage))
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
         asyncio.run(capture_engine_refusal(None))
@@ -497,7 +497,7 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
         async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
             pass
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
         with patch("nemo_gym.models.token_capture.sink._REFUSE_CALL_MISSING_NOTED", [False]):
@@ -532,7 +532,7 @@ def test_record_refusal_never_raises(caplog):
         ) -> None:
             raise RuntimeError("disk full")
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.models.token_capture.sink"):
@@ -547,7 +547,7 @@ def test_record_refusal_never_raises(caplog):
 def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c0",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -591,7 +591,7 @@ def test_a_late_capture_after_freeze_is_dropped_without_marking_the_frozen_rollo
     """
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="late-r0",
+        capture_key="late-r0",
         model_call_id="c1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -604,7 +604,7 @@ def test_a_late_capture_after_freeze_is_dropped_without_marking_the_frozen_rollo
     with pytest.raises(TokenCaptureFrozenError):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "c2"})))
 
-    context = CaptureContext(rollout_id="late-r0", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="late-r0", model_call_id="c2", token_sink=store)
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING):
@@ -625,7 +625,7 @@ def test_a_late_capture_after_retire_is_dropped_like_one_after_freeze(tmp_path, 
     """An abandoned attempt that keeps running must not be reported as a capture failure."""
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="abandoned",
+        capture_key="abandoned",
         model_call_id="c1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -634,7 +634,7 @@ def test_a_late_capture_after_retire_is_dropped_like_one_after_freeze(tmp_path, 
     asyncio.run(store.put(entry))
     store.retire_now(["abandoned"])
 
-    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="abandoned", model_call_id="c2", token_sink=store)
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING):
@@ -652,7 +652,7 @@ def test_a_late_capture_after_retire_is_dropped_like_one_after_freeze(tmp_path, 
 
 def _store_entry(store: TokenCaptureStore, rollout_id: str) -> None:
     entry = TokenEntry(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=f"{rollout_id}-c1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -789,7 +789,7 @@ def test_a_late_call_without_token_ids_after_retire_is_not_reported_as_a_failure
     _store_entry(store, "abandoned")
     store.retire_now(["abandoned"])
 
-    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="abandoned", model_call_id="c2", token_sink=store)
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING):
@@ -852,7 +852,7 @@ def test_a_late_build_failure_after_retire_is_not_counted_as_a_capture_failure(t
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "abandoned")
     store.retire_now(["abandoned"])
-    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="abandoned", model_call_id="c2", token_sink=store)
     failures_before = sink_module._CAPTURE_FAILURES[0]
 
     async def build_fails():
@@ -934,7 +934,7 @@ def test_token_store_rejects_a_bare_rollout_id_and_invalid_batches(tmp_path, met
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "r1")
     # A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts.
-    with pytest.raises(TypeError, match="sequence of rollout ids"):
+    with pytest.raises(TypeError, match="sequence of capture keys"):
         getattr(store, method)("r1")
     with pytest.raises(ValueError, match="Invalid rollout id"):
         getattr(store, method)(["r1", "../escape"])
@@ -944,7 +944,7 @@ def test_token_store_rejects_a_bare_rollout_id_and_invalid_batches(tmp_path, met
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
     store = TokenCaptureStore(tmp_path)
     first = TokenEntry(
-        rollout_id="lag",
+        capture_key="lag",
         model_call_id="c1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
@@ -1552,7 +1552,8 @@ def test_unknown_request_without_response_start_fails_closed(tmp_path):
     app.mount("/silent", silent_app)
     client = TestClient(app)
 
-    with pytest.raises(RuntimeError, match="No response returned"):
+    # No Gym middleware here answers for the app, so the client gets no reply at all.
+    with pytest.raises(AssertionError, match="did not receive any response"):
         client.get("/ng-rollout/silent-roll0/training-token-capture/silent/")
 
     assert TokenCaptureStore(tmp_path).freeze_now("silent-roll0").incomplete is True
@@ -1606,12 +1607,18 @@ def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 
     Framework inference workers import the record and protocols.
-    They must not import Ray, FastAPI, or uvicorn through this package.
+    They must not import Ray, FastAPI, uvicorn, or an OpenAI client through this package.
+    Importing the package loads none of its modules, so the check loads every name each public API serves.
     A subprocess isolates this check from earlier test imports.
     """
-    heavy = ("ray", "fastapi", "uvicorn", "aiohttp", "requests", "torch")
+    heavy = ("ray", "fastapi", "starlette", "uvicorn", "aiohttp", "requests", "httpx", "openai", "torch")
     program = (
-        f"import sys; import nemo_gym.models.token_capture; print(','.join(m for m in {heavy!r} if m in sys.modules))"
+        "import importlib, sys\n"
+        "for package in ('nemo_gym.models.token_capture', 'nemo_gym.models.token_capture.staging'):\n"
+        "    module = importlib.import_module(package)\n"
+        "    for name in module._PUBLIC_API:\n"
+        "        getattr(module, name)\n"
+        f"print(','.join(m for m in {heavy!r} if m in sys.modules))"
     )
     proc = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
@@ -1723,7 +1730,7 @@ def test_external_mode_still_mints_identity_for_a_correlated_call(tmp_path):
     class _Peek(_CapturingModel):
         async def responses(self, request: Request, body=Body()) -> NeMoGymResponse:
             context = current_capture_context()
-            seen["rollout_id"] = context.rollout_id if context else None
+            seen["rollout_id"] = context.capture_key if context else None
             seen["model_call_id"] = context.model_call_id if context else None
             seen["sink"] = context.token_sink if context else "no context"
             return _training_response("hi")
@@ -1760,13 +1767,13 @@ def test_external_mode_does_not_mark_a_token_less_response_incomplete(tmp_path):
 def test_a_committed_call_is_not_marked_even_without_token_ids(tmp_path):
     """A caller that had the arrays when this process did not has already accounted for the call."""
     store = TokenCaptureStore(tmp_path)
-    context = CaptureContext(rollout_id="cm0-r0", model_call_id="c1", token_sink=store)
+    context = CaptureContext(capture_key="cm0-r0", model_call_id="c1", token_sink=store)
     token = set_token_sink(context)
     try:
         asyncio.run(
             commit_entry(
                 TokenEntry(
-                    rollout_id="cm0-r0",
+                    capture_key="cm0-r0",
                     model_call_id="c1",
                     prompt_token_ids=PTOKS,
                     generation_token_ids=GTOKS,
@@ -1793,7 +1800,7 @@ def test_delete_removes_records_and_marker(tmp_path):
     store = TokenCaptureStore(tmp_path)
     store.append(
         TokenEntry(
-            rollout_id="gone-0",
+            capture_key="gone-0",
             model_call_id="c",
             prompt_token_ids=PTOKS,
             generation_token_ids=GTOKS,
@@ -1823,7 +1830,7 @@ def test_concurrent_appends_to_one_rollout_stay_intact(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entries = [
         TokenEntry(
-            rollout_id="r0",
+            capture_key="r0",
             model_call_id=f"call-{i}",
             prompt_token_ids=list(range(200)),
             generation_token_ids=[i] * 64,
@@ -1884,7 +1891,7 @@ def test_installed_sink_receives_entries_without_a_capture_dir(installed_sink):
     assert resp.status_code == 200
     assert len(installed_sink.entries) == 1
     assert installed_sink.entries[0].generation_token_ids == GTOKS
-    assert installed_sink.entries[0].rollout_id == "task0-sink0"
+    assert installed_sink.entries[0].capture_key == "task0-sink0"
 
 
 def test_config_allows_no_directory_when_a_sink_is_installed(installed_sink):
@@ -1948,13 +1955,13 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
     They should share the standard durability path.
     """
     entry = TokenEntry(
-        rollout_id="task0-sink3",
+        capture_key="task0-sink3",
         model_call_id="mc-1",
         prompt_token_ids=PTOKS,
         generation_token_ids=GTOKS,
         generation_log_probs=LPS,
     )
-    token = set_token_sink(CaptureContext(rollout_id="task0-sink3", model_call_id="mc-1", token_sink=installed_sink))
+    token = set_token_sink(CaptureContext(capture_key="task0-sink3", model_call_id="mc-1", token_sink=installed_sink))
     try:
         asyncio.run(commit_entry(entry))
     finally:
@@ -1967,9 +1974,9 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
 
 def test_records_carry_a_schema_version():
     """Writer and reader are different processes and may be different repositories."""
-    assert TOKEN_ENTRY_RECORD_SCHEMA_VERSION == 1
+    assert TOKEN_ENTRY_RECORD_SCHEMA_VERSION == 2
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="c",
         prompt_token_ids=[1],
         generation_token_ids=[2],
@@ -2026,7 +2033,7 @@ def test_capture_stamps_cum_len_and_digest(tmp_path):
 
 def test_digest_round_trip_and_stamp_lineage():
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="c",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],
@@ -2170,7 +2177,7 @@ def _put_shared_file_entry(
 ) -> None:
     request = [{"role": "user", "content": "hello"}]
     entry = TokenEntry(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],
@@ -2196,7 +2203,7 @@ def _put_shared_file_delta_chain(root: str, depth: int) -> tuple[list[dict], lis
         generation_tokens = [100 + index]
         cumulative = cumulative + prompt_tokens + generation_tokens
         entry = TokenEntry(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id=f"call-{index}",
             prompt_token_ids=prompt_tokens,
             generation_token_ids=generation_tokens,
@@ -2256,7 +2263,7 @@ async def test_file_lineage_reuses_the_latest_materialized_parent(tmp_path):
     output = [{"role": "assistant", "content": "answer-100"}]
     expected_tokens.extend([110, 200])
     entry = TokenEntry(
-        rollout_id="delta-chain",
+        capture_key="delta-chain",
         model_call_id="call-100",
         prompt_token_ids=[110],
         generation_token_ids=[200],
@@ -2384,7 +2391,7 @@ async def test_failed_token_commit_never_becomes_resolver_visible(tmp_path, monk
     resolver = FileLineageStore(tmp_path)
     request = [{"role": "user", "content": "hello"}]
     entry = TokenEntry(
-        rollout_id="failed-publication",
+        capture_key="failed-publication",
         model_call_id="call-1",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],
@@ -2399,7 +2406,7 @@ async def test_failed_token_commit_never_becomes_resolver_visible(tmp_path, monk
         await token_store.put(entry)
 
     resolution = await resolver.resolve(
-        entry.rollout_id,
+        entry.capture_key,
         request + entry.output_items + [{"role": "user", "content": "next"}],
     )
     assert resolution.status == ParentResolutionStatus.UNRESOLVED
@@ -2522,7 +2529,7 @@ async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
 
     store = TokenCaptureStore(tmp_path)
     context = CaptureContext(
-        rollout_id="lookup-failure",
+        capture_key="lookup-failure",
         model_call_id="call-1",
         token_sink=store,
         lineage_store=_FailingResolver(),
@@ -2739,7 +2746,7 @@ def test_a_record_is_readable_as_soon_as_put_returns(tmp_path):
     """
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c1",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],
@@ -2757,7 +2764,7 @@ def test_a_rollout_that_lost_a_call_is_distinguishable_from_a_complete_one(tmp_p
     """
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c1",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],
@@ -2850,7 +2857,7 @@ def test_a_configured_sink_receives_entries(tmp_path):
         == 200
     )
 
-    assert [e.rollout_id for e in _ConfiguredSink.entries] == ["task0-cfg0"]
+    assert [e.capture_key for e in _ConfiguredSink.entries] == ["task0-cfg0"]
     assert _ConfiguredSink.entries[0].generation_token_ids == GTOKS
 
 
@@ -3008,7 +3015,7 @@ def test_the_store_is_a_token_source(tmp_path):
 
     store.append(
         TokenEntry(
-            rollout_id="r0",
+            capture_key="r0",
             model_call_id="c1",
             prompt_token_ids=[1],
             generation_token_ids=[2],
@@ -3026,7 +3033,7 @@ def test_the_store_is_a_token_source(tmp_path):
 
 def _entry_fields(**overrides):
     return dict(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c1",
         prompt_token_ids=[1],
         generation_token_ids=[2],
@@ -3065,6 +3072,30 @@ def test_the_finish_reason_round_trips_through_the_store_when_stated(tmp_path):
     assert by_id["older"].finish_reason is None
 
 
+def test_a_version_1_record_in_the_store_reads_its_rollout_id_as_the_capture_key(tmp_path):
+    """A capture written before schema version 2 stays readable after an upgrade."""
+    store = TokenCaptureStore(tmp_path)
+    older = TokenEntry(**_entry_fields()).model_dump(mode="json")
+    older.update(schema_version=1, rollout_id=older.pop("capture_key"), model_call_id="older")
+    store.path_for("r0").write_bytes(orjson.dumps(older) + b"\n")
+    store.append(TokenEntry(**_entry_fields()))
+
+    entries = {entry.model_call_id: entry for entry in store.freeze_now("r0").entries}
+    assert entries.keys() == {"older", "c1"}
+    assert {entry.capture_key for entry in entries.values()} == {"r0"}
+    assert entries["older"].schema_version == 1
+    assert "rollout_id" not in entries["older"].model_dump()
+
+
+def test_only_a_version_1_record_may_name_its_capture_key_rollout_id():
+    fields = _entry_fields()
+    fields["rollout_id"] = fields.pop("capture_key")
+
+    assert TokenEntry.model_validate({**fields, "schema_version": 1}).capture_key == "r0"
+    with pytest.raises(ValidationError, match="capture_key"):
+        TokenEntry.model_validate({**fields, "schema_version": TOKEN_ENTRY_RECORD_SCHEMA_VERSION})
+
+
 def test_a_record_newer_than_this_reader_is_refused():
     """Reject newer records hidden by ``extra="allow"``."""
     with pytest.raises(ValidationError, match="this reader understands up to"):
@@ -3087,7 +3118,7 @@ def test_a_newer_record_in_the_store_fails_the_read_rather_than_being_skipped(tm
 def test_digest_and_cum_len_are_filled_for_every_entry():
     """Stamp cumulative length and digest on every entry."""
     empty = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="e",
         prompt_token_ids=[],
         generation_token_ids=[],
@@ -3097,7 +3128,7 @@ def test_digest_and_cum_len_are_filled_for_every_entry():
     assert empty.cum_len == 0 and empty.digest == compute_digest([])
 
     normal = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="n",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],
@@ -3329,7 +3360,7 @@ def test_lineage_add_entry_indexes_responses_function_call_ids():
     lineage = RolloutLineage()
     ctx = [{"role": "user", "content": "q"}]
     entry = TokenEntry(
-        rollout_id="r0",
+        capture_key="r0",
         model_call_id="c-fc",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],

@@ -14,22 +14,27 @@
 # limitations under the License.
 import json
 import os
+import shlex
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
+import nemo_gym.artifacts.exporters._evalrdl_worker as _evalrdl_worker
 import nemo_gym.artifacts.exporters.isolated as isolated
 from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportState
 from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter
 from nemo_gym.artifacts.exporters.isolated import ensure_exporter_environment
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
+from nemo_gym.orchestration.executors.utils import flatten_export_args
 
 
 # A stand-in for the `evalrdl` SDK with the same names and signatures, driven by environment variables. The worker
@@ -101,6 +106,10 @@ class _Uploads:
 class Client:
     def __init__(self, url=None, token=None, **kwargs):
         self.uploads = _Uploads(url)
+
+
+def upload_plan(path, label=None):
+    return [{"label": label or Path(path).name, "dir": str(path), "files": [], "unreadable": [], "bytes": 0}]
 """
 
 
@@ -160,7 +169,12 @@ class TestConfig:
         config = EvalRDLExportConfig(rollouts_jsonl_fpath=Path("r.jsonl"))
 
         assert (config.label, config.tags, config.meta, config.url) == (None, [], {}, None)
-        assert (config.parallel, config.wait, config.timeout, config.requirement) == (4, True, 1800, "evalrdl")
+        assert (config.parallel, config.wait, config.timeout, config.requirement) == (
+            4,
+            True,
+            1800,
+            "evalrdl>=0.0.241",
+        )
 
     def test_command_line_containers_become_plain_python(self) -> None:
         overrides = OmegaConf.from_dotlist(["rollouts_jsonl_fpath=r.jsonl", "meta.k=v", "meta.n=3"])
@@ -172,6 +186,49 @@ class TestConfig:
         assert config.meta == {"k": "v", "n": 3} and type(config.meta) is dict
         json.dumps({"tags": config.tags, "meta": config.meta})
 
+    def test_nested_meta_becomes_dotted_annotation_keys(self) -> None:
+        overrides = OmegaConf.from_dotlist(
+            [
+                "rollouts_jsonl_fpath=r.jsonl",
+                "meta.model.version=v1",
+                "meta.model.name=the-best-model-ever",
+                "meta.settings.reasoning.effort=high",
+            ]
+        )
+
+        config = EvalRDLExportConfig.model_validate(overrides)
+
+        assert config.meta == {
+            "model.version": "v1",
+            "model.name": "the-best-model-ever",
+            "settings.reasoning.effort": "high",
+        }
+
+    def test_meta_a_submit_renders_as_overrides_reaches_the_exporter_as_dotted_keys(self) -> None:
+        arguments = flatten_export_args(
+            {
+                "meta": {
+                    "model": {"version": "v1", "name": "the-best-model-ever"},
+                    "settings": {"reasoning": {"effort": "high"}},
+                }
+            }
+        )
+        dotlist = [shlex.split(argument)[0].removeprefix("+") for argument in arguments]
+
+        config = EvalRDLExportConfig.model_validate(OmegaConf.from_dotlist(["rollouts_jsonl_fpath=r.jsonl", *dotlist]))
+
+        assert config.meta == {
+            "model.version": "v1",
+            "model.name": "the-best-model-ever",
+            "settings.reasoning.effort": "high",
+        }
+
+    def test_a_dotted_key_and_its_nested_form_are_refused_as_one_annotation_set_twice(self) -> None:
+        with pytest.raises(ValueError, match="model.version"):
+            EvalRDLExportConfig(
+                rollouts_jsonl_fpath=Path("r.jsonl"), meta={"model": {"version": "v1"}, "model.version": "v2"}
+            )
+
     @pytest.mark.parametrize("settings", [{"parallel": 0}, {"timeout": 0}])
     def test_nonpositive_numbers_are_rejected(self, settings: dict[str, Any]) -> None:
         with pytest.raises(ValueError):
@@ -181,7 +238,7 @@ class TestConfig:
         assert load_run_exporter_class("evalrdl") is EvalRDLExporter
         artifacts = _make_run(tmp_path)
 
-        assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl",)
+        assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl>=0.0.241",)
         assert _exporter(artifacts, tmp_path, requirement="evalrdl==1.2.3").required_packages() == ("evalrdl==1.2.3",)
 
 
@@ -257,6 +314,33 @@ class TestRunDirectory:
         _exporter(linked, tmp_path).export(linked)
 
         assert _sdk_call(fake_sdk)["path"] == str(run_dir.resolve())
+
+    def test_the_run_directory_is_uploaded_as_it_is(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
+        # The archive keeps a link as a link and a server cannot follow it, so nothing in the upload is a symlink.
+        artifacts = _make_run(tmp_path)
+        (tmp_path / "gpqa_rollouts_manifest.json").write_text("{}")
+        (tmp_path / "gpqa_rollouts_manifest.identity.json").write_text("{}")
+        (tmp_path / "model-calls").mkdir()
+        (tmp_path / "model-calls" / "0-0.capture.jsonl").write_text("{}")
+        expected = sorted(p.name for p in tmp_path.iterdir())
+
+        assert _exporter(artifacts, tmp_path).export(artifacts).state is ExportState.SUCCEEDED
+
+        call = _sdk_call(fake_sdk)
+        assert call["path"] == str(tmp_path)
+        assert call["files"] == expected
+
+    def test_a_run_dir_above_the_rollouts_is_uploaded_as_it_is(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
+        run_dir, artifacts_dir = tmp_path / "bench", tmp_path / "bench" / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        artifacts = _make_run(artifacts_dir)
+        (artifacts_dir / "gpqa_rollouts_manifest.identity.json").write_text("{}")
+        (run_dir / "eval.exit").write_text("0")
+
+        result = _exporter(artifacts, tmp_path, run_dir=str(run_dir)).export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED
+        assert _sdk_call(fake_sdk)["path"] == str(run_dir)
 
     @pytest.mark.parametrize("other", ["math_rollouts.jsonl", "rollouts.jsonl"])
     def test_a_directory_holding_another_runs_rollouts_is_refused_before_any_environment_is_built(
@@ -348,6 +432,24 @@ class TestUpload:
             "timeout": 60,
         }
 
+    def test_dotted_annotation_keys_reach_the_sdk(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
+        artifacts = _make_run(tmp_path)
+
+        _exporter(
+            artifacts,
+            tmp_path,
+            meta={
+                "model": {"version": "v1", "name": "the-best-model-ever"},
+                "settings": {"reasoning": {"effort": "high"}},
+            },
+        ).export(artifacts)
+
+        assert _sdk_call(fake_sdk)["meta"] == {
+            "model.version": "v1",
+            "model.name": "the-best-model-ever",
+            "settings.reasoning.effort": "high",
+        }
+
     def test_unset_settings_leave_the_sdk_to_its_own_defaults(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
         artifacts = _make_run(tmp_path)
 
@@ -356,7 +458,7 @@ class TestUpload:
         call = _sdk_call(fake_sdk)
         assert (call["url"], call["label"], call["meta"], call["tags"]) == (None, None, None, [])
         assert (call["parallel"], call["wait"], call["timeout"]) == (4, True, 1800)
-        assert fake_sdk["requested"] == [("evalrdl",)]
+        assert fake_sdk["requested"] == [("evalrdl>=0.0.241",)]
 
     @pytest.mark.parametrize(
         ("mode", "state", "exit_code"),
@@ -378,6 +480,24 @@ class TestUpload:
         result = _exporter(artifacts, tmp_path).export(artifacts)
 
         assert (result.state, result.exit_code) == (state, exit_code)
+
+    @pytest.mark.parametrize("planned", [["/run/a", "/run/b"], ["/run/a"]], ids=["split", "nested"])
+    def test_a_directory_the_sdk_would_not_upload_whole_is_refused_before_anything_is_sent(
+        self, monkeypatch: MonkeyPatch, planned: list[str]
+    ) -> None:
+        api = ModuleType("evalrdl.sdk.api")
+        api.RdlError = api.IntakeRefused = Exception
+        api.Client = Mock()
+        api.upload_plan = lambda path, label=None: [{"dir": d} for d in planned]
+        monkeypatch.setitem(sys.modules, "evalrdl", ModuleType("evalrdl"))
+        monkeypatch.setitem(sys.modules, "evalrdl.sdk", ModuleType("evalrdl.sdk"))
+        monkeypatch.setitem(sys.modules, "evalrdl.sdk.api", api)
+
+        result = _evalrdl_worker.run({"run_dir": "/run"})
+
+        assert (result["state"], result["exit_code"]) == ("failed", 1)
+        assert result["detail"]["upload_dirs"] == planned
+        api.Client.assert_not_called()
 
     def test_a_committed_upload_reports_the_run_it_created(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
         artifacts = _make_run(tmp_path)
@@ -474,12 +594,14 @@ def test_the_real_sdk_still_has_the_interface_the_worker_calls(tmp_path: Path) -
     )
     check = """
 import inspect
-from evalrdl.sdk.api import Client, IntakeRefused, RdlError
+from pathlib import Path
+from evalrdl.sdk.api import Client, IntakeRefused, RdlError, upload_plan
 upload = inspect.signature(Client(url="stg", token=False).uploads.upload)
 wanted = {"label", "tags", "meta", "parallel", "wait", "timeout"}
 missing = wanted - set(upload.parameters)
 assert not missing, f"upload() no longer takes {missing}"
 assert issubclass(IntakeRefused, RdlError)
+assert [unit["dir"] for unit in upload_plan(".")] == [str(Path(".").resolve())]
 """
     completed = subprocess.run([str(python), "-c", check], capture_output=True, text=True, check=False, cwd=tmp_path)
 

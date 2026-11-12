@@ -17,13 +17,14 @@
 import re
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from aiohttp import ClientResponseError, ClientTimeout
+from aiohttp import ClientOSError, ClientResponseError, ClientTimeout
 from pydantic import ValidationError
 
 from nemo_gym.client import openai_client as openai_client_module
+from nemo_gym.client.http_client import ConnectionRetryWindow
 from nemo_gym.client.openai_client import (
     MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
@@ -31,7 +32,7 @@ from nemo_gym.client.openai_client import (
     _error_body_is_permanent_auth,
     _error_body_is_permanent_quota,
 )
-from nemo_gym.core.episode import rollout_context
+from nemo_gym.core.episode_context import rollout_context
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +105,120 @@ class TestOpenAIUtils:
         assert isinstance(captured["timeout"], ClientTimeout)
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
+
+    async def test_session_key_headers_carry_the_current_rollout(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"X-Static": "1"},
+            session_key_headers=["X-Session", "X-Other-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+        with rollout_context("trial-2"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"X-Session": "own"})
+
+        assert sent[0]["X-Session"] == sent[0]["X-Other-Session"] == "trial-1"
+        assert sent[0]["X-Static"] == "1"
+        assert "X-Session" not in sent[1]
+        assert sent[2]["X-Session"] == "own"
+        assert sent[2]["X-Other-Session"] == "trial-2"
+
+    async def test_an_explicit_header_of_another_case_replaces_the_rollout_header(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session"]
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"x-session": "own"})
+
+        assert [value for name, value in sent[0].items() if name.lower() == "x-session"] == ["own"]
+
+    async def test_a_default_header_of_another_case_is_replaced_by_the_rollout_header_only_inside_a_rollout(
+        self, monkeypatch
+    ) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"x-session": "static"},
+            session_key_headers=["X-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert [value for name, value in sent[0].items() if name.lower() == "x-session"] == ["trial-1"]
+        assert [value for name, value in sent[1].items() if name.lower() == "x-session"] == ["static"]
+
+    async def test_authorization_wins_over_a_header_of_another_case(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        await client._request(method="POST", url="https://example.test/v1/responses", headers={"authorization": "x"})
+
+        assert [value for name, value in sent[0].items() if name.lower() == "authorization"] == ["Bearer abc"]
+
+    async def test_session_key_headers_carry_the_session_key(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        monkeypatch.setattr(openai_client_module, "current_session_key", lambda: "session-of-the-call")
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session"]
+        )
+
+        await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert sent[0]["X-Session"] == "session-of-the-call"
+
+    async def test_session_key_headers_are_off_by_default(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert "X-Session" not in sent[0]
 
     async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
         captured = {}
@@ -509,6 +624,17 @@ def _busy(status: int = 429, retry_after: str | None = None) -> SimpleNamespace:
     )
 
 
+def _sleep_on_a_fake_clock(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """A mocked retry sleep whose waits advance a fake clock, so the elapsed-time budget sees them as real time."""
+    now = [0.0]
+
+    async def advance(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr("nemo_gym.client.openai_client.monotonic", lambda: now[0])
+    return AsyncMock(side_effect=advance)
+
+
 class TestProviderBackoff:
     """How the client waits on a provider that is busy: growing jittered waits, Retry-After, a time budget."""
 
@@ -543,7 +669,7 @@ class TestProviderBackoff:
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
         request = AsyncMock(return_value=_busy(status))
-        sleep = AsyncMock()
+        sleep = _sleep_on_a_fake_clock(monkeypatch)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
 
@@ -571,24 +697,41 @@ class TestProviderBackoff:
         openai_client_module._retry_wait_seconds(tries, _busy())
         assert windows == [(0, 60.0)]
 
-    async def test_an_internal_client_keeps_retrying_a_busy_server_past_a_thousand_tries(
+    async def test_an_internal_client_stops_waiting_out_a_busy_server_when_its_budget_is_spent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        success = SimpleNamespace(status=200)
-        request = AsyncMock(side_effect=[_busy(429)] * 1025 + [success])
-        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
-        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
-        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True)
+        # The mocked sleep advances a fake clock, as a real one would. The provider has a request ceiling, so a loop
+        # that no longer ends fails here at once instead of spinning (mocked awaits never yield to a timeout).
+        now = [0.0]
 
-        assert await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses") is success
-        assert request.await_count == 1026
+        async def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        async def busy_server(**kwargs):
+            assert request.await_count < 50, "retried past the budget"
+            return _busy(429, retry_after="1")
+
+        request = AsyncMock(side_effect=busy_server)
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.client.openai_client.monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            "nemo_gym.client.openai_client.raise_for_status", AsyncMock(side_effect=RuntimeError("still busy"))
+        )
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True, max_rate_limit_wait_seconds=3
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses")
+        assert request.await_count == 4
 
     @pytest.mark.parametrize("status", [429, 503])
     async def test_a_positive_budget_ends_the_request_before_max_http_attempts_does(
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
         request = AsyncMock(return_value=_busy(status, retry_after="1"))
-        sleep = AsyncMock()
+        sleep = _sleep_on_a_fake_clock(monkeypatch)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
 
@@ -637,3 +780,196 @@ class TestProviderBackoff:
 
         assert await client._request_with_retry(url="https://example.com/v1/responses") is success
         sleep.assert_awaited_once_with(3.0)
+
+    async def test_status_retries_of_one_call_share_one_connection_retry_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(retry_after="1"), success, success])
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", connection_retry_timeout_s=30.0)
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+
+        windows = [c.kwargs["_connection_retry_window"] for c in request.await_args_list]
+        assert isinstance(windows[0], ConnectionRetryWindow) and windows[0].timeout_s == 30.0
+        # The 503 retry keeps the call's window; the next call gets its own.
+        assert windows[0] is windows[1]
+        assert windows[2] is not windows[0]
+
+    async def test_an_answer_after_a_connection_error_keeps_the_full_status_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = MagicMock(ok=True, status=200)
+        transport = MagicMock()
+        transport.request = AsyncMock(
+            side_effect=[ClientOSError(111, "refused"), _busy(status=503, retry_after="60"), success]
+        )
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr("nemo_gym.client.http_client.asyncio.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            request_timeout_seconds=30,
+            max_rate_limit_wait_seconds=0,
+            connection_retry_timeout_s=1.0,
+        )
+
+        # The 503 shows the server is reachable: its Retry-After is honored in full, and the retry is not
+        # reported as the earlier "refused".
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        sleep.assert_awaited_once_with(60.0)
+        assert transport.request.await_count == 3
+
+    async def test_an_unopened_window_keeps_the_full_status_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(status=503, retry_after="60"), success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            max_rate_limit_wait_seconds=0,
+            connection_retry_timeout_s=1.0,
+        )
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        sleep.assert_awaited_once_with(60.0)
+
+    async def test_no_connection_retry_window_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        request = AsyncMock(return_value=SimpleNamespace(status=200))
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        await client._request(method="POST", url="https://example.com/v1/responses")
+        assert "_connection_retry_window" not in request.await_args.kwargs
+
+
+class TestExhaustedAttemptCause:
+    """The final HTTP error of exhausted retries is caused by the last attempt's observed failure."""
+
+    @staticmethod
+    def _http_error() -> ClientResponseError:
+        return ClientResponseError(SimpleNamespace(real_url="http://model"), (), status=503, message="unavailable")
+
+    async def test_the_last_attempt_becomes_the_explicit_cause(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nemo_gym.client import openai_client as openai_utils
+        from nemo_gym.core.failure_records import FailureBoundary
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+        error = self._http_error()
+        monkeypatch.setattr(openai_utils, "raise_for_status", AsyncMock(side_effect=error))
+        last = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="HTTP 503 from the model server",
+            operation="model.request",
+            http_status=503,
+        )
+
+        with pytest.raises(ClientResponseError) as raised:
+            await openai_utils._raise_exhausted(SimpleNamespace(), b"", last)
+        assert raised.value is error and error.__cause__ is last
+
+    async def test_a_cause_already_set_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nemo_gym.client import openai_client as openai_utils
+
+        error = self._http_error()
+        rebuilt = RuntimeError("rebuilt remote failure")
+        error.__cause__ = rebuilt
+        monkeypatch.setattr(openai_utils, "raise_for_status", AsyncMock(side_effect=error))
+
+        with pytest.raises(ClientResponseError) as raised:
+            await openai_utils._raise_exhausted(SimpleNamespace(), b"", None)
+        assert raised.value.__cause__ is rebuilt
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"[]", id="json-array"),
+        pytest.param(b'"quota"', id="json-string"),
+        pytest.param(b'{"error": 42}', id="error-neither-text-nor-object"),
+        pytest.param(b"not json", id="not-json"),
+    ],
+)
+def test_an_error_body_without_an_error_object_has_no_codes(body: bytes) -> None:
+    from nemo_gym.client.openai_client import _parsed_error_codes
+
+    # No code means no quota or auth classification: the caller keeps its ordinary retry handling.
+    assert _parsed_error_codes(body) == []
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(401, b'{"error":{"code":"invalid_api_key"}}', id="permanent-auth"),
+        pytest.param(429, b'{"error":{"code":"insufficient_quota"}}', id="permanent-quota"),
+    ],
+)
+async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_ended(
+    status: int, body: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over real HTTP: a Gym model server's forwarded failure causes the call it ended; later tripped calls send
+    nothing and carry no cause."""
+    import socket
+
+    from aiohttp import web
+
+    from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI, PermanentEndpointError
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
+
+    remote = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason=f"HTTP {status} from the model server",
+        operation="model_request",
+        http_status=status,
+    )
+    headers = FailureHeader.encode(failure_report_for(remote))
+    hits = 0
+
+    async def handler(request: web.Request) -> web.Response:
+        nonlocal hits
+        hits += 1
+        await request.read()
+        return web.Response(status=status, body=body, headers=headers, content_type="application/json")
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    import aiohttp
+
+    import nemo_gym.client.http_client
+
+    session = aiohttp.ClientSession()  # a real HTTP client owned by this test's event loop
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
+    try:
+        client = NeMoGymAsyncOpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key="k", max_rate_limit_wait_seconds=0)
+        call = dict(model="m", messages=[{"role": "user", "content": "hi"}])
+        with pytest.raises(PermanentEndpointError) as first:
+            await client.create_chat_completion(**call)
+        assert hits == 1
+        cause = first.value.__cause__
+        assert isinstance(cause, NgFailureEvent) and cause.event_id == remote.event_id
+        assert failure_report_for(first.value).failure_id == remote.event_id
+        assert first.value.status == status and first.value.response_content == body
+
+        with pytest.raises(PermanentEndpointError) as later:
+            await client.create_chat_completion(**call)
+        assert hits == 1 and later.value.__cause__ is None
+    finally:
+        await session.close()
+        await runner.cleanup()

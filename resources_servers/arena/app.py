@@ -20,7 +20,6 @@ from typing import Any, ClassVar, Literal
 from aiohttp import ClientTimeout
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import Domain, ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -34,8 +33,10 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import reraise_judge_errors
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -245,41 +246,75 @@ class ArenaResourcesServer(SimpleResourcesServer):
             if not images:
                 raise ValueError("vision_arena_v1 requires prompt images")
 
-        # Run both game orderings concurrently to reduce latency. If one fails, the other is cancelled and
-        # awaited before the failure propagates, so it does not keep a judge slot after the row is returned.
-        orderings = [
-            asyncio.ensure_future(
-                self._run_judge_game(
-                    body.question, policy_answer, body.baseline_answer, system_message, prompt_template, images=images
-                )
-            ),
-            asyncio.ensure_future(
-                self._run_judge_game(
-                    body.question, body.baseline_answer, policy_answer, system_message, prompt_template, images=images
-                )
-            ),
-        ]
-        try:
-            game1, game2 = await asyncio.gather(*orderings)
-        except BaseException:
-            for ordering in orderings:
-                ordering.cancel()
-            await asyncio.gather(*orderings, return_exceptions=True)
-            raise
+        async def grade() -> ArenaVerifyResponse:
+            # Run both game orderings concurrently to reduce latency. If one fails, the other is cancelled and
+            # awaited before the failure propagates, so it does not keep a judge slot after the row is returned.
+            orderings = [
+                asyncio.ensure_future(
+                    self._run_judge_game(
+                        body.question,
+                        policy_answer,
+                        body.baseline_answer,
+                        system_message,
+                        prompt_template,
+                        images=images,
+                    )
+                ),
+                asyncio.ensure_future(
+                    self._run_judge_game(
+                        body.question,
+                        body.baseline_answer,
+                        policy_answer,
+                        system_message,
+                        prompt_template,
+                        images=images,
+                    )
+                ),
+            ]
+            try:
+                game1, game2 = await asyncio.gather(*orderings)
+            except BaseException:
+                for ordering in orderings:
+                    ordering.cancel()
+                await asyncio.gather(*orderings, return_exceptions=True)
+                raise
 
-        # Game 1: policy is A. Game 2: policy is B.
-        # Strong verdicts (>>) are counted `verdict_weight` times.
-        weight = self.config.verdict_weight
-        scores = _weighted_scores_as_a(game1.verdict, weight) + _weighted_scores_as_b(game2.verdict, weight)
-        reward = sum(scores) / len(scores)
+            # A game without a verdict is a judge fault (output cut at its token cap, filtered, empty or without
+            # a label), not a policy loss: fail the row so judge_failsafe types it judge_failed, masks it and
+            # leaves its saved answer to be judged again.
+            if missing := [
+                f"game {index} ({self._describe_missing_verdict(game.response)})"
+                for index, game in enumerate((game1, game2), start=1)
+                if game.verdict is None
+            ]:
+                raise JudgeError("The judge gave no verdict for " + " and ".join(missing))
 
-        return ArenaVerifyResponse(
-            **body.model_dump(),
-            reward=reward,
-            policy_answer=policy_answer,
-            policy_reasoning=policy_reasoning,
-            games=[game1, game2],
-        )
+            # Game 1: policy is A. Game 2: policy is B.
+            # Strong verdicts (>>) are counted `verdict_weight` times.
+            weight = self.config.verdict_weight
+            scores = _weighted_scores_as_a(game1.verdict, weight) + _weighted_scores_as_b(game2.verdict, weight)
+            reward = sum(scores) / len(scores)
+
+            return ArenaVerifyResponse(
+                **body.model_dump(),
+                reward=reward,
+                policy_answer=policy_answer,
+                policy_reasoning=policy_reasoning,
+                games=[game1, game2],
+            )
+
+        return await observe_llm_judge_grading(grade)
+
+    @staticmethod
+    def _describe_missing_verdict(response: NeMoGymResponse) -> str:
+        """Why a judge reply holds no verdict, for the failure reason."""
+        if response.incomplete_details and response.incomplete_details.reason:
+            return f"judge output incomplete: {response.incomplete_details.reason}"
+        if response.status not in (None, "completed"):
+            return f"judge response status {response.status}"
+        if not response.output:
+            return "judge output empty"
+        return "no verdict label in the judge output"
 
     def _is_self_comparison(self, body: ArenaVerifyRequest) -> bool:
         if not body.baseline_model:
@@ -357,20 +392,14 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 ),
             ]
 
-            async def call_judge() -> NeMoGymResponse:
-                response = await self.server_client.post(
-                    server_name=config.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=responses_create_params,
-                    timeout=ClientTimeout(total=config.judge_timeout_secs),
-                )
-                # An HTTP error is the judge failure it is (its status and body kept), not a parse error of its body.
-                await raise_for_status(response)
-                return NeMoGymResponse.model_validate(await get_response_json(response))
-
-            # A judge outage is not a lost game: let judge_failsafe return an unresolved judge failure
-            # with the existing answer instead of constructing a zero-valued game.
-            judge_response = await reraise_judge_errors(call_judge())
+            judge_response = await call_judge(
+                self.server_client,
+                server_name=config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+                response_model=NeMoGymResponse,
+                timeout=ClientTimeout(total=config.judge_timeout_secs),
+            )
 
             verdict: str | None = None
             if judge_response.output:
@@ -383,6 +412,9 @@ class ArenaResourcesServer(SimpleResourcesServer):
                             # The published VisionArena prompt includes spaces inside verdict labels.
                             verdict_text = re.sub(r"\s+", "", verdict_text)
                         verdict = _extract_verdict(verdict_text)
+
+            if verdict is not None:
+                record_parsed_judge_verdict()
 
             return ArenaGame(
                 responses_create_params=responses_create_params,
@@ -401,3 +433,6 @@ class ArenaResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ArenaResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ArenaResourcesServer.run_webserver()  # noqa: F401

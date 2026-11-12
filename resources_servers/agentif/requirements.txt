@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-# Dataset preparation (prepare_agentif.py).
-datasets

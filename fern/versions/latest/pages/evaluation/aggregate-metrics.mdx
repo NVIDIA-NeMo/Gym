@@ -5,6 +5,8 @@ position: 5
 ---
 After rollout collection, NeMo Gym computes **aggregate metrics** for each agent by calling the `/aggregate_metrics` endpoint on the agent server. The results are written to a single `_aggregate_metrics.json` file.
 
+To compare these saved metrics between runs, or aggregate benchmark scores across models with confidence intervals, see [Compare Results](/main/evaluation/compare-results). Run aggregation produces the input artifacts; suite comparison combines their selected repeat scores.
+
 ---
 
 ## How It Works
@@ -79,7 +81,7 @@ The output file is a JSON array with one entry per agent:
 | `agent_metrics` | Overall stats, custom metrics, `num_repeats` (distinct repeat indices), and cross-repeat aggregates |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
-| `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats |
+| `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats, except that rollouts carrying `ng_perf` token usage add per-repeat token statistics even for a single repeat |
 
 ---
 
@@ -89,7 +91,7 @@ A single run is a point estimate. Collecting repeats (`--num-repeats`) lets you 
 
 ### Within a repeat, across tasks
 
-`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty.
+`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty. Per-repeat token statistics computed from `ng_perf` are the exception: they are reported for every repeat, including a single one. When every rollout is masked, `compute_aggregate_metrics` returns no repeat rows, and an environment server such as `single_agent_turn` still adds the token statistics.
 
 Each entry carries:
 
@@ -120,7 +122,7 @@ in `<output>_failures.jsonl`. A process death before an outcome is saved remains
 A row the dispatch budget never started leaves no row; with `+record_omitted_rollouts=true` it leaves a sidecar row
 marked `_ng_omitted_rollout: true`, which records that it never ran and is not counted as a failure.
 
-To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics`, and the completion summary `gym eval profile` prints at the end of a run.
+To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics` (a task with no saved rollout keeps its row there, with `num_rollouts: 0`, a `reward_profile_completion_pct` of 0 and no reward statistics), and the completion summary `gym eval profile` prints at the end of a run. [Suite comparison](/main/evaluation/compare-results#check-exclusions-and-coverage) uses materialized inputs when available and labels planned coverage unverified otherwise.
 </Warning>
 
 ### Across repeats
@@ -186,7 +188,7 @@ Selects headline numbers from full-run `agent_metrics`. Default returns all `mea
 ### Example: pass@k
 
 ```python
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -272,6 +274,10 @@ Given 3 tasks with 4 rollouts each (task 0: all correct, task 1: all wrong, task
 
 <Card title="Benchmarks" href="/evaluation/benchmarks">
 How to choose a benchmark, what the categories cover, and how to interpret results.
+</Card>
+
+<Card title="Compare Results" href="/main/evaluation/compare-results">
+Compare baseline and candidate metrics and interpret confidence intervals for their difference.
 </Card>
 
 <Card title="Diagnose Results" href="/evaluation/diagnose-results">

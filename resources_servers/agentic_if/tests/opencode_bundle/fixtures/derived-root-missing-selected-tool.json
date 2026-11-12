@@ -1,0 +1,92 @@
+{
+ "case": "derived-root-missing-selected-tool",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read",
+    "task": "task"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "never"
+       }
+      }
+     ]
+    }
+   },
+   "returned": null,
+   "error": "ValueError: unavailable logical tool: task",
+   "outgoing_request": null,
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [],
+ "issues": [
+  "ValueError"
+ ]
+}

@@ -28,8 +28,9 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
 )
-from nemo_gym.verification import JudgeError
+from nemo_gym.verification import is_judge_failure
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
@@ -39,6 +40,7 @@ from resources_servers.finance_sec_search.app import (
     RateLimiter,
     RetrieveInformationRequest,
     _extract_judge_rating,
+    per_worker_rate_limiter,
 )
 from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
@@ -375,6 +377,56 @@ class TestRateLimiter:
 
         # Requests should be recorded
         assert len(limiter.requests) == 5
+
+    def test_workers_share_the_configured_limit(self, server_config) -> None:
+        """Each worker's limiter allows its share of requests_per_second, so the whole server stays within it."""
+        server_config.requests_per_second = 10
+        server_config.num_workers = 4
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (2, 1.0)
+
+    def test_one_worker_keeps_the_configured_limit(self, server_config) -> None:
+        server_config.requests_per_second = 10
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (10, 1.0)
+
+    def test_more_workers_than_requests_per_second_are_refused(self, server_config) -> None:
+        server_config.requests_per_second = 2
+        server_config.num_workers = 8
+
+        with pytest.raises(
+            ValueError,
+            match=r"needs num_workers=1: it runs with at most requests_per_second \(2\) workers, not 8, because",
+        ):
+            FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    async def test_the_workers_together_admit_at_most_the_limit_in_one_second(self, monkeypatch) -> None:
+        """Each worker keeps its own limiter; within one second their admissions add up to no more than the limit."""
+
+        class Blocked(Exception):
+            pass
+
+        async def block(seconds: float) -> None:
+            raise Blocked
+
+        # A frozen clock: every request falls in the same one-second window, and a limiter that would wait stops.
+        monkeypatch.setattr("resources_servers.finance_sec_search.app.time.monotonic", lambda: 100.0)
+        monkeypatch.setattr("resources_servers.finance_sec_search.app.asyncio.sleep", block)
+
+        for requests_per_second, num_workers in ((10, 4), (10, 10), (7, 3)):
+            admitted = 0
+            for _ in range(num_workers):
+                limiter = per_worker_rate_limiter(requests_per_second, num_workers)
+                while True:
+                    try:
+                        await limiter.acquire()
+                    except Blocked:
+                        break
+                    admitted += 1
+            assert admitted <= requests_per_second
 
 
 # ============================================================================
@@ -1061,7 +1113,17 @@ class TestDownloadAndParseFiling:
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/"
         path = server._url_to_filing_path(url)
         assert path is not None
-        assert path.name == "index.txt"
+        assert path.name == "%index.txt"
+        assert path != server._url_to_filing_path(url + "index")
+
+    def test_url_to_filing_path_lossy_names_do_not_collide(self, server) -> None:
+        base = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008"
+        p_nested = server._url_to_filing_path(f"{base}/exhibits/ex-21.htm")
+        p_flat = server._url_to_filing_path(f"{base}/exhibits_ex-21.htm")
+        p_encoded = server._url_to_filing_path(f"{base}/AAPL%20Report.HTM")
+        p_underscore = server._url_to_filing_path(f"{base}/AAPL_20Report.HTM")
+        assert len({p_nested, p_flat, p_encoded, p_underscore}) == 4
+        assert p_nested.parent == p_flat.parent
 
     def test_url_to_filing_path_invalid(self, server) -> None:
         """Invalid URLs return None."""
@@ -1523,7 +1585,7 @@ class TestVerify:
 
     @pytest.mark.asyncio
     async def test_verify_judge_call_failure_raises_after_retries(self, tmp_path) -> None:
-        """Judge HTTP call failing on every retry → JudgeError, so judge_failsafe
+        """Judge HTTP call failing on every retry → a judge failure, so judge_failsafe
         routes it to the failures sidecar instead of scoring 0.0."""
         server = self._create_server_with_judge(tmp_path)
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
@@ -1533,8 +1595,9 @@ class TestVerify:
         )
         req = self._make_verify_request(response, "$391.0 billion")
         with patch("resources_servers.finance_sec_search.app.asyncio.sleep", AsyncMock()):
-            with pytest.raises(JudgeError, match="judge unavailable"):
+            with pytest.raises(NgFailureEvent, match="judge unavailable") as failure:
                 await server.verify(self._mock_request(), req)
+            assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_verify_extracts_answer_from_submit_tool(self, tmp_path) -> None:

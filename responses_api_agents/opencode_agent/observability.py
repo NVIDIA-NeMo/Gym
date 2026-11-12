@@ -77,6 +77,20 @@ def _native_gap_diagnostics(message_ids: set[str], message_rows: list[Row], part
     )
 
 
+# A Gym Model Server's chat completions reply carries the model's reasoning ahead of its text as one
+# <think>...</think> block. OpenCode reads reasoning only from a separate field, so it stores that block as the start
+# of a text part. Only a block that starts the part is that reasoning; any other think tag is the model's own text.
+_GYM_REASONING_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def split_gym_reasoning(text: str) -> tuple[str | None, str]:
+    """Split the reasoning block a Gym Model Server reply starts with from the rest of an OpenCode text part."""
+    match = _GYM_REASONING_BLOCK.match(text)
+    if match is None:
+        return None, text
+    return match.group(1), text[match.end() :].lstrip()
+
+
 def append_opencode_turns(
     trajectory: TrajectoryRecord,
     session_ids: set[str],
@@ -84,6 +98,8 @@ def append_opencode_turns(
     part_rows: list[Row],
     *,
     model_ref: ModelServerRef | None = None,
+    gym_reasoning: bool = False,
+    normalized_call_ids: dict[str, str] | None = None,
 ) -> None:
     """Membership comes only from persisted IDs; row order numbers turns within a session.
 
@@ -91,6 +107,8 @@ def append_opencode_turns(
     bookkeeping. Only the model processor writes step-start/step-finish parts.
     A saved user message is not the full provider request, so question stays unset.
     step_count counts persisted step-finish events cumulatively within the session.
+    With ``gym_reasoning``, the reasoning block a Gym Model Server reply's text
+    starts with becomes the turn's reasoning rather than answer text.
     """
     messages = {row["id"]: row for row in message_rows}
     parts = defaultdict(list)
@@ -155,7 +173,13 @@ def append_opencode_turns(
                     unavailable.add(message_id)
                     continue
                 if kind == "text":
-                    text_parts.append({"id": part_id, "type": "output_text", "text": part["text"]})
+                    reply_reasoning, text = (
+                        split_gym_reasoning(part["text"]) if gym_reasoning else (None, part["text"])
+                    )
+                    if reply_reasoning is not None:
+                        reasoning.append({"id": f"{part_id}-reasoning", "type": "reasoning", "text": reply_reasoning})
+                    if text or reply_reasoning is None:
+                        text_parts.append({"id": part_id, "type": "output_text", "text": text})
                 else:
                     reasoning.append({"id": part_id, "type": "reasoning", "text": part["text"]})
             elif kind == "tool":
@@ -167,7 +191,7 @@ def append_opencode_turns(
                     {
                         "id": part_id,
                         "type": "function_call",
-                        "call_id": part.get("callID"),
+                        "call_id": (normalized_call_ids or {}).get(part_id, part.get("callID")),
                         "name": part["tool"],
                         "arguments": state.get("input"),
                     }
@@ -178,8 +202,17 @@ def append_opencode_turns(
             unavailable.add(message_id)
             if not answer and not reasoning and not text_parts:
                 continue
-        if text_parts:
-            answer.insert(0, {"id": message_id, "type": "message", "role": "assistant", "content": text_parts})
+        # Match the invocation's Responses shape: native text-part identity belongs to
+        # the output message, not to output_text (which has no id field).
+        answer[:0] = [
+            {
+                "id": part["id"],
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": part["text"], "annotations": []}],
+            }
+            for part in text_parts
+        ]
         trajectory.turns.append(
             TrajectoryTurn(
                 invocation_id=session_id,

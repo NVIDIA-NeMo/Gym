@@ -81,13 +81,35 @@ Function completion (HumanEval, MBPP), competitive programming, text-to-SQL (BIR
 Graduate-level science (GPQA Diamond), MMLU variants, HLE, multi-hop QA (HotPotQA), factual recall (SimpleQA, OmniScience), and abstract reasoning (ARC-AGI).
 
 **Agentic / Tool Use**
-Multi-step tool calling, web search (BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+Multi-step tool calling, web search (BrowseComp, MM-BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+
+MM-BrowseComp is the multimodal version of BrowseComp: 400 web-research questions, 243 of them with question images. Prepare it with `gym eval prepare --benchmark mm_browsecomp`, then run it with a vision-capable policy as its [README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/mm_browsecomp/README.md#run) shows. The policy sees the question images, but search and browse return text only. Gym scores answers with the BrowseComp answer judge, not the official MM-BrowseComp checklist judge.
 
 **Instruction Following & Safety**
 IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, over-refusal calibration (XSTest), and structured output validation.
 
 **Other**
 ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, Arena Hard pairwise judging, and speculative-decoding throughput.
+
+## Benchmarks Whose Data You Stage
+
+A few benchmarks declare a protocol over a dataset that cannot ship with Gym. Their `prepare_script` copies a file you stage yourself and fails when you have not given it one, so a run never scores a partial or stale set.
+
+**AgentArena** (`benchmarks/agent_arena`) is one. It runs the 433-turn Arena validation split at four repeats over the [`agentic_turn_simulation`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/agentic_turn_simulation) environment, which scores a whole agent turn against simulated tools. The rows carry the agent harness's own system prompt and conversation history, so the benchmark sets no `prompt_config` of its own. The split is held out from the Arena RL training rows, is NVIDIA internal use only and is not redistributable: obtain it from the dataset's owners. Its row format is the environment's own, described in [the environment's data guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/agentic_turn_simulation/docs/data.md).
+
+Stage the file, then prepare and run. The simulator and the judge are the environment's judge model server, so every run names it:
+
+```bash
+AGENT_ARENA_TURNS_JSONL=/path/to/arena_turns.jsonl \
+  gym eval prepare --benchmark agent_arena
+
+gym eval run --benchmark agent_arena \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --output results/agent_arena/rollouts.jsonl \
+  ++judge_base_url="$JUDGE_URL" ++judge_api_key="$JUDGE_KEY" ++judge_model_name="$JUDGE_MODEL"
+```
+
+`++judge_base_url` takes one URL or a list of replicas. `++prepare_script_args.source_jsonl=<path>` names the staged file instead of the environment variable, and `++prepare_script_args.limit=<n>` prepares only the first `n` turns for a smoke run. A subset is not the benchmark's score: the protocol is all 433 turns at four repeats.
 
 ## Interpreting Results
 

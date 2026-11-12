@@ -29,7 +29,6 @@ from environment_servers.swe_together.repo_config import discover_repo_config_fi
 from environment_servers.swe_together.runtime import PYTHON, RuntimeProvisioner
 from environment_servers.swe_together.schemas import (
     CandidateTurn,
-    SWETFailure,
     SWETRequest,
     SWETResponse,
     SWETResult,
@@ -59,8 +58,10 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     JUDGE_FAILED,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     verifier_invocation_context,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
@@ -76,8 +77,7 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    EpisodeFailure,
-    HandledEpisodeError,
+    handled_episode_failure,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
@@ -197,7 +197,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         cookies = {}
         agent_id = "candidate-" + uuid4().hex
         agent_close = None
-        failure: SWETFailure | None = None
+        failure: NgFailureEvent | None = None
         activations = []
         steps = []
         stage = "seed"
@@ -233,11 +233,17 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         async def persist_cleanup_evidence() -> None:
             (state.directory / "cleanup-receipts.json").write_text(json.dumps(state.cleanup_receipts, indent=2))
             if failure is not None:
-                failure.agent_close = agent_close
-                failure.agent_observations = agent_close.agent_observations if agent_close else None
-                failure.trajectory = request.trajectory_for_collection(agent_close.trajectory) if agent_close else None
-                failure.cleanup_receipts = state.cleanup_receipts
-                (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
+                failure.episode_evidence.update(
+                    agent_close=agent_close,
+                    agent_observations=agent_close.agent_observations if agent_close else None,
+                    trajectory=agent_close.trajectory if agent_close else None,
+                    cleanup_receipts=state.cleanup_receipts,
+                )
+                wire_reply = self.failure_response(request, failure)
+                (state.directory / "failure.json").write_text(wire_reply.failure.model_dump_json(indent=2))
+                if wire_reply.failure_report is not None:
+                    report_json = wire_reply.failure_report.model_dump_json(indent=2)
+                    (state.directory / "failure_report.json").write_text(report_json)
 
         async def release_dependency_access() -> None:
             if state.dependency_access is not None:
@@ -357,10 +363,15 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 trajectory = await collect_judge_evidence(
                     trajectory, verification, self.server_client.global_config_dict, state.directory
                 )
-            await judge_cleanup.close()
-            await candidate_cleanup.close()
-            await runtime_cleanup.close()
-            await dependency_cleanup.close()
+            try:
+                await judge_cleanup.close()
+                await candidate_cleanup.close()
+                await runtime_cleanup.close()
+                await dependency_cleanup.close()
+            except Exception as error:
+                # The verdict is final. Final cleanup retries the open owners, and their expiry bounds any leak.
+                LOGGER.exception("SWE-Together cleanup failed after verification")
+                state.cleanup_receipts["post_verification_error"] = f"{type(error).__name__}: {error}"[:2000]
             response = SWETResponse(
                 episode_id=request.episode_id,
                 task_id=request.task.task_id,
@@ -370,7 +381,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -382,28 +393,30 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         except Exception as error:
             LOGGER.exception("SWE-Together episode failed at %s", stage)
             dependency = error_evidence(error)
-            failure = SWETFailure(
+            failure = handled_episode_failure(
+                boundary=FailureBoundary.ENVIRONMENT,
                 stage=stage,
-                terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
+                operation="episode",
                 failure_reason=(f"{type(error).__name__}: {error}")[:2000],
-                partial_response=activations[-1].response if activations else None,
-                activations=activations,
-                agent_close=agent_close,
-                agent_observations=agent_close.agent_observations if agent_close else None,
-                trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
-                cleanup_receipts=state.cleanup_receipts,
-                artifact_directory=str(state.directory),
-                dependency_error=dependency,
+                terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
+                evidence={
+                    "partial_response": activations[-1].response if activations else None,
+                    "activations": activations,
+                    "agent_close": agent_close,
+                    "agent_observations": agent_close.agent_observations if agent_close else None,
+                    "trajectory": agent_close.trajectory if agent_close else None,
+                    "cleanup_receipts": state.cleanup_receipts,
+                    "artifact_directory": str(state.directory),
+                    "dependency_error": dependency,
+                },
             )
-            (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
-            failure.cleanup_receipts = state.cleanup_receipts
-            raise HandledEpisodeError(failure) from error
-
-    def failure_response(self, request: SWETRequest, failure: EpisodeFailure) -> SWETResponse:
-        if isinstance(failure, SWETFailure):
-            # Final cleanup updates this same object before the base class serializes it.
-            return SWETResponse(episode_id=request.episode_id, task_id=request.task.task_id, failure=failure)
-        return super().failure_response(request, failure)
+            failure.__cause__ = error
+            wire_reply = self.failure_response(request, failure)
+            (state.directory / "failure.json").write_text(wire_reply.failure.model_dump_json(indent=2))
+            if wire_reply.failure_report is not None:
+                report_json = wire_reply.failure_report.model_dump_json(indent=2)
+                (state.directory / "failure_report.json").write_text(report_json)
+            raise failure from error
 
     def _activation_path(self, request: SWETRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
@@ -452,8 +465,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     env=proxy_env,
                     files=proxy_files,
                     provider_options=options,
-                    metadata=state.runtime.metadata()
-                    | dict(sandbox_config.get("metadata", {}))
+                    metadata=state.runtime.metadata(dict(sandbox_config.get("metadata", {})))
                     | {
                         "benchmark": "swe-together",
                         "task_id": state.task.task_id,

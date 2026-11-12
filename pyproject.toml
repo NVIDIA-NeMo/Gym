@@ -87,11 +87,12 @@ dependencies = [
     # Pinned to a single version, not a range.
     # Gym subclasses the SDK's pydantic models and mirrors its Responses item union by hand.
     # Each version needs its own audit, so a range would claim support for versions nobody tested.
-    # 2.45.0 makes InputTokensDetails.cache_write_tokens required, which NeMoGymResponseInputTokensDetails cannot satisfy.
+    # 2.45.0 makes InputTokensDetails.cache_write_tokens required.
+    # NeMoGymResponseInputTokensDetails overrides it as Optional, so a provider that does not report cache writes stays unknown instead of becoming zero.
     # Moving this pin means re-running tests/unit_tests/core/test_responses_api_types.py, which names each item type Gym cannot represent.
-    # Updated Tue Aug 11, 2026 with openai==2.44.0
-    # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.44.0/LICENSE
-    "openai==2.44.0",
+    # Updated 2026-11-02 with openai==2.45.0 for MAX reasoning effort.
+    # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.45.0/LICENSE
+    "openai==2.45.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
     # /v1/messages <-> Responses mapping in nemo_gym/models/anthropic_converter.py. Types only — we never
@@ -249,6 +250,10 @@ dependencies = [
 
     # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
     "pydot",
+
+    # tiktoken: BPE tokenizer for SPEED-Bench dataset preparation script
+    # License: MIT https://raw.githubusercontent.com/openai/tiktoken/refs/tags/0.9.0/LICENSE
+    "tiktoken>=0.9.0",
 ]
 
 [project.optional-dependencies]
@@ -442,6 +447,13 @@ dev = [
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
+    "tomlkit>=0.12",
+
+    # OpenTelemetry SDK: the in-memory meter of the telemetry tests, which other tests import. Without it the importing
+    # modules were skipped silently in a dev environment; CI already installs it with the telemetry and mlflow extras.
+    # Updated: Sun Nov 01, 2026 with opentelemetry-sdk==1.44.0
+    # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE
+    "opentelemetry-sdk",
 ]
 
 [dependency-groups]
@@ -463,13 +475,16 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 managed = true
-required-version = ">=0.9.30"
+required-version = ">=0.13.4"
 # grpcio and msgpack are transitive dependencies of ray. Pin the lower bounds here to
 # ensure uv selects a CVE-safe version across all resolver paths.
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 # override-dependencies overrides transitive dep version pins that conflict with
 # Python 3.13 wheel availability. Server venvs inherit this via the editable
@@ -866,11 +881,13 @@ name = "nemo_gym packages depend only on packages below them"
 type = "layers"
 layers = [
     # cli/
-    "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils : nemo_gym.cli_setup_command",
+    "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils",
     # environment/
-    "nemo_gym.agent_registry : nemo_gym.benchmarks : nemo_gym.deliverables : nemo_gym.discovery : nemo_gym.environment : nemo_gym.model_registry : nemo_gym.registry : nemo_gym.resources_server_registry",
+    "nemo_gym.environment",
+    # Shared web benchmark browser, session and task contracts.
+    "nemo_gym.web",
     # eval/
-    "nemo_gym.comparison : nemo_gym.eval_plan : nemo_gym.rollout_compare : nemo_gym.rollout_reverification",
+    "nemo_gym.eval",
     # orchestration/
     "nemo_gym.orchestration",
     # rollouts/
@@ -881,8 +898,11 @@ layers = [
     "nemo_gym.agents",
     # models/
     "nemo_gym.models",
+    # server_runtime/supervisor/: starts the servers of a run, so it sits above the rest of server_runtime;
+    # nothing that runs inside a server may import it
+    "nemo_gym.server_runtime.supervisor",
     # server_runtime/
-    "nemo_gym.server_runtime",
+    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.sandbox_lending : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.uvicorn_reuse_port : nemo_gym.server_runtime.verifier_observability",
     # artifacts/
     "nemo_gym.artifacts",
     # metrics/
@@ -911,7 +931,6 @@ ignore_imports = [
     "nemo_gym.client.server_client -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.artifacts.exporters",
-    "nemo_gym.config.global_config -> nemo_gym.orchestration.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",

@@ -3,6 +3,7 @@
 """Terminal-Bench-Science on the pinned Harbor-package runtime shared with TB4."""
 
 import json
+import shlex
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -829,7 +830,7 @@ def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeou
 def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_missing(tmp_path, monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
     from nemo_gym import PARENT_DIR
-    from nemo_gym.orchestration import server_venv as setup_command
+    from nemo_gym.server_runtime.supervisor import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.chdir(tmp_path)
@@ -852,14 +853,21 @@ def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_miss
         f" && {python} -m benchmarks.terminal_bench_science.prepare_codex --task-names {' '.join(in_manifest_order)} "
         f"--task-download-dir {tmp_path / 'packages'}"
     )
-    assert "uv pip install" in command  # sets up the server's environment as `gym env start` does
+    _, setup_command, _ = command.split(" && ", 2)
+    setup_args = shlex.split(setup_command)
+    assert Path(setup_args[1]).name == "venv_setup.py"
+    assert setup_args[setup_args.index("--venv") + 1] == str(python.parent.parent)
+    install_args = shlex.split(setup_args[setup_args.index("--command") + 1])
+    assert Path(install_args[1]).name == "_locked_env.py"
+    assert install_args[install_args.index("--project") + 1] == str(prepare_codex.SERVER_DIR)
+    assert install_args[install_args.index("--venv") + 1] == str(python.parent.parent)
     assert (working_dir, kwargs["project_root"]) == (prepare_codex.SERVER_DIR, PARENT_DIR)
     assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
 
 
 def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
-    from nemo_gym.orchestration import server_venv as setup_command
+    from nemo_gym.server_runtime.supervisor import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.setattr(setup_command, "run_command", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 3))

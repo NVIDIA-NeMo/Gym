@@ -19,18 +19,16 @@ import nemo_gym.models.base_responses_api_model
 import nemo_gym.server_runtime.base_server
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.core import SSE_KEEPALIVE, NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
-from nemo_gym.models import (
-    CAPTURE_REFUSAL_HEADER,
+from nemo_gym.models import is_responses_lifecycle_chunk
+from nemo_gym.models.model_call_capture import _CaptureMiddleware, _reconstruct_streamed_response
+from nemo_gym.models.token_capture import CAPTURE_REFUSAL_HEADER, NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
+from nemo_gym.models.token_capture.staging import (
     INVALID_COMMIT_COORDS_REASON,
-    NG_CAPTURE_FIELD,
-    NG_COMMIT_COORDS_FIELD,
     CaptureAdmission,
     RolloutManifest,
     RolloutTokenCapture,
     StageResult,
-    is_responses_lifecycle_chunk,
 )
-from nemo_gym.models.model_call_capture import _CaptureMiddleware, _reconstruct_streamed_response
 from nemo_gym.server_runtime import CheckpointRequest
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.tests.test_external_capture_streaming import _request
@@ -89,6 +87,7 @@ def make_capture_harness(
     decide_input=None,
     parent_resolution_mode="source_history",
     checkpoint=False,
+    stream_keepalive_s=None,
 ):
     """Allow paired RL tests to inject their staging transport and prefix reader."""
     sink = sink if sink is not None else MemoryStagingSink()
@@ -121,6 +120,7 @@ def make_capture_harness(
             return_token_id_information=False,
             uses_reasoning_parser=reasoning,
             checkpoint={"policy": checkpoint},
+            stream_keepalive_s=stream_keepalive_s,
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict=config),
     )
@@ -741,6 +741,36 @@ async def test_checkpoint_gate_delivers_framework_capture(monkeypatch, tmp_path,
     assert manifest.records[0].response_id == response["id"]
     assert not manifest.pending_call_ids and not manifest.failures
     assert not harness.client.app.state.nemo_gym_policy_gate.tickets
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+async def test_keepalive_stream_announces_the_id_its_capture_row_records(monkeypatch, tmp_path, checkpoint):
+    # The ledger row's response_id is the join key for terminal attribution, and a keepalive stream
+    # announces its id before the engine answers, so the two must agree.
+    harness = make_capture_harness(monkeypatch, tmp_path, checkpoint=checkpoint, stream_keepalive_s=0.02)
+    worker = NeMoGymAsyncOpenAI.create_chat_completion
+
+    async def slow_worker(client, **body):
+        await asyncio.sleep(0.2)  # Outlasts several keepalive intervals.
+        return await worker(client, **body)
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", slow_worker)
+    messages = await _request(
+        harness.client.app,
+        "/ng-rollout/attempt/training-token-capture/v1/responses",
+        {"input": HISTORY, "stream": True},
+    )
+    assert messages[0]["status"] == 200
+    raw = b"".join(message.get("body", b"") for message in messages)
+    events = [json.loads(line[len("data: ") :]) for line in raw.decode().splitlines() if line.startswith("data: ")]
+    assert [event["type"] for event in events[:2]] == ["response.created", "response.in_progress"]
+    assert events[-1]["type"] == "response.completed"
+    manifest = RolloutManifest.model_validate(await harness.ledger.manifest("attempt"))
+    assert len(manifest.records) == len(harness.sink.records) == 1
+    assert {event["response"]["id"] for event in events if "response" in event} == {manifest.records[0].response_id}
+    assert not manifest.pending_call_ids and not manifest.failures
+    if checkpoint:
+        assert not harness.client.app.state.nemo_gym_policy_gate.tickets
 
 
 @pytest.mark.parametrize("stream", [False, True])

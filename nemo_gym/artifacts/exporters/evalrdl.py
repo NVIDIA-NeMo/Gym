@@ -28,6 +28,19 @@ from nemo_gym.config.config_types import RunExportConfig
 UPLOAD_ALLOWANCE_S = 3600
 
 
+def _dotted_keys(meta: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Fold nested mappings of `meta` into dotted keys: `{"model": {"version": "v"}}` is `{"model.version": "v"}`."""
+    flat: dict[str, Any] = {}
+    for key, value in meta.items():
+        path = f"{prefix}.{key}" if prefix else key
+        leaves = _dotted_keys(value, path) if isinstance(value, dict) else {path: value}
+        repeated = sorted(flat.keys() & leaves.keys())
+        if repeated:
+            raise ValueError(f"`meta` sets the annotation {repeated[0]!r} twice.")
+        flat.update(leaves)
+    return flat
+
+
 class EvalRDLExportConfig(RunExportConfig):
     """Configuration for `gym eval export evalrdl`.
 
@@ -52,13 +65,21 @@ class EvalRDLExportConfig(RunExportConfig):
         default=None, description="EvalRDL service: `prod`, `stg` or a URL. Defaults to the SDK's own choice."
     )
     requirement: str = Field(
-        default="evalrdl", description="pip requirement for the EvalRDL SDK, for example a pinned version."
+        default="evalrdl>=0.0.241",
+        description="pip requirement for the EvalRDL SDK, for example a pinned version. 0.0.241 adds `upload_plan`.",
     )
 
     @field_validator("tags", "meta", mode="before")
     @classmethod
     def plain_containers(cls, value: Any) -> Any:
         return OmegaConf.to_container(value, resolve=True) if isinstance(value, (DictConfig, ListConfig)) else value
+
+    @field_validator("meta")
+    @classmethod
+    def dotted_annotation_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """EvalRDL annotations are flat keys such as `model.version`, which a Hydra override can only write as nested
+        settings (`+meta.model.version=m`); the nested form is folded into the dotted key."""
+        return _dotted_keys(value)
 
 
 class EvalRDLExporter(IsolatedExporter):

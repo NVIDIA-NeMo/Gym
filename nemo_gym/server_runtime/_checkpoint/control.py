@@ -13,14 +13,17 @@ phase machine::
 The control plane here owns everything that is the same for every participant:
 
 - checkpoint-ID fencing, phases, and idempotent replay of completed operations;
-- retire: refusing an attempt's requests, stopping its work and freeing its state before replying. The
+- retire: refusing an attempt's requests, stopping its work and releasing its state before replying. The
   refusal outlives the retire, because a request a caller sent before its own retire can arrive after
   this server's retire finished; it lasts until the controller calls ``forget`` for the rollout;
 - restore refuses the attempts it replaces in the same way, until ``forget``:
   a harness of a crashed attempt that outlived the crash may still call the restored servers;
 - the readiness wait, deadlines, and manifest-last storage, with one write per checkpoint that resume stops;
 - a lease: if the controller that started a checkpoint stops calling, the participant resumes on its
-  own when the lease expires, which is the same as an abort.
+  own when the lease expires, which is the same as an abort;
+- release: after publishing a checkpoint and pruning old ones, the controller names every checkpoint it may
+  still restore, and participants delete external state, such as sandbox snapshots, that only other checkpoints
+  referred to. Admitted only when idle, so the checkpoint being written is never released.
 
 ``resume`` also aborts: it reopens admission and lets parked work continue whether or not the checkpoint
 was published. Resuming remembers the checkpoint ID, so a delayed call from a stale controller cannot
@@ -34,6 +37,7 @@ and admission never disagree.
 
 import asyncio
 import hmac
+import inspect
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -59,7 +63,7 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.errors import (
     CheckpointConflictError,
     CheckpointStateError,
@@ -160,6 +164,14 @@ class ForgetRequest(CheckpointRequest):
     rollout_ids: list[str] = Field(
         min_length=1,
         description="Rollouts that are finished for good: nothing of any of their attempts can still run.",
+    )
+
+
+class ReleaseRequest(CheckpointRequest):
+    kept: list[Annotated[str, Field(min_length=1, max_length=128, pattern=CHECKPOINT_ID_PATTERN)]] = Field(
+        description="Every checkpoint the controller may still restore, including the one it just published. "
+        "Participants delete external state that only other checkpoints referred to. Empty once the run is "
+        "complete and nothing will ever be restored."
     )
 
 
@@ -321,8 +333,8 @@ class ClaimRestored(Protocol):
     ) -> AbstractAsyncContextManager[Optional[dict[str, Any]]]: ...
 
 
-class SessionFreed(Protocol):
-    """Told of a session a participant freed outside a request.
+class SessionReleased(Protocol):
+    """Told of a session a participant released outside a request.
 
     ``until_forget`` says the session stays refused until the controller forgets its rollout.
     """
@@ -342,6 +354,9 @@ class CheckpointParticipant(ABC):
     # What this participant's server can capture; its status reports it beside ``kind``, so a controller knows from
     # discovery alone which servers' rollouts start over after a crash.
     mode: CheckpointMode
+    # Whether this participant's checkpoints keep state outside Gym, such as sandbox snapshots, that only a
+    # ``release`` deletes; its status reports it, so a controller that never releases can refuse to run or warn.
+    keeps_external_state: bool = False
     record_model: ClassVar[type[CheckpointRecord]]
 
     def __init__(self) -> None:
@@ -355,12 +370,12 @@ class CheckpointParticipant(ABC):
         self.on_change: Optional[Callable[[], Awaitable[None]]] = None
         # With several workers, takes a restored record from the coordinator by the key ``claim_key`` gives it.
         # The coordinator leases the record to this worker until the block it opens ends.
-        # A failure gives it back, once the teardown it names has freed what the block installed.
+        # A failure gives it back, once the teardown it names has released what the block installed.
         self.claim_restored: Optional[ClaimRestored] = None
-        # With several workers, told of each session this participant freed outside a request, such as by a retire,
-        # so the session's routing claim ends too.
-        # A retired session's claim lasts until the forget that ends its refusal, which tells this again.
-        self.on_session_freed: Optional[SessionFreed] = None
+        # With several workers, told of each session this participant released outside a request, such as by a retire,
+        # so the worker's ownership of the session ends too.
+        # A retired session's ownership lasts until the forget that ends its refusal, which tells this again.
+        self.on_session_released: Optional[SessionReleased] = None
 
     async def notify(self) -> None:
         """Wake a prepare that waits for this participant to become ready."""
@@ -407,7 +422,7 @@ class CheckpointParticipant(ABC):
     @abstractmethod
     async def retire(self, episode_id: EpisodeId) -> None:
         """Stop the running work of ``episode_id`` and earlier attempts, wait until it has stopped,
-        then free their state, live or restored.
+        then release their state, live or restored.
         Return only once nothing of them remains.
 
         If this raises or is cancelled, whatever is still running must stay tracked, so a retry stops it again.
@@ -449,16 +464,25 @@ class CheckpointParticipant(ABC):
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
         self.retired.forget(rollout_ids)
 
+    async def release(self, kept: frozenset[str]) -> None:
+        """Delete external state that only checkpoints outside ``kept`` referred to, such as sandbox snapshots.
+
+        Called while idle, after the controller published a checkpoint and pruned old ones; an empty set means
+        the run is complete. Return only once the state is deleted: the caller holds the control lock and
+        cancels the call at the release request's deadline, so no prepare, commit, or restore runs meanwhile.
+        Override to tell other processes as well. The default keeps nothing outside Gym.
+        """
+
     async def unclaimed(self) -> list[EpisodeId]:
         """Unclaimed restored episodes: no next attempt has used them here yet. Each is named by the attempt that continues it.
 
         A commit deletes the ones its scope leaves out: the controller no longer continues them,
-        and nothing else would free their restored state.
+        and nothing else would release their restored state.
         """
         return []
 
     async def delete_restored(self, episode_id: EpisodeId) -> None:
-        """Free the restored state of ``episode_id``,
+        """Release the restored state of ``episode_id``,
         a replacement attempt that never started here and that the controller no longer continues.
 
         Unlike a retire, it must leave nothing that refuses the attempt later, such as a capture-ledger fence:
@@ -468,8 +492,12 @@ class CheckpointParticipant(ABC):
         """
         await self.retire(episode_id)
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-        """Export for a commit. Override to keep slow I/O off the event loop; the default is synchronous."""
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
+        """Export for the commit of ``checkpoint_id``.
+
+        Override to keep slow I/O off the event loop, or to tag external state with the checkpoint that names it,
+        so a later ``release`` can find it; the default is synchronous.
+        """
         return self.export_records(episode_ids)
 
     async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
@@ -485,7 +513,7 @@ class CheckpointParticipant(ABC):
         Runs once the restore's install has finished, and before another restore installs.
         Raising keeps admission closed, and the next resume or restore calls this again.
         The default keeps everything:
-        the controller retires the restored attempts after a failed restore, which frees it.
+        the controller retires the restored attempts after a failed restore, which releases it.
         """
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
@@ -515,12 +543,12 @@ class CheckpointParticipant(ABC):
         """The identities of restored state no request has used yet, as ``record_identity`` names them.
 
         With several workers, the coordinator compares them with every worker's records,
-        and frees a restored copy another worker's live copy replaces with ``delete_unclaimed_session``.
+        and releases a restored copy another worker's live copy replaces with ``delete_unclaimed_session``.
         """
         raise NotImplementedError(f"the {self.kind} participant does not report its unclaimed restored state")
 
     async def delete_unclaimed_session(self, identity: str) -> None:
-        """Free the restored state named by ``identity`` if no request has used it, refusing nothing later."""
+        """Release the restored state named by ``identity`` if no request has used it, refusing nothing later."""
         raise NotImplementedError(f"the {self.kind} participant does not delete unclaimed restored state")
 
     @staticmethod
@@ -537,6 +565,20 @@ class CheckpointParticipant(ABC):
 
 def next_attempt(episode_id: EpisodeId) -> EpisodeId:
     return episode_id.model_copy(update={"attempt": episode_id.attempt + 1})
+
+
+def require_checkpoint_id_keyword(owner: object, hook: str) -> None:
+    """Refuse at startup an export hook of ``owner`` that a commit could not call with ``checkpoint_id``.
+
+    Otherwise a hook written before it took the keyword fails only at the first checkpoint, with rollouts parked.
+    """
+    parameters = inspect.signature(getattr(owner, hook)).parameters.values()
+    if not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (parameter.name == "checkpoint_id" and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY)
+        for parameter in parameters
+    ):
+        raise ValueError(f"{type(owner).__name__}.{hook} must accept the keyword argument checkpoint_id")
 
 
 @dataclass
@@ -578,13 +620,15 @@ class ParticipantControlPlane:
         self._lease_expires_at: Optional[float] = None
         self._lease_task: Optional[asyncio.Task] = None
         # Recently resumed checkpoint IDs, so a delayed request of a stale controller cannot reopen one.
-        self._resumed_ids: OrderedDict[str, None] = OrderedDict()
+        # Each maps to whether this participant held the checkpoint when it resumed, committed or restored,
+        # rather than aborting it before: only such a checkpoint makes an earlier one's release stale.
+        self._resumed_ids: OrderedDict[str, bool] = OrderedDict()
         # Each completed operation's result, with the arguments it ran with: a retry with other arguments conflicts.
         self._results: dict[tuple[str, str], tuple[Any, dict[str, Any]]] = {}
         self._write: Optional[_Write] = None
         # The last restore's install.
         # It can outlive the restore's deadline, as a thread does,
-        # and a retire must not free restored state before the install that brings it finishes.
+        # and a retire must not release restored state before the install that brings it finishes.
         self._install: Optional[asyncio.Task] = None
         # Reopens admission once an install that outlived its failed restore has finished.
         self._reopening: Optional[asyncio.Task] = None
@@ -596,6 +640,7 @@ class ParticipantControlPlane:
         return {
             "kind": self.participant.kind,
             "mode": self.participant.mode,
+            "keeps_external_state": self.participant.keeps_external_state,
             "instance": self.instance_name,
             "phase": self.phase.value,
             "checkpoint_id": self.checkpoint_id,
@@ -713,8 +758,10 @@ class ParticipantControlPlane:
                 self.phase = CheckpointPhase.PREPARING
                 self._renew(request)
                 try:
-                    await self.participant.close_admission(request)
+                    # Restarts first: closing admission asks running work to park,
+                    # and a restart's activation, on any worker, must already know it is one when it wakes.
                     await self.participant.carry_restarts(request.restarts)
+                    await self.participant.close_admission(request)
                 except BaseException:
                     await self._reopen()
                     raise
@@ -760,7 +807,7 @@ class ParticipantControlPlane:
             await self.participant.wait_changed(min(remaining, 1.0))
 
     async def retire(self, request: RetireRequest) -> dict[str, Any]:
-        """Refuse these attempts, stop their running work and free their state, then reply.
+        """Refuse these attempts, stop their running work and release their state, then reply.
 
         Allowed when idle, and after a restore, where nothing is running yet.
         While a checkpoint is open it is refused: stopping an episode waits for its final cleanup,
@@ -793,6 +840,35 @@ class ParticipantControlPlane:
                 self._admit_outside_checkpoint(request)
                 await _within(request, lambda: self.participant.forget(request.rollout_ids))
             return {"forgotten_count": len(set(request.rollout_ids))}
+
+    async def release(self, request: ReleaseRequest) -> dict[str, Any]:
+        """Delete external state that only checkpoints the controller no longer keeps referred to.
+
+        Admitted only when idle with no checkpoint open, stricter than retire and forget:
+        a list the controller computed before a checkpoint existed must never release that checkpoint.
+        For the same reason a release is refused as stale once this server committed or restored a checkpoint
+        after the one it names. A checkpoint that was aborted here does not count: it kept nothing.
+        A release that names a checkpoint this process never resumed is stale as well once the process holds
+        one, since the request then dates from before a restart. The controller therefore names the latest
+        checkpoint it resumed, published or aborted, also for the release that ends the run.
+        """
+        with self._operation("release", request.checkpoint_id) as span:
+            span.set(kept=len(request.kept))
+            async with self._lock:
+                if self.phase != CheckpointPhase.IDLE or self.checkpoint_id is not None:
+                    raise InvalidPhaseError(f"not valid in phase {self.phase.value}; resume first")
+                resumed = list(self._resumed_ids)
+                if request.checkpoint_id in self._resumed_ids:
+                    later = resumed[resumed.index(request.checkpoint_id) + 1 :]
+                else:
+                    later = resumed
+                if any(self._resumed_ids[checkpoint_id] for checkpoint_id in later):
+                    raise StaleCheckpointError(
+                        f"release for checkpoint {request.checkpoint_id!r} is stale: "
+                        "this server has committed or restored a later checkpoint"
+                    )
+                await _within(request, lambda: self.participant.release(frozenset(request.kept)))
+            return {"released": True}
 
     def _admit_outside_checkpoint(self, request: CheckpointRequest) -> None:
         if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
@@ -936,7 +1012,9 @@ class ParticipantControlPlane:
             # One that fails is final for this checkpoint:
             # exporting again could take a later cut than the other participants already committed.
             if write.export is None:
-                write.export = _background(self.participant.export(request.episode_ids))
+                write.export = _background(
+                    self.participant.export(request.episode_ids, checkpoint_id=request.checkpoint_id)
+                )
             export = write.export
             with checkpoint_span("gym.checkpoint.export") as span:
                 try:
@@ -951,6 +1029,18 @@ class ParticipantControlPlane:
                     self._results[(request.checkpoint_id, "export_failed")] = (None, {"detail": detail})
                     raise ExportFailedError(detail) from error
                 span.set(records=len(write.records))
+        # An expired retire can mark attempts without reaching their cleanup. Never
+        # publish those attempts, even if a participant still considers them exportable.
+        for record in write.records:
+            try:
+                self.participant.retired.check(record.episode_id)
+            except StaleAttemptError as error:
+                detail = (
+                    f"checkpoint {request.checkpoint_id!r} exported a retired attempt "
+                    f"({error}); resume, retry the retire, then prepare again under a new checkpoint ID"
+                )
+                self._results[(request.checkpoint_id, "export_failed")] = (None, {"detail": detail})
+                raise ExportFailedError(detail) from error
         if write.task is None or _failed(write.task):
             write.task = asyncio.create_task(
                 asyncio.to_thread(
@@ -1008,9 +1098,9 @@ class ParticipantControlPlane:
                         Path(request.checkpoint_dir),
                         kind=self.participant.kind,
                         instance=self.instance_name,
-                        select=lambda record: _validate_record(model, record)
-                        if _record_key(record) in scope
-                        else None,
+                        select=lambda record: (
+                            _validate_record(model, record) if _record_key(record) in scope else None
+                        ),
                     ),
                 )
                 span.set(records=len(records), bytes=size)
@@ -1096,8 +1186,8 @@ class ParticipantControlPlane:
         self._remember_resumed(request.checkpoint_id)
         await self.participant.notify()
 
-    def _remember_resumed(self, checkpoint_id: str) -> None:
-        self._resumed_ids[checkpoint_id] = None
+    def _remember_resumed(self, checkpoint_id: str, *, held: bool = False) -> None:
+        self._resumed_ids[checkpoint_id] = held
         while len(self._resumed_ids) > _RESUMED_IDS_KEPT:
             self._resumed_ids.popitem(last=False)
 
@@ -1128,13 +1218,15 @@ class ParticipantControlPlane:
                     raise DeadlineExceededError("restored state is still being deleted; resume again")
             self._write = None
         self.participant.carried_restarts.clear()
+        # A restore whose recovery is still pending failed: nothing of it is held.
+        held = self.phase in (CheckpointPhase.COMMITTED, CheckpointPhase.RESTORED) and not self._reopen_pending
         if self._reopen_pending:
             # A failed restore's recovery has not finished: what it left that cannot be served goes first.
             await self.participant.discard_failed_restore()
         await self.participant.open_admission()
         self._reopen_pending = False
         if resume_id is not None:
-            self._remember_resumed(resume_id)
+            self._remember_resumed(resume_id, held=held)
             self._results = {key: value for key, value in self._results.items() if key[0] != resume_id}
         self.phase = CheckpointPhase.IDLE
         self.checkpoint_id = None
@@ -1230,6 +1322,7 @@ _OPERATION_REQUESTS: dict[str, type[CheckpointRequest]] = {
     "renew": CheckpointRequest,
     "retire": RetireRequest,
     "forget": ForgetRequest,
+    "release": ReleaseRequest,
     "commit": CommitRequest,
     "restore": RestoreRequest,
     "resume": CheckpointRequest,

@@ -19,11 +19,12 @@ This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pu
 from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
-from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
+from swebench.harness.constants import END_TEST_OUTPUT, FAIL_ONLY_REPOS, MAP_REPO_TO_EXT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import *
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
+from resources_servers.swebench.failure_only_grading import failure_only_suite_completed
 
 
 # @bxyu-nvidia: We modify the run_instance function to:
@@ -104,6 +105,9 @@ async def run_instance(
     container = None
     eval_completed = False
     report = {}
+    # Why the evaluation did not complete: the model's patch could not be applied, and the error that ended it.
+    patch_apply_failed = False
+    error = None
     try:
         # Original code:
         # Build + start instance container (instance image should already be built)
@@ -155,6 +159,7 @@ async def run_instance(
                 applied_patch = True
 
         if not applied_patch:
+            patch_apply_failed = True
             logger.info(f"{APPLY_PATCH_FAIL}:\n{val.output.decode(UTF8)}")
             raise EvaluationError(
                 instance_id,
@@ -216,12 +221,26 @@ async def run_instance(
 
         # Get report from test output
         logger.info(f"Grading answer for {instance_id}...")
-        report = get_eval_report(
+        eval_report = get_eval_report(
             test_spec=test_spec,
             prediction=pred,
             test_log_path=test_output_path,
             include_tests_status=True,
         )
+        # Failure-only grading counts every test missing from the log as passing, so a suite that never started or
+        # stopped part way would read as resolved. Accept that verdict only from a suite that ran to completion.
+        if (
+            eval_report[instance_id]["resolved"]
+            and test_spec.repo in FAIL_ONLY_REPOS
+            and not failure_only_suite_completed(test_spec.repo, test_output)
+        ):
+            raise EvaluationError(
+                instance_id,
+                f"The {test_spec.repo} test suite did not run to completion, so its failure-only report shows no "
+                "verdict",
+                logger,
+            )
+        report = eval_report
         logger.info(f"report: {report}\nResult for {instance_id}: resolved: {report[instance_id]['resolved']}")
 
         # Write report to report.json
@@ -232,6 +251,7 @@ async def run_instance(
         error_msg = traceback.format_exc()
         logger.info(error_msg)
         print(e)
+        error = f"{type(e).__name__}: {e}"
     except Exception as e:
         error_msg = (
             f"Error in evaluating model for {instance_id}: {e}\n"
@@ -239,6 +259,7 @@ async def run_instance(
             f"Check ({logger.log_file}) for more information."
         )
         logger.error(error_msg)
+        error = f"{type(e).__name__}: {e}"
     finally:
         # Original code:
         # Remove instance container + image, close logger
@@ -253,6 +274,8 @@ async def run_instance(
         return {
             "completed": eval_completed,
             "resolved": report.get(instance_id, {}).get("resolved", False),
+            "patch_apply_failed": patch_apply_failed,
+            "error": error,
         }
 
 

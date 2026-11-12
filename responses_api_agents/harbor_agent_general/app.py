@@ -59,6 +59,8 @@ from nemo_gym.core import (
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,22 @@ GYM_ROOT = Path(__file__).resolve().parents[2]
 
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 _RAY_WORKER_HTTP_CONFIG: GlobalAIOHTTPAsyncClientConfig | None = None
+
+
+class HarborTrialError(RuntimeError):
+    """Retain the original trial failure across the Ray worker boundary."""
+
+    def __init__(self, exception_type: str, exception_message: str, trial_dir: str) -> None:
+        super().__init__(exception_type, exception_message, trial_dir)
+        self.exception_type = exception_type
+        self.exception_message = exception_message
+        self.trial_dir = trial_dir
+
+    def __str__(self) -> str:
+        if self.exception_message.startswith("[sandbox "):
+            prefix, _, message = self.exception_message.partition("]")
+            return f"{prefix}] Harbor trial failed with {self.exception_type}: {message.lstrip()}"
+        return f"Harbor trial failed with {self.exception_type}: {self.exception_message}"
 
 
 async def _run_worker_job(job_config_dict: dict, task_name: str, http_config: dict) -> str:
@@ -234,6 +252,27 @@ class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+# Harbor's timed phases of a trial (or of one of its steps), in order, and the sandbox phase each one is.
+_HARBOR_PHASES = (
+    ("environment_setup", "setup"),
+    ("agent_setup", "setup"),
+    ("agent_execution", "agent"),
+    ("verifier", "verify"),
+)
+
+
+def _running_phase(result: object) -> str:
+    """The phase a failed Harbor trial or step result was in: the last timed phase that started and did not finish,
+    else ``unknown``."""
+    running = [
+        phase
+        for name, phase in _HARBOR_PHASES
+        if getattr(timing := getattr(result, name, None), "started_at", None) is not None
+        and getattr(timing, "finished_at", None) is None
+    ]
+    return running[-1] if running else "unknown"
+
+
 class HarborAgent(SimpleResponsesAPIAgent):
     ray_enabled = True
     config: HarborAgentConfig
@@ -245,6 +284,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
         global_config = get_global_config_dict()
         self._sem = asyncio.Semaphore(global_config.get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
         self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
+        logger.warning(
+            "responses_api_agents/harbor_agent_general is deprecated. The built-in benchmarks that use it will be migrated to "
+            "the harbor environment server (environment_servers/harbor, see its README.md); no action is needed "
+            "from you yet. New work should use the harbor environment server."
+        )
 
     def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
         """Customize a request's copied job without modifying the shared template."""
@@ -556,11 +600,21 @@ class HarborAgent(SimpleResponsesAPIAgent):
             path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / TaskPaths.TRAJECTORY_FILENAME)]
             step_rewards = [trial.verifier_result.rewards if trial.verifier_result is not None else None]
 
+        timed_out = any(
+            result.exception_info is not None and result.exception_info.exception_type == "AgentTimeoutError"
+            for result in [trial, *(trial.step_results or [])]
+        )
+        # An agent ended at its deadline may not have written its trajectory; its outcome is still the graded zero.
         trajectories = [
-            Trajectory.model_validate_json(trajectory_path.read_text()) for _, trajectory_path in path_entries
+            Trajectory.model_validate_json(trajectory_path.read_text())
+            for _, trajectory_path in path_entries
+            if not timed_out or trajectory_path.is_file()
         ]
         conversion_warnings: list[str] = []
+        if len(trajectories) < len(path_entries):
+            conversion_warnings.append("the agent timed out before it wrote its trajectory")
         output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
+        output = output or [[]]
 
         if len(output) > 1:
             logger.warning(
@@ -637,6 +691,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ],
                 },
             }
+            # A terminal graded outcome: the row stays in the pass-rate denominator and a resume never runs it again.
+            | (
+                {"failure_kind": "agent_timeout", "evaluation_completed": True, "mask_sample": False}
+                if timed_out
+                else {}
+            )
         )
 
     def failure_response(self, body: HarborRunRequest, err: Exception) -> HarborVerifyResponse:
@@ -651,6 +711,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
             tools=[],
             status="failed",
         )
+        # A Ray task error wraps the worker's exception; its message names Harbor's own failure, for example
+        # "Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds".
+        cause = getattr(err, "cause", None) or err
+        reason = " ".join(f"{type(cause).__name__}: {cause}".split())
         return HarborVerifyResponse.model_validate(
             body.model_dump(by_alias=True)
             | {
@@ -658,6 +722,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 "reward": 0.0,
                 NG_FAILURE_CLASS_KEY: "harbor_failed",
                 "error": f"{type(err).__name__}: {err}",
+                "failure_reason": reason[:500],
             }
         )
 
@@ -691,23 +756,26 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     for result in [trial_result, *(trial_result.step_results or [])]
                     if result.exception_info is not None
                 ]
-                ## Harbor still runs the tests after an agent timeout and scores that result, so Gym keeps it too,
-                ## but only when every recorded failure is such a graded timeout.
+                ## An agent timeout is the trial's graded outcome: Harbor scores the tests it could still run, and a
+                ## timeout without a test result (the sandbox ends at the deadline) is a zero. Neither is retried.
                 failed = next(
-                    (
-                        result
-                        for result in failures
-                        if result.exception_info.exception_type != "AgentTimeoutError"
-                        or result.verifier_result is None
-                    ),
+                    (result for result in failures if result.exception_info.exception_type != "AgentTimeoutError"),
                     None,
                 )
                 if failed is not None:
                     exception_info = failed.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
                     result_path.unlink()
-                    raise RuntimeError(
-                        f"Harbor trial failed with {exception_info.exception_type}: {exception_info.exception_message}"
+                    environment = getattr(getattr(job_config, "environment", None), "type", None)
+                    facts = sandbox_failure_prefix(
+                        phase=_running_phase(failed),
+                        provider=getattr(environment, "value", environment),
+                        reason=exception_info.exception_type,
+                    )
+                    raise HarborTrialError(
+                        exception_info.exception_type,
+                        f"{facts}{exception_info.exception_message}",
+                        str(trial_dir.resolve()),
                     )
 
                 return str(trial_dir.resolve())
@@ -720,3 +788,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

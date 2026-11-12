@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.rollouts.trajectory_builder import _trajectory_identity
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _trajectory_identity
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,
@@ -77,11 +77,12 @@ async def fixture(tmp_path, monkeypatch):
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False):
+    def create(task, config, session_id, directory, verifier=False, *, placement_group=None):
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
             session_id=session_id,
+            placement_group=placement_group or session_id,
             closed=False,
             resources=[],
             cleanup_errors=[],
@@ -203,6 +204,7 @@ async def test_agent_owns_loop_and_replays_exact_result(fixture):
         "verifier_stop",
     ]
     assert all(env.closed for env in f.envs)
+    assert f.envs[0].placement_group == f.envs[1].placement_group
     f.server._loader.load.assert_awaited_once()
     f.server.server_client.post.assert_not_called()
     session = f.server._sessions[result.session_id]
@@ -701,7 +703,14 @@ async def test_resource_failure_outside_agent_execution_remains_infrastructure(f
     result = await f.agent.run(f.request, f.body)
     assert not result.evaluation_completed
     assert result.infrastructure_error
-    assert result.model_dump()["_ng_failure_class"] == "infrastructure_error"
+    if stage in {"verifier_setup", "restore", "grade"}:
+        # A failed verifier did not grade the saved answer; #5402 keeps it masked and ungraded.
+        assert "_ng_failure_class" not in result.model_dump()
+        assert result.failure_kind == "verifier_error"
+        assert result.mask_sample is True
+        assert result.reward == 0.0
+    else:
+        assert result.model_dump()["_ng_failure_class"] == "infrastructure_error"
     assert result.sandbox_resource_limit is None
     assert all(env.closed for env in f.envs)
 
@@ -992,3 +1001,420 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
     session = next(iter(f.server._sessions.values()))
     assert session.expiry_task.cancelled()
     f.grade.assert_not_awaited()
+
+
+@pytest.mark.parametrize("graded", ["healthy", "wrong", "verifier_error", "cleanup_unconfirmed", "limit_then_cleanup"])
+async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture, monkeypatch, graded):
+    """The /run path posts /verify through the real ServerClient into the registered, observed /verify route."""
+    import re
+
+    from fastapi import FastAPI
+    from omegaconf import OmegaConf
+
+    from nemo_gym.client import server_client
+    from nemo_gym.config import BaseServerConfig
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        report_for_current_request,
+        rollout_context,
+    )
+    from nemo_gym.orchestration.recovery import _policy_evidence
+
+    f = fixture
+    if graded in {"cleanup_unconfirmed", "limit_then_cleanup"}:
+        # Simulated harness result: what MiniSWEHarness.execute returns when its process cleanup failed, after no
+        # native final status or after a native limit (the cleanup is then an unselected observation).
+        def harness(**kwargs):
+            async def execute(budget):
+                failure = NgFailureEvent(
+                    boundary=FailureBoundary.HARNESS,
+                    failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+                    failure_reason="mini-SWE harness termination was not confirmed",
+                    operation="harness.terminate",
+                )
+                failure.__cause__ = TimeoutError("provider command timed out")
+                report = report_for_current_request(failure)
+                termination = HarnessOutcome(reason="infrastructure_error", detail="Process cleanup failed: timed out")
+                if graded == "limit_then_cleanup":
+                    report = report.model_copy(update={"failure_id": None})
+                    termination = HarnessOutcome(reason="nonzero_exit", detail="LimitsExceeded")
+                return (
+                    module.empty_response(kwargs["params"], "model"),
+                    termination,
+                    {"harness_version": "test", **FailureReportRow.fields(report)},
+                )
+
+            return SimpleNamespace(**kwargs, setup=AsyncMock(), execute=AsyncMock(side_effect=execute))
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    if graded == "wrong":
+        f.grade.side_effect = AsyncMock(return_value={"rewards": {"reward": 0.0}})
+    elif graded == "verifier_error":
+        f.grade.side_effect = RuntimeError("verifier container exited")
+    f.server.server_client.global_config_dict = {"observability_enabled": True}
+    routes = FastAPI()
+    f.server.register_protocol_routes(routes)
+    verify_route = next(r.endpoint for r in routes.routes if getattr(r, "path", None) == "/verify")
+    client = ServerClient(
+        head_server_config=BaseServerConfig(host="localhost", port=3),
+        global_config_dict=OmegaConf.create({"observability_enabled": True, "tb4": {"resources_servers": {}}}),
+    )
+    monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: "http://tb4")
+    seen = []
+
+    async def transport(*, method, url, json, cookies, **kwargs):
+        match = re.fullmatch(r"http://tb4(?:/ng-rollout/(?P<rid>[^/]+))?(?P<path>/.*)", url)
+        seen.append((match["rid"], match["path"]))
+        resource_request = SimpleNamespace(
+            session={SESSION_ID_KEY: "owner", "tb4_client_session_id": json.get("client_session_id", "owner")},
+            cookies=cookies,
+        )
+        with rollout_context(match["rid"]):  # what RolloutContextMiddleware does for the prefixed path
+            if match["path"] == "/seed_session":
+                value = await f.server.seed_session(resource_request, TerminalBench4RunRequest.model_validate(json))
+            else:
+                value = await verify_route(resource_request, SandboxedVerifyRequest.model_validate(json))
+        return SimpleNamespace(value=value.model_dump(mode="json"), cookies={"session": "resource"})
+
+    monkeypatch.setattr(server_client, "request", transport)
+    f.agent.server_client = client
+    body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
+    with rollout_context(f.agent.rollout_id_from_run(body)):  # what the registered /run route does
+        result = await f.agent.run(f.request, body)
+
+    assert seen == [("rollout-1", "/seed_session"), ("rollout-1", "/verify")]
+    dumped = result.model_dump(mode="json")
+    (invocation,) = dumped["ng_verifier_invocations"]
+    assert invocation["invocation_id"].startswith("verify-")
+    # The verify reply of an agent infrastructure failure carries _ng_failure_class, so its invocation is failed.
+    assert invocation["status"] == (
+        "completed"
+        if graded in {"healthy", "wrong", "limit_then_cleanup"}
+        else "incomplete"
+        if graded == "verifier_error"
+        else "failed"
+    )
+    assert "ng_verifier_invocations" not in (dumped.get("ng_agent_observations") or {})
+    # The collection writer moves the separate top-level field into ng_trajectory.verifier_invocations.
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, **dumped}
+    _attach_trajectory_record(record, record)
+    assert "ng_verifier_invocations" not in record
+    assert [i["invocation_id"] for i in record["ng_trajectory"]["verifier_invocations"]] == [
+        invocation["invocation_id"]
+    ]
+    assert record["reward"] == dumped["reward"]
+    # Collection merges the /run reply header's report; the row's own failure_id wins, and recovery selects on it.
+    row = FailureReportRow.merged_into(record)
+    if graded == "cleanup_unconfirmed":
+        (event_id,) = row[FailureReportRow.EVENTS]
+        assert row[FailureReportRow.FAILURE_ID] == event_id
+        assert row[FailureReportRow.EVENTS][event_id]["operation"] == "harness.terminate"
+        assert _policy_evidence(row) == (HARNESS_TERMINATION_UNCONFIRMED, None)
+        assert dumped["_ng_failure_class"] == "infrastructure_error"
+        # TB4 still grades a started agent; the row names the harness's selected failure kind.
+        assert (dumped["_ng_failure_class"], dumped["failure_kind"], dumped["reward"]) == (
+            "infrastructure_error",
+            HARNESS_TERMINATION_UNCONFIRMED,
+            0.75,
+        )
+        return
+    if graded == "limit_then_cleanup":
+        # The native limit is graded as the agent's result; the cleanup event stays on the row, unselected.
+        (event,) = row[FailureReportRow.EVENTS].values()
+        assert event["operation"] == "harness.terminate" and FailureReportRow.FAILURE_ID not in row
+        assert _policy_evidence(row) == (None, None)
+        assert "_ng_failure_class" not in dumped and dumped["failure_kind"] is None
+        assert (dumped["reward"], dumped["evaluation_completed"]) == (0.75, True)
+        return
+    assert FailureReportRow.FAILURE_ID not in row and FailureReportRow.EVENTS not in row
+    if graded == "verifier_error":
+        assert dumped["evaluation_completed"] is False
+    else:
+        assert dumped["reward"] == (0.75 if graded == "healthy" else 0.0)
+        assert dumped["evaluation_completed"] is True
+
+
+@pytest.mark.parametrize("reported", [True, False])
+def test_episode_infrastructure_refusal_keeps_the_harness_failure_as_its_cause(reported):
+    """The 503 stays; a harness-reported failure is its cause, and an unreported one is not invented."""
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        failure_report_for,
+        report_for_current_request,
+    )
+
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.HARNESS,
+        failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+        failure_reason="mini-SWE harness termination was not confirmed",
+        operation="harness.terminate",
+    )
+    failure.__cause__ = TimeoutError("provider command timed out")
+    fields = FailureReportRow.fields(report_for_current_request(failure)) if reported else {}
+    params = TerminalBench4RunRequest(
+        task_name="t", task_ref="r", dataset_ref="d", rollout_id="r", responses_create_params={"input": []}
+    ).responses_create_params
+    result = module.AgentExecutionResult(
+        responses_create_params=params,
+        response=module.empty_response(params, "model"),
+        termination=HarnessOutcome(reason="infrastructure_error", detail="Process cleanup failed: timed out"),
+        agent_started=True,
+        harness_metadata={"harness_version": "test", **fields},
+    )
+    with pytest.raises(HTTPException) as raised:
+        module.MiniSWESandboxedAgent._episode_turn_response(SimpleNamespace(observations=None), result)
+    assert raised.value.status_code == 503
+    report = failure_report_for(raised.value)
+    if reported:
+        assert report.failure_id == fields[FailureReportRow.FAILURE_ID]
+        assert report.events[report.failure_id].failure_kind == HARNESS_TERMINATION_UNCONFIRMED
+    else:
+        assert raised.value.__cause__ is None and report.failure_id is None
+
+
+@pytest.mark.parametrize(
+    "final,grade",
+    [
+        ("limits_exceeded", 0.75),
+        ("limits_exceeded", 0.0),
+        ("limits_exceeded", None),
+        ("submitted", 0.75),
+        ("no_answer", 0.75),
+    ],
+)
+async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
+    fixture, runner_factory, monkeypatch, tmp_path, final, grade
+):
+    """The real MiniSWEHarness.execute result after a failed cleanup, unchanged, through /run, /verify and recovery.
+
+    A native limit stays graded (or ungraded when grading fails) with the cleanup unselected. A submission and a
+    run with no model output keep the cleanup as the selected cause, which recovery stops on.
+    """
+    import re
+
+    from fastapi import Body, FastAPI
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+    from omegaconf import OmegaConf
+
+    from nemo_gym.client import server_client
+    from nemo_gym.config import BaseServerConfig
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureReportRow,
+        NeMoGymResponse,
+        NeMoGymResponseCreateParamsNonStreaming,
+        rollout_context,
+    )
+    from nemo_gym.orchestration.recovery import _policy_evidence, _policy_replay_is_unsupported
+    from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
+
+    f = fixture
+    if grade is None:
+        f.grade.side_effect = RuntimeError("verifier container exited")
+    else:
+        f.grade.side_effect = AsyncMock(return_value={"rewards": {"reward": grade}})
+    scripted = FastAPI()
+    calls = []
+
+    @scripted.post("/v1/responses")
+    async def model(body: dict = Body()):
+        calls.append(body)
+        if final == "no_answer":
+            return JSONResponse({"error": {"message": "controlled failure"}}, status_code=503)
+        command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" if final == "submitted" else "exit 7"
+        return {
+            "id": f"response-{len(calls)}",
+            "object": "response",
+            "model": "controlled",
+            "created_at": 0,
+            "status": "completed",
+            "parallel_tool_calls": False,
+            "tools": [],
+            "tool_choice": "auto",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "tool-1",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": command}),
+                }
+            ],
+        }
+
+    model_client = TestClient(scripted)
+
+    async def query(params):
+        reply = await asyncio.to_thread(model_client.post, "/v1/responses", json=params)
+        reply.raise_for_status()
+        return NeMoGymResponse.model_validate(reply.json())
+
+    real = await runner_factory(
+        context=HarnessContext(session_id="invocation", task_id="0", rollout_id="0-0", instruction="work"),
+        config=MiniSWEConfig(step_limit=1),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=f.server.config.artifacts_dir / "real",
+        observability_enabled=True,
+    )
+    execute_command = real.sandbox.exec
+
+    async def exec_with_cleanup_timeout(command, **kwargs):
+        if "kill -TERM" in command:
+            raise TimeoutError("provider command timed out after 70s")
+        return await execute_command(command, **kwargs)
+
+    real.sandbox.exec = exec_with_cleanup_timeout
+    produced = await real.execute(15)
+    model_client.close()
+    response, outcome, _ = produced
+    assert outcome.reason == ("nonzero_exit" if final == "limits_exceeded" else "infrastructure_error")
+    assert (response.output == []) is (final == "no_answer")
+
+    def harness(**kwargs):
+        # The agent's harness slot returns exactly the objects the real harness produced above.
+        return SimpleNamespace(**kwargs, setup=AsyncMock(), execute=AsyncMock(return_value=produced))
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    f.server.server_client.global_config_dict = {"observability_enabled": True}
+    routes = FastAPI()
+    f.server.register_protocol_routes(routes)
+    verify_route = next(r.endpoint for r in routes.routes if getattr(r, "path", None) == "/verify")
+    client = ServerClient(
+        head_server_config=BaseServerConfig(host="localhost", port=3),
+        global_config_dict=OmegaConf.create({"observability_enabled": True, "tb4": {"resources_servers": {}}}),
+    )
+    monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: "http://tb4")
+
+    async def transport(*, method, url, json, cookies, **kwargs):
+        match = re.fullmatch(r"http://tb4(?:/ng-rollout/(?P<rid>[^/]+))?(?P<path>/.*)", url)
+        resource_request = SimpleNamespace(
+            session={SESSION_ID_KEY: "owner", "tb4_client_session_id": json.get("client_session_id", "owner")},
+            cookies=cookies,
+        )
+        with rollout_context(match["rid"]):
+            if match["path"] == "/seed_session":
+                value = await f.server.seed_session(resource_request, TerminalBench4RunRequest.model_validate(json))
+            else:
+                value = await verify_route(resource_request, SandboxedVerifyRequest.model_validate(json))
+        return SimpleNamespace(value=value.model_dump(mode="json"), cookies={"session": "resource"})
+
+    monkeypatch.setattr(server_client, "request", transport)
+    f.agent.server_client = client
+    body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
+    with rollout_context(f.agent.rollout_id_from_run(body)):
+        result = await f.agent.run(f.request, body)
+    from tests.unit_tests.orchestration.test_recovery_saved_generation import persist_producer_result
+
+    decision, store, projected = await persist_producer_result(
+        tmp_path / "persisted", monkeypatch, result.model_dump(mode="json")
+    )
+    assert decision.action.value == ("noop" if final == "limits_exceeded" and grade is not None else "stop")
+    assert store.pending() == []
+    # No response text or function arguments cross the remote projection.
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in json.dumps(projected.model_dump())
+    row = FailureReportRow.merged_into({"_ng_task_index": 0, "_ng_rollout_index": 0, **result.model_dump(mode="json")})
+    (event,) = row[FailureReportRow.EVENTS].values()
+    assert (event["boundary"], event["operation"]) == ("harness", "harness.terminate")
+    if final == "limits_exceeded":
+        assert FailureReportRow.FAILURE_ID not in row
+        assert _policy_evidence(row) == ((None, None) if grade is not None else (row.get("failure_kind"), None))
+        if grade is None:
+            assert row["evaluation_completed"] is False
+        else:
+            assert (row["reward"], row["evaluation_completed"], "_ng_failure_class" in row) == (grade, True, False)
+        return
+    assert row[FailureReportRow.FAILURE_ID] == event["event_id"]
+    persisted = store.failures()[0]
+    assert persisted[FailureReportRow.FAILURE_ID] == event["event_id"]
+    assert decision.evidence[0].failure_id == event["event_id"]
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (1, 3)
+    assert row["_ng_failure_class"] == "infrastructure_error"
+    assert _policy_evidence(row) == (HARNESS_TERMINATION_UNCONFIRMED, None)
+    # A serialized response retains the execution evidence even when no output was emitted.
+    assert _policy_replay_is_unsupported(row)
+
+
+@pytest.mark.parametrize("typed", [False, True])
+async def test_actual_harness_exec_cause_survives_legacy_verify(fixture, monkeypatch, typed):
+    from nemo_gym.core import PROVIDER_UNAVAILABLE, FailureReportRow, NgFailureEvent
+    from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEHarness
+
+    f = fixture
+    failure = OSError("provider command status unavailable")
+    if typed:
+        reported = NgFailureEvent(
+            boundary="harness",
+            failure_kind=PROVIDER_UNAVAILABLE,
+            failure_reason="provider command status unavailable",
+            operation="command.status",
+            operation_id="execution-1",
+        )
+        reported.__cause__ = failure
+        failure = reported
+    executions = []
+
+    def harness(**kwargs):
+        actual = MiniSWEHarness(**kwargs)
+        actual.directory.mkdir(parents=True, exist_ok=True)
+        actual.setup = AsyncMock()
+        actual.close = AsyncMock()
+        actual.sandbox.upload = AsyncMock()
+        actual.sandbox.download = AsyncMock(side_effect=FileNotFoundError("no saved native trajectory"))
+
+        async def execute(*args, **kwargs):
+            executions.append(1)
+            raise failure
+
+        actual.sandbox.exec = AsyncMock(side_effect=execute)
+        return actual
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    result = await f.agent.run(f.request, f.body)
+    row = result.model_dump(mode="json")
+    report = FailureReportRow.report(row)
+    selected = report.events[report.failure_id]
+    assert row["_ng_failure_class"] == "infrastructure_error"
+    assert row["failure_kind"] == "agent_route_failed"
+    assert selected.operation == "harness.run" and selected.stage == "agent"
+    assert selected.failure_kind == "agent_route_failed"
+    if typed:
+        cause = report.events[selected.cause_id]
+        assert cause.event_id == failure.event_id
+        assert cause.operation_id == "execution-1"
+        assert cause.failure_kind == PROVIDER_UNAVAILABLE
+        assert cause.foreign_error.exception_type.endswith("OSError")
+    else:
+        assert selected.cause_id is None
+        assert selected.foreign_error.exception_type.endswith("OSError")
+    assert executions == [1]
+    # Grading may complete, but it must not erase the selected execution failure.
+    assert row["reward"] == 0.75
+    assert f.agent._runs
+
+
+async def test_a_resumed_rollout_that_was_already_graded_is_answered_without_a_second_episode(fixture):
+    """A segment ended after TB4 graded a rollout and before the run saved it. The resumed run sends the rollout again
+    as its next attempt, from a new client session. The agent forwards the Gym identity, and TB4 answers from its
+    record: no second model loop and no second verification."""
+    f = fixture
+    gym = {"_ng_run_id": "c" * 32, "_ng_task_index": 3, "_ng_rollout_index": 0}
+    first = TerminalBench4RunRequest.model_validate(f.body.model_dump() | gym | {"_ng_attempt_index": 0})
+    graded = await f.agent.run(f.request, first)
+    assert graded.evaluation_completed and graded.reward == 0.75
+
+    resumed = TerminalBench4RunRequest.model_validate(
+        f.body.model_dump() | gym | {"_ng_attempt_index": 1, "rollout_id": "rollout-resumed"}
+    )
+    replayed = await f.agent.run(SimpleNamespace(session={SESSION_ID_KEY: "next-segment"}, cookies={}), resumed)
+
+    assert f.grade.await_count == 1 and len(f.harnesses) == 1
+    assert replayed.reward == 0.75 and replayed.evaluation_completed
+    assert replayed.model_dump()["replayed_from"]["attempt_index"] == 0

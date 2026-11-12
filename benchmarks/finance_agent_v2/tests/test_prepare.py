@@ -264,7 +264,7 @@ class TestSourceDriftGuard:
         # from different commits, a question could reference a tool behavior that
         # is not what is installed.
         requirements = (
-            prepare_module.Path("resources_servers/finance_agent_v2/requirements.txt").read_text().splitlines()
+            prepare_module.Path("resources_servers/finance_agent_v2/pyproject.toml").read_text().splitlines()
         )
         pins = [line for line in requirements if "finance-agent-v2.git@" in line]
         assert len(pins) == 1, f"expected one finance-agent-v2 pin, found {pins}"

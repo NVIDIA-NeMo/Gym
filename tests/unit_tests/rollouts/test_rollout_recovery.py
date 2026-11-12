@@ -19,14 +19,15 @@ import asyncio
 import json
 import multiprocessing
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
 import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
@@ -38,7 +39,6 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.server_runtime.episode_types import EpisodeFailure
 from tests.unit_tests.rollouts.test_rollout_collection import (
     FakeResponse,
     failing_row,
@@ -637,7 +637,7 @@ async def test_failure_sidecar_preserves_producer_diagnostics(runner_config, mon
     assert next(row for row in returned if row["_ng_task_index"] == 1) == saved
 
 
-async def test_repeated_interruption_reserves_new_identities_without_spending_retries(tmp_path, monkeypatch):
+async def test_repeated_interruption_reserves_new_identities_and_charges_only_the_later_ends(tmp_path, monkeypatch):
     from nemo_gym.rollouts.rollout_store import RolloutStore
 
     rows = [failing_row(index) for index in range(4)]
@@ -682,11 +682,21 @@ async def test_repeated_interruption_reserves_new_identities_without_spending_re
 
     reader = RolloutStore.read(output)
     assert reader.coverage()["missing"] == len(rows)
-    assert reader.coverage()["counted_failures"] == 0
+    # Three allocations ended with every row in flight. The first end was free; the resume after the second charged
+    # attempt 1 of each, and the end of the third is charged by the next writer.
+    assert reader.coverage()["counted_failures"] == len(rows)
     retry = reader.pending(3)
     assert len(retry) == len(rows)
     assert all(row["_ng_attempt_index"] == 3 for row in retry)
-    assert reader.selected("success") == [] and reader.failures() == []
+    assert reader.selected("success") == []
+    # The charge is a saved outcome of the earlier attempt; the newest attempt is the reservation with no outcome.
+    from nemo_gym.rollouts.rollout_records import read_records
+    from nemo_gym.utils.path_utils import failures_path_for
+
+    assert {
+        (row["_ng_task_index"], row["_ng_attempt_index"], row["failure_kind"])
+        for row in read_records(failures_path_for(output))
+    } == {(index, 1, "rollout_allocation_ended") for index in range(len(rows))}
 
 
 async def test_runner_accepts_nested_hydra_overrides_and_unused_unresolved_server(runner_config, monkeypatch):
@@ -887,9 +897,7 @@ async def test_terminal_skips_can_be_explicitly_scored_as_zero(runner_config, mo
     assert len(aggregate.await_args.args[0]) == 3
 
 
-async def test_reported_kill_shaped_failures_remain_retryable_without_spending_budget(
-    runner_config, monkeypatch, capsys
-):
+async def test_reported_kill_shaped_failures_stop_without_spending_budget(runner_config, monkeypatch, capsys):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
 
     async def post(**kwargs):
@@ -910,21 +918,40 @@ async def test_reported_kill_shaped_failures_remain_retryable_without_spending_b
     runner_config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(runner_config)
     await RolloutCollectionHelper().run_from_config(runner_config)
-    assert client.post.await_count == 7
+    # An interruption with no recorded eligible cause is not dispatched again by resume.
+    assert client.post.await_count == 3
     output = Path(runner_config.output_jsonl_fpath)
     failures = list(read_records(collection.failures_path_for(output)))
-    assert len(failures) == 6
+    assert len(failures) == 2
     assert all("reward" not in row and "_ng_no_persist" not in row for row in failures)
     coverage = json.loads(coverage_path_for(output).read_text())
-    assert coverage["attempts"] == 7
+    assert coverage["attempts"] == 3
     assert coverage["failure_budget_exhausted"] == 0
     assert coverage["counted_failures"] == 0
     assert coverage["progress_outcomes_recorded"] == 0
     assert coverage["max_rollout_attempts"] == 2
     printed = capsys.readouterr().out
-    assert "execution 1" in printed
+    assert "execution 0" in printed and "execution 1" not in printed
     assert "Retry budget exhausted" not in printed
     assert str(collection.failures_path_for(output)) in printed
+
+
+def known_pre_answer_provider_failure():
+    """The environment reports a provider allocation failure before any answer exists."""
+    return {
+        "_ng_failure_class": "agent_request_failed",
+        "failure_kind": "agent_request_failed",
+        "_ng_failure_id": "allocation-failure",
+        "_ng_failure_events": {
+            "allocation-failure": {
+                "event_id": "allocation-failure",
+                "boundary": "provider",
+                "failure_kind": "provider_unavailable",
+                "operation": "provider.create",
+                "failure_reason": "Controlled provider allocation unavailable",
+            }
+        },
+    }
 
 
 @pytest.mark.parametrize("count_failures_as_zero", [False, True])
@@ -940,6 +967,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
+    recorded = []
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -948,7 +977,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         identity = logical_rollout_id(row)
         assert history.manifest.next_attempt[identity] == row.get("_ng_attempt_index", 0) + 1
         if row["task"] == 1 and row.get("_ng_attempt_index", 0) == 0:
-            raise http_error(503)
+            # A bare gateway 503 cannot prove execution never began.
+            return FakeResponse(200, known_pre_answer_provider_failure())
         if row["task"] == 2:
             return FakeResponse(
                 200,
@@ -982,11 +1012,14 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/masked": 1,
         "coverage/unscored": 0,
         "coverage/failed": 1,
+        "coverage/failed_masked": 0,
         "coverage/omitted": 1,
         "coverage/not_started": 0,
         "coverage/missing_outcomes": 0,
+        "coverage/open": 2,
         "coverage/failure_budget_exhausted": 0,
     }
+    assert recorded == [(exported[-1], report["run_id"])]  # The same run summary goes to OTel.
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
     assert progress["progress/my_agent/masked_pct"] == 100.0
     assert progress["progress/my_agent/failed"] == 1
@@ -1002,7 +1035,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     runner_config.resume_from_cache = True
     calls.clear()
     await helper.run_from_config(runner_config)
-    assert [(row["task"], row["_ng_attempt_index"]) for row in calls] == [(1, 1)]
+    # The failed rollout runs again, and so does the result its verifier_error masked: infrastructure left it unmeasured.
+    assert sorted((row["task"], row["_ng_attempt_index"]) for row in calls) == [(0, 1), (1, 1)]
     assert collection.failures_path_for(output).read_bytes() == original_failures
     assert not journal_path_for(output).exists()
     report = json.loads(coverage_path_for(output).read_text())
@@ -1020,6 +1054,53 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
 
 
+async def test_run_summary_reaches_otel_without_an_experiment_tracker(runner_config, monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from nemo_gym.telemetry import gym_metrics
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    class _Handle:
+        is_exporting = True
+        meter = provider.get_meter("run-summary-collection-test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    gym_metrics._reset_for_testing()
+    runner_config.disable_aggregation = False
+    runner_config.upload_rollouts = False
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(collection, "get_exporters", lambda: [])
+    export_metrics = MagicMock()
+    monkeypatch.setattr(collection, "export_metrics", export_metrics)
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
+    try:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+        data = reader.get_metrics_data()
+        metrics = {
+            metric.name: {frozenset(point.attributes.items()): point.value for point in metric.data.data_points}
+            for resource_metric in data.resource_metrics
+            for scope_metric in resource_metric.scope_metrics
+            for metric in scope_metric.metrics
+            if metric.name.startswith("gym.run.")
+        }
+    finally:
+        provider.shutdown()
+        gym_metrics._reset_for_testing()
+
+    report = json.loads(coverage_path_for(Path(runner_config.output_jsonl_fpath)).read_text())
+    run = frozenset({(gym_metrics.RUN_ID_ATTRIBUTE, report["run_id"])})
+    export_metrics.assert_not_called()
+    assert metrics["gym.run.info"] == {run: 1}
+    assert metrics["gym.run.coverage.scored"] == {run: report["scored"]}
+    assert metrics["gym.run.coverage.failed"] == {run: 0}
+    assert report["scored"] > 0
+
+
 @pytest.mark.parametrize("failure_type", ["typed", "legacy", "kill_shaped", "skipped", "suppressed"])
 async def test_progress_masking_matches_persisted_outcomes(runner_config, monkeypatch, failure_type):
     source = Path(runner_config.input_jsonl_fpath)
@@ -1027,6 +1108,8 @@ async def test_progress_masking_matches_persisted_outcomes(runner_config, monkey
     rows[2]["agent_ref"]["name"] = "dropped_agent"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
     runner_config.upload_rollouts = False
+    # The typed reply is an invalid reply from the one-task dropped agent; this test is about masking, not the stop.
+    runner_config.environment_protocol_violation_stop_after = 0
     exported = []
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
@@ -1137,6 +1220,7 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         "anthropic_api_key",
         "sandbox_model_base_url",
         "num_workers",
+        "uvicorn_reuse_port",
         "switchyard_api_key",
         "switchyard_base_url",
     ],
@@ -1148,11 +1232,13 @@ def test_known_operational_settings_do_not_change_resume_identity(saved_manifest
     before = RunManifest.create(source, rows, config, servers).config_digest
     settings[field] = "after"
     assert RunManifest.create(source, rows, config, servers).config_digest == before
-    # The same spelling inside task data must not be silently erased.
+    # The same spelling inside task data must not be silently erased, unless it names a credential: a credential is
+    # never part of the persisted identity, at any depth.
     settings["task_parameters"] = {field: "before"}
     before = RunManifest.create(source, rows, config, servers).config_digest
     settings["task_parameters"][field] = "after"
-    assert RunManifest.create(source, rows, config, servers).config_digest != before
+    changed = RunManifest.create(source, rows, config, servers).config_digest != before
+    assert changed is not field.endswith("api_key")
 
 
 @pytest.mark.parametrize(
@@ -1399,7 +1485,7 @@ async def test_no_serve_resume_uses_running_server_identity(runner_config, monke
     async def post(**kwargs):
         row = kwargs["json"]
         if phase == "A" and row["task"] == 1:
-            raise TimeoutError("No saved outcome")
+            return FakeResponse(200, known_pre_answer_provider_failure())
         return FakeResponse(200, {"reward": 1.0, "response": {}, "model_used": phase})
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
@@ -1571,7 +1657,7 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
 
     async def post(**kwargs):
         entry = TokenEntry(
-            rollout_id="0-0",
+            capture_key="0-0",
             model_call_id="kept-answer",
             model="m",
             prompt_token_ids=[1, 2, 3],
@@ -1609,7 +1695,14 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
     if judge_failed:
         assert "reward" not in saved
         assert list(read_records(output)) == []
-        assert len(history.pending(3)) == 1
+        assert history.pending(3) == []
+        runner_config.resume_from_cache = True
+        client.post.reset_mock()
+        try:
+            await RolloutCollectionHelper().run_from_config(runner_config)
+        except RuntimeError:
+            pass
+        assert client.post.await_count == 0
     else:
         assert saved["reward"] == 1.0
         runner_config.resume_from_cache = True
@@ -1674,7 +1767,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
         latest = older_failure | {"_ng_attempt_index": 2}
         writer.record_dispatch(latest)
         if latest_outcome in {"failure", "suppressed_retry"}:
-            writer.record_outcome(latest | {"_ng_failure_class": "judge_failed"})
+            writer.record_outcome(latest | {"_ng_failure_class": "provider_unavailable"})
         elif latest_outcome == "omitted":
             writer.record_omission(latest, "No reusable answer")
     assert success["reward"] == 1.0
@@ -1695,7 +1788,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
         post.reset_mock()
     else:
         await RolloutCollectionHelper().run_from_config(resumed)
-    expected_failures = {"judge_failed": 1} if latest_outcome == "failure" else {}
+    expected_failures = {"provider_unavailable": 1} if latest_outcome == "failure" else {}
     status = json.loads((tmp_path / "batch_status.json").read_text())["members"]["my_agent"]
     assert status["completed_rollout_count"] == 0
     assert status["remaining_rollout_count"] == 1
@@ -1757,10 +1850,10 @@ async def test_interruption_failures_do_not_spend_budget_or_create_retry_progres
         client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
     output = Path(runner_config.output_jsonl_fpath)
     for invocation in range(3):
+        unknown_kill = kind in ("kill_shaped", "kill_shaped_with_kind")
+        # An interruption with no recorded eligible cause stops automatic recovery: nothing stays retryable.
         expected_exit = (
-            (76 if invocation == 2 else 75)
-            if kind == "judge_failed"
-            else (75 if mixed_success and invocation == 0 else 1)
+            76 if kind == "judge_failed" else 76 if unknown_kill else (75 if mixed_success and invocation == 0 else 1)
         )
         with pytest.raises(IncompleteEvaluationError) as error:
             await RolloutCollectionHelper().run_from_config(runner_config)
@@ -1769,9 +1862,9 @@ async def test_interruption_failures_do_not_spend_budget_or_create_retry_progres
             _check_saved_completion(output)
         assert saved_error.value.exit_code == expected_exit
         reader = RolloutStore.read(output)
-        counted = (3 - int(mixed_success)) * (invocation + 1) if kind == "judge_failed" else 0
+        counted = (3 - int(mixed_success)) if kind == "judge_failed" else 0
         assert reader.coverage()["counted_failures"] == counted
-        assert len(reader.pending(3)) == (0 if kind == "judge_failed" and invocation == 2 else 3 - int(mixed_success))
+        assert len(reader.pending(3)) == (0 if unknown_kill or kind == "judge_failed" else 3 - int(mixed_success))
         assert all("reward" not in row for row in reader.failures())
         runner_config.resume_from_cache = True
 
@@ -2010,8 +2103,12 @@ async def test_health_reports_are_cleared_after_validation_and_written_under_run
     assert all(report.read_text() == "validated report" for report in reports)
 
 
-async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(runner_config, monkeypatch):
-    from nemo_gym.rollout_reverification import _is_judge_failure, _rollout_response
+@pytest.mark.parametrize("specific_kind", ["judge_timeout", "judge_failed", "judge_invalid"])
+@pytest.mark.parametrize("has_answer", [False, True])
+async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(
+    runner_config, monkeypatch, specific_kind, has_answer
+):
+    from nemo_gym.eval.rollout_reverification import _is_judge_failure, _rollout_response
 
     answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "saved answer"}]}]}
     post = AsyncMock(
@@ -2019,8 +2116,8 @@ async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(run
             200,
             {
                 "_ng_failure_class": "judge_failed",
-                "failure_kind": "judge_timeout",
-                "response": answer,
+                "failure_kind": specific_kind,
+                **({"response": answer} if has_answer else {}),
             },
         )
     )
@@ -2030,11 +2127,23 @@ async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(run
     failures = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
     assert len(failures) == 3
     for failure in failures:
-        assert failure["_ng_failure_class"] == "judge_timeout"
-        assert failure["_ng_failure_legacy_class"] == "judge_failed"
+        assert failure["_ng_failure_class"] == specific_kind
+        if specific_kind != "judge_failed":
+            assert failure["_ng_failure_legacy_class"] == "judge_failed"
         assert _is_judge_failure(failure)
-        assert _rollout_response(failure) == answer
+        if has_answer:
+            assert _rollout_response(failure) == answer
+        else:
+            with pytest.raises(ConfigError, match="has no `response`"):
+                _rollout_response(failure)
         assert "reward" not in failure
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).pending() == []
+    post.reset_mock()
+    try:
+        await RolloutCollectionHelper().run_from_config(runner_config.model_copy(update={"resume_from_cache": True}))
+    except RuntimeError:
+        pass
+    post.assert_not_called()
 
 
 async def test_timeout_retry_policy_survives_resume_until_explicitly_changed(runner_config, monkeypatch):
@@ -2068,3 +2177,436 @@ async def test_timeout_retry_policy_survives_resume_until_explicitly_changed(run
     offline = RolloutStore.read(output).coverage()
     assert offline["retry_terminal_timeouts"] is False
     assert offline["failed_final"] == 2
+
+
+async def test_typed_episode_outcomes_settle_stop_or_retry_through_collection_and_resume(runner_config, monkeypatch):
+    """Native HTTP serialization, collection, durable selection and aggregation use the same settled outcomes."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from pydantic import BaseModel
+
+    from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
+    from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
+    from nemo_gym.server_runtime.base_resources_server import AggregateMetricsRequest
+    from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnResponse
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+
+    class TaskInput(BaseModel):
+        pass
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+    Path(runner_config.input_jsonl_fpath).write_text(
+        "".join(
+            json.dumps({"task_id": {"taskset": "native", "task_id": str(i)}, "task_input": {}}) + "\n"
+            for i in range(7)
+        )
+    )
+    runner_config.environment_server_routes = {"native": "environment"}
+    runner_config.disable_aggregation = False
+    answer = NeMoGymResponse.model_validate(
+        {
+            "id": "kept",
+            "object": "response",
+            "created_at": 0,
+            "model": "fixture",
+            "status": "completed",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {"id": "message", "type": "message", "role": "assistant", "status": "completed", "content": []}
+            ],
+        }
+    ).model_dump(mode="json")
+    calls: list[tuple[str, int]] = []
+    aggregated: list[list[dict]] = []
+    app = FastAPI()
+
+    @app.post("/run")
+    async def run_episode(payload: dict):
+        request = BaseEpisodeRequest[TaskInput].model_validate(payload)
+        task = request.task.task_id.task_id
+        calls.append((task, request.episode_id.attempt))
+        reply = {"episode_id": request.episode_id, "task_id": request.task.task_id}
+        if task == "0":
+            reply["result"] = {"reward": 1.0}
+        elif task == "1":  # Explicit policy final zero, without a fabricated verifier result.
+            reply["result"] = {
+                "_ng_failure_class": "model_policy_response_timeout",
+                "_ng_failure_terminal": True,
+                "_ng_failure_counts_as_zero": True,
+            }
+        elif task == "2":  # No answer was produced; an admission refusal preserves previously spent attempts.
+            reply["failure"] = {
+                "failure_reason": "Infrastructure unavailable before answer",
+                "terminal": False,
+                "failure_kind": "transport_timeout",
+                "stage": "admission" if request.episode_id.attempt == 1 else "agent",
+            }
+        elif task == "3":
+            reply["result"] = {
+                "_ng_failure_class": "judge_failed",
+                "failure_kind": "judge_failed",
+                "reward": 0.0,
+                "response": answer,
+            }
+        elif task == "4":  # An unknown interruption grants no automatic retry and invents no model zero.
+            reply["failure"] = {
+                "failure_reason": "Interrupted, cause unknown",
+                "terminal": False,
+                "failure_kind": "kill_shaped",
+            }
+        elif task == "5":  # Ordinary wrong answer remains a measured zero.
+            reply["result"] = {"reward": 0.0, "response": answer}
+        else:  # Cleanup failed after the completed answer; repeating the episode would regenerate it.
+            reply["failure"] = {
+                "failure_reason": "Cleanup not confirmed",
+                "terminal": False,
+                "failure_kind": "harness_termination_unconfirmed",
+                "stage": "cleanup",
+                "partial_response": answer,
+            }
+            return SingleAgentTurnResponse.model_validate(reply)
+        return BaseEpisodeResponse[dict].model_validate(reply)
+
+    @app.post("/aggregate_metrics")
+    async def aggregate(payload: AggregateMetricsRequest):
+        rows = [dict(row) for row in payload.verify_responses]
+        aggregated.append(rows)
+        return compute_aggregate_metrics(rows)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://native-test") as http:
+
+        async def post(*, server_name, url_path, json, **kwargs):
+            assert server_name == "environment"
+            payload = json.model_dump(mode="json") if isinstance(json, BaseModel) else json
+            response = await http.post(url_path, json=payload)
+            return FakeResponse(response.status_code, response.json())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+        output = Path(runner_config.output_jsonl_fpath)
+        await RolloutCollectionHelper().run_from_config(runner_config)
+        first = RolloutStore.read(output)
+        assert sorted(calls) == [(str(i), 0) for i in range(7)]
+        assert first.coverage()["final_zeros"] == 1
+        assert [row["_ng_task_index"] for row in first.pending()] == [2]
+        assert sorted((row["_ng_task_index"], row["reward"]) for row in aggregated[-1]) == [
+            (0, 1.0),
+            (1, 0.0),
+            (5, 0.0),
+        ]
+        metrics = json.loads(aggregate_metrics_path_for(output).read_text())
+        assert metrics[0]["agent_metrics"]["mean/reward"] == pytest.approx(1 / 3)
+        failures = {row["_ng_task_index"]: row for row in first.failures()}
+        assert "reward" not in failures[1] and "response" not in failures[1]
+        assert not failures[1].get("ng_verifier_invocations")
+        assert failures[1]["_ng_failure_counts_as_zero"] is True
+        assert failures[4]["_ng_failure_class"] == "kill_shaped"
+        assert failures[6]["_ng_failure_class"] == "harness_termination_unconfirmed"
+        assert not failures[4].get("_ng_failure_counts_as_zero")
+        assert first.coverage()["failed"] == 5  # Policy zero remains a health failure.
+        failure_bytes = output.with_name(output.stem + "_failures.jsonl").read_bytes()
+
+        runner_config.resume_from_cache = True
+        calls.clear()
+        # Admission is free, but does not erase the first charged failure. Two more charged failures exhaust 3.
+        for _ in range(4):
+            await RolloutCollectionHelper().run_from_config(runner_config)
+        assert calls == [("2", 1), ("2", 2), ("2", 3)]
+        reloaded = RolloutStore.read(output)
+        assert reloaded.pending() == []
+        kept = {row["_ng_task_index"]: row for row in reloaded.failures()}
+        assert kept[3]["response"] == kept[6]["_ng_failure_partial_response"] == answer
+        assert reloaded.coverage()["final_zeros"] == 1 and reloaded.coverage()["successful"] == 2
+        assert kept[2]["_ng_attempt_index"] == 3 and kept[2]["_ng_failure_max_attempts"] == 3
+        assert reloaded.coverage()["failure_budget_exhausted"] == 1
+        assert output.with_name(output.stem + "_failures.jsonl").read_bytes().startswith(failure_bytes)
+        assert all(
+            sorted((row["_ng_task_index"], row["reward"]) for row in rows) == [(0, 1.0), (1, 0.0), (5, 0.0)]
+            for rows in aggregated
+        )
+
+
+def _identity_case(tmp_path: Path, settings: dict) -> tuple:
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+
+    source = tmp_path / "input.jsonl"
+    source.write_text("{}\n")
+    materialized = tmp_path / "materialized.jsonl"
+    materialized.write_text("")
+    global_config = {"policy_model": {"responses_api_models": {"vllm_model": {"model": "demo-model", **settings}}}}
+    return RunManifest.create(source, [], {}, global_config), materialized
+
+
+def _saved_by_an_earlier_gym(tmp_path: Path, settings: dict) -> Path:
+    """A manifest whose configuration digest was taken from the identity as resolved, as earlier Gym recorded it."""
+    from nemo_gym.rollouts.rollout_recovery import _configuration_identity, _digest
+
+    manifest, _ = _identity_case(tmp_path, settings)
+    global_config = {"policy_model": {"responses_api_models": {"vllm_model": {"model": "demo-model", **settings}}}}
+    path = tmp_path / "rollouts_manifest.json"
+    manifest.model_copy(update={"config_digest": _digest(_configuration_identity({}, global_config, []))}).write(path)
+    return path
+
+
+NULL_DEFAULTS = {"chat_template_kwargs": None, "sampling_overrides": None, "extra_body": None}
+
+
+@pytest.mark.parametrize("kept", [{}, {"sampling_overrides": {"temperature": 1.0}}])
+def test_a_run_saved_with_since_removed_null_defaults_resumes_without_them(tmp_path: Path, kept: dict) -> None:
+    from nemo_gym.rollouts.rollout_recovery import validate_resume
+
+    saved = _saved_by_an_earlier_gym(tmp_path, NULL_DEFAULTS | kept)
+    current, materialized = _identity_case(tmp_path, kept)
+
+    assert validate_resume(saved, current, materialized) is not None
+
+
+def test_a_run_saved_by_an_earlier_gym_with_the_same_settings_resumes(tmp_path: Path) -> None:
+    from nemo_gym.rollouts.rollout_recovery import validate_resume
+
+    saved = _saved_by_an_earlier_gym(tmp_path, {"extra_body": {"seed": 1}})
+    current, materialized = _identity_case(tmp_path, {"extra_body": {"seed": 1}})
+
+    assert validate_resume(saved, current, materialized) is not None
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [{"model": "other-model"}, {"extra_body": {"seed": 2}}, {"chat_template_kwargs": {"thinking": True}}],
+)
+def test_any_other_configuration_drift_is_still_refused(tmp_path: Path, drift: dict) -> None:
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.rollouts.rollout_recovery import validate_resume
+
+    saved = _saved_by_an_earlier_gym(tmp_path, NULL_DEFAULTS)
+    current, materialized = _identity_case(tmp_path, drift)
+
+    with pytest.raises(ConfigError, match="incompatible resolved configuration"):
+        validate_resume(saved, current, materialized)
+
+
+def test_a_new_manifest_treats_a_null_setting_as_absent(tmp_path: Path) -> None:
+    from nemo_gym.rollouts.rollout_recovery import validate_resume
+
+    with_null, materialized = _identity_case(tmp_path, {"extra_body": None})
+    path = tmp_path / "rollouts_manifest.json"
+    with_null.write(path)
+    without, _ = _identity_case(tmp_path, {})
+
+    assert with_null.config_digest == without.config_digest
+    assert validate_resume(path, without, materialized) is not None
+
+
+@pytest.mark.parametrize("succeeded", [0, 1], ids=["all-rejected", "one-succeeded"])
+async def test_rejected_sandbox_credentials_end_the_run_without_a_retry(runner_config, monkeypatch, succeeded):
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    # An orchestrated run requires every rollout, so the run ends even after a rollout succeeded.
+    runner_config.require_complete = True
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"])
+        if len(calls) <= succeeded:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "infrastructure_error",
+                "failure_kind": "provider_credentials_rejected",
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match="refused the credentials") as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.exit_code == 76
+    assert raised.value.failure_kind == "provider_credentials_rejected"
+    assert "gym eval resubmit --recover" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("kind", "stop_text"),
+    [
+        ("provider_quota_exhausted", "the grading provider's quota is exhausted"),
+        ("provider_credentials_rejected", "refused the credentials"),
+    ],
+)
+@pytest.mark.parametrize("succeeded", [0, 1], ids=["all-stopped", "one-scored"])
+async def test_a_grading_provider_stop_ends_the_run_without_a_retry(
+    runner_config, monkeypatch, kind, stop_text, succeeded
+):
+    """Modelled on the rejected sandbox credentials test above, for a grading provider's judge-class failure rows."""
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    runner_config.require_complete = True
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"])
+        if len(calls) <= succeeded:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "judge_failed",
+                "failure_kind": kind,
+                "failure_reason": "AA quota exhausted, resets at 2026-11-07 21:33 UTC; grade with replay or resubmit",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match=stop_text) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.exit_code == 76 and raised.value.failure_kind == kind
+    assert "gym eval resubmit --recover" in str(raised.value)
+    if kind == "provider_quota_exhausted":
+        assert "resets at 2026-11-07 21:33 UTC" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("failure_class", "kind"),
+    [
+        ("infrastructure_error", "provider_credentials_rejected"),
+        ("judge_failed", "provider_credentials_rejected"),
+        ("judge_failed", "provider_quota_exhausted"),
+    ],
+)
+async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, monkeypatch, failure_class, kind):
+    """The stop is a rejection like an incomplete run: one rollout scored, yet no score is computed or left behind."""
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+
+    runner_config.require_complete = True
+    runner_config.disable_aggregation = False
+    aggregate = aggregate_metrics_path_for(Path(runner_config.output_jsonl_fpath))
+    aggregate.write_text("[]")  # an earlier segment's aggregate describes other rows
+    urls = []
+    calls = []
+
+    async def post(**kwargs):
+        urls.append(kwargs["url_path"])
+        calls.append(kwargs["json"])
+        if len(calls) == 1:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": failure_class,
+                "failure_kind": kind,
+                "failure_reason": "provider stop",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.failure_kind == kind
+    assert "/aggregate_metrics" not in urls
+    assert not aggregate.exists()
+
+
+async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    runner_config.require_complete = True
+    rejected = {
+        "_ng_failure_class": "infrastructure_error",
+        "failure_kind": "provider_credentials_rejected",
+        "reward": 0,
+        "response": {},
+    }
+    reply = [rejected]
+
+    async def post(**kwargs):
+        return FakeResponse(200, dict(reply[0]))
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match="refused the credentials"):
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    # The credentials are fixed: the resumed run dispatches the rejected rollouts again and completes.
+    reply[0] = {"reward": 1.0, "response": {}}
+    runner_config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]
+
+
+def test_run_outcomes_forwards_the_connection_bounds_and_is_unbounded_without_them(monkeypatch):
+    seen = []
+
+    def fake(self, examples, **kwargs):
+        seen.append(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_examples_with_metadata", fake)
+    row = failing_row()
+
+    RolloutCollectionHelper().run_outcomes([row])
+    RolloutCollectionHelper().run_outcomes([row], max_num_tries=2, connect_grace_s=60.0)
+
+    assert (seen[0]["_max_num_tries"], seen[0]["_connect_grace_s"]) == (None, None)
+    assert (seen[1]["_max_num_tries"], seen[1]["_connect_grace_s"]) == (2, 60.0)
+
+
+def _refused_connection():
+    from aiohttp import ClientConnectorError
+    from aiohttp.client_reqrep import ConnectionKey
+
+    return ClientConnectorError(ConnectionKey("127.0.0.1", 1, False, True, None, None, None), OSError(111, "refused"))
+
+
+async def test_a_refused_connection_is_resent_within_the_grace_and_then_reported_as_not_sent(monkeypatch):
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = _refused_connection()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) > 1
+    assert (outcome.source, outcome.delivery) == ("collector", "not_sent")
+    assert outcome.exception_type == "ClientConnectorError"
+
+
+async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_not_resent_by_the_grace(monkeypatch):
+    from aiohttp import ServerDisconnectedError
+
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = ServerDisconnectedError()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) == 1
+    assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
+    assert outcome.exception_type == "ServerDisconnectedError"

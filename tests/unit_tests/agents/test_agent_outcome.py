@@ -80,3 +80,38 @@ def test_rejects_unregistered_failure_kinds(kind):
         AgentOutcome(**fields)
     with pytest.raises(ValidationError, match="Unregistered failure kind"):
         AgentOutcome.model_validate_json(json.dumps(fields))
+
+
+def test_class_action_cannot_bypass_environment_supported_actions():
+    from pydantic import ValidationError
+
+    from nemo_gym.agents.agent_outcome import AgentOutcomePolicyConfig
+
+    with pytest.raises(ValidationError, match="does not support count_as_zero"):
+        AgentOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})
+
+
+def test_agent_class_action_uses_its_configured_shared_mapping():
+    from nemo_gym.agents.agent_outcome import (
+        AGENT_OUTCOME_METADATA_KEY,
+        AgentOutcomePolicyConfig,
+        agent_outcome_policy,
+    )
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
+
+    response = NeMoGymResponse(
+        id="test",
+        object="response",
+        created_at=0,
+        model="test",
+        output=[],
+        status="failed",
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        metadata={AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"model_policy_response_timeout"}'},
+    )
+    policy = AgentOutcomePolicyConfig(by_failure_class={"evaluation": "retry"})
+    assert agent_outcome_policy(response, config=policy) == "fail"
+    policy.classification.by_failure_kind["model_policy_response_timeout"] = "evaluation"
+    assert agent_outcome_policy(response, config=policy) == "retry"

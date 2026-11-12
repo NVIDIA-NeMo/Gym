@@ -33,8 +33,8 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request
 
-from nemo_gym.models.token_capture.staging import CaptureAdmission, StagedCallRecord, StageResult
 from nemo_gym.models.token_capture.staging.capture import ActiveCall, RolloutTokenCapture
+from nemo_gym.models.token_capture.staging.records import CaptureAdmission, StagedCallRecord, StageResult
 from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutInventory,
     GenerationCutPrefixAck,

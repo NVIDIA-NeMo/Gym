@@ -25,7 +25,8 @@ verification pipeline:
 - Research mode uses `prompts/research_judge.yaml`, which asks the judge for
   the paper's numeric `VERDICT: <total_points>` (Appendix B, page 14).
   Correctness is computed from the numeric score at the configured threshold.
-  Research accepts only a final numeric `VERDICT` line. Judges with incomplete
+  Research accepts a final numeric `VERDICT` line or a response containing only
+  a number on the rubric scale. Judges with incomplete
   responses or invalid scores raise `JudgeError` and are routed to the failure
   sidecar, preserving the policy answer for judge-only recovery.
 - Research configuration sets high reasoning effort and no explicit token cap;

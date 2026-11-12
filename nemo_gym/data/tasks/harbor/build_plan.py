@@ -42,7 +42,7 @@ from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, veri
 
 
 if TYPE_CHECKING:
-    # The type of what a Runner returns only: this module spawns nothing (see tests/unit_tests/test_sandbox_policy.py).
+    # The type of what a Runner returns only: this module spawns nothing (see tests/unit_tests/data/tasks/harbor/test_sandbox_policy.py).
     import subprocess
 
 

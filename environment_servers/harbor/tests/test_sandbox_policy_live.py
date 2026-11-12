@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The live half of the static sandbox policy (tests/unit_tests/test_sandbox_policy.py, R4): what the running
+"""The live half of the static sandbox policy (tests/unit_tests/data/tasks/harbor/test_sandbox_policy.py, R4): what the running
 server serves and what its episode response carries. It imports the server package, so it lives here, with the
 server's suite, and not in the core unit run whose coverage gate must not count the server's modules."""
 

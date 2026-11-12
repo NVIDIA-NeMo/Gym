@@ -5,18 +5,24 @@ config_paths:
   - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
+use_absolute_ip: true
+
 # This flat-row recipe binds its own environment instead of the generic NOOA environment.
-nooa_environment_server:
-  _delete_key: environment_servers
+nooa_environment_server: null
 
 swebench_pro_nooa_resources_server:
   _inherit_from: swebench_pro_resources_server
   resources_servers:
     swebench_pro:
       allowed_agents: [nooa_agent]
+      # Only the task sandbox is restricted; fresh grading sandboxes retain their settings.
+      task_network_policy:
+        model_server: ${swebench_pro_nooa_agent.responses_api_agents.nooa_agent.model_server}
       sandbox_config:
         # Outlive the episode, patch extraction, and final cleanup budgets.
         ttl_s: 25200
+        provider_options:
+          platform: {os: linux, arch: amd64}
       datasets:
         - name: swebench_pro
           type: benchmark
@@ -34,6 +40,9 @@ swebench_pro_nooa_agent:
       nooa:
         execution_mode: sandboxed
       max_policy_calls: null
+      # Built on the controller before seeding; task installation performs no downloads.
+      runtime_wheelhouse: ${oc.env:NOOA_SWE_RUNTIME_WHEELHOUSE,null}
+      runtime_wheelhouse_required: true
 
 swebench_pro_nooa:
   _inherit_from: single_agent_turn_legacy

@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agents import SandboxSession
+from nemo_gym.agents import SandboxSession, is_harness_termination_failure
+from nemo_gym.core import NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
@@ -84,8 +85,11 @@ async def test_capture_follows_confirmed_cleanup_and_keeps_output():
 async def test_bad_cleanup_keeps_state_retryable_without_capture(invalid):
     state, sandbox = session()
     sandbox.result.update(invalid)
-    with pytest.raises(RuntimeError):
+    # A malformed receipt stays a retryable RuntimeError; a negative one is the harness's final typed failure.
+    final = invalid["cleanup_confirmed"] is False
+    with pytest.raises(NgFailureEvent if final else RuntimeError) as failure:
         await execute(state)
+    assert is_harness_termination_failure(failure.value) is final
     assert state.session.cleanup is None
     assert state.session.artifacts is None
     assert "read stdout.jsonl" not in sandbox.events and "snapshot" not in sandbox.events

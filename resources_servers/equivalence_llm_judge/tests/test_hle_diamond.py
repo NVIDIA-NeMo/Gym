@@ -29,7 +29,6 @@ from pydantic import TypeAdapter, ValidationError
 import benchmarks.hle_diamond.prepare as prepare_module
 import benchmarks.hle_diamond.prepare_opencode as prepare_opencode_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
-from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     GlobalConfigDictParserConfig,
@@ -45,8 +44,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.data import fill_prompt, load_prompt_config
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
-from nemo_gym.environment import load_manifest, resolve_manifest_config_path
+from nemo_gym.environment import BENCHMARKS_DIR, BenchmarkConfig, load_manifest, resolve_manifest_config_path
+from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.environment.discovery import _parse_no_environment_tolerating_unset_values
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import resolve_provider_config
@@ -528,8 +528,8 @@ class TestConfigs:
             get_first_server_config_dict(resolved, "hle_diamond_judge_model")["openai_model"] == "vendor/other-judge"
         )
 
-    def test_judge_knobs_default_off_and_only_hle_diamond_enables_them(self):
-        """The shared judge server's slice hook and case-insensitive labels stay off for hle and hle_verified."""
+    def test_judge_knobs_default_off_and_only_hle_diamond_enables_the_slice_hook(self):
+        """The slice hook stays off for hle and hle_verified; they share the tolerant verdict-label match."""
         fields = LLMJudgeResourcesServerConfig.model_fields
         assert fields["report_slice_fields"].default_factory() == []
         assert fields["judge_labels_case_insensitive"].default is False
@@ -537,9 +537,11 @@ class TestConfigs:
             (REPO_ROOT / "resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml").read_text()
         )["equivalence_llm_judge"]["resources_servers"]["equivalence_llm_judge"]
         assert not {"report_slice_fields", "judge_labels_case_insensitive"} & set(base)
+        assert "judge_labels_case_insensitive" not in str(base)
         for sibling in ("hle", "hle_verified"):
             sibling_text = (REPO_ROOT / "benchmarks" / sibling / "config.yaml").read_text(encoding="utf-8")
-            assert "judge_labels_case_insensitive" not in sibling_text and "report_slice_fields" not in sibling_text
+            assert "judge_labels_case_insensitive: true" in sibling_text
+            assert "report_slice_fields" not in sibling_text
 
         shipped = yaml.safe_load((HLE_DIAMOND_DIR / "config.yaml").read_text())[JUDGE_SERVER]["resources_servers"][
             "equivalence_llm_judge"

@@ -1,5 +1,5 @@
 name: gdp_pdf
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier

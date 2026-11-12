@@ -179,6 +179,135 @@ def _payload(model_base_url: str, **overrides) -> dict:
     }
 
 
+@pytest.mark.parametrize("inherited_hermes_home", [False, True])
+def test_worker_configures_session_state_before_hermes_imports(tmp_path, inherited_hermes_home) -> None:
+    import yaml
+
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    task_home = tmp_path / "task-home"
+    task_hermes_home = task_home / ("custom-hermes" if inherited_hermes_home else ".hermes")
+    task_hermes_home.mkdir(parents=True)
+    (task_hermes_home / ".env").write_text("HERMES_TASK_ENV_LOADED=1\n")
+    (task_hermes_home / "config.yaml").write_text("model: task_model\n")
+    original_task_files = {path.name: path.read_bytes() for path in task_hermes_home.iterdir()}
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    input_path, output_path = session_dir / "input.json", session_dir / "output.json"
+    report_path = tmp_path / "report.json"
+    task_env = {
+        "HOME": str(task_home),
+        "PATH": os.environ["PATH"],
+        "PYTHONPATH": str(tmp_path / "task-packages"),
+        "PYTHONHOME": str(tmp_path / "task-python"),
+    }
+    env = {
+        **os.environ,
+        **task_env,
+        "OPENAI_BASE_URL": "http://stale-task-model.invalid/v1",
+        "OPENAI_API_KEY": "stale-task-key",
+    }
+    env.pop("HERMES_HOME", None)
+    env.pop("HERMES_TASK_ENV_LOADED", None)
+    if inherited_hermes_home:
+        env["HERMES_HOME"] = str(task_hermes_home)
+    # A fresh process must import the real dependency: this test module has already imported Hermes.
+    # Pass the test environment's trusted import paths explicitly, independently of the task's PYTHONPATH.
+    driver = """
+import json, os, pathlib, subprocess, sys
+sys.path[:0] = json.loads(sys.argv[1])
+imports = {}
+class WatchImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {'run_agent', 'hermes_constants'}:
+            home = pathlib.Path(os.environ.get('HERMES_HOME', pathlib.Path.home() / '.hermes'))
+            config = home / 'config.yaml'
+            imports[fullname] = {
+                'home': str(home),
+                'config': config.read_text() if config.exists() else None,
+                'model_base_url': os.environ.get('OPENAI_BASE_URL'),
+                'model_api_key': os.environ.get('OPENAI_API_KEY'),
+            }
+sys.meta_path.insert(0, WatchImports())
+import sandbox_runner
+status = sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
+import run_agent
+from tools.memory_tool import MEMORY_DIR
+from tools.process_registry import CHECKPOINT_PATH
+keys = ['HOME', 'PATH', 'PYTHONPATH', 'PYTHONHOME']
+child_code = 'import json, os, sys; print(json.dumps({k: os.environ.get(k) for k in sys.argv[1:]}))'
+child = subprocess.check_output(
+    [sys.executable, '-I', '-c', child_code, *keys], text=True,
+)
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+    'imports': imports,
+    'import_home': str(run_agent._hermes_home),
+    'memory_dir': str(MEMORY_DIR),
+    'checkpoint_path': str(CHECKPOINT_PATH),
+    'task_dotenv_loaded': os.environ.get('HERMES_TASK_ENV_LOADED'),
+    'environment': {key: os.environ.get(key) for key in keys},
+    'child_environment': json.loads(child),
+}))
+raise SystemExit(status)
+"""
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        payload = _payload(server.base_url)
+        input_path.write_text(json.dumps(payload))
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                driver,
+                json.dumps([str(Path(sandbox_runner.__file__).parent), *sys.path]),
+                str(input_path),
+                str(output_path),
+                str(report_path),
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+
+    details = output_path.read_text() if output_path.exists() else result.stdout
+    assert result.returncode == 0, f"{result.stderr}\n{details}"
+    assert json.loads(output_path.read_text())["result"]["final_response"] == "done"
+    report = json.loads(report_path.read_text())
+    hermes_home = session_dir / "hermes-home"
+    expected_config = {
+        "model": "policy_model",
+        "provider": "auto",
+        "auxiliary": {
+            "compression": {
+                "provider": "custom",
+                "base_url": server.base_url,
+                "api_key": "gym",
+                "model": "policy_model",
+            }
+        },
+    }
+    for imported in report["imports"].values():
+        imported["config"] = yaml.safe_load(imported["config"])
+    assert report["imports"] == {
+        name: {
+            "home": str(hermes_home),
+            "config": expected_config,
+            "model_base_url": server.base_url,
+            "model_api_key": "gym",
+        }
+        for name in ("run_agent", "hermes_constants")
+    }
+    assert report["import_home"] == str(hermes_home)
+    assert report["memory_dir"] == str(hermes_home / "memories")
+    assert report["checkpoint_path"] == str(hermes_home / "processes.json")
+    assert report["task_dotenv_loaded"] is None
+    assert report["environment"] == report["child_environment"] == task_env
+    assert {path.name: path.read_bytes() for path in task_hermes_home.iterdir()} == original_task_files
+
+
 def test_sandbox_retry_attempts_retain_invocation_headers(tmp_path, restore_process_globals) -> None:
     rejected = {"error": {"message": "retry this request", "type": "server_error"}}
     with _ModelServer([rejected, rejected, _completion({"content": "done"})], status_codes=[429, 500, 200]) as server:
@@ -419,7 +548,7 @@ def test_iteration_limit_summary_reaches_the_model_server(
                     },
                 ),
             )
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
+            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args, **_kwargs: model_server.base_url)
             observations = []
             output = asyncio.run(
                 agent._create_response(
@@ -591,3 +720,28 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
+
+
+def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_process_globals):
+    import yaml
+    from agent.auxiliary_client import call_llm
+
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, max_turns=4), tmp_path)
+        response = call_llm(task="compression", messages=[{"role": "user", "content": "Summarize"}])
+    assert response.choices[0].message.content == "done"
+    assert server.requests[-1]["messages"] == [{"role": "user", "content": "Summarize"}]
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == server.base_url
+    assert config["auxiliary"]["compression"]["model"] == "policy_model"
+
+
+def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_path, restore_process_globals):
+    """The agent gives compression a URL that keeps its own sampling; the runner points Hermes at it."""
+    import yaml
+
+    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, compression_model_base_url=compression_url), tmp_path)
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == compression_url

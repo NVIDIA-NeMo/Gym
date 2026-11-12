@@ -40,6 +40,8 @@ cd "${repo_root}"
 source "${ci_dir}/sanitize_env.sh"
 gym_ci_sanitize_environment server
 unset -f gym_ci_sanitize_environment
+# shellcheck source=scripts/ci/test_worker_env.sh
+source "${ci_dir}/test_worker_env.sh"
 driver_venv_dir=""
 if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
     driver_venv_dir="${GYM_CI_UV_VENV_DIR%/}/.driver-venv"
@@ -53,8 +55,6 @@ ng_test_all_args=(
     "+fail_on_total_and_test_mismatch=true"
     "+delete_venvs_after_each_test=true"
     "+uv_cache_dir=${UV_CACHE_DIR}"
-    "+num_shards=${num_shards}"
-    "+shard_index=${shard_index}"
 )
 if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
     # A provider-supplied fast venv root may be on a different filesystem from the persistent
@@ -64,7 +64,7 @@ if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
 fi
 if [[ -n "${driver_venv_dir}" ]]; then
     test_status=0
-    ng_test_all "${ng_test_all_args[@]}" || test_status=$?
+    python "${ci_dir}/server_test_workers.py" "${shard_index}" "${num_shards}" "${ng_test_all_args[@]}" || test_status=$?
     if ! rm -rf -- "${driver_venv_dir}"; then
         echo "Failed to remove Gym CI driver venv: ${driver_venv_dir}" >&2
         if [[ "${test_status}" -eq 0 ]]; then
@@ -73,4 +73,4 @@ if [[ -n "${driver_venv_dir}" ]]; then
     fi
     exit "${test_status}"
 fi
-exec ng_test_all "${ng_test_all_args[@]}"
+exec python "${ci_dir}/server_test_workers.py" "${shard_index}" "${num_shards}" "${ng_test_all_args[@]}"

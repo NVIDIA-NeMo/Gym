@@ -113,7 +113,7 @@ gdpval_claude48_judge_model:
 gdpval_resources_server:
   resources_servers:
     gdpval:
-      allowed_agents: [stirrup_agent]
+      allowed_agents: [stirrup_agent, pi_agent, codex_agent, nooa_agent]
       entrypoint: app.py
       domain: other
       verified: false

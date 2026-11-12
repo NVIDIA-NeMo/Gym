@@ -45,8 +45,10 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import VerifierFixture, call_judge
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 
@@ -56,19 +58,34 @@ JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
 SLICES_PREFIX = "slices/"
 
 
+_LABEL_MARKUP = re.compile(r"[*_`]")
+_LABEL_COLON_SPACING = re.compile(r"\s*:\s*")
+
+
+def _fold_for_label_match(text: str) -> str:
+    """Fold text for a tolerant label search.
+
+    Casefold, drop bold, italic and code marks, and normalise the spacing around colons, so that
+    ``Judgement: Yes``, ``Judgement: **no**`` and ``**Judgement:** no`` fold to the same ``judgement: no``
+    as the configured label.
+    """
+    return _LABEL_COLON_SPACING.sub(": ", _LABEL_MARKUP.sub("", text.casefold()))
+
+
 def _match_verdict_labels(
     text: str, equal_label: str, not_equal_label: str, case_insensitive: bool = False
 ) -> list[str]:
     """Return non-overlapping verdict labels in text order.
 
     Consume each match so INCORRECT does not also count as CORRECT. With ``case_insensitive`` the
-    search runs on the ``str.casefold`` forms of the text and the labels, so "Judgement: Yes" matches
-    the configured "Judgement: yes"; the returned entries are always the configured labels as written.
+    search runs on the folded forms of the text and the labels (see ``_fold_for_label_match``), so
+    "Judgement: Yes" and "Judgement: **yes**" match the configured "Judgement: yes"; the returned entries
+    are always the configured labels as written.
     """
     labels = (equal_label, not_equal_label)
     if case_insensitive:
-        text = text.casefold()
-        needles = tuple(label.casefold() for label in labels)
+        text = _fold_for_label_match(text)
+        needles = tuple(_fold_for_label_match(label) for label in labels)
     else:
         needles = labels
     eq_needle, neq_needle = needles
@@ -181,10 +198,12 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
-    # Match the two labels case-insensitively (str.casefold) when parsing the verdict. Off by default,
-    # which keeps the byte-exact match every existing config was measured with. HLE-Diamond turns it on:
-    # upstream's judge reads a structured `correct: yes|no` field whose case cannot vary, whereas here a
-    # judge that writes "Judgement: Yes" would otherwise yield no_verdict and a reward of 0.
+    # Match the two labels tolerantly when parsing the verdict: case-insensitive (str.casefold), ignoring
+    # bold, italic and code marks, and with any spacing around colons, so a judge that writes
+    # "Judgement: Yes", "Judgement: **no**" or "**Judgement:** yes" is read like "Judgement: yes".
+    # Off by default, which keeps the byte-exact match every existing config was measured with. The HLE
+    # configs turn it on: upstream's judge reads a structured `correct: yes|no` field whose form cannot
+    # vary, whereas here such replies would otherwise yield no_verdict and a reward of 0.
     judge_labels_case_insensitive: bool = False
     # Optional regex to extract the question from the last user message.
     # If provided and a match is found, the first non-empty capture group is used;
@@ -242,10 +261,10 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
         if (
             self.judge_labels_case_insensitive
             and self.judge_equal_label != self.judge_not_equal_label
-            and self.judge_equal_label.casefold() == self.judge_not_equal_label.casefold()
+            and _fold_for_label_match(self.judge_equal_label) == _fold_for_label_match(self.judge_not_equal_label)
         ):
             raise ValueError(
-                "judge_equal_label and judge_not_equal_label differ only in case, so "
+                "judge_equal_label and judge_not_equal_label differ only in case or markup, so "
                 "judge_labels_case_insensitive=true could never tell the verdicts apart"
             )
         return self
@@ -611,16 +630,19 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
         )
 
-        # Step 4: Run first judge evaluation
-        first_equal, first_eval = await self._generate_judge_evaluation(
-            question=question, expected_answer=expected, generated_answer=generated
-        )
+        async def grade() -> LLMJudgeVerifyResponse:
+            # Step 4: Run first judge evaluation
+            first_equal, first_eval = await self._generate_judge_evaluation(
+                question=question, expected_answer=expected, generated_answer=generated
+            )
 
-        # Step 5 & 6: Handle result based on first evaluation
-        if not first_equal:
-            return await self._handle_first_pass_failed(body, expected, question, first_eval)
-        else:
+            # Step 5 & 6: Handle result based on first evaluation
+            if not first_equal:
+                return await self._handle_first_pass_failed(body, expected, question, first_eval)
             return await self._handle_first_pass_succeeded(body, expected, question, generated, first_eval)
+
+        # Every judge pass (rescue and swap included) is a dependency of the returned grade.
+        return await observe_llm_judge_grading(grade)
 
     async def _generate_judge_evaluation(
         self, *, question: str, expected_answer: str, generated_answer: str
@@ -675,6 +697,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             truncated=judge_response.status == "incomplete",
             case_insensitive=cfg.judge_labels_case_insensitive,
         )
+        if (
+            equal_label != not_equal_label
+            and eval_record.verdict_label is not None
+            and judge_response.status != "incomplete"
+            and not {"conflicting_verdicts", "truncated_judge_output"} & set(eval_record.judgement_parsing_issues)
+        ):
+            # Only an unambiguous, complete verdict is a parsed grade; the not-equal fallback stays unknown.
+            record_parsed_judge_verdict()
         return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
@@ -752,3 +782,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     LLMJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LLMJudgeResourcesServer.run_webserver()  # noqa: F401

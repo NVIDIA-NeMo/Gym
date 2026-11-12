@@ -4,14 +4,15 @@
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.server_runtime.episode_types import (
+from nemo_gym.core.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
-    EpisodeFailure,
+    EpisodeId,
     MaterializedTask,
+    TaskId,
     is_materialized_task_row,
 )
+from nemo_gym.core.failure_records import EpisodeFailure
 
 
 class _TaskInput(BaseModel):

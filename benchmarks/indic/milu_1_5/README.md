@@ -136,10 +136,10 @@ python -m benchmarks.indic.milu_1_5.prepare \
 
 ```bash
 PYTHONPATH=resources_servers/mcqa:. pytest --import-mode=importlib \
-  tests/unit_tests/test_indic_milu_1_5.py \
-  tests/unit_tests/test_milu_1_5_grading.py \
-  tests/unit_tests/test_milu_1_5_reference_grading.py \
-  tests/unit_tests/test_milu_1_5_rescore.py \
+  tests/unit_tests/benchmarks/test_indic_milu_1_5.py \
+  tests/unit_tests/benchmarks/test_milu_1_5_grading.py \
+  tests/unit_tests/benchmarks/test_milu_1_5_reference_grading.py \
+  tests/unit_tests/benchmarks/test_milu_1_5_rescore.py \
   resources_servers/mcqa/tests \
   responses_api_models/vllm_model/tests/test_milu_1_5.py
 ruff check benchmarks/indic/milu_1_5 resources_servers/mcqa/app.py

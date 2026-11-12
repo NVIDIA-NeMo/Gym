@@ -32,17 +32,21 @@ from uuid import uuid4
 
 import orjson
 from aiohttp import ClientResponseError
+from anyio import CancelScope
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.model_call_sampling import model_call_sampling_config
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.core.typed_exceptions import failure_report_for
 from nemo_gym.models._checkpoint import (
     CheckpointableLedger,
     PolicyAdmissionMiddleware,
@@ -63,6 +67,10 @@ from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthes
 from nemo_gym.models.model_call_capture import (
     _SSE_KEEPALIVE,
     ModelCallCaptureConfig,
+    _is_chat_done,
+    _stream_report,
+    _with_report_field,
+    _with_stream_report,
     install_model_call_capture,
 )
 from nemo_gym.models.responses_streaming import (
@@ -74,13 +82,8 @@ from nemo_gym.models.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.models.token_capture import (
-    capture_tokens,
-    current_capture_context,
-    register_call_intent,
-    resolve_parent,
-)
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
+from nemo_gym.models.token_capture.harness_notes import trailing_harness_note
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -88,9 +91,16 @@ from nemo_gym.models.token_capture.protocols import (
     LineageResolver,
 )
 from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+from nemo_gym.models.token_capture.sink import (
+    capture_tokens,
+    current_capture_context,
+    register_call_intent,
+    resolve_parent,
+)
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
@@ -207,6 +217,35 @@ def _plain(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _plain(item) for key, item in value.items()}
     return value
+
+
+async def _cancel_and_wait_for_backend(backend: asyncio.Task[Any]) -> None:
+    # Disconnects cancel the enclosing AnyIO scope at every checkpoint. Protect the backend's own
+    # asynchronous teardown from that cancellation and from another cleanup owner cancelling it twice.
+    with CancelScope(shield=True):
+        if not backend.done() and not backend.cancelling():
+            backend.cancel()
+        await asyncio.gather(backend, return_exceptions=True)
+
+
+class _BackendStreamingResponse(StreamingResponse):
+    """A keepalive stream that owns the backend call its body waits for.
+
+    The body's own cleanup runs only once iteration starts. A client that disconnects after the
+    handler returns but before the first chunk would otherwise leave the call generating.
+    """
+
+    def __init__(self, content: AsyncIterator[str | bytes], *, backend: "asyncio.Task[Any]") -> None:
+        super().__init__(
+            content, media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
+        self.backend = backend
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _cancel_and_wait_for_backend(self.backend)
 
 
 def _orjson_dispatch_response(content: Any) -> Any:
@@ -368,6 +407,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 content=getattr(error, "response_content", error.message),
                 status_code=error.status,
                 media_type=(error.headers or {}).get("Content-Type", "application/json"),
+                # The handled error ends the request: its own failure chain is the reply's final failure.
+                headers=FailureHeader.encode(failure_report_for(error)),
             )
 
         self.setup_session_middleware(app)
@@ -413,6 +454,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/embeddings")(self.embeddings)
 
         self.setup_policy_checkpoint(app, capture_ledger)
+        # Added after policy admission and capture, so it runs before them and they see the values the provider receives.
+        sampling_config = model_call_sampling_config(self.server_client.global_config_dict)
+        app.add_middleware(
+            ModelSamplingMiddleware,
+            required=sampling_config is not None and self.config.name in sampling_config.required_model_servers,
+        )
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
@@ -488,7 +535,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
             app.router.lifespan_context = lifespan_with_coordinator
             gate = link.gate
-        # Outermost of this app's middleware: a refused call must not register capture intent.
+        # Outside capture: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
         app.state.nemo_gym_policy_gate = gate
 
@@ -558,7 +605,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
-            raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+            raise RequestValidationError(
+                [{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]
+            ) from exc
 
         return await self._stream_responses(request, params, ns_map)
 
@@ -572,21 +621,23 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # Keepalive events name the response before it exists, so the response takes this id.
         response_id = f"resp_{uuid4().hex}"
+        # The middleware resets the request's log before the body streams; keep this request's log object.
+        failure_log = RequestFailureLog.current()
         pending = asyncio.create_task(self._invoke_responses(request, params, response_id=response_id))
         try:
             # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
             # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
             done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
         except BaseException:
-            pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
             raise
         if done:
             return await self._stream_buffered_responses(request, pending, ns_map)
-        return StreamingResponse(
-            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        return _BackendStreamingResponse(
+            self._responses_keepalive_events(
+                request, pending, ns_map, keepalive_s, response_id, failure_log=failure_log
+            ),
+            backend=pending,
         )
 
     async def _stream_buffered_responses(
@@ -606,6 +657,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
+                # No header is sent yet, so the selected failure travels with the reply as for an HTTP error.
+                headers=FailureHeader.encode(failure_report_for(exc)),
             )
 
     async def _responses_keepalive_events(
@@ -615,8 +668,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ns_map: NamespaceMap,
         keepalive_s: float,
         response_id: str,
+        *,
+        failure_log: Optional[RequestFailureLog] = None,
     ) -> AsyncIterator[str | bytes]:
-        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes."""
+        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes.
+
+        The headers went out before ``pending`` finished, so the terminal event carries the request's failure report.
+        """
         try:
             for event in synthesize_responses_keepalive_sse(response_id, include_created=True):
                 yield event
@@ -631,17 +689,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             except Exception as exc:
                 # The stream is already open, so only a terminal event can report the failure.
                 code, message = self._streamed_responses_failure(exc)
+                report = _stream_report(failure_log, exc)
                 for event in synthesize_responses_failure_sse(
                     message, code=code, response_id=response_id, include_created=False
                 ):
-                    yield event
+                    yield _with_stream_report(event, report)
                 return
+            report = _stream_report(failure_log, None)
             async for event in served.body_iterator:
-                yield event
+                yield _with_stream_report(event, report)
         finally:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
 
     def _streamed_responses_failure(self, exc: Exception) -> tuple[Optional[str], str]:
         """The ``(code, message)`` of the ``response.failed`` event that reports a failure after keepalives.
@@ -721,11 +779,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion_json = (
                 completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
             )
-            return await self._stream_served_response(
+            streamed = await self._stream_served_response(
                 completion_json,
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
+            if "usage" in completion_json:
+                # A client without stream_options.include_usage gets no usage chunk; capture records Gym's own usage.
+                request.state.nemo_gym_internal_usage = completion_json["usage"]
+            return streamed
 
+        # The middleware resets the request's log before the body streams; keep this request's log object.
+        failure_log = RequestFailureLog.current()
         pending = asyncio.create_task(self._invoke_chat_completions(request, params))
         try:
             # StreamingResponse commits HTTP headers before iterating its body.
@@ -734,9 +798,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             if done:
                 return await completed_stream(await pending)
         except BaseException:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
             raise
 
         async def events() -> AsyncIterator[str | bytes]:
@@ -763,7 +825,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                             message,
                         )
                         error = {"message": message, "type": "invalid_request_error", "param": param, "code": code}
-                        yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                        payload = _with_report_field({"error": error}, _stream_report(failure_log, exc))
+                        yield f"event: error\ndata: {json.dumps(payload)}\n\n"
                         return
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
@@ -781,23 +844,25 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                         "type": "server_error" if status >= 500 else "invalid_request_error",
                         "code": status,
                     }
-                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    payload = _with_report_field({"error": error}, _stream_report(failure_log, exc))
+                    yield f"event: error\ndata: {json.dumps(payload)}\n\n"
                     return
                 # Capture finalization and serialization failures must propagate:
                 # treating them as backend SSE errors would hide an invalid capture.
                 response = await completed_stream(completion)
+                report = _stream_report(failure_log, None)
+                last: str | bytes | None = None
                 async for event in response.body_iterator:
-                    yield event
+                    if last is not None:
+                        # The chunk before [DONE] is the last one a client parses: it carries the report.
+                        yield _with_stream_report(last, report) if _is_chat_done(event) else last
+                    last = event
+                if last is not None:
+                    yield last
             finally:
-                if not pending.done():
-                    pending.cancel()
-                await asyncio.gather(pending, return_exceptions=True)
+                await _cancel_and_wait_for_backend(pending)
 
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return _BackendStreamingResponse(events(), backend=pending)
 
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -809,7 +874,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             self._validate_capture_request(params)
-            request_messages = _request_messages(params)
+            note = trailing_harness_note(list(params.messages))
+            if note is not None:
+                # The harness, not the model, wrote this assistant message, and its next request drops it. The
+                # model reads it as a user message, and lineage leaves it out (see harness_notes).
+                params = params.model_copy(
+                    update={"messages": [*params.messages[:-1], {"role": "user", "content": note}]}
+                )
+                request_messages = _request_messages(params)[:-1]
+            else:
+                request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()
@@ -910,7 +984,7 @@ def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStre
     try:
         return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
     except ValidationError as exc:
-        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]) from exc
 
 
 def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStreaming:
@@ -925,7 +999,7 @@ def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStr
     except ValidationError as exc:
         raise RequestValidationError(
             [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
-        )
+        ) from exc
 
 
 # Preserve old reader imports during deprecation without eagerly importing the reader back here.
@@ -967,7 +1041,7 @@ _moved_lazy_names = moved_attr_getter(
             ),
             "nemo_gym.rollouts.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
+        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode_context",
     },
 )
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

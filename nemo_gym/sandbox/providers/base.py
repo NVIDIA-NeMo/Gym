@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import error_to_http_status
+
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
 # and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
@@ -69,14 +74,26 @@ class SandboxEndpoint:
 
 
 @dataclass(frozen=True)
-class SandboxResources:
-    """Provider-neutral resource request."""
+class SandboxResourceAmounts:
+    """Provider-neutral quantities: CPU cores, MiB, GiB and GPU count.
+
+    Missing values are unspecified/unknown, never zero. Fractional memory and disk
+    preserve observed allocations; gpu_type is a selector rather than an amount.
+    """
 
     cpu: float | None = None
-    memory_mib: int | None = None
-    disk_gib: int | None = None
+    memory_mib: float | None = None
+    disk_gib: float | None = None
     gpu: int | None = None
     gpu_type: str | None = None
+
+
+@dataclass(frozen=True)
+class SandboxResources(SandboxResourceAmounts):
+    """Provider-neutral creation request, retaining integer memory/disk inputs."""
+
+    memory_mib: int | None = None
+    disk_gib: int | None = None
 
     @classmethod
     def from_mapping(cls, resources: Mapping[str, Any] | None) -> "SandboxResources":
@@ -155,7 +172,9 @@ class SandboxSpec:
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    # Uploaded at startup, keyed by remote path.
+    # A str is written as UTF-8 text and bytes are written unchanged, so binary files such as images fit too.
+    files: dict[str, str | bytes] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
@@ -224,6 +243,10 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``error_type="user_switch_unavailable"`` means the provider confirmed that
+    credential switching prevented process launch. Helpers that allow the image's
+    default user can choose that branch without reporting a failure event.
     """
 
     stdout: str | None
@@ -262,6 +285,36 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    operation: str,
+    details: SandboxFailureDetails | None = None,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
@@ -279,9 +332,10 @@ class SandboxProvider(Protocol):
         """Create a ready sandbox and return a provider-neutral handle.
 
         Providers must return only after the sandbox is healthy enough to run
-        commands and transfer files. If the sandbox cannot become ready before
-        the configured timeout, providers should raise ``SandboxCreateError``
-        or a provider-specific subclass.
+        commands and transfer files. New and migrated providers must report allocation
+        and readiness failures as ``NgFailureEvent`` with ``boundary="sandbox"`` and a registered kind.
+        Providers awaiting migration still expose creation exceptions; see the
+        sandbox documentation's required provider migrations.
         """
         ...
 
@@ -508,8 +562,9 @@ class SandboxPtySession(Protocol):
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         """Return the next output chunk (all terminal output in PTY mode;
         stdout only in pipe mode). ``b""`` means the process exited and the
-        stream is drained. Raises ``TimeoutError`` on timeout and
-        ``SandboxPtyError`` if the session died without exiting.
+        stream is drained. Raises ``TimeoutError`` when this wait expires;
+        that alone does not mean the command failed. Report session death as
+        ``NgFailureEvent``; providers awaiting migration use ``SandboxPtyError``.
         """
         ...
 
@@ -543,7 +598,11 @@ class SandboxPtySession(Protocol):
         ...
 
     async def wait_exit(self, *, timeout_s: float | None = None) -> int:
-        """Block until the process exits and return its exit code."""
+        """Block until the process exits and return its exit code.
+
+        Raises ``TimeoutError`` when this wait expires; that alone does not mean
+        the command failed. Session failures follow the same contract as ``read``.
+        """
         ...
 
     async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:

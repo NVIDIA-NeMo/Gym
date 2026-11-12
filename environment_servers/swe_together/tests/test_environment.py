@@ -17,6 +17,8 @@ from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
 from nemo_gym.rollouts.rollout_collection import _episode_record
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 def activation(index=0, **kwargs):
@@ -526,7 +528,7 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
         tmp_path,
         dependency_proxy_url="http://10.0.0.3:3128",
         sandbox_config={
-            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed"},
+            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed", PLACEMENT_GROUP_KEY: "wrong"},
             "provider_options": {"network_policy": policy},
         },
         judge_sandbox_config={"metadata": {}},
@@ -550,7 +552,8 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
     episode = Episode(request(), request().task.task_input.task_data, tmp_path, tmp_path)
     episode.task_metadata = {"environment": {"memory": "4G"}}
     episode.runtime = SimpleNamespace(
-        metadata=lambda: {"placement": "shared"}, mount_options=lambda *_: {"volumes": []}
+        metadata=lambda overrides: {"placement": "shared"} | overrides | {PLACEMENT_GROUP_KEY: "runtime-group"},
+        mount_options=lambda *_: {"volumes": []},
     )
     episode.dependency_access = SimpleNamespace(
         certificate=AsyncMock(return_value="cert"), sandbox_settings=lambda token, policy, cert: (policy, {}, {})
@@ -560,33 +563,37 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
     candidate, judge = specs["candidate"].metadata, specs["judge"].metadata
     assert candidate["nemo.nvidia.com/oom-kill"] == "process"
     assert candidate["placement"] == "shared" and judge["placement"] == "shared"
+    assert candidate[PLACEMENT_GROUP_KEY] == judge[PLACEMENT_GROUP_KEY] == "runtime-group"
     assert "nemo.nvidia.com/oom-kill" not in judge
     assert specs["candidate"].resources.memory_mib == 4096
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("activation_error,receipt_missing", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("trajectory_task_id", ["task", "wrong-task"])
 async def test_local_lifecycle_closes_candidate_before_verification(
-    tmp_path, monkeypatch, activation_error, receipt_missing
+    tmp_path, monkeypatch, activation_error, receipt_missing, trajectory_task_id
 ):
     environment = server(tmp_path)
     order = []
     sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
-    candidate_trajectory = {
-        "task_id": "task",
-        "rollout_id": "one",
-        "turns": [
-            {
-                "invocation_id": "root",
-                "task_id": "task",
-                "rollout_id": "one",
-                "turn_no": 1,
-                "timestamp": 1.0,
-                "step_count": 0,
-                "answer": "candidate decision",
-            }
-        ],
-    }
+    candidate_trajectory = TrajectoryRecord.model_validate(
+        {
+            "task_id": trajectory_task_id,
+            "rollout_id": "one",
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "task_id": trajectory_task_id,
+                    "rollout_id": "one",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "step_count": 0,
+                    "answer": "candidate decision",
+                }
+            ],
+        }
+    ).model_dump(mode="json")
 
     async def prepare(self, value):
         value.sandbox = sandbox
@@ -700,19 +707,18 @@ async def test_local_lifecycle_closes_candidate_before_verification(
     req = request()
     result = await environment.run_request(req)
     collected = _episode_record(result.model_dump(mode="json"))
-    collector_task_id = "{'taskset': 'swet', 'task_id': 'task'}"
+    collector_task_id = trajectory_task_id
     assert collected["ng_trajectory"]["task_id"] == collector_task_id
     assert collected["ng_trajectory"]["turns"][0]["task_id"] == collector_task_id
-    assert collected["ng_trajectory"]["turns"][0]["answer"] == "candidate decision"
+    assert collected["ng_trajectory"]["turns"] == candidate_trajectory["turns"]
     raw_close = json.loads((tmp_path / "one" / "candidate-agent-close.json").read_text())
-    assert raw_close["trajectory"]["task_id"] == "task"
-    assert raw_close["trajectory"]["turns"][0]["task_id"] == "task"
+    assert raw_close["trajectory"] == candidate_trajectory
     if activation_error:
         assert result.result is None and result.failure.terminal
         assert result.failure.agent_close.cleanup_confirmed is True
         final = json.loads((tmp_path / "one" / "failure.json").read_text())
         assert final["agent_close"]["cleanup_confirmed"] is True
-        assert final["agent_close"]["trajectory"]["task_id"] == "task"
+        assert final["agent_close"]["trajectory"] == candidate_trajectory
         assert final["trajectory"]["task_id"] == collector_task_id
         assert final["cleanup_receipts"]["candidate_sandbox"]["cleanup_confirmed"] is True
         assert collected["ng_trajectory"]["rollout_id"] == "one"
@@ -728,7 +734,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(
         assert collected["ng_trajectory"]["verifier_invocations"][0]["invocation_id"] == "judge-invocation"
     assert collected["ng_trajectory"]["model_calls"][0]["model_call_id"] == "judge-call"
     assert (tmp_path / "one" / "judge-model-calls.json").exists()
-    assert result.result.ng_agent_close.trajectory.task_id == "task"
+    assert result.result.ng_agent_close.trajectory.model_dump(mode="json") == candidate_trajectory
     assert result.result.ng_trajectory.rollout_id == "one"
     assert collected["ng_trajectory"]["rollout_id"] == "one"
     assert "ng_agent_observations" in collected
@@ -744,6 +750,73 @@ async def test_local_lifecycle_closes_candidate_before_verification(
     assert result.result.cleanup_receipts["candidate_sandbox"]["cleanup_confirmed"]
 
 
+@pytest.mark.asyncio
+async def test_cleanup_timeout_after_verification_keeps_the_verdict(tmp_path, monkeypatch):
+    environment = server(tmp_path, cleanup_timeout_seconds=0.05)
+    releases = []
+
+    async def release(session_id):
+        releases.append(session_id)
+        await asyncio.sleep(1)
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.runtime = SimpleNamespace(release=release)
+        value.task_metadata = {"agent_kwargs": {}}
+        value.prompt = "first instruction"
+
+    async def stop(self, value, role):
+        value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
+
+    async def verify(self, value, initial, activations):
+        return {
+            "responses_create_params": initial,
+            "response": activations[-1].response,
+            "reward": 1,
+            "judge_score": 0.9,
+            "task_id": "task",
+            "evaluation_completed": True,
+        }
+
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "cleanup_confirmed": True,
+                "trajectory": {"task_id": "task", "rollout_id": "one", "turns": []},
+            }
+        else:
+            data = activation().response.model_dump(mode="json")
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    async def payload(response):
+        return response.payload
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(
+        SWETEnvironmentServer, "_next_user_turn", AsyncMock(return_value=UserTurn(activation_id=0, kind="stop"))
+    )
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", payload)
+    environment.server_client = SimpleNamespace(post=post)
+
+    result = await environment.run_request(request())
+
+    assert result.failure is None
+    assert result.result.reward == 1 and result.result.judge_score == 0.9
+    assert result.result.cleanup_receipts["post_verification_error"] == "TimeoutError: "
+    # The release timed out once in the protocol, and final cleanup tried it again.
+    assert len(releases) == 2
+
+
 @pytest.mark.parametrize(
     "native_outcome,confirmed",
     [("interrupted", True), ("not_started", True), ("failed", True), ("interrupted", False)],
@@ -751,7 +824,9 @@ async def test_local_lifecycle_closes_candidate_before_verification(
 async def test_interaction_deadline_closes_remote_work_before_grading(
     tmp_path, monkeypatch, native_outcome, confirmed
 ):
-    environment = server(tmp_path, interaction_timeout_seconds=0.03, cleanup_timeout_seconds=1)
+    # The deadline must fire while the activation is in flight: 0.5 s leaves a loaded runner time to start it,
+    # and the remote work outlasts the deadline, so only the deadline close can end it.
+    environment = server(tmp_path, interaction_timeout_seconds=0.5, cleanup_timeout_seconds=1)
     remote = None
     close_count = 0
     verified = False
@@ -759,7 +834,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
 
     async def work():
         nonlocal late_work
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(5)
         late_work = True
 
     async def prepare(self, value):
@@ -836,6 +911,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
     monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
     environment.server_client = SimpleNamespace(post=post)
     result = await environment.run_request(request())
+    assert remote is not None, "the activation did not start before the interaction deadline"
     assert remote.cancelled() and not late_work
     simulator.assert_not_awaited()
     if native_outcome == "interrupted" and confirmed:

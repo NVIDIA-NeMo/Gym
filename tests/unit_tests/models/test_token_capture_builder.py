@@ -46,7 +46,7 @@ from nemo_gym.models.token_capture.store import TokenCaptureStore
 
 def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0, finish_reason=None):
     e = TokenEntry(
-        rollout_id="t0-r0",
+        capture_key="t0-r0",
         model_call_id=mcid,
         model="m",
         prompt_token_ids=prompt,
@@ -183,7 +183,7 @@ def test_contiguity_assert_catches_a_gap():
 def _content_entry(mcid, prompt, gen, text, parent=None):
     lp = [-0.1] * len(gen)
     entry = TokenEntry(
-        rollout_id="t0-r0",
+        capture_key="t0-r0",
         model_call_id=mcid,
         model="m",
         prompt_token_ids=prompt,
@@ -224,7 +224,7 @@ def test_projection_handles_content_only_leading_item():
     # The tool call carries the token fields.
     # Usage comes from the token-bearing item.
     entry = TokenEntry(
-        rollout_id="t0-r0",
+        capture_key="t0-r0",
         model_call_id="c1",
         model="m",
         prompt_token_ids=[1, 2, 3],
@@ -293,7 +293,7 @@ def test_consumer_reads_store_and_builds(tmp_path):
     # The colocated consumer freezes the local store before building.
     store = TokenCaptureStore(tmp_path)
     for e in APPEND_ONLY:
-        store.append(e.model_copy(update={"rollout_id": "t0-r0"}))
+        store.append(e.model_copy(update={"capture_key": "t0-r0"}))
     dirs = token_capture_dirs_from_config({"token_id_capture": {"enabled": True, "dir": str(tmp_path)}})
     assert dirs == [tmp_path]
     merged = trajectories_for_rollout("t0-r0", dirs, builder="prefix_merging")
@@ -321,7 +321,7 @@ def test_consumer_reads_and_freezes_an_external_source():
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=tuple(APPEND_ONLY),
                 incomplete=False,
                 snapshot_id="snapshot-1",
@@ -358,7 +358,7 @@ def test_external_source_offloads_trajectory_assembly(monkeypatch):
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=tuple(APPEND_ONLY),
                 incomplete=False,
                 snapshot_id="snapshot-thread",
@@ -387,7 +387,7 @@ def test_consumer_masks_an_incomplete_external_snapshot():
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=(APPEND_ONLY[0],),
                 incomplete=True,
                 snapshot_id="snapshot-2",
@@ -410,7 +410,7 @@ def test_consumer_masks_an_empty_external_snapshot():
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=(),
                 incomplete=False,
                 snapshot_id="snapshot-empty",
@@ -677,7 +677,7 @@ class _FrozenSource:
 
     async def freeze(self, rollout_id):
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=self._entries,
             incomplete=self._incomplete,
             snapshot_id="frozen-1",
@@ -961,7 +961,7 @@ def _commit_delta_entry(
     request: list[dict],
 ) -> CaptureContext:
     entry = TokenEntry(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=call_id,
         prompt_token_ids=prompt,
         generation_token_ids=generation,
@@ -970,7 +970,7 @@ def _commit_delta_entry(
     )
     stamp_continuation(entry, request)
     context = CaptureContext(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=call_id,
         token_sink=store,
         lineage_store=lineage,
@@ -1060,7 +1060,7 @@ def test_delta_materialization_handles_a_thousand_turns_without_recursion():
 def test_broken_delta_chain_masks_instead_of_guessing(tmp_path):
     store = TokenCaptureStore(tmp_path)
     orphan = TokenEntry(
-        rollout_id="orphan",
+        capture_key="orphan",
         model_call_id="child",
         prompt_token_ids=[9],
         generation_token_ids=[10],
@@ -1089,7 +1089,7 @@ def test_broken_delta_chain_masks_instead_of_guessing(tmp_path):
 
 def test_in_memory_lineage_refuses_delta_records():
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="child",
         prompt_token_ids=[9],
         generation_token_ids=[10],

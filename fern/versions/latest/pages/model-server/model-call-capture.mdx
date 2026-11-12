@@ -245,6 +245,12 @@ includes a gap to show the complete shape. The `gaps` field is omitted when ther
 reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
 report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
 
+Each call's `tokens_in` is the whole prompt size. When the provider reports prompt caching, the call
+also carries `cached_tokens` (tokens read from the cache) and `cache_creation_tokens` (tokens written
+to the cache); both are part of `tokens_in`. Gym reads cache writes from OpenAI's
+`input_tokens_details.cache_write_tokens` (Responses) or `prompt_tokens_details.cache_write_tokens`
+(Chat Completions), and from Anthropic's `cache_creation_input_tokens`.
+
 After successful [`ng_trajectory`](/main/observability/rollout-evidence#which-artifact-to-read) projection, attached calls
 omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
@@ -303,10 +309,7 @@ Read raw records programmatically when you need more than the rollout attachment
 
 ```python
 from nemo_gym.models import CaptureStore
-from nemo_gym.rollouts.model_calls import (
-    aggregate_model_call_metrics,
-    read_model_call_records,
-)
+from nemo_gym.rollouts import aggregate_model_call_metrics, read_model_call_records
 
 store = CaptureStore("/absolute/path/to/results/model-calls")
 calls = read_model_call_records(store, rollout_id)
@@ -344,6 +347,22 @@ policy_model:
       entrypoint: app.py
 ```
 
+### Trajectory schema selection
+
+The default trajectory schema is `"1.0"`. To retain qualified v2 tool timing, add:
+
+```yaml
+model_call_capture:
+  trajectory_schema_version: "2.0"
+```
+
+`observability_enabled` and `model_call_capture_dir` remain top-level settings as shown above.
+Direct callers can use `run_examples(..., trajectory_schema_version="2.0")`; an explicit argument
+wins over the configured version. Schema selection also applies with `enrich_results=False`:
+the default projects raw results to v1, while selecting v2 preserves producer evidence without
+upgrading legacy evidence or reading captures. Direct HTTP `/run` replies remain raw producer
+evidence; schema negotiation happens at collection or export.
+
 Model servers and `rollout_collection` must resolve `model_call_capture_dir` to the same location.
 For separate pods or nodes, mount that absolute path in every producer and the collector. Multiple
 model servers can append to one rollout file when the shared filesystem supports POSIX advisory file
@@ -373,6 +392,60 @@ Agents based on `SimpleResponsesAPIAgent` can add the prefix with these helpers:
 
 The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every agent by
 default.
+
+### Clients with a fixed base URL
+
+A long-lived client, such as one a resources server calls during verification, may not be able to change its
+base URL for each rollout. `nemo_gym.server_runtime.with_rollout_prefix` rewrites each request URL instead: it
+inserts `/ng-rollout/<rollout>` after the matching base URL, using the current rollout, so the call reaches the
+model server exactly like a prefixed one, and every Gym server layer that reads the prefix (capture, policy
+checkpointing, session affinity) sees it.
+
+- Only URLs under one of the base URLs you list are changed. They are compared by scheme, host
+  (case-insensitive), effective port and whole path segments, the way HTTP clients normalize them.
+- A URL that already carries a rollout prefix below the base is left as it is.
+- With no current rollout the URL is unchanged, a debug message is logged, and the model server forwards the
+  call without capture.
+- The current rollout is a `ContextVar`. A synchronous client run through `asyncio.to_thread` or
+  `contextvars.copy_context().run` sees it; one run through `loop.run_in_executor` or a thread pool does not.
+
+`rollout_prefix_hook` and `async_rollout_prefix_hook` wrap it as httpx request event hooks. The OpenAI SDK
+accepts such a client through `http_client`.
+
+```python
+import httpx
+import requests
+from openai import OpenAI
+from requests.adapters import HTTPAdapter
+
+from nemo_gym.server_runtime import async_rollout_prefix_hook, rollout_prefix_hook, with_rollout_prefix
+
+model_base_urls = ["http://model-server:8000"]
+
+# httpx, synchronous and asynchronous clients
+client = httpx.Client(event_hooks={"request": [rollout_prefix_hook(model_base_urls)]})
+async_client = httpx.AsyncClient(event_hooks={"request": [async_rollout_prefix_hook(model_base_urls)]})
+
+# the OpenAI SDK, through its httpx client
+openai_client = OpenAI(base_url="http://model-server:8000/v1", api_key="unused", http_client=client)
+
+
+# requests
+class RolloutPrefixAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        request.url = with_rollout_prefix(request.url, model_base_urls)
+        return super().send(request, **kwargs)
+
+
+session = requests.Session()
+session.mount("http://", RolloutPrefixAdapter())
+session.mount("https://", RolloutPrefixAdapter())
+```
+
+With observability or checkpointing on, Gym sets the current rollout for every request it sends to a
+resources server for that rollout, including `/verify`. Clients created once and shared across concurrent
+rollouts therefore name each request's own rollout. The rollout is the capture key, including an `-a<N>`
+attempt suffix when the run retries.
 
 ## Add agent-side evidence
 
@@ -453,10 +526,11 @@ POST /training-token-capture/control/rollouts/retire
 POST /training-token-capture/control/rollouts/delete
 Authorization: Bearer <control auth token>
 
-{"rollout_ids": ["<rollout_id>", ...]}
+{"capture_keys": ["<capture_key>", ...]}
 ```
 
-Each request takes at most 4096 rollout IDs, and `RolloutControlClient.retire` and `RolloutControlClient.delete` split longer lists into batches for you.
+The body field was earlier named `rollout_ids`, which the routes still accept for one release.
+Each request takes at most 4096 capture keys, and `RolloutControlClient.retire` and `RolloutControlClient.delete` split longer lists into batches for you.
 The reply lists the rollouts whose ledger was removed under `removed` and the rest under `absent`.
 Because repeating either operation changes nothing, a failed batch can simply be sent again.
 

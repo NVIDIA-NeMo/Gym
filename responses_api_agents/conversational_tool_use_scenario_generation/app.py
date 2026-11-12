@@ -38,8 +38,9 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.models import ResponsesConverter, chat_completion_usage_to_response_usage
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.conversational_tool_use_scenario_generation.assets import (
     ScenarioAssets,
     load_assets,
@@ -390,7 +391,7 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
         completion: NeMoGymChatCompletion,
     ) -> NeMoGymResponse:
         response_params = body.responses_create_params.model_copy(update={"model": completion.model})
-        return ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        return ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params,
             completion,
         )
@@ -410,3 +411,6 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ConversationalToolUseScenarioGenerationAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ConversationalToolUseScenarioGenerationAgent.run_webserver()  # noqa: F401

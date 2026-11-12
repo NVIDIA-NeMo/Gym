@@ -79,6 +79,10 @@ class TestApp:
         # strict requires boxed; plain C should fail
         result = await server.verify(verify_request)
         assert result.reward == 0.0
+        # A wrong or unparsed answer is graded, not masked: the row carries the gym-p0/v1 TE-6 fields.
+        dumped = result.model_dump()
+        assert dumped["evaluation_completed"] is True
+        assert dumped["mask_sample"] is False
 
         # Now send boxed C (strict)
         response_boxed = NeMoGymResponse(

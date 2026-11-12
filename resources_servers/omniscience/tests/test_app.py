@@ -15,6 +15,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.client import ServerClient
@@ -71,11 +72,42 @@ class TestParseJudgeGrade:
     def test_letter_on_last_line(self) -> None:
         assert parse_judge_grade("Some reasoning\nA") == "A"
 
-    def test_letter_in_text(self) -> None:
+    def test_labelled_letter_in_text(self) -> None:
         assert parse_judge_grade("The grade is A based on analysis") == "A"
 
     def test_fallback_to_b(self) -> None:
         assert parse_judge_grade("no clear grade here") == "B"
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("NOT_ATTEMPTED", "D"),
+            ("CORRECT", "A"),
+            ("INCORRECT", "B"),
+            ("PARTIAL_ANSWER", "C"),
+            ("PARTIAL", "C"),
+            ("The grade is NOT_ATTEMPTED because the model refuses.", "D"),
+            ("C: PARTIAL_ANSWER", "C"),
+            ("Grade: **B**", "B"),
+            ("reasoning\n**A**", "A"),
+            ("reasoning\nD.", "D"),
+        ],
+    )
+    def test_unambiguous_grade_tokens(self, text: str, expected: str) -> None:
+        assert parse_judge_grade(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "A reasonable attempt, but it is not clear",
+            "It is CORRECT in part but also INCORRECT in part",
+            "PARTIALLY_CORRECT",
+            "Not attempted at all",
+            "",
+        ],
+    )
+    def test_ambiguous_text_defaults_to_incorrect(self, text: str) -> None:
+        assert parse_judge_grade(text) == "B"
 
     def test_whitespace_handling(self) -> None:
         assert parse_judge_grade("  D  ") == "D"
@@ -497,3 +529,86 @@ class TestExtractTextNoStrip:
     def test_strip_true_removes_reasoning(self) -> None:
         response = self._make_response("reasoning here</think>answer")
         assert extract_text_from_response(response, strip_thinking=True) == "answer"
+
+
+@pytest.mark.parametrize(
+    "text, expected, parsed",
+    [
+        ("A", "A", True),
+        ("A\n", "A", True),
+        ("B", "B", True),
+        ("B\nA", "A", True),
+        ("explanation\nD", "D", True),
+        ("reasoning\n\u00a0A", "A", True),
+        ("reasoning\n\u00a0B", "B", True),
+        ("reasoning\n\u2003D", "D", True),
+        ("The grade is A based on analysis", "A", True),
+        ("The grade is A based on option B", "A", True),
+        ("The grade is A based on answer B", "A", True),
+        ("Grade: **B**", "B", True),
+        ("ANSWER: B", "B", True),
+        ("Answer is D", "D", True),
+        ("Verdict: D", "D", True),
+        ("Reasoning...\nFinal grade: C", "C", True),
+        ("NOT_ATTEMPTED", "D", True),
+        ("CORRECT", "A", True),
+        ("INCORRECT", "B", True),
+        ("C: PARTIAL_ANSWER", "C", True),
+        ("Grade: INCORRECT", "B", True),
+        ("Grade: B: INCORRECT", "B", True),
+        ("Grade: C: PARTIAL_ANSWER", "C", True),
+        ("Grade: B; Verdict: B", "B", True),
+        ("NOT CORRECT", "B", False),
+        ("It is not CORRECT", "B", False),
+        ("The predicted answer is NOT CORRECT.", "B", False),
+        ("PARTIALLY CORRECT", "B", False),
+        ("Grade: NOT CORRECT", "B", False),
+        ("Grade: PARTIALLY CORRECT", "B", False),
+        ("<think>Is it CORRECT? No.</think>B", "B", False),
+        ("<think>\nCORRECT\n</think>B", "B", False),
+        ("A\n\nExplanation: the answer is B-level", "B", False),
+        ("The gold answer is C and the predicted answer is C++, which is different.", "B", False),
+        ("<your_message>A</your_message>", "B", False),
+        ("b", "B", False),
+        ("Predicted answer: Berlin", "B", False),
+        ("The predicted answer is a city in France.", "B", False),
+        ("Answer: Berlin", "B", False),
+        ("Grade: Athens", "B", False),
+        ("Answer: C++", "B", False),
+        ("Grade: A+", "B", False),
+        ("Grade: A/B-level", "B", False),
+        ("Grade: A/B+", "B", False),
+        ("Grade: A/E", "B", False),
+        ("Grade:\nA reasonable attempt", "B", False),
+        ("Reasoning; Grade: A", "B", False),
+        ("C: CORRECT", "B", False),
+        ("Grade: A: INCORRECT", "B", False),
+        ("Grade: A/B", "B", False),
+        ("Grade: A & B", "B", False),
+        ("Grade: A | C", "B", False),
+        ("Grade: CORRECT or INCORRECT", "B", False),
+        ("The grade is A or B", "B", False),
+        ("Grade: A/B; Grade: A", "B", False),
+        ("Grade: A; Grade: B", "B", False),
+        ("Grade: A; Grade: B+", "B", False),
+        ("Grade: **A**/**B**", "B", False),
+        ("Grade: **A** and **B**", "B", False),
+        ("Grade: **A**, **B**", "B", False),
+        ("The answer A is not correct.", "B", False),
+        ("PARTIALLY_CORRECT", "B", False),
+        ("no clear grade", "B", False),
+        ("It is CORRECT in part but also INCORRECT in part", "B", False),
+    ],
+)
+def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str, parsed: bool) -> None:
+    from nemo_gym.trajectory import ModelCallRef
+    from nemo_gym.verification import JudgeGrading
+    from nemo_gym.verification.judge import _judge_grading
+
+    grading = JudgeGrading(dependencies=[ModelCallRef(model_call_id="judge-response")])
+    token = _judge_grading.set(grading)
+    try:
+        assert parse_judge_grade(text) == expected
+        assert grading.parsed_dependencies == ({0} if parsed else set())
+    finally:
+        _judge_grading.reset(token)

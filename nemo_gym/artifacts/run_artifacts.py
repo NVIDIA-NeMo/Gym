@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
@@ -23,6 +25,21 @@ from nemo_gym.utils.path_utils import (
     materialized_path_for,
     resolved_config_path_for,
 )
+
+
+# A staged collection marks each planned input its accepted partial stage omitted with the stage and its policy:
+# ``{"stage_index": int, "tolerate_unresolved": bool}``. Recovery counts such a row as omitted (complete by the stage's
+# policy, never planned again), and the export receipt carries the same count.
+ACCEPTED_STAGE_OMISSION = "accepted_stage_omission"
+
+
+def accepted_stage_omission(row: Mapping[str, object]) -> Optional[str]:
+    """The stage and policy that omitted a planned row, e.g. "(stage_index 1, tolerate_unresolved)", else None."""
+    marker = row.get(ACCEPTED_STAGE_OMISSION)
+    if not isinstance(marker, Mapping) or type(marker.get("stage_index")) is not int:
+        return None
+    tolerate = ", tolerate_unresolved" if marker.get("tolerate_unresolved") is True else ""
+    return f"(stage_index {marker['stage_index']}{tolerate})"
 
 
 @dataclass(frozen=True)
@@ -59,5 +76,5 @@ class RunArtifacts:
         return exporter_run_id_path_for(self.rollouts_jsonl_fpath, exporter)
 
     def export_done_fpath(self, exporter: str) -> Path:
-        """Marker a post-run export writes, holding the backend run id, once the whole run has been sent."""
+        """Receipt written after verified delivery of the whole run, either live or by a post-run export."""
         return export_done_path_for(self.rollouts_jsonl_fpath, exporter)

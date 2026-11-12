@@ -21,7 +21,8 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRecord, JsonPayload
 from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError
 from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state, write_participant_state

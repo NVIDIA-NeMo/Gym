@@ -17,18 +17,33 @@ page compositing."""
 
 import base64
 import io
+import json
 import random
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientPayloadError, ClientResponseError
 from PIL import Image
 
-from nemo_gym.client import ServerClient
+from nemo_gym.agents.utils import verify_call
+from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    FailureBoundary,
+    FailureEvent,
+    FailureHeader,
+    FailureReport,
+    ModelFailureDetails,
+    NeMoGymResponse,
+    NgFailureEvent,
+    RequestFailureLog,
+    SdkErrorDetails,
+)
 from responses_api_agents.gdp_pdf_agent import app as gdp_pdf_agent_app
 from responses_api_agents.gdp_pdf_agent.app import (
     DocumentDelivery,
@@ -147,6 +162,139 @@ def _error(message: str, status: int = 500) -> ClientResponseError:
     return error
 
 
+def _write_text_manifest(base_dir: Path) -> str:
+    """A one-page, text-only document manifest under ``base_dir``; returns its path relative to it.
+
+    The committed example manifests are not part of every checkout, so tests of the /run flow that
+    do not need page images build this one and run the agent with ``include_images=False``.
+    """
+    document_dir = base_dir / "documents" / "doc"
+    document_dir.mkdir(parents=True)
+    manifest = {"source_dpi": 150, "pages": [{"page_number": 1, "text": "The cap is 10."}]}
+    (document_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return "documents/doc/manifest.json"
+
+
+def _text_only_agent(tmp_path: Path, **overrides) -> tuple[GdpPdfAgent, str]:
+    agent = _agent(documents_base_dir=str(tmp_path), include_images=False, strip_images_from_output=False, **overrides)
+    return agent, _write_text_manifest(tmp_path)
+
+
+def _image_agent(tmp_path: Path, **overrides) -> tuple[GdpPdfAgent, str, list[dict]]:
+    """An agent over a two-page manifest with page screenshots, built under ``tmp_path``; also returns the
+    list that collects every request body sent to /verify."""
+    document_dir = tmp_path / "documents" / "img"
+    document_dir.mkdir(parents=True)
+    pages = []
+    for number in (1, 2):
+        Image.new("RGB", (60, 80), "white").save(document_dir / f"page_{number}.png")
+        pages.append({"page_number": number, "text": f"Page {number} text.", "image": f"page_{number}.png"})
+    (document_dir / "manifest.json").write_text(json.dumps({"source_dpi": 150, "pages": pages}), encoding="utf-8")
+    agent = _agent(documents_base_dir=str(tmp_path), strip_images_from_output=False, **overrides)
+    verified: list[dict] = []
+
+    def post(**kw):
+        if kw["url_path"] == "/verify":
+            verified.append(kw["json"])
+            return SimpleNamespace(cookies={}, data=kw["json"] | {"reward": 0.25})
+        return SimpleNamespace(cookies={}, data={})
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    return agent, "documents/img/manifest.json", verified
+
+
+async def _run_with_episodes(agent: GdpPdfAgent, manifest: str, episode) -> SimpleAgentVerifyResponse:
+    with (
+        patch.object(GdpPdfAgent, "_create_episode", side_effect=episode),
+        patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+        patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+        patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+    ):
+        return await agent.run(SimpleNamespace(cookies={}), _run_request(manifest))
+
+
+class TestIncompleteOutputIsTheResult:
+    """An incomplete answer means the model spent its output budget: that is the row's result, not a
+    delivery problem to negotiate away. Regenerating it is opt-in (``regenerate_on_incomplete_output``)."""
+
+    async def test_incomplete_answer_with_images_is_kept_and_verified(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            return _incomplete_response("cut off mid-"), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 1
+        assert len(verified) == 1
+        assert verified[0]["response"]["status"] == "incomplete"
+        assert verified[0]["response"]["output"][0]["content"][0]["text"] == "cut off mid-"
+        assert result.response.status == "incomplete"
+        assert result.reward == 0.25
+        assert result.document_delivery["image_dpi"] == 150
+        assert result.document_delivery["rejected_attempts"] == []
+        assert result.document_delivery["input_limit_rejections"] == 0
+        assert result.document_delivery["output_truncation_regenerations"] == 0
+        assert result.agent_adaptations == {"input_limit_rejections": 0, "output_truncation_regenerations": 0}
+
+    async def test_flag_restores_regeneration_and_counts_it(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path, regenerate_on_incomplete_output=True)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            return (_incomplete_response() if len(calls) == 1 else _response("full answer")), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 2
+        assert len(verified) == 1
+        assert verified[0]["response"]["status"] != "incomplete"
+        assert result.document_delivery["image_dpi"] == 120
+        assert [a["limit"] for a in result.document_delivery["rejected_attempts"]] == ["output_truncated"]
+        assert result.document_delivery["output_truncation_regenerations"] == 1
+        assert result.document_delivery["input_limit_rejections"] == 0
+        assert result.agent_adaptations == {"input_limit_rejections": 0, "output_truncation_regenerations": 1}
+
+    async def test_an_image_count_rejection_still_adapts_and_is_counted(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            if len(calls) == 1:
+                raise _error("At most 1 image(s) may be provided in one prompt.", status=400)
+            return _response("full answer"), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 2
+        images = [b for b in calls[1].input[0].content if _block_type(b) == "input_image"]
+        assert len(images) == 1  # two pages composited into the one image the endpoint allows
+        assert result.document_delivery["pages_per_image"] == 2
+        assert [a["limit"] for a in result.document_delivery["rejected_attempts"]] == ["image_count"]
+        assert result.document_delivery["input_limit_rejections"] == 1
+        assert result.document_delivery["output_truncation_regenerations"] == 0
+        assert result.agent_adaptations == {"input_limit_rejections": 1, "output_truncation_regenerations": 0}
+        assert len(verified) == 1 and result.reward == 0.25
+
+    async def test_a_complete_answer_is_unchanged(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            return _response("full answer"), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 1
+        assert len(verified) == 1
+        assert result.response.output[0].content[0].text == "full answer"
+        assert result.document_delivery["image_dpi"] == 150
+        assert result.document_delivery["rejected_attempts"] == []
+        assert result.document_delivery["input_limit_rejections"] == 0
+        assert result.document_delivery["output_truncation_regenerations"] == 0
+
+
 class TestConfig:
     def test_defaults_are_conservative(self) -> None:
         config = _agent_config()
@@ -157,6 +305,7 @@ class TestConfig:
         assert config.include_text is True
         assert config.include_images is True
         assert config.strip_images_from_output is True
+        assert config.regenerate_on_incomplete_output is False
 
     def test_overrides_apply(self) -> None:
         config = _agent_config(dpi=200, max_images=8, max_pages=10, include_images=False)
@@ -521,11 +670,10 @@ class TestRun:
         assert len(result.document_delivery["rejected_attempts"]) == 2
 
     @requires_example_manifest
-    async def test_incomplete_status_triggers_dpi_backoff_without_an_error(self) -> None:
-        # vLLM can accept an oversized request and just run out of output room instead of
-        # rejecting it outright -- no exception is raised, so this must be detected separately
-        # from the ClientResponseError path above.
-        agent = _agent(strip_images_from_output=False, include_images=True)
+    async def test_incomplete_status_triggers_dpi_backoff_when_regeneration_is_enabled(self) -> None:
+        # Opt-in only (regenerate_on_incomplete_output): an incomplete answer is regenerated with a
+        # smaller image footprint, detected separately from the ClientResponseError path above.
+        agent = _agent(strip_images_from_output=False, include_images=True, regenerate_on_incomplete_output=True)
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},
@@ -553,7 +701,9 @@ class TestRun:
 
     @requires_example_manifest
     async def test_incomplete_status_is_accepted_once_dpi_floor_reached(self) -> None:
-        agent = _agent(strip_images_from_output=False, include_images=True, min_dpi=140)
+        agent = _agent(
+            strip_images_from_output=False, include_images=True, min_dpi=140, regenerate_on_incomplete_output=True
+        )
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},
@@ -616,30 +766,68 @@ class TestRun:
         assert result.reward == 0.0
         assert result.response.output == []
         assert result.failure_reason == "GDP.pdf terminal input limit: context"
+        # A terminal input limit is a scored attempt (the benchmark's own rule), not a masked failure.
+        assert result.mask_sample is False
+        assert result.failure_kind is None
 
-    @requires_example_manifest
-    async def test_unrelated_failure_is_not_retried_but_scores_zero(self) -> None:
-        # An unclassified, non-auth error (e.g. a rare vLLM-side multimodal-processor bug) must
-        # not take the whole evaluation run down over one document -- it becomes a graceful
-        # terminal failure instead of propagating, same as a terminal input-limit.
-        agent = _agent(strip_images_from_output=False)
+    async def test_a_failed_policy_call_is_not_a_model_zero(self, tmp_path) -> None:
+        """5xx, 429 and 401/403 replies and transport errors leave typed through the agent boundary: nothing is
+        scored, so the row is masked and retried by Collection instead of becoming the model's zero."""
+        for error in (_error("out of memory", status=500), _error("slow down", status=429), _error("no", status=401)):
+            agent, manifest = _text_only_agent(tmp_path / str(error.status))
+            agent.server_client.post = AsyncMock(return_value=SimpleNamespace(cookies={}, data={}))
+            with pytest.raises(ClientResponseError) as raised:
+                await _run_with_episodes(agent, manifest, [error])
+            assert raised.value.status == error.status
+            assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == ["/seed_session"]
+
+    async def test_a_confirmed_policy_timeout_is_typed_as_the_policys(self, tmp_path) -> None:
+        operation_id = uuid4().hex
+        attempts = [
+            FailureEvent(
+                boundary=FailureBoundary.MODEL,
+                failure_kind="model_request_error",
+                failure_reason=MODEL_RESPONSE_TIMEOUT_REASON,
+                operation="model_request",
+                operation_id=operation_id,
+                attempt_id=uuid4().hex,
+                details=ModelFailureDetails(request_upload_complete=True),
+                foreign_error=SdkErrorDetails(exception_type="TimeoutError", message=""),
+            )
+            for _ in range(3)
+        ]
+        report = FailureReport(failure_id=attempts[-1].event_id, events={e.event_id: e for e in attempts})
+        error = ClientResponseError(
+            None, (), status=500, message="upstream failure", headers=FailureHeader.encode(report)
+        )
+        error.response_content = b"timed out"
+        agent, manifest = _text_only_agent(tmp_path)
+        agent.server_client.post = AsyncMock(return_value=SimpleNamespace(cookies={}, data={}))
+
+        with pytest.raises(NgFailureEvent) as raised:
+            await _run_with_episodes(agent, manifest, [error])
+
+        assert (raised.value.failure_kind, raised.value.operation) == (
+            "model_policy_response_timeout",
+            "agent.policy_request",
+        )
+
+    async def test_a_real_input_limit_still_scores_zero(self, tmp_path) -> None:
+        agent, manifest = _text_only_agent(tmp_path, min_dpi=140)
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},
                 data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
             )
         )
-        with (
-            patch.object(GdpPdfAgent, "_create_episode", side_effect=_error("out of memory")) as call,
-            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
-            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
-            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
-        ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
-        assert call.await_count == 1
-        assert result.reward == 0.0
-        assert result.response.output == []
-        assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_http_500"
+
+        async def episode(*args, **kwargs):
+            raise _error("maximum context length")
+
+        result = await _run_with_episodes(agent, manifest, episode)
+
+        assert (result.reward, result.mask_sample) == (0.0, False)
+        assert result.failure_reason == "GDP.pdf terminal input limit: context"
 
     async def test_auth_and_rate_limit_errors_still_raise(self) -> None:
         # These are systemic, not per-document -- every other row would fail identically, so
@@ -654,28 +842,6 @@ class TestRun:
         ):
             await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
-
-    @requires_example_manifest
-    async def test_non_client_response_exceptions_also_score_zero(self) -> None:
-        # Any other exception type (not just ClientResponseError) must be equally contained --
-        # e.g. a JSON decode error or an assertion deep inside an upstream library.
-        agent = _agent(strip_images_from_output=False)
-        agent.server_client.post = AsyncMock(
-            side_effect=lambda **kw: SimpleNamespace(
-                cookies={},
-                data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
-            )
-        )
-        with (
-            patch.object(GdpPdfAgent, "_create_episode", side_effect=AssertionError("Expected a cached item")) as call,
-            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
-            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
-            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
-        ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
-        assert call.await_count == 1
-        assert result.reward == 0.0
-        assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_AssertionError"
 
     @requires_example_manifest
     async def test_images_are_stripped_from_the_result_when_enabled(self) -> None:
@@ -697,15 +863,41 @@ class TestRun:
         # content blocks here beyond the call succeeding without image payloads surviving.
         assert result.reward == 1.0
 
-    @requires_example_manifest
-    async def test_verify_failure_scores_zero_instead_of_crashing(self) -> None:
-        # A /verify-side failure (judge outage, a resources-server bug on some row) must not
-        # take the whole evaluation run down either -- same containment as a model-call failure.
-        agent = _agent(strip_images_from_output=False)
+    async def test_terminal_input_limit_stays_a_scored_zero_with_a_text_only_manifest(self, tmp_path: Path) -> None:
+        # The genuine limit case, without the optional example manifests: the row is still verified
+        # and scored 0 with its input-limit failure_reason, as the benchmark's methodology prescribes.
+        agent, manifest_relpath = _text_only_agent(tmp_path, min_dpi=140)
+        agent.server_client.post = AsyncMock(
+            side_effect=lambda **kw: SimpleNamespace(
+                cookies={},
+                data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
+            )
+        )
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", side_effect=_error("maximum context length")),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+        ):
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(manifest_relpath))
+        assert result.reward == 0.0
+        assert result.response.output == []
+        assert result.failure_reason == "GDP.pdf terminal input limit: context"
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert agent.server_client.post.await_count == 2  # seed_session, verify
+
+    @pytest.mark.parametrize("status", [500, 502, 503])
+    async def test_verify_server_error_is_a_typed_failure_not_a_scored_zero(self, tmp_path: Path, status: int) -> None:
+        # A /verify 5xx is the verifier's failure, not the model's: there is no verdict to score. It is
+        # raised as the typed agent route failure the parent simple_agent raises, caused by the verifier's
+        # reply, instead of a reward 0 labeled as an input limit. (A judge outage never gets here:
+        # judge_failsafe answers it as a masked row.)
+        agent, manifest_relpath = _text_only_agent(tmp_path)
 
         async def post(**kw):
             if kw["url_path"] == "/verify":
-                raise ClientResponseError(None, (), status=500, message="judge unavailable")
+                raise ClientResponseError(None, (), status=status, message="verifier unavailable")
             return SimpleNamespace(cookies={})
 
         agent.server_client.post = AsyncMock(side_effect=post)
@@ -713,10 +905,130 @@ class TestRun:
             patch.object(GdpPdfAgent, "_create_episode", new=AsyncMock(return_value=(_response(), None, {}, {}))),
             patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            RequestFailureLog.capture() as failure_log,
         ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(manifest_relpath))
+        failure = next(
+            event for event in failure_log.report.events.values() if event.failure_kind == AGENT_ROUTE_FAILED
+        )
+        assert failure.boundary == FailureBoundary.AGENT
+        assert failure.failure_kind == AGENT_ROUTE_FAILED
+        assert failure.operation == "verify"
+        assert failure.stage == "verification"
+        assert failure.foreign_error.http_status == status
+        assert result.mask_sample is True
+        assert result.response == _response()
+        assert "terminal input limit" not in result.failure_reason
+
+    async def test_verify_transport_failure_is_a_typed_failure_not_a_scored_zero(self, tmp_path: Path) -> None:
+        # The verifier being unreachable is the same kind of failure as it answering 5xx.
+        agent, manifest_relpath = _text_only_agent(tmp_path)
+
+        async def post(**kw):
+            if kw["url_path"] == "/verify":
+                raise ConnectionError("resources server unreachable")
+            return SimpleNamespace(cookies={})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", new=AsyncMock(return_value=(_response(), None, {}, {}))),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            RequestFailureLog.capture() as failure_log,
+        ):
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(manifest_relpath))
+        failure = next(
+            event for event in failure_log.report.events.values() if event.failure_kind == AGENT_ROUTE_FAILED
+        )
+        assert failure.failure_kind == AGENT_ROUTE_FAILED
+        assert failure.operation == "verify"
+        assert failure.foreign_error.exception_type == "ConnectionError"
+        assert result.mask_sample is True
+        assert result.response == _response()
+
+    async def test_verify_failure_after_a_terminal_input_limit_is_still_a_typed_failure(self, tmp_path: Path) -> None:
+        # The terminal input limit would have scored 0, but without a /verify reply there is no verdict
+        # at all, so the row is a failure rather than a zero that happens to be right.
+        agent, manifest_relpath = _text_only_agent(tmp_path, min_dpi=140)
+
+        async def post(**kw):
+            if kw["url_path"] == "/verify":
+                raise ClientResponseError(None, (), status=500, message="verifier unavailable")
+            return SimpleNamespace(cookies={})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", side_effect=_error("maximum context length")),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            RequestFailureLog.capture() as failure_log,
+        ):
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(manifest_relpath))
+        failure = next(
+            event for event in failure_log.report.events.values() if event.failure_kind == AGENT_ROUTE_FAILED
+        )
+        assert result.mask_sample is True
+        assert failure.failure_kind == AGENT_ROUTE_FAILED
+        assert failure.operation == "verify"
+
+
+class TestMaskFailedAttempts:
+    """mask_failed_attempts keeps attempts without a gradable answer out of training, never out of evaluation."""
+
+    async def _run(
+        self, tmp_path: Path, episode: Any, *, verify_raises: bool = False, **config: Any
+    ) -> SimpleAgentVerifyResponse:
+        agent, manifest = _text_only_agent(tmp_path, **config)
+
+        async def post(**kw: Any) -> SimpleNamespace:
+            if kw["url_path"] == "/verify" and verify_raises:
+                raise RuntimeError("judge outage")
+            return SimpleNamespace(
+                cookies={}, data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {}
+            )
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        return await _run_with_episodes(agent, manifest, episode)
+
+    async def test_off_by_default_so_evaluation_counts_the_zero(self, tmp_path: Path) -> None:
+        result = await self._run(tmp_path, _error("maximum context length", status=400))
         assert result.reward == 0.0
-        assert "verify_failed" in result.failure_reason
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason == "GDP.pdf terminal input limit: context"
+        assert "mask_sample" not in (result.model_extra.get("instance_config") or {})
+
+    @pytest.mark.parametrize(
+        ("error", "kind"),
+        [
+            (_error("maximum context length", status=400), "model_context_limit"),
+            (_error("payload too large", status=413), "model_request_error"),
+        ],
+    )
+    async def test_masks_an_attempt_whose_input_never_fit(
+        self, tmp_path: Path, error: ClientResponseError, kind: str
+    ) -> None:
+        result = await self._run(tmp_path, error, mask_failed_attempts=True)
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == kind
+        assert result.model_extra["instance_config"]["mask_sample"] is True
+        assert result.failure_reason.startswith("GDP.pdf terminal input limit: ")
+
+    async def test_a_failed_verification_is_masked_either_way(self, tmp_path: Path) -> None:
+        for mask in (False, True):
+            result = await self._run(
+                tmp_path / str(mask), [(_response(), None, {}, {})], verify_raises=True, mask_failed_attempts=mask
+            )
+            assert result.reward == 0.0
+            assert result.mask_sample is True
+            assert result.failure_kind is not None
+
+    async def test_leaves_a_graded_answer_alone(self, tmp_path: Path) -> None:
+        result = await self._run(tmp_path, [(_response(), None, {}, {})], mask_failed_attempts=True)
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason is None
 
 
 class TestStripImageBlocks:
@@ -754,3 +1066,50 @@ class TestStripImageBlocks:
         assert [_block_type(block) for block in content] == ["input_text"]
         gaps = stripped.model_extra["ng_trajectory"]["gaps"]
         assert {"code": "multimodal_history_redacted"} in gaps
+
+
+class TestVerifyTransportRetry:
+    @staticmethod
+    def _agent(tmp_path: Path, failures: int):
+        agent, manifest_relpath = _text_only_agent(tmp_path)
+        verify_calls = []
+
+        async def post(**kw):
+            if kw["url_path"] == "/verify":
+                verify_calls.append(kw)
+                if len(verify_calls) <= failures:
+                    raise ClientPayloadError("Response payload is not completed")
+                return SimpleNamespace(cookies={}, data=kw["json"] | {"reward": 1.0})
+            return SimpleNamespace(cookies={})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        return agent, manifest_relpath, verify_calls
+
+    async def _run(self, agent, manifest_relpath):
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", new=AsyncMock(return_value=(_response(), None, {}, {}))),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+            patch.object(verify_call, "_stateless_verifier", new=AsyncMock(return_value=True)),
+            patch.object(verify_call, "_retry_wait_s", return_value=0),
+            RequestFailureLog.capture() as failure_log,
+        ):
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(manifest_relpath))
+        return result, failure_log
+
+    async def test_a_payload_error_on_verify_is_retried_and_the_row_is_not_masked(self, tmp_path: Path) -> None:
+        agent, manifest_relpath, verify_calls = self._agent(tmp_path, failures=2)
+        result, failure_log = await self._run(agent, manifest_relpath)
+        assert len(verify_calls) == 3
+        assert result.reward == 1.0 and not result.mask_sample and result.failure_kind is None
+        # Both lost replies stay observations of the scored row.
+        assert [e.operation for e in failure_log.report.events.values()].count("verify") == 2
+
+    async def test_a_persistent_payload_error_still_masks_after_the_bound(self, tmp_path: Path) -> None:
+        agent, manifest_relpath, verify_calls = self._agent(tmp_path, failures=5)
+        result, _ = await self._run(agent, manifest_relpath)
+        assert len(verify_calls) == 3
+        assert result.mask_sample is True and result.reward == 0.0 and result.response == _response()
+        assert result.failure_kind == AGENT_ROUTE_FAILED
+        assert result.failure_reason == "Agent operation verify failed: ClientPayloadError"

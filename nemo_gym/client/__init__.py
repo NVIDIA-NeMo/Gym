@@ -29,11 +29,13 @@ if TYPE_CHECKING:
         get_response_json,
         is_global_aiohttp_client_request_debug_enabled,
         is_global_aiohttp_client_setup,
+        raise_boundary_failure,
         raise_for_status,
         request,
         set_global_aiohttp_client,
     )
     from nemo_gym.client.openai_client import (
+        MODEL_RESPONSE_TIMEOUT_REASON,
         RATE_LIMIT_ERROR_CODES,
         RETRY_ERROR_CODES,
         NeMoGymAsyncOpenAI,
@@ -55,6 +57,7 @@ if TYPE_CHECKING:
 _PUBLIC_API = {
     "GlobalAIOHTTPAsyncClientConfig": "http_client",
     "MAX_NUM_TRIES": "http_client",
+    "MODEL_RESPONSE_TIMEOUT_REASON": "openai_client",
     "NeMoGymAsyncOpenAI": "openai_client",
     "PermanentEndpointError": "openai_client",
     "RATE_LIMIT_ERROR_CODES": "openai_client",
@@ -68,6 +71,7 @@ _PUBLIC_API = {
     "get_server_url": "server_client",
     "is_global_aiohttp_client_request_debug_enabled": "http_client",
     "is_global_aiohttp_client_setup": "http_client",
+    "raise_boundary_failure": "http_client",
     "raise_for_status": "http_client",
     "request": "http_client",
     "rollout_path_prefix": "server_client",

@@ -223,6 +223,15 @@ def test_stores_implement_capture_ledger(store):
     assert isinstance(store, CaptureLedger)
 
 
+async def test_ledger_methods_take_capture_keys_by_keyword(store):
+    await store.record_failure(capture_key="r1", model_call_id="c1", reason="worker_capture_failed")
+
+    manifest = RolloutManifest.model_validate(await store.manifest(capture_key="r1"))
+    assert [failure.model_call_id for failure in manifest.failures] == ["c1"]
+    assert await store.retire(capture_keys=["r1"]) == {"removed": ["r1"], "absent": []}
+    assert await store.delete(capture_keys=["r1"]) == {"removed": [], "absent": ["r1"]}
+
+
 @pytest.mark.asyncio
 async def test_ledger_row_round_trips_token_free_manifest(store):
     await _record_call_1(store)
@@ -330,7 +339,7 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
 
 async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
     context = CaptureContext(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
@@ -412,7 +421,7 @@ async def test_admission_seeded_history_on_empty_ledger_is_text_root(store):
 
 
 @pytest.mark.asyncio
-async def test_admission_unresolved_poisons_instead_of_new_root(store):
+async def test_admission_unresolved_poisons_instead_of_new_root(store, caplog):
     await _record_call_1(store)
     # Assistant history that matches no committed call on a non-empty ledger.
     context = await _admit(store, [USER_1, ASSISTANT_SEEDED, USER_2])
@@ -420,10 +429,33 @@ async def test_admission_unresolved_poisons_instead_of_new_root(store):
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
     assert manifest.failures[0].model_call_id == "c2"
+    # The warning says why the parent was not found, so a poisoned call can be diagnosed from the log.
+    assert "Unresolved parent for model call c2 of rollout r1 (reason=no_match, 3 request items)" in caplog.text
+
+
+class _UnsizedHistory:
+    """A request history that can be iterated more than once but has no len()."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+
+    def __iter__(self):
+        return iter(self._items)
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_siblings_are_unresolved(store):
+async def test_an_unsized_request_history_still_poisons_and_logs(store, caplog):
+    # The warning counts the history the call was resolved against, not the caller's object.
+    await _record_call_1(store)
+    context = await _admit(store, _UnsizedHistory([USER_1, ASSISTANT_SEEDED, USER_2]))
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
+    assert "(reason=no_match, 3 request items); poisoning the call" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_siblings_are_unresolved(store, caplog):
     """Two committed calls with identical text but different tokens must never resolve; the call poisons."""
     await _record_call_1(store)
     # Same request and response text as c1, but a different token sequence.
@@ -433,6 +465,7 @@ async def test_ambiguous_siblings_are_unresolved(store):
     assert context.capture_admission is None
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
+    assert "(reason=ambiguous, 3 request items); poisoning the call" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -728,7 +761,7 @@ async def test_file_store_delete_removes_every_ledger_and_fence_file(tmp_path):
 async def test_a_bare_rollout_id_string_is_rejected(store, method):
     """A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts."""
     await _record_call_1(store)
-    with pytest.raises(TypeError, match="sequence of rollout ids"):
+    with pytest.raises(TypeError, match="sequence of capture keys"):
         await getattr(store, method)("r1")
     assert await store.has_rows("r1")
 
@@ -913,7 +946,7 @@ async def test_retirement_fences_admission_and_closure_until_delete(store):
 
 @pytest.mark.asyncio
 async def test_checkpoint_restores_delivered_calls_without_dead_attempt_intents(tmp_path):
-    from nemo_gym.core.episode import EpisodeId
+    from nemo_gym.core.episode_types import EpisodeId
     from nemo_gym.models._checkpoint import export_model_records, import_model_records
 
     store = FileLineageStore(tmp_path / "source")

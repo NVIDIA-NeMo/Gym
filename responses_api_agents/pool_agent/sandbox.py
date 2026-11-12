@@ -11,12 +11,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from shlex import quote
 
-from nemo_gym.agents import RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession
+from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxSession
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
+# Keep the stdlib shim's filename out of task commands matching Python processes.
+RUNNER_FILE = "sandbox_runner"
 
 
 @dataclass(frozen=True)
@@ -120,10 +122,22 @@ class PoolSession(AgentSessionState):
         await upload_text(
             self.session.sandbox, path=f"{directory}/task_env.json", text=json.dumps(access.env if access else {})
         )
-        return SandboxCommand(
-            argv=["python3", "-I", f"{directory}/{RUNNER_FILE}", directory, self.session.workdir],
-            stdlib_runner=True,
+        # Pool owns its stdlib shim's neutral interpreter name; the shared launcher only accepts argv.
+        # As before, retain python3 when the Linux interpreter cannot be resolved or linked.
+        interpreter = f"{directory}/bin/pool-runner"
+        bin_dir = quote(f"{directory}/bin")
+        resolve_interpreter = 'import os; print(os.readlink("/proc/self/exe"))'
+        result = await self.session.sandbox.exec(
+            f"real=$(python3 -I -c {quote(resolve_interpreter)} 2>/dev/null) && "
+            f'{{ [ -d {bin_dir} ] || mkdir {bin_dir}; }} && ln -sfn "$real" {quote(interpreter)}',
+            cwd=self.session.workdir,
+            timeout_s=30,
         )
+        if result.error_type:
+            raise RuntimeError(f"Cannot prepare Pool runner interpreter: {result.error_type}")
+        if result.return_code != 0:
+            interpreter = "python3"
+        return SandboxCommand(argv=[interpreter, "-I", f"{directory}/{RUNNER_FILE}", directory, self.session.workdir])
 
     async def collect(self) -> PoolArtifacts:
         """Read partial output even when a terminated runner could not record its exit."""

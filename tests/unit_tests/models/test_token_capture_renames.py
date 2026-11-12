@@ -20,6 +20,7 @@ import warnings
 import pytest
 
 from nemo_gym._moved_paths import _RENAMED_TOKEN_CAPTURE_NAMES, moved_names_getattr
+from nemo_gym._public_api import lazy_exports
 from nemo_gym.config.global_config import TOKEN_CAPTURE_BLOCK
 from nemo_gym.models.token_capture.config import TokenCaptureConfig
 
@@ -48,7 +49,11 @@ def test_an_old_name_resolves_to_its_renamed_object_with_a_warning(
         assert moved_names_getattr(module.__name__)(old_name) is _new_object(target)
 
 
-def test_an_old_name_resolves_through_a_package_public_api() -> None:
+def test_an_old_name_resolves_through_a_package_public_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh public getter makes the warning assertion independent of earlier legacy-name reads."""
+    package = importlib.import_module("nemo_gym.config")
+    getter, _ = lazy_exports(package.__name__, package._PUBLIC_API)
+    monkeypatch.setattr(package, "__getattr__", getter)
     with pytest.warns(DeprecationWarning, match="TOKEN_ID_CAPTURE_BLOCK"):
         # Read through the package object: this test is about the package's public API itself.
         TOKEN_ID_CAPTURE_BLOCK = importlib.import_module("nemo_gym.config").TOKEN_ID_CAPTURE_BLOCK

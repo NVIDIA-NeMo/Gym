@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -345,3 +346,18 @@ def test_temporary_worker_environment_restores_process_state(monkeypatch) -> Non
 
     assert os.environ["EXISTING_WORKER_VALUE"] == "before"
     assert "NEW_WORKER_VALUE" not in os.environ
+
+
+def test_component_lock_retains_harbor_packager_dependency() -> None:
+    project = Path(__file__).resolve().parents[1]
+    with (project / "pyproject.toml").open("rb") as f:
+        component = tomllib.load(f)
+    assert "pathspec" in component["tool"]["uv"]["override-dependencies"]
+    with (GYM_ROOT / "pyproject.toml").open("rb") as f:
+        parent = tomllib.load(f)
+    assert "pathspec; sys_platform == 'never'" in parent["tool"]["uv"]["override-dependencies"]
+    with (project / "uv.lock").open("rb") as f:
+        packages = tomllib.load(f)["package"]
+    harbor = next(package for package in packages if package["name"] == "harbor")
+    assert {"name": "pathspec"} in harbor["dependencies"]
+    assert any(package["name"] == "pathspec" for package in packages)

@@ -27,5 +27,8 @@ graphwalks_benchmark_environment_server:
   _inherit_from: graphwalks_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: graphwalks_benchmark_resources_server
       agent_server:
         name: graphwalks_benchmark_simple_agent

@@ -6,6 +6,14 @@ Prepare [allenai/reward-bench-2](https://huggingface.co/datasets/allenai/reward-
 uv run python -m benchmarks.genrm_rewardbench2.prepare
 ```
 
+For an LLM as a judge, prepare and run with `llm_as_a_judge.yaml`, which embeds the
+[shared GenRM instructions](../../resources_servers/genrm_eval/configs/llm_as_a_judge_prompt.yaml).
+Candidate orders and scoring are unchanged; this is not the paper's generative judging prompt.
+
+```bash
+gym eval prepare --config benchmarks/genrm_rewardbench2/llm_as_a_judge.yaml
+```
+
 The `test` split has 1,865 records across six subsets: Factuality, Focus, Math, Precise IF,
 Safety, and Ties. A scalar reward model scores a record's four completions independently and is
 correct when the chosen one scores highest. A GenRM judge compares two responses at a time, so

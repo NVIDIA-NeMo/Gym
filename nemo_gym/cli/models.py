@@ -31,7 +31,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.model_registry import discover_models
+from nemo_gym.environment.model_registry import discover_models
 
 
 def _inspect_model(name: str, models: dict, global_config_dict) -> None:

@@ -17,5 +17,8 @@ imo_proofbench_imo_proofbench_judge_environment_server:
   _inherit_from: imo_proofbench_judge_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: imo_proofbench_judge
       agent_server:
         name: imo_proofbench_imo_proofbench_judge_simple_agent

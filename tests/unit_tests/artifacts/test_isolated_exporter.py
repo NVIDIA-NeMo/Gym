@@ -331,3 +331,47 @@ def test_from_global_config_validates_the_config_and_reads_the_venv_root(tmp_pat
     assert exporter.venv_root == tmp_path / "v"
     with pytest.raises(Exception, match="rollouts_jsonl_fpath"):
         FakeExporter.from_global_config(OmegaConf.create({"uv_venv_dir": str(tmp_path)}))
+
+
+@pytest.mark.parametrize("failure", [None, "import", "payload", "run"])
+def test_worker_result_protocol_replaces_stale_results_atomically(tmp_path, monkeypatch, capsys, failure):
+    import json
+    from io import StringIO
+    from types import ModuleType
+
+    from nemo_gym.artifacts.exporters import _isolated_worker as worker
+
+    source = tmp_path / "worker.py"
+    body = "def run(payload):\n    print('SDK output')\n    return {'detail': {'received': payload['value']}}\n"
+    if failure == "import":
+        body = "raise ImportError('SDK unavailable')\n"
+    elif failure == "run":
+        body = "def run(payload):\n    raise ValueError('upload rejected')\n"
+    source.write_text(body)
+    result_path = tmp_path / "result.json"
+    previous = '{"state":"stale"}'
+    result_path.write_text(previous)
+    monkeypatch.setitem(sys.modules, "gym_exporter_worker", ModuleType("previous_worker"))
+    monkeypatch.setattr(sys, "stdin", StringIO("{invalid" if failure == "payload" else '{"value":7}'))
+    replace = worker.os.replace
+    replacements = []
+
+    def checked_replace(source_path, target_path):
+        assert Path(target_path).read_text() == previous
+        replacements.append(json.loads(Path(source_path).read_text()))
+        replace(source_path, target_path)
+
+    monkeypatch.setattr(worker.os, "replace", checked_replace)
+    assert worker.main(["worker", str(result_path), str(source)]) == 0
+    result = json.loads(result_path.read_text())
+    assert replacements == [result]
+    assert not result_path.with_suffix(".json.tmp").exists()
+    if failure is None:
+        assert result == {"state": "succeeded", "error": None, "exit_code": 1, "detail": {"received": 7}}
+        assert "SDK output" in capsys.readouterr().out
+    else:
+        expected = {"import": "ImportError", "payload": "JSONDecodeError", "run": "ValueError"}[failure]
+        assert result["state"] == "failed" and result["exit_code"] == 1
+        assert result["error"].startswith(expected + ":")
+        assert result["detail"] == {}
+        assert expected in capsys.readouterr().err

@@ -63,6 +63,8 @@ Interpret attribution carefully:
 `failure_kind` is derived from `failure_class`. A class that is already a registered Gym failure kind or already
 contains a namespace is kept as is. Any other class is lowercased, characters other than letters, digits, and
 underscores become underscores, and `usersim:` is prepended, for example `usersim:assistant_activation_error`.
+For simulation failures attributed outside the Assistant, a missing `failure_class` falls back to
+`usersim:simulation_failed`. Grading failures use the kinds described below.
 
 Assistant-caused invalid responses and non-retryable Assistant 4xx responses follow the measured-failure path.
 Participant timeouts, provider/transport failures, retryable status codes, and session-plumbing failures remain failures
@@ -91,7 +93,7 @@ The main cases are:
 - A scorer or trajectory evaluator raises or returns an error: masked as `verifier_error`.
 - A completed scenario has no Assistant quality score: masked as `judge_failed`.
 - A verifier timeout: masked; `failure_reason` reports the configured evaluation timeout.
-- The Resources Server session is gone at verification: masked as `session_lost`, or `session_expired` when the seed
+- The resources session is gone at verification: masked as `session_lost`, or `session_expired` when the seed
   outlived `session_ttl_seconds`. See [Session cleanup failures](#session-cleanup-failures).
 
 NeMo User Sim scorer results classified as `not_applicable`, including its documented skipped sentinel, do not
@@ -123,7 +125,7 @@ Use these sources instead:
 ## Prepared-row mismatch
 
 At seed time, the Resources Server validates required fields, the pinned NeMo User Sim revision, and the
-Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded health
+Nemotron-Personas version pinned for the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded health
 rows. It stores a canonical digest of the resolved row (`resolved_row`). At verification, a changed resolved row or
 mismatched task, episode, or trajectory identity is rejected.
 
@@ -136,8 +138,8 @@ gym eval prepare --config environments/nemo_user_sim/config.yaml
 
 ## Session cleanup failures
 
-The Environment Server registers cleanup before seeding and closes participant and Resources Server sessions on every
-outcome. Cleanup is idempotent. Verifying an unknown or closed Resources Server session returns a masked zero reward with
+The Environment Server registers cleanup before seeding and closes participant and resources sessions on every
+outcome. Cleanup is idempotent. Verifying an unknown or closed resources session returns a masked zero reward with
 `failure_kind` `session_lost`; a session whose seed outlived `session_ttl_seconds` returns `session_expired`.
 
 When diagnosing session errors, preserve the failure stage and HTTP status. Session-related 404 and 409 responses

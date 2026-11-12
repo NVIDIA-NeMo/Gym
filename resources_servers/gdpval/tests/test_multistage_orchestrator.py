@@ -47,10 +47,12 @@ from nemo_gym.rollouts import (
     SharedRolloutCollectionConfig,
     is_terminal_failure,
 )
+from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline
 from nemo_gym.server_runtime import lost_session_verification
 from nemo_gym.utils import aggregation_sources_path_for, failures_path_for
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
+    ACCEPTED_STAGE_OMISSION_KEY,
     ACCEPTED_STAGE_ROW_COUNT_KEY,
     MultiStageRunConfig,
     StageResume,
@@ -75,6 +77,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     load_latest_attempt_dispositions,
     load_latest_failures,
     load_persisted_rows,
+    load_retryable_failure_stages,
     load_reuse_cached_keys,
     parse_multistage_config,
     read_journal,
@@ -837,7 +840,7 @@ class TestMaterializedInputs:
     """A multistage run's stage rows pair with its rollouts for ``gym eval reverify``."""
 
     def test_reverify_pairs_every_stage_and_forwards_its_identity(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_reverification import _build_verify_payload, _yield_inputs_and_rollouts_paired
+        from nemo_gym.eval.rollout_reverification import _build_verify_payload, _yield_inputs_and_rollouts_paired
         from resources_servers.gdpval.app import GDPValVerifyRequest
 
         rows = _materialized_rows(["t0", "t1"])
@@ -2990,7 +2993,7 @@ class TestFailureRouting:
         ]
         rows = [{**row, NG_ENVIRONMENT_SERVER_KEY: "gdpval_environment_server"} for row in rows]
         outcomes: List[Tuple[str, str]] = []
-        monkeypatch.setattr(rollout_collection_module, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(rollout_collection_module, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             rollout_collection_module,
             "record_rollout_completed",
@@ -3687,6 +3690,21 @@ class TestCompletionContract:
         assert [len(outcomes[index]["omitted_keys"]) for index in (0, 1)] == [1, 1]
         rows = self._rows(tmp_path / "rollouts.jsonl")
         assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [9, 19]
+        # The planned inputs mark exactly the rows each accepted stage omitted, so recovery never plans them again.
+        from nemo_gym.rollouts import materialized_path_for
+
+        inputs = self._rows(materialized_path_for(tmp_path / "rollouts.jsonl"))
+        marked = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[ACCEPTED_STAGE_OMISSION_KEY]
+            for row in inputs
+            if row.get(ACCEPTED_STAGE_OMISSION_KEY)
+        }
+        # Each mark names the stage that omitted the row and its policy's tolerate_unresolved, for the gate text.
+        assert marked == {
+            tuple(key): {"stage_index": index, "tolerate_unresolved": True}
+            for index in (0, 1)
+            for key in outcomes[index]["omitted_keys"]
+        }
 
     async def test_a_stage_left_open_with_retryable_rows_fails_the_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3952,6 +3970,208 @@ class TestIntegrationWiring:
         assert written[0]["aggregation_error"]["http_status"] == 500
 
 
+class _Walltime(BaseException):
+    """Stands in for the SIGTERM a batch job gets at its time limit."""
+
+
+class TestIncrementalStageRows:
+    """A job killed mid-batch keeps the rows that returned before the kill."""
+
+    TASK_IDS = [f"t{i}" for i in range(10)]
+
+    async def _run(
+        self,
+        out_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        outcome,
+        *,
+        retry_inprocess: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Run ``run_e2e_multistage`` on stages ``[3, 5:2]``; ``outcome(row, position)`` answers each row."""
+        dispatched: List[Dict[str, Any]] = []
+        task_ids = self.TASK_IDS
+
+        class FakeHelper:
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(task_ids)
+
+            def _run_examples_with_metadata(self, rows, **kwargs):
+                dispatched.extend(dict(row) for row in rows)
+                # The production completion-order iterator, so finished siblings queue behind a failure.
+                return rollout_collection_module._EagerCompletionIterator(
+                    iter([outcome(row, position) for position, row in enumerate(rows)]), total=len(rows)
+                )
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return out_dir / "aggregate.json"
+
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(task_ids), None),
+        )
+        config = SimpleNamespace(
+            input_jsonl_fpath=str(out_dir / "input.jsonl"),
+            output_jsonl_fpath=str(out_dir / "rollouts.jsonl"),
+            num_samples_in_parallel=None,
+            dispatch_budget_s=None,
+            drain_margin_s=None,
+            dispatch_longest_first=False,
+            resume_from_cache=True,
+            route_failures_to_sidecar=True,
+            check_completion=lambda **kwargs: None,
+        )
+        global_config = {
+            "multistage": {
+                "enabled": True,
+                "stages": ["3", "5:2"],
+                "seed": 0,
+                # Every stage-2 row goes through dispatch, none through /verify.
+                "reuse_cached_deliverables": False,
+                "retry_inprocess": retry_inprocess,
+            },
+            "gdpval": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+        await run_e2e_multistage(config, global_config)
+        return dispatched
+
+    @staticmethod
+    def _answer(result_for):
+        """Build an ``outcome`` callable from ``result_for(row, position) -> result``; ``None`` kills the job."""
+        scored = _fake_run_rollouts_factory()
+
+        def outcome(row: Dict[str, Any], position: int):
+            async def done():
+                result = result_for(row, position)
+                if result is None:
+                    raise _Walltime()
+                if result == "success":
+                    ((_, result),) = await scored([row])
+                return rollout_collection_module._CompletedRollout(row=row, result=result, rollout_latency_ms=None)
+
+            return done()
+
+        return outcome
+
+    @staticmethod
+    def _rows(path: Path) -> List[Dict[str, Any]]:
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    async def test_rows_returned_before_a_timeout_survive_the_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Uninterrupted reference run. Each row is saved once, not once per row and again per batch.
+        reference_dir = tmp_path / "reference"
+        reference_dir.mkdir()
+        routed: List[Tuple[Any, Any, Any]] = []
+        real_route = multistage_module.route_stage_rows
+
+        def counting_route(output_fpath, rows):
+            routed.extend((row["stage_index"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows)
+            real_route(output_fpath, rows)
+
+        monkeypatch.setattr(multistage_module, "route_stage_rows", counting_route)
+        await self._run(reference_dir, monkeypatch, self._answer(lambda row, position: "success"))
+        monkeypatch.setattr(multistage_module, "route_stage_rows", real_route)
+        assert len(routed) == 8 and len(set(routed)) == 8
+
+        # Every stage-2 row but the last returns, then the job reaches its time limit.
+        def kill_last_stage2_row(row: Dict[str, Any], position: int):
+            return None if row["stage_index"] == 1 and position == 4 else "success"
+
+        with pytest.raises(_Walltime):
+            await self._run(tmp_path, monkeypatch, self._answer(kill_last_stage2_row))
+
+        stage2 = [row for row in self._rows(tmp_path / "rollouts.jsonl") if row["stage_index"] == 1]
+        assert len(stage2) == 4
+        assert {(row["expected_final_stage_index"], row["expected_stage_row_count"]) for row in stage2} == {(1, 5)}
+
+        dispatched = await self._run(tmp_path, monkeypatch, self._answer(lambda row, position: "success"))
+
+        assert [row["stage_index"] for row in dispatched] == [1]
+
+        def identity(rows: List[Dict[str, Any]]):
+            return sorted((row["stage_index"], row[TASK_INDEX_KEY_NAME], tuple(row["per_reference"])) for row in rows)
+
+        assert identity(self._rows(tmp_path / "rollouts.jsonl")) == identity(
+            self._rows(reference_dir / "rollouts.jsonl")
+        )
+
+    async def test_a_line_cut_short_by_the_kill_does_not_block_the_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def kill_last_stage2_row(row: Dict[str, Any], position: int):
+            return None if row["stage_index"] == 1 and position == 4 else "success"
+
+        with pytest.raises(_Walltime):
+            await self._run(tmp_path, monkeypatch, self._answer(kill_last_stage2_row))
+        out = tmp_path / "rollouts.jsonl"
+        for path in (out, failures_path_for(out), journal_path_for(out)):
+            with path.open("ab") as handle:
+                handle.write(b'{"stage_index": 1, "task_ind')
+
+        dispatched = await self._run(tmp_path, monkeypatch, self._answer(lambda row, position: "success"))
+
+        assert [row["stage_index"] for row in dispatched] == [1]
+        assert sum(row["stage_index"] == 1 for row in self._rows(out)) == 5
+
+    async def test_finished_siblings_of_a_raising_rollout_are_saved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The first stage-2 rollout raises at once; its 4 siblings finish in the same loop step and queue behind it.
+        async def outcome_for(row: Dict[str, Any], position: int):
+            if row["stage_index"] == 1 and position == 0:
+                raise RuntimeError("/run crashed")
+            return await self._answer(lambda row, position: "success")(row, position)
+
+        with pytest.raises(RuntimeError, match="/run crashed"):
+            await self._run(tmp_path, monkeypatch, outcome_for)
+
+        stage2 = [row for row in self._rows(tmp_path / "rollouts.jsonl") if row["stage_index"] == 1]
+        assert len(stage2) == 4
+
+        dispatched = await self._run(tmp_path, monkeypatch, self._answer(lambda row, position: "success"))
+
+        assert [row["stage_index"] for row in dispatched] == [1]
+
+    async def test_an_in_process_retry_keeps_its_returned_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        retryable = {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}
+        drained = {**retryable, NG_NO_PERSIST_KEY: True, NG_DISPATCH_DRAINED_KEY: True}
+
+        # Stage 2: the last 3 rows fail retryably. In the retry, the first
+        # recovers, the second is drained, and the job is killed on the third.
+        def result_for(row: Dict[str, Any], position: int):
+            if row["stage_index"] == 0:
+                return "success"
+            if not row.get(ATTEMPT_INDEX_KEY_NAME):
+                return dict(retryable) if position >= 2 else "success"
+            return ["success", dict(drained), None][position]
+
+        with pytest.raises(_Walltime):
+            await self._run(tmp_path, monkeypatch, self._answer(result_for), retry_inprocess=True)
+
+        out = tmp_path / "rollouts.jsonl"
+        assert sum(row["stage_index"] == 1 for row in self._rows(out)) == 3
+        assert sum(row["stage_index"] == 1 for row in self._rows(failures_path_for(out))) == 3
+        # The drained retry row journals no no-persist tombstone.
+        dispositions = load_latest_attempt_dispositions(journal_path_for(out)).get(1, {})
+        assert not any(disposition[NG_NO_PERSIST_KEY] for disposition in dispositions.values())
+
+        dispatched = await self._run(
+            tmp_path, monkeypatch, self._answer(lambda row, position: "success"), retry_inprocess=True
+        )
+
+        assert [(row["stage_index"], row.get(ATTEMPT_INDEX_KEY_NAME)) for row in dispatched] == [(1, 1), (1, 1)]
+        assert sum(row["stage_index"] == 1 for row in self._rows(out)) == 5
+
+
 _ROUTING_CONFIG = {
     "gdpval_stirrup_agent": {"responses_api_agents": {"stirrup_agent": {}}},
     "gdpval_environment_server": {
@@ -4127,6 +4347,33 @@ class TestCachedDeliverableReuse:
         ]
         assert [(row["stage_index"], row[TASK_INDEX_KEY_NAME]) for row in inputs] == [(0, 0), (1, 1)]
 
+    @pytest.mark.parametrize("failed_cached_verifies", [0, 1])
+    async def test_each_judged_and_retried_row_is_saved_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_cached_verifies: int
+    ) -> None:
+        # The final write_rollouts dedupes, so count the incremental saves themselves.
+        routed: List[Tuple[Any, Any, Any, Any]] = []
+        real_route = multistage_module.route_stage_rows
+
+        def counting_route(output_fpath, rows):
+            routed.extend(
+                (
+                    row["stage_index"],
+                    row[TASK_INDEX_KEY_NAME],
+                    row.get(ATTEMPT_INDEX_KEY_NAME),
+                    row.get(NG_FAILURE_CLASS_KEY),
+                )
+                for row in rows
+            )
+            real_route(output_fpath, rows)
+
+        monkeypatch.setattr(multistage_module, "route_stage_rows", counting_route)
+        await self._run_two_stages(tmp_path, monkeypatch, cached=True, failed_cached_verifies=failed_cached_verifies)
+
+        assert len(routed) == len(set(routed))
+        assert [entry[:2] for entry in routed if entry[3] is None] == [(0, 0), (1, 1)]
+        assert sum(entry[0] == 1 and entry[3] is not None for entry in routed) == failed_cached_verifies
+
     @pytest.mark.parametrize(
         ("failure_stage", "dispatched_stages", "verified_stages"),
         [("verification", [0], [0, 1]), ("seed", [0, 0], [1]), ("agent", [0], [])],
@@ -4282,8 +4529,10 @@ class TestCachedDeliverableReuse:
         # Each stage's rows are in the materialized inputs before the stage is dispatched.
         assert self.inputs_at_dispatch == [[0], [0, 1]]
 
+    @pytest.mark.parametrize("producer_schema", ["1.0", "2.0"])
+    @pytest.mark.parametrize("requested_schema", [None, "1.0", "2.0"])
     async def test_agent_observations_are_joined_into_a_trajectory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, producer_schema: str, requested_schema: str | None
     ) -> None:
         test = self
 
@@ -4293,7 +4542,10 @@ class TestCachedDeliverableReuse:
 
             def _run_examples_with_metadata(self, rows, **kwargs):
                 async def done(row):
-                    result = {**test._per_reference(row), "ng_agent_observations": {"source": "stirrup"}}
+                    result = {
+                        **test._per_reference(row),
+                        "ng_agent_observations": {"source": "stirrup", "schema_version": producer_schema},
+                    }
                     CaptureStore(tmp_path / "capture").record(
                         maybe_rollout_id_from_run_body(row), _capture_exchange("dispatched")
                     )
@@ -4331,6 +4583,9 @@ class TestCachedDeliverableReuse:
             },
         }
 
+        if requested_schema is not None:
+            global_config["model_call_capture"] = {"trajectory_schema_version": requested_schema}
+
         # A capture left by an earlier run under the same rollout id must not be merged.
         stale_capture = CaptureStore(tmp_path / "capture")
         stale_capture.record(maybe_rollout_id_from_run_body(_materialized_rows(["t0"])[0]), {"stale": True})
@@ -4338,6 +4593,7 @@ class TestCachedDeliverableReuse:
         await run_e2e_multistage(config, global_config)
 
         (row,) = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+        assert row["ng_trajectory"]["schema_version"] == (requested_schema or "1.0")
         assert row["ng_trajectory"]["task_id"] == "t0"
         assert [call["model_call_id"] for call in row["ng_model_call_capture"]["calls"]] == ["dispatched"]
 
@@ -4509,6 +4765,9 @@ class TestRetryableFailure:
         assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout", NG_TERMINAL_KEY: True}) is False
         assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout", NG_NO_PERSIST_KEY: True}) is False
 
+    def test_an_agent_timeout_that_kept_the_answer_is_the_models_result(self) -> None:
+        assert _is_retryable_failure(_answered_agent_timeout()) is False
+
     @pytest.mark.parametrize(
         ("stage", "retryable"),
         [("agent", False), ("seed", True), ("verification", True), ("admission", True), (None, True)],
@@ -4521,6 +4780,134 @@ class TestRetryableFailure:
             row["_ng_failure_stage"] = stage
 
         assert _is_retryable_failure(row) is retryable
+
+
+def _answered_agent_timeout(**identity: Any) -> Dict[str, Any]:
+    """The failure verify returns for an agent wall-time stop: the agent's response is kept."""
+    return {
+        **identity,
+        NG_FAILURE_CLASS_KEY: "agent_timeout",
+        "failure_kind": "agent_timeout",
+        "mask_sample": True,
+        "reward": 0.0,
+        "response": {
+            "id": "agent-0",
+            "object": "response",
+            "error": None,
+            "metadata": {"stop_reason": "wall_time"},
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "x"}]}],
+        },
+    }
+
+
+def test_a_resume_does_not_dispatch_an_agent_timeout_that_kept_the_answer(tmp_path: Path) -> None:
+    out = tmp_path / "rollouts.jsonl"
+    out.write_bytes(b"")
+    answered = _answered_agent_timeout(stage_index=0, **{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+    unanswered = {
+        "stage_index": 0,
+        TASK_INDEX_KEY_NAME: 1,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+        NG_FAILURE_CLASS_KEY: "agent_timeout",
+    }
+    failures_path_for(out).write_text(json.dumps(answered) + "\n" + json.dumps(unanswered) + "\n")
+
+    gated = load_gated_keys(out, {})
+    assert gated[0] == {(0, 0)}
+    # Only the timeout that kept no answer reopens its stage.
+    assert load_retryable_failure_stages(out, gated, {}) == {0}
+    failures_path_for(out).write_text(json.dumps(answered) + "\n")
+    assert load_retryable_failure_stages(out, load_gated_keys(out, {}), {}) == set()
+
+
+async def _stirrup_wall_time_verify_result(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """What GDPVal's /verify returns for a Stirrup run stopped by its wall time, serialised as the server sends it.
+
+    The response is the one Stirrup builds from the runner's partial report: ``incomplete``, the tool turns completed
+    so far, and ``stop_reason: wall_time``. The verify result comes from the server's own wall-time branch.
+    """
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from resources_servers.gdpval.app import GDPValResourcesServer, GDPValVerifyRequest
+
+    response = NeMoGymResponse(
+        id=f"stirrup-{row[TASK_INDEX_KEY_NAME]}",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[
+            {"type": "function_call", "call_id": "c1", "name": "code_exec", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        metadata={"elapsed_seconds": "3600.0", "stop_reason": "wall_time"},
+        status="incomplete",
+        error=None,
+    )
+    body = GDPValVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=response,
+        task_id=row["task_id"],
+        reference_ids=row["reference_ids"],
+        stage_index=row["stage_index"],
+    )
+    server = SimpleNamespace(config=SimpleNamespace(reward_mode="comparison"))
+    verified = await GDPValResourcesServer.verify(server, SimpleNamespace(session={}), body)
+    return verified.model_dump(mode="json", by_alias=True)
+
+
+async def test_a_strict_stage_with_an_answered_agent_timeout_stops_with_nothing_to_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The answered deadline is the model's result, so it is never run again, and it holds no battle. A strict
+    # non-final stage (no partial_completion) needs a battle for every planned row, so the stage is coverage-blocked
+    # with nothing a resume could retry: the next stage is never planned and the run fails rather than resumes.
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+    task_ids = [f"t{i}" for i in range(4)]
+    config = parse_multistage_config(
+        {
+            "enabled": True,
+            "stages": [{"num_tasks": 4}, {"num_tasks": 4, "num_models": 1}],
+            "seed": 0,
+            "retry_inprocess": True,
+        }
+    )
+    resume = TestPartialStageCompletion._balanced_resume(task_ids)
+    successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+    dispatched: List[Dict[str, Any]] = []
+
+    async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        dispatched.extend(dict(row) for row in rows_in)
+        pairs = await successful_run(rows_in)
+        return [
+            (row, await _stirrup_wall_time_verify_result(row) if row[TASK_INDEX_KEY_NAME] == 0 else result)
+            for row, result in pairs
+        ]
+
+    all_results, summaries = await run_multistage_stages(
+        config, {"a": 1000.0, "b": 1200.0}, _distribution(task_ids), _materialized_rows(task_ids), run, resume=resume
+    )
+
+    # Dispatched once, never retried in process, and the second stage is never planned.
+    assert [row[TASK_INDEX_KEY_NAME] for row in dispatched if row.get(ATTEMPT_INDEX_KEY_NAME)] == []
+    assert {row["stage_index"] for row in dispatched} == {0}
+    assert len(dispatched) == 4
+    [summary] = summaries
+    assert summary["incomplete"] is True and summary["coverage_blocked"] is True
+    assert resume.completed == []
+    # Persisted, the row is gated and leaves no retryable stage, so a resume has nothing to run.
+    [timeout_row] = [row for row in resume.appended[0] if row[TASK_INDEX_KEY_NAME] == 0]
+    assert timeout_row[NG_FAILURE_CLASS_KEY] == "agent_timeout" and is_answered_agent_deadline(timeout_row)
+    out = tmp_path / "rollouts.jsonl"
+    out.write_bytes(b"")
+    failures_path_for(out).write_text(json.dumps(timeout_row) + "\n")
+    gated = load_gated_keys(out, {})
+    assert gated[0] == {(0, 0)}
+    assert load_retryable_failure_stages(out, gated, {}) == set()
+    # The declared final stage has no rows, so the run fails instead of reporting a finished calibration.
+    with pytest.raises(RuntimeError, match="produced no rows for it"):
+        _require_final_stage_rows(all_results, 2, summaries)
 
 
 class TestTolerateUnresolved:
@@ -4811,6 +5198,7 @@ class TestRetryInProcess:
         [
             ({NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}, 3),
             ({NG_FAILURE_CLASS_KEY: "agent_timeout"}, 3),
+            (_answered_agent_timeout(), 1),
             ({NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, "_ng_failure_stage": "agent"}, 1),
             ({NG_FAILURE_CLASS_KEY: "agent_run_error"}, 1),
         ],

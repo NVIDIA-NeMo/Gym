@@ -14,11 +14,7 @@ bixbench_hypothesis:
           type: benchmark
           jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
           prepare_script: benchmarks/bixbench_hypothesis/harbor/adapter.py
-          prepare_dependencies:
-            - datasets
-            - huggingface_hub
-            - tqdm
-            - tyro
+          prepare_project: benchmarks/bixbench_hypothesis
           num_repeats: 4
 
       harbor_max_retries: 3

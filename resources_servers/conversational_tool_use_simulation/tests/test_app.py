@@ -618,6 +618,8 @@ async def test_first_user_fallback_row_is_scored_and_not_masked(monkeypatch) -> 
     assert verified.reward == 1.0
     assert verified.mask_sample is False
     assert verified.trajectory_invalid_reasons == []
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.failure_labels == []
     assert [message.text for message in verified.result.trajectory.messages] == [
         "I need help.",
@@ -683,6 +685,32 @@ async def test_first_user_stop_is_invalid_when_fallback_disabled(monkeypatch) ->
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["invalid_user_message"]
     assert verified.failure_labels == [VerificationFailureLabel.USER_FAILURE]
+    # The local check rejected the message, so no judge ran and none is blamed.
+    assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:user_message_failed_check"
+    assert "failed the local check" in verified.failure_reason
+    assert "invalid_user_message" in verified.failure_reason
+
+
+async def test_trajectory_that_never_completes_is_masked_as_incomplete() -> None:
+    server = make_server()
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    verified = await server.verify(request, make_verify_request())
+    assert verified.reward == 0.0
+    assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:trajectory_incomplete"
+    assert "without a complete terminal state" in verified.failure_reason
+    assert "simulator" not in verified.failure_reason
 
 
 async def test_tool_schema_failure_is_recorded() -> None:
@@ -720,6 +748,9 @@ async def test_tool_schema_failure_is_recorded() -> None:
     assert verified.num_tool_schema_failures == 1
     assert verified.trajectory_invalid_reasons
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
+    assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:tool_result_failed_check"
+    assert "failed the local check" in verified.failure_reason
     assert verified.result.trajectory.messages[-1].source == "environment"
     assert verified.result.trajectory.messages[-1].schema_valid is False
 
@@ -789,6 +820,8 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
     assert state.terminal_error == "The maximum number of agent steps of 50 has been reached"
     verified = await server.verify(request, make_verify_request())
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
 
 
 async def test_agent_step_limit_after_text_and_user_reply_preserves_messages() -> None:
@@ -859,6 +892,8 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
     assert verified.trajectory_invalid_reasons == ["invalid_agent_tool_call"]
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.result.trajectory.messages[-1].tool_name == "update_subscription"
 
 
@@ -982,6 +1017,8 @@ async def test_user_generation_error_records_invalid_reason_when_fallback_disabl
     assert verified.trajectory_invalid_reasons == ["message_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.USER_FAILURE]
     assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:simulator_call_failed"
+    assert "user simulator call failed: model server returned no text" in verified.failure_reason
 
 
 async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None:
@@ -1031,6 +1068,8 @@ async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None
     assert verified.trajectory_invalid_reasons == ["message_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
     assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:simulator_call_failed"
+    assert "tool simulator call failed: tool simulator returned no text" in verified.failure_reason
 
 
 async def test_none_tool_schemas_skip_validation(monkeypatch) -> None:
@@ -1227,6 +1266,8 @@ async def test_transfer_ground_truth_mismatch_zeroes_reward_and_skips_judge(
     assert verified.reward == 0.0
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.transfer_ground_truth_enforced is True
     assert verified.transfer_ground_truth_mismatch is True
     assert verified.judge_skipped_for_transfer_mismatch is True
@@ -1331,6 +1372,8 @@ async def test_llm_judge_labels_tool_response_failure_and_short_circuits(monkeyp
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
     assert verified.num_tool_failures == 1
     assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:tool_result_failed_verification"
+    assert "no_reward_environment_message" in verified.failure_reason
     agent_verification = verified.result.trajectory.agent_verification_result
     assert agent_verification is not None
     assert agent_verification.trajectory_invalid_reasons == ["no_reward_environment_message"]
@@ -1377,6 +1420,8 @@ async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -
     assert verified.trajectory_invalid_reasons == []
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.judge_diagnostics["verification_type"] == "complete_trajectory_combined_evaluation"
     assert verified.judge_diagnostics["conversation_verification_result"]["reward"] == 0
     trajectory_result = verified.result.trajectory
@@ -1669,6 +1714,8 @@ async def test_judge_exception_is_synchronized_into_internal_sidecar(monkeypatch
     assert verified.trajectory_invalid_reasons == ["verification_generation_error"]
     assert verified.failure_labels == [VerificationFailureLabel.VERIFICATION_GENERATION_ERROR]
     assert verified.mask_sample is True
+    assert verified.failure_kind == "judge_failed"
+    assert "judge provider unavailable" in verified.failure_reason
     assert "instance_config" not in verified.model_dump()
     assert verified.judge_generation_error == "RuntimeError: judge provider unavailable"
     agent_verification = verified.result.trajectory.agent_verification_result

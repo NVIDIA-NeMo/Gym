@@ -442,6 +442,23 @@ def test_a_scoring_call_that_times_out_is_masked_not_a_server_error(
         verified = _verify(client)
     assert verified["reward"] == 0.0 and verified["mask_sample"] is True
     assert "scoring failed" in verified["failure_reason"] and worker.proc.returncode is not None
+    assert verified["failure_kind"] == "verifier_error"
+
+
+def test_a_verify_with_no_campaign_is_masked_as_a_lost_session(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    with _client(tmp_path, server) as client:
+        _seed(client)
+        worker = server.workers.pop(next(iter(server.workers)))
+        try:
+            verified = _verify(client)
+        finally:
+            # Shutdown only closes the workers still registered, and this one is not. Close it on the client's own
+            # event loop, as the server does, so its process and pipes are reaped before the client exits.
+            client.portal.call(worker.close)
+    assert verified["reward"] == 0.0 and verified["mask_sample"] is True
+    assert verified["failure_kind"] == "session_lost"
+    assert verified["failure_reason"] == "no campaign for this session"
 
 
 def test_a_tool_that_prints_to_stdout_does_not_break_the_replies(tmp_path: Path) -> None:
