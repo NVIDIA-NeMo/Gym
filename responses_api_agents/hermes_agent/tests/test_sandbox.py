@@ -1850,6 +1850,7 @@ async def test_images_reach_host_and_sandbox_without_dropping_history(agent, sta
     [
         ("user", {"image_url": "https://example.com/image.png"}, "base64 data URI"),
         ("user", {"image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,é"}, "invalid base64"),
         ("user", {"image_url": "data:image/png;base64,aGVsbG8="}, "no data of a supported media type"),
         ("user", {"image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
         ("user", {"file_id": "file-image"}, "base64 data URI"),
@@ -1871,3 +1872,13 @@ async def test_invalid_images_fail_before_execution(agent, state, role, image, m
     assert state.task is None
     agent._run_sandbox_episode.assert_not_awaited()
     agent._create_response.assert_not_awaited()
+
+    result = episode(agent)
+    agent._run_sandbox_episode = AsyncMock(return_value=result)
+    agent._create_response = AsyncMock(return_value=result.response)
+    recovered = await agent.responses(
+        request(state) if sandbox else SimpleNamespace(session={}),
+        NeMoGymResponseCreateParamsNonStreaming(input="text recovery"),
+    )
+    assert recovered.status == "completed"
+    (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()

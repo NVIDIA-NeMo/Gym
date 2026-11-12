@@ -11,7 +11,13 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.core import MediaFile, split_text_and_media
 from responses_api_agents.openclaw_agent.app import parse_openclaw_session_items
-from responses_api_agents.openclaw_agent.tests.test_sandbox import close_body, seed, setup, staged  # noqa: F401
+from responses_api_agents.openclaw_agent.tests.test_sandbox import (  # noqa: F401
+    close_body,
+    events,
+    seed,
+    setup,
+    staged,
+)
 
 
 IMAGE_URI = (
@@ -127,6 +133,7 @@ def test_image_capability_is_opt_in_for_text_prompts(setup, image_input):
     [
         ("user", {"image_url": "https://example.com/a.png"}),
         ("user", {"image_url": "data:image/png;base64,%%%"}),
+        ("user", {"image_url": "data:image/png;base64,é"}),
         ("user", {"image_url": "data:image/png;base64,aGVsbG8="}),
         ("user", {"image_url": "data:image/svg+xml;base64,PHN2Zy8+"}),
         ("user", {"file_id": "file-image"}),
@@ -142,14 +149,22 @@ def test_rejects_unsupported_images_before_activation_and_allows_recovery(setup,
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": items}).status_code == 422
+        rejected = client.post(path, json={"input": items})
+        assert rejected.status_code == 422
+        if image.get("image_url") in {"data:image/png;base64,%%%", "data:image/png;base64,é"}:
+            assert "invalid base64" in rejected.text
         sandbox.launch.assert_not_awaited()
         assert client.post(path, json={"input": "task"}).status_code == 200
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
-def test_native_image_omission_cannot_be_reported_as_success(setup, monkeypatch):
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+@pytest.mark.parametrize("retained", [False, True])
+def test_gradable_responses_require_native_prompt_images(setup, monkeypatch, stop_reason, retained):
     agent, sandbox = setup
+    sandbox.events = events(stop_reason=stop_reason)
+    if retained:
+        sandbox.events = json.dumps(native_image_event()) + "\n" + sandbox.events
     original_upload = sandbox.upload
 
     async def upload(source, destination):
@@ -160,10 +175,38 @@ def test_native_image_omission_cannot_be_reported_as_success(setup, monkeypatch)
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json=image_body())
-        assert result.status_code >= 500
+        if retained:
+            assert result.status_code == 200, result.text
+            assert result.json()["status"] == ("completed" if stop_reason == "stop" else "incomplete")
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        else:
+            assert result.status_code >= 500
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
-        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+        if not retained:
+            assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("before_model_call", [False, True])
+def test_wall_timeout_does_not_require_native_prompt_images(setup, monkeypatch, before_model_call):
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=-15)
+    sandbox.events = "" if before_model_call else events(stop_reason="aborted")
+    original_upload = sandbox.upload
+
+    async def upload(source, destination):
+        if "/media/" not in destination:
+            await original_upload(source, destination)
+
+    monkeypatch.setattr(sandbox, "upload", upload)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json=image_body())
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "incomplete"
+        if not before_model_call:
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
 @pytest.mark.parametrize("ending", ["close", "deadline", "failure"])

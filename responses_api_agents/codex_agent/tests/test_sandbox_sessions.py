@@ -4017,6 +4017,7 @@ def test_session_stages_images_once_and_attaches_in_order(setup, image_only):
         ("user", {"type": "input_image", "image_url": "https://example.com/a.png"}, "base64 data URI"),
         ("user", {"type": "input_image", "file_id": "file-id"}, "base64 data URI"),
         ("user", {"type": "input_image", "image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"type": "input_image", "image_url": "data:image/png;base64,é"}, "invalid base64"),
         ("user", {"type": "input_image", "image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
         (
             "user",

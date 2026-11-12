@@ -978,7 +978,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         response = await self._collect_sandbox_response(
             state, body, prompt=prompt, system=system, capture_correlated=True
         )
-        if media and response.status == "completed":
+        if media and (
+            response.status == "completed"
+            or (response.status == "incomplete" and not (state.session.cleanup or {}).get("timed_out"))
+        ):
             transcript = (state.session.artifacts or {}).get(
                 f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", ""
             )
