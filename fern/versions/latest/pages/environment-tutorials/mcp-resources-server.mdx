@@ -370,7 +370,7 @@ my_environment:
 
 With one transport, the grant is required, so an agent that cannot use it rejects the seed. Use `[mcp]` for MCP-only agents.
 
-Leave `num_workers` unset or set it to `1`. The server refuses more workers, because a tool call cannot yet reach the worker that runs its episode.
+With several workers (`num_workers`), each tool call reaches the worker that runs its episode, over either transport.
 
 In `run`, `serve_tools` returns the grants. Pass them unchanged to the agent:
 
