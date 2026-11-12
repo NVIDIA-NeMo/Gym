@@ -873,6 +873,7 @@ def _settled_count(coverage: dict) -> int:
         coverage["successful"]
         - coverage.get("masked_retryable", 0)
         - coverage.get("masked_exhausted", 0)
+        - coverage.get("masked_failed", 0)
         + coverage["final_zeros"]
     )
 

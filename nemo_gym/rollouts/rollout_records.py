@@ -220,6 +220,8 @@ class _Outcome:
     masked_infrastructure: bool = False
     # The masked result an operator approved to run again (``masked_kept_answer_kind``): counted as the line above.
     rerun_approved: bool = False
+    # A masked result whose producer chose ``fail`` (a defect in the task data, for example): the failure kind.
+    masked_failed_kind: str | None = None
 
 
 # A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
@@ -718,6 +720,11 @@ class RolloutRecords:
             and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
             masked_infrastructure=masked_infrastructure,
             rerun_approved=rerun_approved,
+            masked_failed_kind=(
+                str(row.get("failure_kind") or "unknown")
+                if failure_class is None and row.get("mask_sample") and row.get("failure_outcome_action") == "fail"
+                else None
+            ),
         )
         outcome = self.payloads[key]
         if (
@@ -1031,7 +1038,15 @@ class RolloutRecords:
             for identity in self.expected
             if self.disposition(identity) == "success"
         )
-        settled = counts["success"] - masked_retryable - masked_exhausted + final_zeros
+        # Masked with ``fail`` by its producer: final (recovery stops on it), never measured, so the run is not complete
+        # until the row's data is fixed or dropped. The kinds tell the benchmark owner what to fix.
+        masked_failed = Counter(
+            self.payloads[(identity, self.latest[identity])].masked_failed_kind
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+            and self.payloads[(identity, self.latest[identity])].masked_failed_kind
+        )
+        settled = counts["success"] - masked_retryable - masked_exhausted - masked_failed.total() + final_zeros
         # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
         # (terminal, at their attempt cap, or ``stopped_not_retried``, which resume does not run again) are not open,
         # even when they are not settled.
@@ -1046,6 +1061,8 @@ class RolloutRecords:
             "masked": masked,
             "masked_retryable": masked_retryable,
             "masked_exhausted": masked_exhausted,
+            "masked_failed": masked_failed.total(),
+            "masked_failed_kinds": dict(sorted(masked_failed.items())),
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,

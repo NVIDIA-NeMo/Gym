@@ -241,7 +241,7 @@ def test_a_masked_infrastructure_result_that_kept_a_saved_answer_is_not_retried(
     assert decision.counts == {"scored": 1, "masked": 1}
 
 
-@pytest.mark.parametrize("kind", ["agentic_turn_simulation:time_cap", "agentic_turn_simulation:simulator_failed"])
+@pytest.mark.parametrize("kind", ["demo_env:time_cap", "demo_env:simulator_failed"])
 @pytest.mark.parametrize("attribution", ["evaluation", "model", "unknown"])
 def test_a_masked_namespaced_kind_with_a_recorded_retry_is_retried(tmp_path, kind, attribution):
     row = _masked(kind) | {"failure_outcome_action": "retry", "failure_outcome_attribution": attribution}
@@ -267,7 +267,7 @@ def test_a_masked_namespaced_kind_with_a_recorded_retry_is_retried(tmp_path, kin
     ],
 )
 def test_a_masked_namespaced_kind_without_a_retry_it_may_take_is_kept(tmp_path, fields):
-    output, _ = _run(tmp_path, [[_masked("agentic_turn_simulation:time_cap") | fields]])
+    output, _ = _run(tmp_path, [[_masked("demo_env:time_cap") | fields]])
     store = RolloutStore.read(output, import_legacy=False)
     assert store.pending() == [] and store.coverage()["complete"] is True
     _, decision = _decide(tmp_path, allocation_cut=False)
@@ -277,7 +277,7 @@ def test_a_masked_namespaced_kind_without_a_retry_it_may_take_is_kept(tmp_path, 
 def _retry_at(stage):
     """A masked model timeout whose owner recorded ``retry``, at ``stage``, with the attempt's partial transcript.
 
-    The shape of the AutomationBench rows: the stage sits only on the selected failure event, and the response has
+    The shape of a model-call timeout row: the stage sits only on the selected failure event, and the response has
     output items but no status.
     """
     tool_turn = {"type": "function_call", "call_id": "c1", "name": "search", "arguments": "{}"}
@@ -522,3 +522,22 @@ def test_store_refuses_malformed_saved_policy_sections(tmp_path, section):
     (tmp_path / "resolved-config.yaml").write_text(json.dumps({"driver": {"benchmarks": {"benchmark": section}}}))
     with pytest.raises(ConfigError, match="must be a mapping"):
         RolloutStore.read(output)
+
+
+def test_a_masked_result_its_producer_failed_is_final_and_leaves_the_run_incomplete(tmp_path):
+    # A task-data defect the Environment Server reports with action fail: never measured and never run again.
+    output, _ = _run(tmp_path, [[_masked("demo_env:invalid_reference") | {"failure_outcome_action": "fail"}]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == []
+    coverage = store.coverage()
+    assert (coverage["complete"], coverage["masked"], coverage["masked_failed"], coverage["open"]) == (False, 1, 1, 0)
+    assert coverage["masked_failed_kinds"] == {"demo_env:invalid_reference": 1}
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert (decision.action.value, decision.counts) == ("stop", {"scored": 1, "terminal": 1})
+
+
+def test_a_masked_result_without_an_action_keeps_its_coverage(tmp_path):
+    output, _ = _run(tmp_path, [[_masked("demo_env:invalid_reference")]])
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert (coverage["complete"], coverage["masked"], coverage["masked_failed"]) == (True, 1, 0)
+    assert coverage["masked_failed_kinds"] == {}
