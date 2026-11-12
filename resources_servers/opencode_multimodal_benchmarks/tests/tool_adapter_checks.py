@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.data import TrainDataProcessor, materialize_task
 from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
 from resources_servers.opencode_multimodal_benchmarks.tests.test_rewards import tool_response, trajectory
@@ -27,7 +28,23 @@ class AdapterChecks:
         return Path(__file__).resolve().parents[2] / self.component
 
     def row(self):
-        return json.loads((self.component_dir() / "data/example.jsonl").read_text())
+        return json.loads((self.component_dir() / "data/example.jsonl").read_text().splitlines()[0])
+
+    def test_committed_examples_pass_ci_data_validation(self):
+        from nemo_gym.cli.env import TestConfig, _validate_data_single
+
+        _validate_data_single(TestConfig(entrypoint=f"resources_servers/{self.component}", should_validate_data=True))
+        directory = self.component_dir() / "data"
+        rows = [json.loads(line) for line in (directory / "example.jsonl").read_text().splitlines()]
+        results = [json.loads(line) for line in (directory / "example_rollouts.jsonl").read_text().splitlines()]
+        schema = importlib.import_module(f"resources_servers.{self.parent}.task_data").TaskData
+        for row, result in zip(rows, results, strict=True):
+            schema.model_validate(row)
+            assert NeMoGymResponseCreateParamsNonStreaming.model_validate(
+                result["responses_create_params"]
+            ) == NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+            assert result["expected_answer"] == row["expected_answer"]
+            assert result["response"]["output"]
 
     def collate(self, tmp_path, monkeypatch, row):
         config = OmegaConf.load(self.component_dir() / "configs" / f"{self.component}.yaml")
