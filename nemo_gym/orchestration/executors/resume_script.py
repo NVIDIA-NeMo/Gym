@@ -94,11 +94,17 @@ REQUEUE_SETTLE_BOUND_S = 300
 # The sacct fields of every incarnation of every allocation of a chain (see recovery.chain_accounting).
 CHAIN_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,Restarts"
 # Appended in the job dir: one JSON row per allocation incarnation of the run's jobs (chain segments, follow-ups and
-# sentinels), from sacct, for GPU-hour accounting. Each prologue records every incarnation that has ended, and the job
-# that ends the chain also records its own as of its epilogue (``"ended": false``); see render_resume_prologue.
+# sentinels), from sacct, for GPU-hour accounting. Each job records every incarnation that has ended, and a job that
+# ends without a successor to record it (a stop, a complete run, an idle sentinel) also records its own as of its exit
+# (``"ended": false``).
 JOB_ALLOCATIONS_NAME = "job-allocations.jsonl"
 # Read with SLURM_TIME_FORMAT=%s, so Start and End are Unix seconds.
 JOB_ALLOCATIONS_FORMAT = "JobIDRaw,State,Start,End,ElapsedRaw,NNodes,NodeList,AllocTRES,Restarts"
+# Recording is best-effort: its sacct queries and the waits between them end within this many seconds.
+JOB_ALLOCATIONS_BUDGET_S = 30
+JOB_ALLOCATIONS_RETRY_S = 5
+# Held only while a job reads, deduplicates and appends rows (never during sacct); older than a minute it is stale.
+JOB_ALLOCATIONS_LOCK_NAME = ".gym_job_allocations.lock"
 # The previous state a sentinel gives the installed continuation reader to reconcile a requeued chain, with the
 # chain's records in CHAIN_ACCOUNTING_ENV; the reader prints the reconciled walltime after ACCOUNTED_WALLTIME_PREFIX.
 REQUEUE_RECONCILE_STATE = "REQUEUED"
@@ -216,6 +222,7 @@ _gym_stop_incomplete() {{
     else
         echo "Run incomplete: the open rollout count is unknown (no readable coverage report at $_report)."
     fi
+    _gym_record_own_allocation
     exit 1
 }}
 
@@ -289,6 +296,7 @@ _gym_end_if_complete() {{
     fi
     rm -f "$_incomplete_file"
     echo "Run complete: the Store covers all $_gym_complete_rollouts expected rollouts and $_gym_export_note; job ${{SLURM_JOB_ID:-}} ends the chain with nothing to recover."
+    _gym_record_own_allocation
     exit 0
 }}
 
@@ -320,6 +328,7 @@ _gym_chain_settled() {{
 }}
 _gym_requeue_stop() {{
     echo "Requeued chain: $1; sentinel ${{SLURM_JOB_ID:-}} leaves the chain stopped. Continue with gym eval resubmit --recover."
+    _gym_record_own_allocation
     exit 0
 }}
 _gym_requeue_unlock() {{
@@ -388,29 +397,50 @@ _gym_reconcile_requeue() {{
         echo "WARNING: the recovery submission may have succeeded without an observed reply: $_out"
     fi
     rm -f "$OUTPUT_DIR/{resubmit_lock_name}"
+    _gym_record_own_allocation
     exit 0
 }}
 
-# Every job of the run the job dir names: the chain, each claimed follow-up and each queued sentinel.
+# Every job of the run the job dir names (the chain, each claimed follow-up and each queued sentinel), and $1.
 _gym_run_job_ids() {{
-    cat "$OUTPUT_DIR/{job_chain_name}" "$OUTPUT_DIR"/.gym_followup_queued.* "$OUTPUT_DIR"/.gym_followup_sentinel.* 2>/dev/null | \
-        grep -xE '[0-9]{{1,15}}' | sort -u | paste -sd, -
+    {{ cat "$OUTPUT_DIR/{job_chain_name}" "$OUTPUT_DIR"/.gym_followup_queued.* "$OUTPUT_DIR"/.gym_followup_sentinel.* 2>/dev/null
+       echo "${{1:-}}"; }} | grep -xE '[0-9]{{1,15}}' | sort -u | paste -sd, -
+}}
+# A command cut off after $1 seconds, where coreutils timeout exists.
+_gym_bounded() {{
+    if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
 }}
 # Appends to {job_allocations_name} one row per allocation incarnation (job id, restarts) of those jobs that has ended
-# and has no row yet; with $1, also the running incarnation of that job, once (ended false). Scheduler accounting that
-# stays unavailable records nothing: a later job records what is missing. It never stops the chain.
+# and has no row yet; with $1, also the running incarnation of that job, once (ended false). Best-effort: the queries
+# end within the budget, and accounting that does not answer records nothing (a later job records what is missing).
+# The read, deduplication and append hold a lock, so jobs that run at once never write the same row twice.
 _gym_record_allocations() {{
-    local _ids _rows="" _new _sacct_try _file="$OUTPUT_DIR/{job_allocations_name}"
-    _ids=$(_gym_run_job_ids)
+    local _ids _rows="" _new _left _sacct_try _try _deadline=$((SECONDS + {job_allocations_budget_s}))
+    local _file="$OUTPUT_DIR/{job_allocations_name}" _lock="$OUTPUT_DIR/{job_allocations_lock_name}"
+    _ids=$(_gym_run_job_ids "${{1:-}}")
     [[ -n "$_ids" ]] || return 0
     for _sacct_try in 1 2 3 4 5 6; do
-        _rows=$(SLURM_TIME_FORMAT=%s sacct -D -X -P -n -j "$_ids" --format={job_allocations_format} 2>/dev/null) && \
+        _left=$((_deadline - SECONDS))
+        (( _left > 0 )) || break
+        _rows=$(SLURM_TIME_FORMAT=%s _gym_bounded "$_left" sacct -D -X -P -n -j "$_ids" --format={job_allocations_format} 2>/dev/null) && \
             [[ -n "$_rows" ]] && break
         _rows=""
-        sleep 10
+        (( _deadline - SECONDS > {job_allocations_retry_s} )) || break
+        sleep {job_allocations_retry_s}
     done
     if [[ -z "$_rows" ]]; then
         echo "WARNING: scheduler accounting of jobs $_ids is unavailable; {job_allocations_name} records none of them now."
+        return 0
+    fi
+    # Up to about 15 s; the jitter keeps writers that wait together from waking together.
+    for _try in {{1..50}}; do
+        find "$_lock" -mmin +1 -exec rm -f {{}} + 2>/dev/null
+        (set -C; : > "$_lock") 2>/dev/null && break
+        _try=""
+        sleep "0.$((RANDOM % 5 + 1))"
+    done
+    if [[ -z "$_try" ]]; then
+        echo "WARNING: {job_allocations_lock_name} stayed held; {job_allocations_name} records none of jobs $_ids now."
         return 0
     fi
     _new=$(awk -F'|' -v want="$_ids" -v self="${{1:-}}" -v file="$_file" -v q='"' \
@@ -439,11 +469,17 @@ _gym_record_allocations() {{
                 "," q "node_list" q ":" text($7) "," q "nodes" q ":" ($6 + 0) "," q "recorded_at" q ":" q at q \
                 "," q "restarts" q ":" ($9 + 0) "," q "source" q ":" q "sacct" q "," q "start_epoch_s" q ":" number($3) \
                 "," q "state" q ":" text(state) "}}"
-        }}' <<< "$_rows") || return 0
+        }}' <<< "$_rows")
     [[ -z "$_new" ]] || printf '%s\\n' "$_new" >> "$_file" || echo "WARNING: cannot append to {job_allocations_name}."
+    rm -f "$_lock"
     return 0
 }}
-_gym_record_allocations
+# Before a job ends with nothing after it to record it: its own allocation as of now, once.
+_gym_record_own_allocation() {{
+    [[ -z "${{_gym_own_allocation_recorded:-}}" && "${{SLURM_JOB_ID:-}}" =~ ^[0-9]+$ ]] || return 0
+    _gym_own_allocation_recorded=1
+    _gym_record_allocations "$SLURM_JOB_ID"
+}}
 
 # The previous job queues a sentinel next to its follow-up F (afterany:F). F records itself in the chain before
 # anything else, so a sentinel only acts when F started and ended unrecorded: F died before its prologue ran.
@@ -464,6 +500,7 @@ if [[ -n "$_gym_sentinel_for" ]]; then
         if [[ -e "$OUTPUT_DIR/.gym_followup_queued.$_gym_sentinel_for" ]] || \
             ! grep -qF -- "{provisional_marker_prefix}$_gym_sentinel_for started" "$_incomplete_file" 2>/dev/null; then
             echo "Follow-up $_gym_sentinel_for recorded itself in the chain; sentinel ${{SLURM_JOB_ID:-}} has nothing to do."
+            _gym_record_own_allocation
             exit 0
         fi
         _gym_sentinel_recorded=1
@@ -485,6 +522,7 @@ if [[ -n "$_gym_sentinel_for" ]]; then
         _gym_parent_state=${{_gym_parent_state%+}}
         if [[ "$_gym_parent_state" == COMPLETED ]]; then
             echo "Follow-up $_gym_sentinel_for never started: job $_prev_slurm_job_id completed, so Slurm cancelled it; sentinel ${{SLURM_JOB_ID:-}} leaves the chain as it is."
+            _gym_record_own_allocation
             exit 0
         fi
         _gym_cancel_note="Follow-up $_gym_sentinel_for {cancelled_followup_marker} (job $_prev_slurm_job_id ended ${{_gym_parent_state:-in an unknown state}}); the chain stopped. Continue with gym eval resubmit --recover."
@@ -494,6 +532,7 @@ if [[ -n "$_gym_sentinel_for" ]]; then
         fi
         echo "Follow-up $_gym_sentinel_for never started (it was cancelled); sentinel ${{SLURM_JOB_ID:-}} leaves the chain as it is."
         echo "$_gym_cancel_note"
+        _gym_record_own_allocation
         exit 0
     fi
     if [[ -n "$_gym_sentinel_recorded" ]]; then
@@ -625,6 +664,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         COMPLETED)
             _gym_clear_provisional
             echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
+            _gym_record_own_allocation
             exit 0 ;;
         CANCELLED)
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; continue with gym eval resubmit --recover, which carries the retry and walltime budgets over." ;;
@@ -885,6 +925,8 @@ if [[ $_gym_queue_followup == 1 ]]; then
         fi
     fi
 fi
+# With its follow-up queued, the job records the run's ended allocations; recording never delays the continuation.
+_gym_record_allocations
 """
 
 _MAX_WALLTIME_CHECK_TEMPLATE = """\
@@ -947,6 +989,9 @@ _gym_end_own_chain() {{
     # A job whose driver failed otherwise has its follow-up start, and that prologue decides; an incomplete run
     # continues.
     elif [[ $_rc != 0 ]] || ! _gym_run_complete; then
+        # Its follow-up records it; with none queued (a refused or unobserved submission), nothing else would.
+        _id=$(head -n 1 "$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID" 2>/dev/null) || _id=""
+        [[ "$_id" =~ ^[0-9]+$ ]] || _gym_record_own_allocation
         return $_rc
     # This job COMPLETEs: Slurm would cancel its afternotok follow-up, and the follow-up's sentinel would then start on
     # a full allocation only to write the record below and exit. A stop the chain recorded earlier (a refused
@@ -984,7 +1029,7 @@ _gym_end_own_chain() {{
         _cancelled+="${{_cancelled:+,}}\\"$_role\\":{{\\"job_id\\":\\"$_id\\",\\"result\\":\\"$_result\\"}}"
     done
     # Nothing follows this job to record it: it records its own allocation as of now, and any ended one still missing.
-    _gym_record_allocations "$SLURM_JOB_ID"
+    _gym_record_own_allocation
     printf '{{"at":"%s","cancelled":{{%s}},"ended":"%s","job_id":"%s"}}\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \\
         "$_cancelled" "$_ended" "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{chain_end_journal_name}" || \\
         echo "WARNING: cannot journal the end of the chain in {chain_end_journal_name}."
@@ -1079,6 +1124,9 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         chain_accounting_format=CHAIN_ACCOUNTING_FORMAT,
         job_allocations_name=JOB_ALLOCATIONS_NAME,
         job_allocations_format=JOB_ALLOCATIONS_FORMAT,
+        job_allocations_budget_s=JOB_ALLOCATIONS_BUDGET_S,
+        job_allocations_retry_s=JOB_ALLOCATIONS_RETRY_S,
+        job_allocations_lock_name=JOB_ALLOCATIONS_LOCK_NAME,
         requeue_reconcile_state=REQUEUE_RECONCILE_STATE,
         chain_accounting_env=CHAIN_ACCOUNTING_ENV,
         accounted_walltime_prefix=ACCOUNTED_WALLTIME_PREFIX,
