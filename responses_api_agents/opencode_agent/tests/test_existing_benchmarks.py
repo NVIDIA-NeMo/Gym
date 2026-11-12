@@ -173,3 +173,14 @@ def test_nemotron_overlays_bind_deepswe_opencode_sessions(staged: bool, monkeypa
     )
     environment = get_first_server_config_dict(config, "deepswe_environment_server")
     assert environment.agent_server.name == "deepswe_opencode_agent"
+
+
+def test_the_agentenv_sessions_recipe_runs_opencode_sessions_on_agentenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _resolve_config("benchmarks/swebench/verified/opencode_sessions_agentenv.yaml", monkeypatch)
+
+    assert config.sandbox.default_metadata["sandbox-api"] == "e2b"
+    assert config.sandbox.e2b.create.auto_resume is False and config.sandbox.e2b.create.lease_s > 0
+    resources = get_first_server_config_dict(config, "swebench_verified_opencode_sessions_resources_server")
+    assert resources.sandbox_checkpoint.parallelism == 64
+    environment = get_first_server_config_dict(config, "swebench_verified_opencode_sessions")
+    assert environment.agent_server.name == "swebench_verified_opencode_sessions_agent"

@@ -20,8 +20,10 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentSessionState,
     NothingCapturedError,
+    RestoredLaunch,
     SandboxCommand,
     SandboxSession,
     exec_idempotent,
@@ -43,6 +45,14 @@ from responses_api_agents.opencode_agent.snapshot import NoRootSessionError, sna
 
 
 LOG = logging.getLogger(__name__)
+
+# The model relay a launch runs on a sandbox whose snapshots keep processes (harness_runner.sh starts it): the
+# script in the session root, and per launch directory its endpoint (``{"gen", "upstream"}``) and status files.
+# OpenCode's own binary runs it as Bun (``BUN_BE_BUN=1``), so the relay needs nothing from the task image.
+MODEL_RELAY_SCRIPT = HARNESS_RUNNER_SCRIPT.with_name("model_relay.mjs")
+RELAY_RUNTIME_ENV = {"BUN_BE_BUN": "1"}
+RELAY_ENDPOINT_FILE = "relay-endpoint.json"
+RELAY_STATUS_FILE = "relay-status.json"
 
 
 def format_error_message(message: str, *, output: str = "", stderr: str = "") -> str:
@@ -173,6 +183,11 @@ class OpenCodeSandboxSession(AgentSessionState):
     resuming the conversation kept in the root. A session a restore installed has no sandbox
     connection (``session`` is ``None``) until its replacement attempt's seed re-binds it;
     ``restored`` keeps what the checkpoint exported until then.
+
+    On a sandbox whose snapshots keep processes (``keeps_processes``), the pause holds the harness's model calls
+    instead of stopping it, and OpenCode reaches the model through a relay in the sandbox: a restore brings the
+    launch back running, ``adoption`` names the held pause it is taken over from, and ``relay_gen`` is the
+    generation of the relay's endpoint, raised when a restore points it at the replacement attempt.
     """
 
     session: SandboxSession[str] | None
@@ -217,6 +232,9 @@ class OpenCodeSandboxSession(AgentSessionState):
     completed_activation: int = 0
     completed_reply: dict[str, JsonValue] | None = None
     restored: dict[str, JsonValue] | None = None
+    keeps_processes: bool = False
+    relay_gen: int = 0
+    adoption: RestoredLaunch | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -414,6 +432,30 @@ class OpenCodeSandboxSession(AgentSessionState):
             raise asyncio.CancelledError
         return artifacts
 
+    async def adopt(
+        self, *, pause_seq: int, timeout: float, close_timeout: float, pause_allowance_s: float = 0.0
+    ) -> str:
+        """Take over the launch a restore brought back holding pause ``pause_seq``, as ``execute`` finishes one."""
+        artifacts = await self.session.adopt(
+            pause_seq=pause_seq,
+            collect=lambda: self.collect_artifacts(timeout=close_timeout),
+            timeout=timeout,
+            close_timeout=close_timeout,
+            pause_allowance_s=pause_allowance_s,
+        )
+        if self.session.closing:
+            raise asyncio.CancelledError
+        return artifacts
+
+    async def point_relay(self, upstream: str) -> None:
+        """Point the current launch's model relay at ``upstream`` as its next endpoint generation."""
+        self.relay_gen += 1
+        await upload_text(
+            self.session.sandbox,
+            path=f"{self.session.session_dir}/{RELAY_ENDPOINT_FILE}",
+            text=json.dumps({"gen": self.relay_gen, "upstream": upstream}),
+        )
+
     async def stage_activation(
         self, payload: dict[str, JsonValue], *, media: Sequence[MediaFile] = ()
     ) -> SandboxCommand:
@@ -463,6 +505,27 @@ class OpenCodeSandboxSession(AgentSessionState):
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
+        relay = payload.get("relay")
+        if relay is not None:
+            # The runner starts the relay on OpenCode's binary; if it does not come up, OpenCode calls the model
+            # directly, under the fallback environment.
+            await upload_text(
+                self.session.sandbox,
+                path=f"{directory}/{RELAY_ENDPOINT_FILE}",
+                text=json.dumps({"gen": self.relay_gen, "upstream": relay["upstream"]}),
+            )
+            params |= {
+                "MODEL_RELAY_PORT": str(relay["port"]),
+                "MODEL_RELAY_ENDPOINT": f"{directory}/{RELAY_ENDPOINT_FILE}",
+                "MODEL_RELAY_STATUS": f"{directory}/{RELAY_STATUS_FILE}",
+                "MODEL_RELAY_COMMAND": [
+                    f"{self.runtime}/opencode",
+                    f"{self.persistent_directory}/{MODEL_RELAY_SCRIPT.name}",
+                ],
+                # The relay's process alone: OpenCode itself would start as Bun with it.
+                "MODEL_RELAY_COMMAND_ENV": RELAY_RUNTIME_ENV,
+                "MODEL_RELAY_FALLBACK_ENV": relay["fallback_env"],
+            }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(
             argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
