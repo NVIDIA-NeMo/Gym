@@ -428,7 +428,7 @@ def _masked_evaluation_side_kind(
 
     The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
-    ``failure_kind`` is registered (or namespaced, with the ``retry`` action its owner recorded), evaluation-side through
+    ``failure_kind`` is registered (or namespaced, with the ``retry`` action its owner recorded and no model attribution), evaluation-side through
     the shared classifier, not one whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a
     ``transport_*`` verify call.
     """
@@ -456,9 +456,10 @@ def _masked_evaluation_side_kind(
             config=classification,
         )
     retry_declared = row.get("failure_outcome_action") == OutcomeAction.RETRY
+    namespaced_retry = retry_declared and row.get("failure_outcome_attribution") != FailureClass.MODEL
     if (
         not isinstance(kind, str)
-        or not (is_registered(kind) or (is_namespaced(kind) and retry_declared))
+        or not (is_registered(kind) or (is_namespaced(kind) and namespaced_retry))
         or (selected_class != FailureClass.EVALUATION and not retry_declared)
         or kind in _MASKED_REGRADE_KINDS
         or kind.startswith("transport_")
@@ -476,7 +477,7 @@ def masked_infrastructure_kind(
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
     run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action (honored
     whatever the attribution), the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
-    model-class kind, no kind, an unregistered kind, a namespaced kind without a recorded ``retry``, and the kinds
+    model-class kind, no kind, an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
     whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the
     masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its
     verifier could grade of it.

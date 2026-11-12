@@ -242,9 +242,12 @@ def test_a_masked_infrastructure_result_that_kept_a_saved_answer_is_not_retried(
 
 
 @pytest.mark.parametrize("kind", ["demo_env:time_cap", "demo_env:simulator_failed"])
-@pytest.mark.parametrize("attribution", ["evaluation", "model", "unknown"])
+@pytest.mark.parametrize("attribution", ["evaluation", "unknown", None])
 def test_a_masked_namespaced_kind_with_a_recorded_retry_is_retried(tmp_path, kind, attribution):
-    row = _masked(kind) | {"failure_outcome_action": "retry", "failure_outcome_attribution": attribution}
+    # No recorded attribution is handled as for a registered kind: the owner's retry decides.
+    row = _masked(kind) | {"failure_outcome_action": "retry"}
+    if attribution is not None:
+        row["failure_outcome_attribution"] = attribution
     output, _ = _run(tmp_path, [[row]])
     store = RolloutStore.read(output, import_legacy=False)
     assert [(r["_ng_task_index"], r["_ng_attempt_index"]) for r in store.pending()] == [(1, 1)]
@@ -260,6 +263,7 @@ def test_a_masked_namespaced_kind_with_a_recorded_retry_is_retried(tmp_path, kin
     [
         pytest.param({}, id="no-recorded-action"),
         pytest.param({"failure_outcome_action": "count_as_zero", "failure_outcome_attribution": "model"}, id="zero"),
+        pytest.param({"failure_outcome_action": "retry", "failure_outcome_attribution": "model"}, id="model-retry"),
         pytest.param(
             {"failure_outcome_action": "retry", "failure_outcome_attribution": "evaluation"} | _ANSWER,
             id="saved-answer",
