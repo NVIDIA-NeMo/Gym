@@ -1645,13 +1645,19 @@ def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepa
         assert coverage["complete"] is False
 
 
-def test_failed_rejudgment_selects_a_new_episode_decision_without_replacing_answer(prepared_run):
+@pytest.mark.parametrize("kind", ["judge_failed", "judge_unparseable", "judge_invalid"])
+def test_failed_rejudgment_selects_a_new_episode_decision_without_replacing_answer(prepared_run, kind):
     output, prepare = prepared_run
     answer = {"object": "response", "id": "saved", "status": "completed", "output": []}
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending()[0]
         store.record_dispatch(row)
-        failure = row | {"_ng_failure_class": "judge_failed", "_ng_failure_id": "first", "response": answer}
+        failure = row | {
+            "_ng_failure_class": kind,
+            "_ng_failure_legacy_class": "judge_failed",
+            "_ng_failure_id": "first",
+            "response": answer,
+        }
         store.record_outcome(failure)
     assert failure["_ng_episode_outcome"]["action"] == "verify"
     with RolloutStore.open_for_rejudgment(output) as store:

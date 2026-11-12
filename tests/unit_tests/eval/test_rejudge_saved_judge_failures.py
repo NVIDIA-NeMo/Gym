@@ -655,7 +655,8 @@ async def test_saved_fail_decision_is_not_bound_or_automatically_rejudged(tmp_pa
     assert await rejudge_saved_judge_failures({}, output) == 0
 
 
-def test_scored_unparsed_answer_remains_reverifiable_under_failure_stop_policy(tmp_path):
+@pytest.mark.parametrize("masked", [False, True])
+def test_scored_unparsed_answer_remains_reverifiable_under_failure_stop_policy(tmp_path, masked):
     artifacts = tmp_path / "job" / "bench" / "artifacts"
     artifacts.mkdir(parents=True)
     (artifacts.parent.parent / "resolved-config.yaml").write_text(
@@ -666,10 +667,40 @@ def test_scored_unparsed_answer_remains_reverifiable_under_failure_stop_policy(t
         artifacts,
         judge_failures=1,
         rollouts=2,
-        result_evidence={"judge_evaluations": [{"verdict_label": "judge_parsing_error"}]},
+        result_evidence={
+            "judge_evaluations": [{"verdict_label": "judge_parsing_error"}],
+            "mask_sample": masked,
+            **({"failure_kind": "judge_failed"} if masked else {}),
+        },
     )
     assert failures[0]["_ng_episode_outcome"]["action"] == "fail"
-    assert due_judge_failures(output) == ["1-0"]
+    expected = [] if masked else ["1-0"]
+    assert due_judge_failures(output) == expected
     binding = bind_judge_failures(output, skip_spent=True)
-    assert list(binding["failures"]) == ["1-0"]
-    assert binding["saved_results"] == {"1-0"}
+    assert list(binding["failures"]) == expected
+    assert binding["saved_results"] == set(expected)
+
+
+@pytest.mark.parametrize("canonical", ["judge_unparseable", "judge_invalid"])
+def test_canonical_judge_failure_can_settle_its_original_answer(tmp_path, canonical):
+    job = tmp_path / "job"
+    (job / "artifacts").mkdir(parents=True)
+    output, [failure] = _run(
+        job / "artifacts",
+        judge_failures=1,
+        evidence={
+            "_ng_failure_class": canonical,
+            "_ng_failure_legacy_class": "judge_failed",
+            "failure_kind": canonical,
+        },
+    )
+    assert due_judge_failures(output) == ["0-0"]
+    assert list(bind_judge_failures(output)["failures"]) == ["0-0"]
+    decision = _decision(job)
+    assert decision.action.value == "reverify", decision.reason
+    assert decision.identities["judge_recoverable"] == [(0, 0)]
+    _settle(output, failure, 0.5)
+    assert due_judge_failures(output) == []
+    [settled] = [row for row in RolloutStore.read(output).selected("success") if row["_ng_task_index"] == 0]
+    assert settled["response"] == ANSWER
+    assert settled["reward"] == 0.5

@@ -132,6 +132,7 @@ from nemo_gym.rollouts.recovery_policy import (
 )
 from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
 from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
+from nemo_gym.rollouts.rollout_recovery import matches_failure_class
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 
@@ -752,7 +753,7 @@ def decide_recovery(
                     )
                 )
                 continue
-            judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
+            judge = matches_failure_class(row, JUDGE_FAILURE_KINDS)
             if (
                 not judge
                 and identity in managed
@@ -1010,7 +1011,7 @@ def decide_recovery(
         )
         spent = fact.attempts if fact else len(rows)
         quota_wait = False
-        if last.get(FAILURE_CLASS) == JUDGE_FAILED:
+        if matches_failure_class(last, JUDGE_FAILURE_KINDS):
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
             quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
