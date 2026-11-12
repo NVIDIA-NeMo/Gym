@@ -406,7 +406,9 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 
 
 @pytest.mark.parametrize("compaction", [True, False])
-@pytest.mark.parametrize("harness,tool_steps,low_usage", [("opencode", 2, 500), ("hermes", 14, 1000)])
+@pytest.mark.parametrize(
+    "harness,tool_steps,low_usage", [("opencode", 2, 500), ("hermes", 14, 1000), ("stirrup", 14, 500)]
+)
 def test_compaction_is_scripted_independently_of_request_text(tmp_path, compaction, harness, tool_steps, low_usage):
     scenario = dataclasses.replace(
         SCENARIO["context_compaction"],
