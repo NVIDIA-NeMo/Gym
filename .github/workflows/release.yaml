@@ -73,7 +73,7 @@ jobs:
       !cancelled() && !failure()
       && !(needs.pre-flight.outputs.docs_only == 'true'
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@f7af92c4d1caea5a58577ce4ac5314f7de1bc5d4 # v1.4.3
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@1ea89871720f31b9cacfd40655ad5151edd8be6f
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -89,7 +89,13 @@ jobs:
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-use-changelog-builder: true
-      gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}
+      # A PR rehearsal compares its changes with main; release invocations retain the full tag-based changelog.
+      # Repository-wide notes can exceed the shared template's environment limit (FW-CI-templates#619).
+      gh-release-from-tag: >-
+        ${{ inputs.gh-release-from-tag
+            || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')
+                && github.event.repository.default_branch)
+            || '' }}
       restrict-to-admins: true
     secrets: inherit  # pragma: allowlist secret
 

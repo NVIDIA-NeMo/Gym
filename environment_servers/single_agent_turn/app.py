@@ -3,10 +3,10 @@
 
 """Resources-backed single-agent environment server."""
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any, Literal
 from uuid import uuid4
-from warnings import warn
 
 from aiohttp import ClientConnectorError
 from fastapi import Body
@@ -53,6 +53,7 @@ from nemo_gym.core import (
     model_sampling_path_segment,
     rebuild_failure,
 )
+from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
@@ -185,25 +186,32 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return [server.name for server in servers]
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Forward to the resources server, which owns verification in this protocol.
+        """Combine the resources server's benchmark metrics with performance metrics for the whole batch.
 
-        Without verification there is nothing to aggregate, so a skipping server returns empty metrics.
+        Rollout collection derives each row's ``ng_perf`` from agent observations and model-call captures.
+        Performance metrics count every supplied rollout, including masked and unverified ones.
+        The resources server owns scoring, task-specific weighting, and headline metric selection.
         """
-        if self._skipped_verification_reward() is not None:
-            warn(
-                "Skipping aggregate metrics because skip_verification=True; "
-                "use disable_aggregation=True to avoid writing aggregate metric files.",
-                RuntimeWarning,
-                stacklevel=2,
+        metrics = AggregateMetrics()
+        if self._skipped_verification_reward() is None:
+            # Keep benchmark evidence (including response.usage) intact. The reserved
+            # performance summary is reduced here once, independently of resources server filtering.
+            benchmark_body = body.model_copy(
+                update={
+                    "verify_responses": [
+                        {key: value for key, value in row.items() if key != "ng_perf"} for row in body.verify_responses
+                    ]
+                }
             )
-            return AggregateMetrics()
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_boundary_failure(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/aggregate_metrics",
+                json=benchmark_body,
+            )
+            await raise_boundary_failure(response)
+            metrics = AggregateMetrics.model_validate(await get_response_json(response))
+        # The reduction is CPU-bound over every row, so keep it off the server's event loop.
+        return await asyncio.to_thread(add_perf_metrics, metrics, body.verify_responses)
 
     async def run(
         self,
