@@ -417,6 +417,11 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             raise HTTPException(422, "responses_stream_passthrough cannot capture training token IDs")
         payload = self.config.extra_body | body
         payload["model"] = self.config.openai_model
+        # The relay makes the one attempt a one-attempt policy allows; like _call_upstream, it waits out the
+        # policy's pre-request jitter before taking a provider slot.
+        jitter = self.config.upstream_retry_policy.pre_request_jitter_seconds
+        if jitter is not None:
+            await asyncio.sleep(random.uniform(*jitter))
         slot = AsyncExitStack()
         # Hold this server's provider slot until the relayed stream ends.
         await slot.enter_async_context(self._upstream_request_slot())

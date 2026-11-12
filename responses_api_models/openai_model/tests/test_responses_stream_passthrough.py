@@ -193,6 +193,33 @@ def test_passthrough_rejects_settings_it_cannot_apply(config) -> None:
         make_server(responses_stream_passthrough=True, **config)
 
 
+@pytest.mark.parametrize("jitter,expected_sleeps", [([1, 2], [1.5]), (None, [])])
+async def test_relay_waits_out_the_pre_request_jitter_before_taking_a_slot(
+    monkeypatch, jitter, expected_sleeps
+) -> None:
+    # A one-attempt policy's jitter delays every provider attempt, the relayed one included, and the wait happens
+    # outside the provider slot so it does not hold capacity.
+    policy = {"max_attempts": 1} if jitter is None else {"max_attempts": 1, "pre_request_jitter_seconds": jitter}
+    server = make_server(responses_stream_passthrough=True, max_concurrent_requests=1, upstream_retry_policy=policy)
+    events = []
+
+    async def fake_sleep(seconds):
+        events.append(("sleep", seconds, server._semaphore.locked()))
+
+    async def create_response_stream(**payload):
+        events.append(("provider", None, server._semaphore.locked()))
+        return FakeUpstream(SSE)
+
+    monkeypatch.setattr("responses_api_models.openai_model.app.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("responses_api_models.openai_model.app.random.uniform", lambda low, high: (low + high) / 2)
+    server._client.create_response_stream = create_response_stream
+
+    response = await server._relay_responses_stream(dict(CODEX_REQUEST))
+    assert b"".join([chunk async for chunk in response.body_iterator]) == b"".join(SSE)
+
+    assert events == [("sleep", seconds, False) for seconds in expected_sleeps] + [("provider", None, True)]
+
+
 @pytest.fixture
 async def gym_http_client():
     """A fresh shared aiohttp client, as a running Gym server has, for calls to a real upstream."""
