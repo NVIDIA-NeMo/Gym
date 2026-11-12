@@ -4,8 +4,9 @@
 
 A row is one UI task, as ``environments/ui_generation_agentic/prepare.py`` writes it: the agent's prompt travels in
 ``responses_create_params``; the task-owned fields name the stack, the entry file the agent must create, and the user
-prompt the judge grades against. Required-ness mirrors ``UiGenVerifyRequest`` and the seed's ``UiGenTask`` (app.py),
-and unknown fields are kept (``extra="allow"``).
+prompt the judge grades against. ``UiGenTaskFields`` declares those fields once: the seed's ``UiGenTask`` and
+``UiGenVerifyRequest`` (app.py) inherit them, so the row schema and the runtime models cannot drift apart. Unknown
+fields are kept (``extra="allow"``).
 """
 
 from typing import Optional
@@ -13,8 +14,8 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class TaskData(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class UiGenTaskFields(BaseModel):
+    """The task fields the server reads at seed and verify."""
 
     stack: str = Field(
         description="The task's stack, a key of the server's `stacks` config (ui-next, ui-vite or ui-static).",
@@ -28,6 +29,11 @@ class TaskData(BaseModel):
         description="The user's request alone (without the delivery instructions), which the judge grades against.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
+
+
+class TaskData(UiGenTaskFields):
+    model_config = ConfigDict(extra="allow")
+
     task_id: Optional[str] = Field(
         default=None,
         description="Stable task id, `<stack>-<source id>`.",

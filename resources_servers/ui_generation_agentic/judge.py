@@ -16,7 +16,9 @@
 
 Copied from ``resources_servers/ui_generation/app.py`` (NVIDIA-NeMo/Gym PR #5774) and adapted: the judge sees the
 user prompt, a one-line description of the target stack and the candidate's code, and no reference answer, so the
-verdict has no ``reference_differences``. The parsing and validation rules are otherwise unchanged.
+verdict has no ``reference_differences``. The code is fenced with more backticks than any run inside it, and a reply
+may wrap its verdict in a fenced block with text around it (the first fenced JSON object is taken, the language tag in
+any case). The validation rules are otherwise unchanged.
 """
 
 from __future__ import annotations
@@ -34,7 +36,8 @@ VERDICT_KEYS = frozenset(
     {"schema_version", "prompt_adherence", "quality", "critical_issues", "uncertainty", "execution_verified"}
 )
 MAX_SCORE = 4
-_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
+# A fenced block with an optional json tag; the closing fence has as many backticks as the opening one.
+_FENCE_RE = re.compile(r"(`{3,})[ \t]*(?:json)?[ \t]*\r?\n(.*?)\r?\n[ \t]*\1(?!`)", re.DOTALL | re.IGNORECASE)
 _LEADING_THINK_RE = re.compile(r"^\s*<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
 
 
@@ -74,22 +77,33 @@ def parse_judge_completion(completion: NeMoGymChatCompletion) -> tuple[dict[str,
     if think:
         reasoning = reasoning or think.group(1).strip()
         content = content[think.end() :]
-    text = content.strip()
-    fenced = _FENCE_RE.match(text)
-    if fenced:
-        text = fenced.group(1).strip()
-    try:
-        verdict = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise JudgeError(f"invalid_json: {error}") from error
+    verdict = _verdict_json(content.strip())
     if error := validate_verdict(verdict):
         raise JudgeError(f"invalid_schema: {error}")
     return verdict, reasoning
 
 
+def _verdict_json(text: str) -> object:
+    """The reply as JSON, or else its first fenced block that holds a JSON object; raise ``JudgeError`` if none."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        first_error = error
+    for fenced in _FENCE_RE.finditer(text):
+        try:
+            verdict = json.loads(fenced.group(2))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(verdict, dict):
+            return verdict
+    raise JudgeError(f"invalid_json: {first_error}") from first_error
+
+
 def judge_case(prompt: str, stack_description: str, entry_path: str, code: str, language: str) -> str:
     """The judge's user message: the case as JSON, with the candidate's code in one fenced block."""
-    candidate = f"### {entry_path}\n```{language}\n{code}\n```"
+    # A fence longer than any run of backticks in the code, so the code cannot close it early.
+    fence = "`" * max(3, max((len(run) for run in re.findall(r"`+", code)), default=0) + 1)
+    candidate = f"### {entry_path}\n{fence}{language}\n{code}\n{fence}"
     return json.dumps(
         {"prompt": prompt, "stack": stack_description, "candidate_answer": candidate}, ensure_ascii=False
     )

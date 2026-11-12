@@ -14,7 +14,7 @@
 # verify time).
 
 # ---- Stage: the stack's sample-runner project ----
-FROM node:22-bookworm-slim AS stack
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS stack
 ENV NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS=--max-old-space-size=4096
 WORKDIR /app
 RUN chown node:node /app
@@ -225,7 +225,10 @@ COPY --chown=node:node <<'EOF' /app/package.json
 }
 EOF
 
-RUN npm install --legacy-peer-deps --no-audit --no-fund --loglevel=error \
+# The committed lockfile (docker/<stack>/package-lock.json, named context `stack_lock`) pins every transitive
+# dependency; npm ci installs exactly that tree.
+COPY --chown=node:node --from=stack_lock package-lock.json /app/package-lock.json
+RUN npm ci --legacy-peer-deps --no-audit --no-fund --loglevel=error \
     && npm cache clean --force
 
 COPY --chown=node:node <<'EOF' /app/next.config.mjs
@@ -367,16 +370,19 @@ ENTRYPOINT ["run-sample"]
 CMD ["serve"]
 
 # ---- Stage: pinned OpenCode runtime and ripgrep ----
-FROM debian:bookworm-slim AS fetch
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS fetch
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 ARG OPENCODE_VERSION=1.17.11
 ARG RG_VERSION=15.1.0
+# SHA-256 of the OpenCode binary, the same pin as the compositions' sandbox_executable_sha256.
+ARG OPENCODE_SHA256=0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
 # SHA-256 of the rg binary, as pinned in Gym benchmarks/agentic_if/README.md.
 ARG RG_SHA256=ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2
 RUN set -eux; mkdir -p /out; \
   curl -fsSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" -o /tmp/oc.tgz; \
   tar -xzf /tmp/oc.tgz -C /out opencode; chmod 755 /out/opencode; \
+  echo "${OPENCODE_SHA256}  /out/opencode" | sha256sum -c -; \
   test "$(/out/opencode --version)" = "${OPENCODE_VERSION}"; \
   curl -fsSL --retry 3 "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o /tmp/rg.tgz; \
   tar -xzf /tmp/rg.tgz -C /tmp; cp "/tmp/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /out/rg; chmod 755 /out/rg; \
@@ -384,7 +390,7 @@ RUN set -eux; mkdir -p /out; \
 
 # OpenCode's plugin dependencies (@opencode-ai/plugin@1.17.11), built reproducibly like
 # benchmarks/agentic_if/README.md describes; the result matches that README's SHA-256.
-FROM node:22-bookworm-slim AS plugins
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS plugins
 WORKDIR /build/opencode
 COPY --from=opencode_plugins package.json package-lock.json /build/opencode/
 RUN set -eux; npm ci --ignore-scripts --no-audit --no-fund --loglevel=error; \
@@ -396,7 +402,7 @@ RUN set -eux; npm ci --ignore-scripts --no-audit --no-fund --loglevel=error; \
 # Codex's own installer (responses_api_agents/codex_agent/install_codex_runtime.sh, named context `codex_installer`)
 # fetches Node 22.19.0, checked against nodejs.org's SHASUMS256, and @openai/codex (Apache-2.0) into the runtime dir
 # that the codex composition names as sandbox_runtime_dir, because the sandbox itself has no internet.
-FROM debian:bookworm-slim AS codex
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS codex
 ARG WITH_CODEX=0
 ARG CODEX_VERSION=0.144.4
 COPY --from=codex_installer install_codex_runtime.sh /tmp/install_codex_runtime.sh

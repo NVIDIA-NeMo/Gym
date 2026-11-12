@@ -24,6 +24,9 @@ ui_generation_agentic_codex_agent:
       # Baked into the images (WITH_CODEX=1); setup checks it reports `codex-cli 0.144.4` instead of installing.
       sandbox_runtime_dir: /opt/ui-gen/runtime/codex
       timeout: 3600
+      # Grade the file as it stands when Codex exits nonzero or ends without turn.completed, as the other harnesses'
+      # failed runs are graded, instead of turning the run into an execution error that leaves the score.
+      verify_after_agent_error: true
       # The sandbox environment is the agent image's own; Codex needs its TMPDIR (/var/tmp), since it refuses to create
       # its helper binaries under the temp dir and its sessions live under /tmp.
       inherit_sandbox_environment: true

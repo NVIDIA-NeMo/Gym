@@ -1,13 +1,14 @@
 # Agentic UI generation: a coding harness writes one UI entry file from scratch in a per-stack sandbox that this
 # resources server lends through single_agent_turn; this server then builds the snapshotted file in a fresh copy
 # of the image's template and scores it with an LLM judge (reward = build x quality / 4). Run it through a harness
-# composition in environments/ui_generation_agentic/ (opencode.yaml, claude_code.yaml, hermes.yaml), which
-# sets the agent.
+# composition in environments/ui_generation_agentic/ (opencode.yaml, claude_code.yaml, hermes.yaml, codex.yaml),
+# which sets the agent.
 #
 # Images, judge and policy endpoints are supplied by the runner (env vars / env.yaml); nothing here names them.
-#   UI_GEN_{NEXT,VITE,STATIC}_IMAGE       digest-pinned agent images you build and push from docker/ (README.md)
-#   UI_GEN_{NEXT,VITE,STATIC}_MANIFEST_SHA256   optional manifest pins (guard G3)
-#   judge_base_url / judge_api_key / judge_model_name   the judge model, in env.yaml
+#   UI_GEN_{NEXT,VITE,STATIC}_IMAGE       digest-pinned agent images you build and push from docker/ (README.md);
+#                                         a seed of a stack whose image is unset is refused
+#   UI_GEN_{NEXT,VITE,STATIC}_MANIFEST_SHA256   optional manifest pins, checked at every seed
+#   judge_base_url / judge_api_key / judge_model_name   the judge model, in env.yaml (required)
 config_paths:
   - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
@@ -16,7 +17,8 @@ environment_server_routes:
 
 # The harness's output cap for each model call: reasoning plus one tool call. A call cut off at this cap is lost and
 # the run stops, which scores as a model failure. Override per run with ++ui_generation_agentic_max_output_tokens=<n>.
-# OpenCode and Hermes read it; Claude Code keeps its CLI default (32000).
+# OpenCode and Hermes read it; Claude Code keeps its CLI default (32000); Codex takes its cap from the model server
+# (README.md, "Run").
 ui_generation_agentic_max_output_tokens: 32768
 
 ui_generation_agentic_resources_server:
@@ -28,7 +30,7 @@ ui_generation_agentic_resources_server:
       description: An agent writes one front-end UI file from scratch in a sandbox; graded by building it and an LLM judge.
       value: Generate agentic UI-building traces (and rewards) across harnesses with a build check and a code judge.
       allowed_agents: [opencode_agent, claude_code_agent, hermes_agent, codex_agent]
-      # Sessions live in this process.
+      # Lent sandboxes and sessions live in this process.
       num_workers: 1
       sandbox_provider: sandbox
       sandbox_config:
@@ -42,27 +44,31 @@ ui_generation_agentic_resources_server:
           benchmark: ui-generation-agentic
       stacks:
         ui-next:
-          image: ${oc.env:UI_GEN_NEXT_IMAGE,/nonexistent/set-UI_GEN_NEXT_IMAGE}
+          image: ${oc.env:UI_GEN_NEXT_IMAGE,null}
           workdir: /app
+          agent_user: node
           entry_path: app/sample.tsx
           language: tsx
           description: Next.js 15 app router, React 19, TypeScript, Tailwind CSS 3; the file default-exports a client component rendered on the home page; only the preinstalled npm packages are available.
           manifest_sha256: ${oc.env:UI_GEN_NEXT_MANIFEST_SHA256,null}
         ui-vite:
-          image: ${oc.env:UI_GEN_VITE_IMAGE,/nonexistent/set-UI_GEN_VITE_IMAGE}
+          image: ${oc.env:UI_GEN_VITE_IMAGE,null}
           workdir: /app
+          agent_user: node
           entry_path: src/App.tsx
           language: tsx
           description: Vite 7 + React 19 + TypeScript + Tailwind CSS 3 single-page app; the file default-exports the App component; only the preinstalled npm packages are available.
           manifest_sha256: ${oc.env:UI_GEN_VITE_MANIFEST_SHA256,null}
         ui-static:
-          image: ${oc.env:UI_GEN_STATIC_IMAGE,/nonexistent/set-UI_GEN_STATIC_IMAGE}
+          image: ${oc.env:UI_GEN_STATIC_IMAGE,null}
           workdir: /usr/share/nginx/html
+          agent_user: ui
           entry_path: index.html
           language: html
           description: A single self-contained static HTML page (inline CSS and JS; libraries only from public CDNs) served by nginx.
           manifest_sha256: ${oc.env:UI_GEN_STATIC_MANIFEST_SHA256,null}
-      # restricted: deny-all egress except the policy model server and Google Fonts (OpenSandbox only).
+      # restricted: deny-all egress except the policy model server's host (every port of it) and Google Fonts
+      # (OpenSandbox only; another provider is refused at startup). open: no egress rule.
       agent_network_mode: restricted
       model_server:
         type: responses_api_models
@@ -71,11 +77,12 @@ ui_generation_agentic_resources_server:
       # What the deployment enforces (from the egress probe); stamped on every rollout.
       egress_enforcement: ${oc.env:UI_GEN_EGRESS_ENFORCEMENT,unknown}
       # detection_only when sandbox commands cannot switch user (self-hosted OpenSandbox 1.1.1 runs them as the
-      # image user); full needs root and the verifier user.
+      # image user); full needs root and the verifier user (tested with the Docker provider).
       guard_mode: detection_only
       build_timeout_s: 600
       inconclusive_verification_retries: 2
-      reward_mode: gated
+      # The judge score a built file earns (reward = build x score / 4): quality, prompt_adherence, mean or min.
+      reward_score: quality
       judge_model_server:
         type: responses_api_models
         name: ui_generation_agentic_judge_model
@@ -92,14 +99,17 @@ ui_generation_agentic_resources_server:
           num_repeats: 1
 
 # The judge: a model of another family than the policy, supplied through env.yaml (judge_base_url, judge_api_key,
-# judge_model_name). Sampling is left to the endpoint's defaults.
+# judge_model_name; a run without them fails at config resolution). Sampling is left to the endpoint's defaults.
+# The judge server listens on loopback only, so a restricted sandbox (which can reach every port of the policy model
+# server's host) cannot call the judge, even with ++use_absolute_ip=true.
 ui_generation_agentic_judge_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${oc.select:judge_base_url,''}
-      api_key: ${oc.select:judge_api_key,''}
-      model: ${oc.select:judge_model_name,''}
+      host: 127.0.0.1
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
       return_token_id_information: false
       uses_reasoning_parser: true
       uses_interleaved_reasoning: false

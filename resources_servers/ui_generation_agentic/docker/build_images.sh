@@ -8,8 +8,9 @@
 #
 # Each image is built with an EMPTY build context (the Dockerfile on stdin), so no local file can end up in it; the
 # only extra inputs are OpenCode's plugin lockfile from benchmarks/agentic_if/opencode (named context
-# `opencode_plugins`) and Codex's installer from responses_api_agents/codex_agent (named context `codex_installer`,
-# used only with WITH_CODEX=1, which bakes the Codex runtime that codex.yaml needs). With --push, the script prints
+# `opencode_plugins`), the stack's npm lockfile from docker/<stack>/ (named context `stack_lock`; the static stack
+# has none) and Codex's installer from responses_api_agents/codex_agent (named context `codex_installer`, used only
+# with WITH_CODEX=1, which bakes the Codex runtime that codex.yaml needs). Base images are pinned by digest. With --push, the script prints
 # each pushed image's digest: set UI_GEN_{NEXT,VITE,STATIC}_IMAGE to those digest references. Audit an image (no
 # data, no credentials) before pushing it anywhere others can pull.
 set -euo pipefail
@@ -24,7 +25,9 @@ PUSH=false
 [ "${1:-}" = "--push" ] && PUSH=true
 for stack in ui-next ui-vite ui-static; do
   ref="$PREFIX/$stack:$TAG"
-  docker build -t "$ref" --build-arg "WITH_CODEX=$WITH_CODEX" \
+  lock=()
+  [ -d "$HERE/$stack" ] && lock=(--build-context "stack_lock=$HERE/$stack")
+  docker build -t "$ref" --build-arg "WITH_CODEX=$WITH_CODEX" "${lock[@]}" \
     --build-context "opencode_plugins=$GYM_ROOT/benchmarks/agentic_if/opencode" \
     --build-context "codex_installer=$GYM_ROOT/responses_api_agents/codex_agent" - < "$HERE/$stack.Dockerfile"
   if $PUSH; then
