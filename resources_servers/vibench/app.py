@@ -783,6 +783,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
             ),
         )
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a build sandbox whose teardown failed after a failed seed, which a later close retries.
+        return session_id in self._sessions
+
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:

@@ -1192,6 +1192,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         return ResourcesCloseSessionResponse(resources_session_id=sid)
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a shell sandbox or workspace whose release failed, which a later close retries.
+        return session_id in self._shell_sessions or session_id in self._session_workspaces
+
     async def _release_session(self, sid: str) -> None:
         """Remove the session's workspace and metrics. A failed removal raises and keeps the workspace for a retry."""
         shell = self._shell_sessions.get(sid)

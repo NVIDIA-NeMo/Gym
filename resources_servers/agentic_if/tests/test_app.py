@@ -304,6 +304,8 @@ async def test_a_failed_release_after_a_failed_seed_is_retried_by_close(world):
     with pytest.raises(HTTPException):
         await seed(world, swe_row())
     assert "resources-1" in world.server._episodes
+    keeps_state = world.server.owned_session_routing()["keeps_session_state"]
+    assert keeps_state("resources-1")  # Routing keeps the owner for the close that retries the release.
     with pytest.raises(HTTPException) as retried_seed:
         await seed(world, swe_row())
     assert retried_seed.value.status_code == 409
@@ -312,6 +314,13 @@ async def test_a_failed_release_after_a_failed_seed_is_retried_by_close(world):
         ResourcesCloseSessionRequest(resources_session_id="resources-1", episode_id=EPISODE)
     )
     assert not world.server._episodes and len(world.backends.to("/close_session")) == 2
+    assert not keeps_state("resources-1")
+
+
+def test_an_episode_record_with_nothing_to_release_does_not_keep_ownership(world):
+    # A seed cancelled while it waited for the episode lock leaves a record with no task backend session.
+    world.server._episodes["resources-1"] = app_module._Episode()
+    assert not world.server.keeps_session_state("resources-1")
 
 
 @pytest.mark.asyncio

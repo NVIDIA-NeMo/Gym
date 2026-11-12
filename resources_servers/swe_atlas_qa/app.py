@@ -218,6 +218,10 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
             self._sessions[session_id] = (body.task_id, handle)
             return SWEAtlasQASeedSessionResponse(sandbox_descriptor=descriptor)
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a sandbox whose delete failed after verify or close, which a later close retries.
+        return session_id in self._sessions or session_id in self._cleanup_pending
+
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:

@@ -189,10 +189,13 @@ async def test_seed_preserves_primary_error_and_failed_cleanup_for_close(setup) 
     with pytest.raises(RuntimeError, match="cannot serialize"):
         await server.seed_session(request, seed)
     assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
+    # With several workers, routing keeps the session on this worker for the close that retries the stop.
+    assert server.keeps_session_state(seed.resources_session_id)
     with pytest.raises(HTTPException, match="no longer available"):
         await server.seed_session(request, seed)
     await server.close_resources_session(close_body(seed))
     assert not server._session_id_to_sandbox
+    assert not server.keeps_session_state(seed.resources_session_id)
 
 
 @pytest.mark.parametrize("recovery", ["close", "shutdown"])
