@@ -17,6 +17,10 @@ The Gym page [Add or Update a Harness](../../../fern/versions/latest/pages/agent
 
 Words used below follow the page's [Terminology](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminology): the *harness* is the agent runtime, the *adapter* is the Agent Server that wraps it. A *pairing* is one harness run on one benchmark: the adapter is the agent, the benchmark's Resources Server prepares and verifies the tasks, and a `single_agent_turn` Environment Server connects the two for each episode.
 
+Read the [shared outcome-policy guide](../../../fern/versions/latest/pages/observability/outcome-policies.mdx)
+for boundary configuration, failure recording and executable examples. Reuse the shared selector;
+keep retry safety and budgets with the executor, and preserve recovered observations.
+
 ## Step 0: Scope before code
 
 1. **Check what already exists.** Look for the harness in [Built-in agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#built-in-agents), [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses), and under `responses_api_agents/`, including generic bridges such as `harbor_agent` that can already launch some harnesses on the legacy `/run` path. If an adapter exists, the work is an update or a migration, not a new adapter. Read its README and tests first.

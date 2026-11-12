@@ -1,0 +1,139 @@
+---
+title: Outcome policies
+description: Configure failure actions at shared boundaries without replacing execution safety or retry budgets.
+---
+
+# Outcome policies
+
+Record facts with `NgFailureEvent`; choose actions with the shared
+`nemo_gym.core.outcome_policy` mechanism. Do not add another kind-to-retry table in
+an adapter. [Failure observations](/main/observability/rollout-failures) describes
+stages, causes, classification and recording recovered attempts.
+
+## Select once at the owning boundary
+
+`OutcomePolicyConfig` supplies rules; `choose_action` selects by HTTP status,
+failure kind, failure class, then fallback. Status is optional. Partial overrides
+preserve unspecified rules. Each boundary validates its supported actions.
+`FailureClass` (`model`, `evaluation`, `unknown`) comes from the configurable
+mapper in `failure_kinds.py`; class alone never implies retry or a zero.
+
+This Python example uses the environment dependency boundary's actual config:
+
+```python
+from nemo_gym.client import DependencyOutcomePolicyConfig, dependency_outcome
+from nemo_gym.core import FailureBoundary, NgFailureEvent
+
+policy = DependencyOutcomePolicyConfig(by_status_code={503: "fail"})
+error = NgFailureEvent(
+    boundary=FailureBoundary.RESOURCES_SERVER,
+    operation="seed_session",
+    stage="seed",
+    failure_kind="provider_unavailable",
+    failure_reason="Service unavailable",
+    http_status=503,
+)
+decision = dependency_outcome(error, config=policy, stage="seed")
+assert decision.action == "fail"
+```
+
+An executor still owns replay safety, cancellation, attempt/deadline budgets and
+whether usable output exists. Selecting `retry` cannot grant more attempts or
+resend an unsafe operation. `verify` uses retained output; it must not silently
+regenerate a model answer. `fail` stops ungraded. `count_as_zero`, where supported,
+is an explicit scored result, distinct from a masked placeholder reward.
+
+## Configuration locations
+
+These are separate decisions at separate boundaries, all using the same selector:
+
+| Boundary | Configuration field | Available actions and execution |
+| --- | --- | --- |
+| Environment dependency | `dependency_outcome_policy` on `single_agent_turn` | `retry`, `fail`; the episode adapter projects nonterminal/terminal failure for collection, without another local retry loop. |
+| Agent result | `agent_outcome_policy` on `single_agent_turn` | `verify`, `retry`, `fail`; existing timeout evidence and saved-output guards still apply. |
+| Judge request | `judge_call_outcome_policy` on the Resources Server, or `call_judge(outcome_policy=...)` | `retry`, `fail`; bounded judge-helper attempts after errors reach it. The HTTP client retains its existing transport retry allowance. |
+| Exhausted judge verification | `judge_failure_outcome_policy` on the Resources Server | `verify` retains the answer for supported deferred reverification; `fail` stops ungraded. Both retain the failure report. |
+| Saved-run recovery | `driver.benchmarks.<name>.resumable.recovery_outcome_policy` | `retry`, `verify`, `fail`, subject to saved-answer and Store guards; no new scoring decisions. |
+
+The agent-result config does not accept `count_as_zero`. For confirmed model-response
+timeouts, an Environment Server without its own explicit timeout/default rule retains
+the agent's legacy `outcome_policy` / `final_on_model_timeout` setting; that adapter
+can supply a counted-zero decision. Ordinary incomplete output still follows its
+existing verification path.
+
+For example, merge this into the benchmark's Gym YAML, using its existing server
+instance names (`environment`, `resources` here):
+
+```yaml
+environment:
+  environment_servers:
+    single_agent_turn:
+      dependency_outcome_policy:
+        by_status_code: {503: fail}
+      agent_outcome_policy:
+        by_failure_kind: {model_context_limit: verify}
+resources:
+  resources_servers:
+    my_resources_server:
+      judge_call_outcome_policy:
+        by_status_code: {429: fail}
+      judge_failure_outcome_policy:
+        by_failure_kind: {judge_failed: fail}
+```
+
+The judge request policy stops helper retries when an error reaches that boundary.
+It does not disable the HTTP client's separate transport retry allowance. The final judge
+policy independently stops deferred reverification. Change both when that is the
+intended behavior. Defaults remain in the respective config classes; adapters
+should reuse them rather than infer policy from labels or exception strings.
+
+Judge-provider quota and credential stops retain their specific failure kinds and
+use the configured judge and recovery policies. A named future quota reset delays
+otherwise permitted re-grading; an explicit `fail` stays a policy stop, not a wait
+for that reset.
+
+Recovery config belongs in the submit YAML, not a server config:
+
+```yaml
+driver:
+  benchmarks:
+    my_benchmark:
+      resumable:
+        max_retries: 3
+        recovery_outcome_policy:
+          by_failure_kind: {judge_unparseable: fail}
+          by_status_code: {429: retry}
+          default_action: retry
+          saved_answer_default_action: verify
+```
+
+`default_action` is the episode-recovery fallback. `saved_answer_default_action`
+is the fallback for eligible reverification of a retained answer (`verify` or
+`fail`); its default preserves reverification. Status/kind/class rules precede
+both fallbacks. A matching `retry` rule in a saved-answer-only context is
+unsupported and stops recovery; it does not regenerate the answer or turn into
+`verify`. Recovery consumes a saved final `fail` or counted-zero decision instead
+of overriding it with current producer defaults. Automatic and judge-failed-only
+reverification skip final failures; explicit general reverification remains a
+separate operator action.
+
+Infrastructure-faulted agent timeouts retain their existing recovery-derived
+classification, separate from clean `agent_timeout` rules. Configure their action
+through the `evaluation` class or recovery fallback. The derived
+`agent_timeout_infrastructure` label is diagnostic recovery evidence, not a new
+producer kind to register or put in `by_failure_kind`.
+
+## Recording and checks
+
+Record each failed attempt before retry (`observe_failure`) so successful
+responses retain recovered events. Preserve IDs through forwarding. Collection
+persists the reports, causes, retained answer and applied decision, where present;
+it does not rerun the producer policy. The existing result fields
+`failure_outcome_action` and `failure_outcome_attribution` carry applied action and
+class. Episode `terminal` is the retry/fail projection, not a substitute for class.
+A reward of zero alone does not establish an explicit counted-zero decision.
+
+For a new boundary, test a configured override, exhausted budget, unsafe replay,
+recovered failure followed by success, and save/reload of the final decision.
+Do not derive a new failure kind from terminality, change an event's stage when
+forwarding, or use completion flags to undo a counted-zero decision.

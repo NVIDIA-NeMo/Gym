@@ -717,3 +717,9 @@ If adding a training environment (not just a benchmark), additionally run traini
 ## Token ID Propagation (Multi-Turn Training)
 
 During training, model responses include `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs` on response messages. When constructing multi-turn input for the next model call, propagate these fields from the previous model response. This is required for RL training to work correctly.
+
+## Shared failure actions
+
+Use the [outcome-policy guide](../../../../fern/versions/latest/pages/observability/outcome-policies.mdx)
+for Python and YAML examples. Do not copy kind/status retry tables into a benchmark:
+reuse its Environment Server and Resources Server policy fields, with supported actions and executor guards.
