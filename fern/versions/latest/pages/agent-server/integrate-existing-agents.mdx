@@ -20,13 +20,14 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | --- | --- | --- | --- | --- | --- | --- |
 | BrowseComp (`browsecomp_agent`) | Responses | Direct HTTP | Preserved from Model Server responses; sandbox path qualified for evaluation only | Not declared | Not declared | Only when the task runs as root: a task user is refused |
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared | Yes |
-| Pi (`pi_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
-| Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
-| Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared | With `--agent kilocode_agent/kilocode_sandboxed` and `++use_absolute_ip=true` |
+| Pi (`pi_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Declared | Declared | Yes |
+| Codex (`codex_agent`) | Responses (streaming) | MCP only | Off by default (`token_id_capture`) | Declared | Declared | Yes |
+| Kilo (`kilocode_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Declared | Not declared | With `--agent kilocode_agent/kilocode_sandboxed` and `++use_absolute_ip=true` |
 | OpenCode (`opencode_agent`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared | Yes |
-| OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Not declared | Declared | Yes |
+| OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Not declared | Declared | Yes |
 | Copilot (`copilot_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Not declared | Not validated |
 | mini-SWE (`mini_swe_agent`, `mini_swe_agent_sandboxed.yaml`) | Responses | MCP only, through a task-local CLI that its bash tool calls | Not wired up; evaluation only | Not declared | Not declared | Only when the task runs as root: a task user is refused |
+| Goose (`goose_agent`) | Chat Completions | None | Not validated; evaluation only | Not declared | Not declared | Not validated |
 
 The [visual benchmark catalog](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/opencode_multimodal_benchmarks)
 uses stock OpenCode sessions for VStar, HRBench8K, VTCBench and ZeroBench. Prompt

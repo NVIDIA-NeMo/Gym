@@ -851,6 +851,7 @@ class TestApp:
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
+        session_key_headers: list[str] | None = None,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -868,6 +869,7 @@ class TestApp:
             endpoint_failure_threshold=endpoint_failure_threshold,
             endpoint_retry_after_s=endpoint_retry_after_s,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
+            session_key_headers=session_key_headers or [],
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -1690,6 +1692,16 @@ class TestApp:
 
             assert header == capture_key
             assert capture_key in server._session_id_to_client
+
+    def test_session_key_headers_reach_every_endpoint_client(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, session_key_headers=["X-Session-Id"])
+
+        assert [client.session_key_headers for client in server._clients] == [["X-Session-Id"]]
+
+    def test_no_session_key_headers_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+
+        assert [client.session_key_headers for client in server._clients] == [[]]
 
     def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch)
@@ -7607,6 +7619,15 @@ class TestEndpointFile:
         )
         params.update(overrides)
         return VLLMModel(config=VLLMModelConfig(**params), server_client=MagicMock(spec=ServerClient))
+
+    def test_rebound_clients_keep_session_key_headers(self, tmp_path) -> None:
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1000, 1000))
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0, session_key_headers=["X-Session-Id"])
+
+        server._maybe_rebind_endpoint()
+
+        assert [client.session_key_headers for client in server._clients] == [["X-Session-Id"]]
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
