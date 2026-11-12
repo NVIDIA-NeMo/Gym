@@ -89,6 +89,7 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    TrajectoryTurn,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession, interrupted_outcome
@@ -100,6 +101,7 @@ MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 # gym_mcp.mjs names each tool `<grant>_<tool>` and allows at most 64 of these characters.
 _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,62}")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
 
 def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any], *, will_retry: bool) -> bool:
@@ -604,6 +606,92 @@ def _set_invocation_outcome(
                 record.duration_ms = duration_ms
 
 
+def _build_pi_turns(
+    events: list[tuple[float, dict[str, Any]]],
+    invocation_id: str,
+    model_ref: Optional[ModelServerRef],
+    *,
+    task_id: str,
+    rollout_id: str,
+    activation_id: Optional[int] = None,
+) -> tuple[list[TrajectoryTurn], list[ObservationGap]]:
+    """One turn per assistant reply Pi reports, each joined to its model call by the reply's response ID.
+
+    Pi reports a failed model call as an assistant reply with stop reason ``error`` before it retries; that is an
+    attempt, not a decision, so it is not a turn. Pi does not report the request it sent, so ``question`` stays unset.
+    ``step_count`` counts the tool executions that finished before the turn.
+    """
+    turns: list[TrajectoryTurn] = []
+    gaps: list[ObservationGap] = []
+    finished_tools = 0
+    for observed_at, event in events:
+        if event.get("type") == "tool_execution_end":
+            finished_tools += 1
+            continue
+        message = event.get("message")
+        if event.get("type") != "message_end" or not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.get("stopReason") == "error":
+            continue
+        answer: list[dict[str, Any]] = []
+        reasoning: list[dict[str, Any]] = []
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"]:
+                answer.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": block["text"], "annotations": []}],
+                    }
+                )
+            elif block.get("type") == "toolCall":
+                arguments = block.get("arguments")
+                answer.append(
+                    {
+                        "type": "function_call",
+                        "call_id": block.get("id"),
+                        "name": block.get("name"),
+                        "arguments": json.dumps(arguments)
+                        if isinstance(arguments, (dict, list))
+                        else str(arguments or ""),
+                    }
+                )
+            elif block.get("type") == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"]:
+                reasoning.append(
+                    {"type": "reasoning", "summary": [{"type": "summary_text", "text": block["thinking"]}]}
+                )
+        turn_no = len(turns) + 1
+        response_id = message.get("responseId")
+        model_calls = []
+        if model_ref is not None and isinstance(response_id, str) and response_id:
+            model_calls.append(ModelCallRef(model_ref=model_ref, response_id=response_id))
+        else:
+            gaps.append(
+                ObservationGap(
+                    code="turn_model_call_unavailable", invocation_id=invocation_id, detail=f"turn={turn_no}"
+                )
+            )
+        turns.append(
+            TrajectoryTurn(
+                invocation_id=invocation_id,
+                activation_id=activation_id,
+                task_id=task_id,
+                rollout_id=rollout_id,
+                turn_no=turn_no,
+                timestamp=observed_at,
+                answer=answer,
+                reasoning_content=reasoning or None,
+                step_count=finished_tools,
+                model_calls=model_calls,
+            )
+        )
+    if not turns:
+        gaps.append(ObservationGap(code="turns_unavailable", invocation_id=invocation_id))
+    return turns, gaps
+
+
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     """Return (user_message, system_message) from a responses body input list."""
     items = list(body_input)
@@ -920,6 +1008,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             agent_observations=state.observations
             or AgentObservationBundle(source="pi", gaps=[ObservationGap(code="observation_capture_failed")]),
             cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
+            trajectory=state.trajectory,
         )
 
     def _validate_request(
@@ -1347,8 +1436,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             )
         state.record_observations(observations)
         if state.is_continuation:
-            # A multi-turn environment reads each activation's own observations from its response.
-            response = response.model_copy(update={_INTERNAL_OBSERVATIONS_KEY: observations.model_dump(mode="json")})
+            response = self._with_activation_records(state, response, observations)
         if error:
             if reported_model_error:
                 # Classify a failed compaction call, not the overflow it was recovering from.
@@ -1378,11 +1466,22 @@ class PiAgent(SimpleResponsesAPIAgent):
                 if isinstance(record, AgentInvocation):
                     record.activation_id = state.activation_id
                     record.harness_session_id = state.harness_session_id
+            state.record_turns(
+                *_build_pi_turns(
+                    events,
+                    state.invocation_id,
+                    self.config.model_server,
+                    task_id=state.request.task_id.task_id,
+                    rollout_id=state.request.episode_id.capture_key,
+                    activation_id=state.activation_id,
+                )
+            )
         return observations
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
-        # Pi reports its tool calls with timing, its reasoning and its compactions, but builds no trajectory record.
-        return AgentContinuationCapabilities(observations=["timing", "harness_tool_calls", "reasoning", "compaction"])
+        return AgentContinuationCapabilities(
+            observations=["trajectory", "timing", "harness_tool_calls", "reasoning", "compaction"]
+        )
 
     def _continuation_close_timeout(self) -> float:
         return self.config.session_close_timeout_seconds
@@ -1458,7 +1557,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         observations: AgentObservationBundle,
     ) -> NeMoGymResponse:
         """The response of a continuation activation whose deadline passed before Pi started."""
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self.config.model,
@@ -1475,7 +1574,20 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "activation_id": str(state.activation_id),
                 "harness_session_id": state.harness_session_id,
             },
-        ).model_copy(update={_INTERNAL_OBSERVATIONS_KEY: observations.model_dump(mode="json")})
+        )
+        return self._with_activation_records(state, response, observations)
+
+    def _with_activation_records(
+        self, state: PiSandboxSession, response: NeMoGymResponse, observations: AgentObservationBundle
+    ) -> NeMoGymResponse:
+        """Attach the activation's own observations and turns, which multi-turn environments read per activation."""
+        assert state.activation_id is not None
+        return response.model_copy(
+            update={
+                _INTERNAL_OBSERVATIONS_KEY: observations.model_dump(mode="json"),
+                _INTERNAL_TRAJECTORY_KEY: state.activation_trajectory(state.activation_id).model_dump(mode="json"),
+            }
+        )
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)

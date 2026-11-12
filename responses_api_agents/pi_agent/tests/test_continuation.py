@@ -64,21 +64,24 @@ def root_invocations(observations: dict) -> list[tuple]:
     ]
 
 
-def test_seed_declares_the_observations_pi_supports(setup):
+def test_seed_declares_the_observations_pi_supports_including_the_default_ones(setup):
     agent, _ = setup
     with TestClient(agent.setup_webserver()) as client:
         seeded = client.post("/v1/agent_sessions", json=continuation_seed())
         assert seeded.status_code == 200, seeded.text
         assert seeded.json()["capabilities"]["mode"] == "resume_harness_session"
         assert set(seeded.json()["capabilities"]["observations"]) == {
+            "trajectory",
             "timing",
             "harness_tool_calls",
             "reasoning",
             "compaction",
         }
-        # Pi builds no trajectory record, so a seed that requires one is refused before any setup.
-        refused = client.post("/v1/agent_sessions", json=continuation_seed(observations=("trajectory",)))
-        assert refused.status_code == 422
+    # Environment servers such as SWE-Together and Harbor require the default observations.
+    defaults = seed(session_id="pi-defaults").model_copy(update={"continuation": AgentContinuationRequirements()})
+    with TestClient(agent.setup_webserver()) as client:
+        accepted = client.post("/v1/agent_sessions", json=defaults.model_dump(mode="json"))
+        assert accepted.status_code == 200, accepted.text
 
 
 def test_later_activation_resumes_the_saved_conversation_with_its_own_images(setup):
@@ -268,6 +271,107 @@ def test_each_activation_spends_only_its_own_timeout(setup):
     assert all(29 < limit <= 30 for limit in limits), limits
 
 
+def recorded(*events: dict) -> str:
+    return "\n".join(json.dumps([float(i), event]) for i, event in enumerate(events))
+
+
+def reply(content: list[dict], *, response_id: str | None, stop_reason: str = "stop") -> dict:
+    message = {"role": "assistant", "content": content, "stopReason": stop_reason}
+    if response_id is not None:
+        message["responseId"] = response_id
+    return {"type": "message_end", "message": message}
+
+
+def finished(stop_reason: str = "stop") -> dict:
+    return {"type": "agent_end", "messages": [{"role": "assistant", "stopReason": stop_reason}]}
+
+
+def test_close_reports_every_activation_turn_joined_to_its_model_call(setup):
+    agent, sandbox = setup
+    tool_call = {"type": "toolCall", "id": "tool-1", "name": "bash", "arguments": {"command": "ls"}}
+    activations = [
+        recorded(
+            # A failed model call that Pi retries is an attempt, not a turn.
+            reply([], response_id="failed-call", stop_reason="error"),
+            reply(
+                [{"type": "thinking", "thinking": "List files"}, tool_call],
+                response_id="call-1",
+                stop_reason="toolUse",
+            ),
+            {"type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "bash"},
+            {"type": "tool_execution_end", "toolCallId": "tool-1", "toolName": "bash", "isError": False},
+            reply([{"type": "text", "text": "Two files"}], response_id="call-2"),
+            finished(),
+        ),
+        recorded(reply([{"type": "text", "text": "Done"}], response_id=None), finished()),
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=continuation_seed()).json()["agent_session_id"]
+        responses = []
+        for index, events in enumerate(activations, start=1):
+            sandbox.events = events
+            responses.append(activate(client, index, {"input": f"turn {index}"}))
+            assert responses[-1].status_code == 200, responses[-1].text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+
+    assert closed.status_code == 200, closed.text
+    trajectory = closed.json()["trajectory"]
+    # Each activation's response carries that activation's turns; close carries them all.
+    per_activation = [response.json()["_ng_trajectory"] for response in responses]
+    assert [turn for record in per_activation for turn in record["turns"]] == trajectory["turns"]
+    assert [len(record["turns"]) for record in per_activation] == [2, 1]
+    assert (trajectory["task_id"], trajectory["rollout_id"]) == ("task", "pi-smoke-a2")
+    first, second = f"{session_id}:activation-1", f"{session_id}:activation-2"
+    turns = trajectory["turns"]
+    # Turns are numbered within each activation's invocation, the identity its model calls carry.
+    assert [(t["invocation_id"], t["activation_id"], t["turn_no"], t["step_count"]) for t in turns] == [
+        (first, 1, 1, 0),
+        (first, 1, 2, 1),
+        (second, 2, 1, 0),
+    ]
+    assert turns[0]["answer"] == [
+        {"type": "function_call", "call_id": "tool-1", "name": "bash", "arguments": json.dumps({"command": "ls"})}
+    ]
+    assert turns[0]["reasoning_content"] == [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "List files"}]}
+    ]
+    assert turns[1]["answer"][0]["content"][0]["text"] == "Two files"
+    model_ref = {"type": "responses_api_models", "name": "policy"}
+    assert [t["model_calls"] for t in turns] == [
+        [{"model_call_id": None, "model_ref": model_ref, "response_id": "call-1"}],
+        [{"model_call_id": None, "model_ref": model_ref, "response_id": "call-2"}],
+        [],
+    ]
+    # A reply with no response ID cannot be joined to its model call, and says so.
+    assert [(g["code"], g["invocation_id"], g.get("detail")) for g in trajectory["gaps"]] == [
+        ("turn_model_call_unavailable", second, "turn=1")
+    ]
+
+
+async def test_activation_that_never_ran_is_reported_without_turns(setup):
+    agent, sandbox = setup
+    execute = sandbox.execute
+
+    async def failed_preparation(command, **kwargs):
+        if command.startswith("mkdir -p -- ") and "/activation-2/" in command:
+            raise RuntimeError("sandbox lost")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = failed_preparation
+    session = {}
+    await agent.seed_agent_session(http_request(session), AgentSeedSessionRequest.model_validate(continuation_seed()))
+    await agent.responses(http_request(session, 1), NeMoGymResponseCreateParamsNonStreaming(input="one"))
+    with pytest.raises(RuntimeError):
+        await agent.responses(http_request(session, 2), NeMoGymResponseCreateParamsNonStreaming(input="two"))
+    closed = await agent.close_agent_session(
+        http_request(session), AgentCloseSessionRequest(**close_body("pi-session"))
+    )
+    assert {turn.activation_id for turn in closed.trajectory.turns} == {1}
+    assert [(gap.code, gap.invocation_id) for gap in closed.trajectory.gaps] == [
+        ("turns_unavailable", "pi-session:activation-2")
+    ]
+
+
 def http_request(session: dict, index: int | None = None) -> Request:
     headers = [(AGENT_ACTIVATION_HEADER.encode(), str(index).encode())] if index is not None else []
     return Request(
@@ -311,6 +415,8 @@ async def unstarted_activation_ends_incomplete_and_session_continues(agent, sand
     assert (response.status, response.output) == ("incomplete", [])
     assert response.metadata["activation_id"] == "2"
     assert root_invocations(response.model_dump()["_ng_agent_observations"]) == [(2, "incomplete", "timeout", True)]
+    trajectory = response.model_dump()["_ng_trajectory"]
+    assert (trajectory["turns"], [gap["code"] for gap in trajectory["gaps"]]) == ([], ["turns_unavailable"])
     assert sandbox.launch.await_count == 1
 
 
@@ -380,7 +486,10 @@ def test_one_activation_session_keeps_its_directory_and_single_activation(setup)
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         assert client.post(ROUTE, json={"input": "one"}).status_code == 200
         assert client.post(ROUTE, json={"input": "two"}).status_code == 409
-        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    # Only a continuation session reports a trajectory, so one-activation rollouts are collected as before.
+    assert "trajectory" not in closed.json()
     payload = staged(sandbox)
     assert "activation-" not in sandbox.directory
     # A session that never resumes saves no conversation.
@@ -438,11 +547,16 @@ async def test_pinned_pi_resumes_the_saved_conversation_with_tool_results_and_im
                 agent.responses(http_request(session, 2), NeMoGymResponseCreateParamsNonStreaming(input="Again.")), 30
             )
         finally:
-            await agent.close_agent_session(
+            closed = await agent.close_agent_session(
                 http_request(session), AgentCloseSessionRequest(**close_body("pi-session"))
             )
 
     assert one.status == two.status == "completed"
+    # Pi's own events give one turn per model reply, each joined to the response the model returned.
+    turns = [(t.activation_id, t.turn_no, t.step_count, t.model_calls[0].response_id) for t in closed.trajectory.turns]
+    assert turns == [(1, 1, 0, "chat-1"), (1, 2, 1, "chat-2"), (2, 1, 0, "chat-3")]
+    assert [item["type"] for item in closed.trajectory.turns[0].answer] == ["function_call"]
+    assert closed.trajectory.gaps == []
     assert [item.content[0].text for item in two.output if item.type == "message"] == ["Reply 3."]
     # The second activation's request carries the whole first turn: the image, the tool call and its result.
     history = requests[2]["messages"]

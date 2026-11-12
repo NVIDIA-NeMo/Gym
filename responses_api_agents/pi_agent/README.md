@@ -250,9 +250,9 @@ changed requests are rejected. A disconnected HTTP caller does not cancel Pi; se
 A seed with `continuation` opens a session that takes later user turns. Pi saves the conversation under
 the session directory with `--session-dir` and a session ID fixed at seed, and each activation resumes it,
 so the model sees earlier turns, tool calls, tool results and images. Pi stores each image's data in the
-saved conversation, so a later turn does not need an earlier turn's staged file. A seed that requires
-`trajectory` observations is refused: Pi reports tool calls with timing, reasoning and compactions, but
-builds no trajectory record.
+saved conversation, so a later turn does not need an earlier turn's staged file. The session reports
+every continuation observation: its trajectory, timing, tool calls, reasoning and compactions. Environment
+servers that require the default observations, such as SWE-Together and Harbor, can therefore use it.
 
 - Each activation sends the `x-ng-agent-activation` header with its 1-based index. The base agent joins
   and replays a retry of the same index with the same input, and rejects a changed input, a skipped index,
@@ -269,13 +269,20 @@ builds no trajectory record.
   session can still be continued. Its model calls send `x-session-id`
   `<agent session ID>:activation-<index>`, the invocation ID its observations use, so the model server's
   capture correlates each call with its activation. Responses carry `activation_id` and
-  `harness_session_id` metadata, and the activation's own observations in `_ng_agent_observations`.
+  `harness_session_id` metadata, the activation's own observations in `_ng_agent_observations`, and its
+  own turns in `_ng_trajectory`.
 - Each activation's invocation reports its status, its duration, and an error type: `timeout` or
   `cancelled` for a run stopped at its deadline or by close, `context_limit` for a run that reached the
   model's context limit, `provider_error` for a model call error Pi reported, and `server_error` for any
   other failure.
 - Close stops a running activation and returns every activation's observations in order, with
-  `cleanup_confirmed`.
+  `cleanup_confirmed`, and a trajectory with one turn per assistant reply Pi reported. A turn holds the
+  reply's text, tool calls and reasoning, and refers to the model call behind it by the reply's response ID,
+  so rollout collection joins it to the captured call. Turns are numbered within each activation's invocation;
+  `step_count` counts the tool executions that finished before the turn. A failed model call that Pi retries
+  is not a turn. Pi does not report the request it sent, so a turn has no `question`. An activation that
+  stopped before Pi ran has no turns and a `turns_unavailable` gap. A one-activation session returns no
+  trajectory, so its rollouts are collected as before.
 - A turn stopped at its deadline can still be continued: when a stopped run leaves a tool call without
   a result, Pi 0.80.2 adds a "No result provided" result before the next turn.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
