@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import logging
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -127,8 +130,59 @@ def test_a_restriction_is_logged_with_its_mode_and_hosts(caplog: pytest.LogCaptu
             tool_urls=TOOL_URLS,
         )
     [record] = [r for r in caplog.records if r.name == "nemo_gym.agents.utils.sandbox_network"]
+    # Where INFO reaches a handler, the record stays at INFO.
+    assert record.levelno == logging.INFO
     assert "network_access=model_and_tools" in record.getMessage()
     assert "model.example, search.example, tools.example" in record.getMessage()
+
+
+# An agent server process as Gym starts it: the supervisor injects the config, which configures logging only with
+# `verbose`, and uvicorn then configures its own loggers.
+AGENT_PROCESS = """
+import logging.config
+import sys
+from types import SimpleNamespace
+
+import uvicorn.config
+
+from nemo_gym.agents.utils.sandbox_network import restrict_sandbox_network
+from nemo_gym.config.global_config import get_global_config_dict
+from nemo_gym.sandbox.providers.base import SandboxSpec
+
+get_global_config_dict()
+logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+restrict_sandbox_network(
+    SandboxSpec(image="task"),
+    network_access=sys.argv[1],
+    provider=SimpleNamespace(name="opensandbox"),
+    model_base_url="http://model.example:8000/v1?key=model-secret",
+    tool_urls=["https://user:tool-secret@tools.example/mcp/path?q=1"],
+)
+"""
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+@pytest.mark.parametrize(
+    ("network_access", "hosts"),
+    [("model_only", "model.example"), ("model_and_tools", "model.example, tools.example")],
+)
+def test_an_agent_server_process_prints_one_restriction_record(network_access: str, hosts: str, verbose: bool) -> None:
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("NEMO_GYM_OTEL_", "NEMO_LENS_"))}
+    env["NEMO_GYM_CONFIG_DICT"] = f"{{verbose: {str(verbose).lower()}}}"
+    result = subprocess.run(
+        [sys.executable, "-c", AGENT_PROCESS, network_access],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=True,
+    )
+    [line] = [line for line in result.stderr.splitlines() if "Restricting a new" in line]
+    assert line.endswith(
+        f"Restricting a new opensandbox sandbox to network_access={network_access}: egress allowed only to {hosts}"
+    )
+    for leaked in ("secret", "user", "/mcp", "/v1", "q=1", "8000"):
+        assert leaked not in line
 
 
 def test_inherit_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
@@ -136,4 +190,13 @@ def test_inherit_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
         restrict_sandbox_network(
             SandboxSpec(image="task"), network_access="inherit", provider=OPENSANDBOX, model_base_url=MODEL_URL
         )
+    assert not [r for r in caplog.records if r.name == "nemo_gym.agents.utils.sandbox_network"]
+
+
+def test_a_rejected_restriction_logs_no_restriction(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="nemo_gym.agents.utils.sandbox_network"):
+        with pytest.raises(AgentSeedRejectedError):
+            restrict_sandbox_network(
+                SandboxSpec(image="task"), network_access="model_only", provider=DOCKER, model_base_url=MODEL_URL
+            )
     assert not [r for r in caplog.records if r.name == "nemo_gym.agents.utils.sandbox_network"]
