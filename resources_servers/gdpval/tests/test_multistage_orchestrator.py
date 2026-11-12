@@ -47,7 +47,6 @@ from nemo_gym.rollouts import (
     SharedRolloutCollectionConfig,
     is_terminal_failure,
 )
-from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline
 from nemo_gym.server_runtime import lost_session_verification
 from nemo_gym.utils import aggregation_sources_path_for, failures_path_for
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
@@ -4826,8 +4825,8 @@ async def _stirrup_wall_time_verify_result(row: Mapping[str, Any], reference_roo
     The response is the one Stirrup builds from the runner's partial report: ``incomplete``, the tool turns completed
     so far, and ``stop_reason: wall_time``. The verify result comes from the server's own wall-time branch.
     """
-    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.client import ServerClient
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
     from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
     response = NeMoGymResponse(
