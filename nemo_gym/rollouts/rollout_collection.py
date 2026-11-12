@@ -4802,7 +4802,10 @@ executions → not run again (left to recovery)
             rejection = config.completion_rejection(
                 expected=completion["expected"],
                 results=persisted_results,
-                completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
+                completed=completion["successful"]
+                - completion.get("masked_retryable", 0)
+                - completion.get("masked_exhausted", 0)
+                + completion["final_zeros"],
                 intentionally_omitted=completion["intentionally_omitted"],
                 retryable=completion["retryable"] > 0,
                 made_progress=store.progress_outcomes_recorded > 0,
@@ -6438,6 +6441,7 @@ class RolloutAggregationHelper(BaseModel):
             "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
             if inventory_known
             else None,
+            "masked_exhausted": sum(c.get("masked_exhausted", 0) for c in components) if inventory_known else None,
             "max_rollout_attempts": components[0]["max_rollout_attempts"]
             if components and len({c["max_rollout_attempts"] for c in components}) == 1
             else None,

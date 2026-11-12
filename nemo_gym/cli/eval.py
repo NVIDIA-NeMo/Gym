@@ -867,6 +867,16 @@ def _collect_and_rejudge(
     _rejudge_saved_judge_failures(global_config_dict, output, config)
 
 
+def _settled_count(coverage: dict) -> int:
+    """The rollouts the Store coverage counts as settled: infrastructure-masked results, retryable or exhausted, are not."""
+    return (
+        coverage["successful"]
+        - coverage.get("masked_retryable", 0)
+        - coverage.get("masked_exhausted", 0)
+        + coverage["final_zeros"]
+    )
+
+
 def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
     """The rejection of a strict run as its settled state decides it, after the saved-answer pass.
 
@@ -890,7 +900,7 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
         else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
     )
     return IncompleteEvaluationError(
-        f"{coverage['successful'] - coverage.get('masked_retryable', 0) + coverage['final_zeros']}/{coverage['expected']} "
+        f"{_settled_count(coverage)}/{coverage['expected']} "
         "samples completed after the "
         f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance}",
         retryable=retryable,
@@ -912,7 +922,7 @@ def _saved_run_complete(output: Path) -> bool:
         coverage = store.coverage()
     except Exception:  # the original rejection stands
         return False
-    completed = coverage["successful"] - coverage.get("masked_retryable", 0) + coverage["final_zeros"]
+    completed = _settled_count(coverage)
     return completed == coverage["expected"] or has_only_intentional_gaps(
         expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
     )

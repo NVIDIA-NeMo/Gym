@@ -117,13 +117,25 @@ def test_a_masked_infrastructure_result_at_the_attempt_cap_is_exhausted_and_not_
     store = RolloutStore.read(output, import_legacy=False)
     assert store.pending() == []
     coverage = store.coverage()
-    assert (coverage["failure_budget_exhausted"], coverage["retryable"], coverage["complete"]) == (1, 0, True)
+    # Never measured: a final failure that leaves the run incomplete, never a masked success.
+    assert (coverage["failure_budget_exhausted"], coverage["retryable"]) == (1, 0)
+    assert (coverage["masked_exhausted"], coverage["masked_retryable"], coverage["open"]) == (1, 0, 0)
+    assert (coverage["measured"], coverage["complete"], coverage["completion_fraction"]) == (1, False, 0.5)
     _, decision = _decide(tmp_path, allocation_cut=False)
     assert decision.action.value == "stop"
     assert decision.counts == {"scored": 1, "exhausted": 1}
     item = _evidence(decision, (1, 0))
     assert (item.failure_kind, item.attempts, item.max_attempts) == ("session_lost", 3, 3)
     assert "used every attempt since the last resubmit" in decision.reason
+
+
+def test_an_attempt_extension_reopens_an_exhausted_masked_infrastructure_result(tmp_path):
+    output, _ = _run(tmp_path, [[_masked("session_lost")] * 3])
+    (output.parent / "rollouts_attempt_extension").write_text("1\n")
+    store = RolloutStore.read(output, import_legacy=False)
+    coverage = store.coverage()
+    assert (coverage["masked_exhausted"], coverage["masked_retryable"], coverage["complete"]) == (0, 1, False)
+    assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in store.pending()] == [(1, 3)]
 
 
 @pytest.mark.parametrize("kind", [None, "agent_timeout", "model_context_limit", "env:own_kind", "not_registered"])
