@@ -21,7 +21,14 @@ from environment_servers.single_agent_turn.app import (
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    MaterializedTask,
+    ModelCallSampling,
+    NeMoGymResponse,
+    TaskId,
+    encode_model_sampling,
+)
 from nemo_gym.server_runtime import SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
@@ -212,6 +219,28 @@ def test_legacy_adapter_preserves_task_identity_and_data():
         "verifier_metadata": {"answer": "expected"},
     }
     assert request.episode_id.attempt == 1
+
+
+def test_a_rows_sampling_values_reach_the_agents_activation_url() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    sampling = {"temperature": 0.6, "top_p": 0.95, "max_output_tokens": 64}
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={
+            "task_id": "task",
+            "_ng_rollout_id": "trained",
+            "_ng_model_sampling": sampling,
+            "responses_create_params": {"input": "task"},
+        },
+    )
+
+    assert response.status_code == 200
+    segment = encode_model_sampling(ModelCallSampling(**sampling))
+    assert client.calls[2][1] == f"/ng-rollout/trained/ng-sampling/{segment}/v1/responses"
+    # The task the agent and the Resources Server see is unchanged.
+    assert "_ng_model_sampling" not in orjson.dumps(client.calls[0][2]["json"]).decode()
 
 
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
