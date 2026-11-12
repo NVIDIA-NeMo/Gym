@@ -152,8 +152,13 @@ machine, boxd stops the command's process group at the deadline. In a container,
 the `docker exec` client, and the process inside the container ends when the sandbox stops, as with
 the `docker` provider.
 
-Machine creation and commands are never retried, because either may already have taken effect.
-Status, delete, and file calls retry transport failures `operations.retries` times.
+Machine creation and commands are never retried, because either may already have taken effect. A
+command whose stream ends without an exit status raises `provider_command_outcome_unknown`. Delete,
+connect, and file calls retry transport failures `operations.retries` times.
+
+Commands with a deadline over 15 minutes, or none, write a NUL byte to stderr every 5 minutes, so
+idle-connection timeouts between the client and the machine never end the stream of a command that
+prints nothing for a long time. The provider removes NUL bytes from those commands' stderr.
 
 ## Pause and Resume
 
@@ -173,6 +178,7 @@ Allocation, readiness, lifecycle, and transport failures raise `NgFailureEvent` 
 | boxd could not be reached | `provider_unavailable` |
 | The machine did not answer a command within the ready deadline | `provider_create_timeout` |
 | `docker pull`, `docker run` or a file copy exited nonzero | `provider_setup_failed` |
+| A command's stream ended without an exit status | `provider_command_outcome_unknown` |
 | The container did not answer the readiness probe | `provider_not_ready` |
 
 A failed create deletes the machine it made before raising. Command exits, including nonzero exits,
