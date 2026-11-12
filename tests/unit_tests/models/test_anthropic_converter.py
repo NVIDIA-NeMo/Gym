@@ -22,9 +22,10 @@ two directions against drift.
 
 import json
 
+import pytest
 from anthropic.types import Message
 
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
@@ -319,6 +320,37 @@ class TestResponsesToAnthropicResponse:
         assert tool_use["input"] == {"a": 1}
         assert out["stop_reason"] == "tool_use"
         assert out["usage"] == {"input_tokens": 5, "output_tokens": 7}
+
+    def test_token_metadata_is_dropped_from_the_anthropic_response(self) -> None:
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "step", "signature": "sig"},
+                    {"type": "text", "text": "Hello"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"a": 1}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 5, "output_tokens": 7},
+            }
+        )
+        tokens = {
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3],
+            "generation_log_probs": [-0.5],
+            "routed_experts": [[[0]]],
+        }
+        # Served responses carry token metadata on training variants of their output items.
+        training_resp = NeMoGymResponse.model_validate(
+            {**resp.model_dump(), "output": [{**item.model_dump(), **tokens} for item in resp.output]}
+        )
+        assert all(item.prompt_token_ids == [1, 2] for item in training_resp.output)
+
+        out = conv.responses_to_anthropic_response(training_resp, model="m")
+
+        assert out == conv.responses_to_anthropic_response(resp, model="m")
+        assert not any(field in json.dumps(out) for field in tokens)
+        # The mapping ignores token fields either way; the item dumps skip them so the lists are not copied.
+        assert not any(field in item for item in conv._iter_output_dicts(training_resp) for field in tokens)
 
     def test_reasoning_becomes_thinking_block(self) -> None:
         conv, resp = self._response_from_anthropic(
@@ -624,3 +656,15 @@ class TestSharedHelperBranches:
         anthropic_body: dict = {}
         conv._copy_tool_choice({"tool_choice": "required"}, anthropic_body)
         assert anthropic_body["tool_choice"] == {"type": "any"}
+
+
+@pytest.mark.parametrize("count", [None, 0, 7])
+def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | None) -> None:
+    usage = {"input_tokens": 11, "output_tokens": 3}
+    if count is not None:
+        usage["cache_creation_input_tokens"] = count
+
+    result = _converter()._usage_to_responses_usage(usage)
+
+    assert result.input_tokens_details.cache_write_tokens == count
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11, 3, 14)

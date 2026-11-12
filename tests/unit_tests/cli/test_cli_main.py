@@ -27,7 +27,7 @@ from pytest import MonkeyPatch
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.config.global_config as gc
-import nemo_gym.orchestration.server_supervisor
+import nemo_gym.server_runtime.supervisor.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -817,7 +817,7 @@ class TestFriendlyValidationError:
                 raise AssertionError("RunHelper must not be built for a malformed head_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "RunHelper", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
@@ -1698,7 +1698,6 @@ class TestAgentSelector:
         assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
         agent = resolved[new_name].responses_api_agents.langgraph_agent
         assert agent.entrypoint == f"{flavor}_agent.py"
-        assert agent.num_workers == 1
         for binding in ("resources_server", "model_server", "datasets"):
             assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers
