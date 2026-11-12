@@ -698,9 +698,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ValueError(
                     "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
                 )
-        self._s3_references = S3ReferenceCache(
-            Path(self.config.reference_cache_dir or Path(tempfile.gettempdir()) / "gdpval-reference-cache")
+        reference_cache_dir = Path(
+            self.config.reference_cache_dir or Path(tempfile.gettempdir()) / "gdpval-reference-cache"
         )
+        self._s3_references = S3ReferenceCache(reference_cache_dir)
         if self.config.libreoffice_command is not None:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
@@ -711,7 +712,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
             # /verify also converts reference deliverables in place.
             for ref_id, ref in self._references.items():
                 if is_s3_uri(ref.deliverables_dir):
-                    # Downloaded per task at /verify into the cache, which the server owns.
+                    # Downloaded per task at /verify into the cache, which the server owns and converts in.
+                    probe_dirs.append(reference_cache_dir)
                     continue
                 ref_dir = Path(ref.deliverables_dir)
                 if not ref_dir.is_dir():
