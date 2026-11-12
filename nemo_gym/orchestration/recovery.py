@@ -515,6 +515,12 @@ class RecoveryDecision(BaseModel):
     # Which chain accounting is unknown when this STOP is the unknown-budget or unknown-walltime stop: "budget" or
     # "walltime". The reason is display text that later notes extend; an operator continuation keys on this field.
     accounting_unknown: Literal["budget", "walltime"] | None = Field(default=None, exclude=True)
+    # The guard that refuses (or, for an inspection, would refuse) an operator continuation of unknown accounting:
+    # the scheduler did not answer, a job of the run is pending or running, a follow-up claim names no job, the
+    # accounting files changed while read, or the run configures no infra-retry cap. The operator verdict keys on it.
+    continuation_refused: (
+        Literal["scheduler_unreachable", "job_live", "claim_unidentified", "counters_changed", "no_retry_cap"] | None
+    ) = Field(default=None, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None
@@ -1459,10 +1465,7 @@ def decide_recovery(
                     "no rerun in the Store, so nobody owns them"
                 )
             if reserved:
-                parts.append(
-                    f"{reserved} reservation(s) have no saved outcome and the allocation that made them is not known "
-                    "to have ended, so whether they ran is unknown"
-                )
+                parts.append(f"{reserved} reservation(s) have no saved outcome and {_RESERVATIONS_UNKNOWN}")
             return decision(
                 RecoveryAction.STOP,
                 "; ".join(parts)
@@ -1543,19 +1546,15 @@ def decide_recovery(
                     )
                 )
                 + f"; {EXTEND_ATTEMPTS_HINT}"
-                # More attempts alone would stop again on a spent budget of the chain, so name every one now.
-                + (
-                    f"; a resume of them would also stop, as {' and '.join(spent)}: raise every spent budget in "
-                    "one call"
-                    if (spent := _spent_chain_budgets(budget))
-                    else ""
-                ),
+                # More attempts alone would stop again on the chain's budget, so name every blocker now.
+                + _chain_blockers_note(budget),
             )
         if counts.get(IdentityState.MASKED):
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
-                f"resume would run nothing; the run is not complete; {populations}",
+                f"resume would run nothing; the run is not complete; {populations}"
+                + (_chain_blockers_note(budget) if masked_without_artifact else ""),
             )
         if counts.get(IdentityState.SKIPPED):
             reasons = sorted({item.reason for item in evidence if item.state == IdentityState.SKIPPED and item.reason})
@@ -1593,6 +1592,12 @@ def decide_recovery(
                 "; less than a minute is left): raise both in one call"
                 if walltime_spent
                 else ""
+            )
+            # A raised retry cap would stop next on the walltime nobody can read, so name it now.
+            + (
+                f", and {UNKNOWN_WALLTIME_REASON}: raise the retries and give an explicit budget in one call"
+                if budget.walltime_capped and budget.walltime_used_s is None
+                else ""
             ),
         )
     if budget.walltime_capped:
@@ -1617,6 +1622,7 @@ def decide_recovery(
 
 
 _INFRA_BUDGET_USED_PREFIX = "the stored infra-retry budget is used"
+_RESERVATIONS_UNKNOWN = "the allocation that made them is not known to have ended, so whether they ran is unknown"
 _ATTEMPTS_USED_TOKEN = "used every attempt since the last resubmit"
 _WALLTIME_USED_TOKEN = "the stored walltime budget is used"
 # A refused or stopped recovery records none of the extensions it asked for, so the next one must ask again.
@@ -1628,24 +1634,24 @@ _EXTEND_RETRIES_SCOPE = (
 )
 
 
-def _spent_chain_budgets(budget: RecoveryBudget) -> list[str]:
-    """The stored infra-retry and walltime budgets a resume would stop on, as their stop texts."""
-    spent = []
-    if (
-        budget.max_infra_retries is not None
-        and budget.infra_retries_used is not None
-        and budget.infra_retries_used >= budget.max_infra_retries
-    ):
-        spent.append(f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})")
-    # A chain stops once less than a minute of its walltime remains.
-    if (
-        budget.walltime_capped
-        and budget.walltime_used_s is not None
-        and budget.max_walltime_s is not None
-        and budget.max_walltime_s - budget.walltime_used_s < 60
-    ):
-        spent.append(f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)")
-    return spent
+def _chain_blockers_note(budget: RecoveryBudget) -> str:
+    """For a stop on the identities' own states (exhausted, masked): what in the chain's budget would stop the resume
+    an extension or a rerun allows, as the stop texts name it, so one call can lift every blocker; else ""."""
+    blockers = []
+    if budget.max_infra_retries is None or budget.infra_retries_used is None:
+        blockers.append(UNKNOWN_BUDGET_REASON)
+    elif budget.infra_retries_used >= budget.max_infra_retries:
+        blockers.append(f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})")
+    if budget.walltime_capped and budget.max_walltime_s is not None:
+        if budget.walltime_used_s is None:
+            if UNKNOWN_BUDGET_REASON not in blockers:
+                blockers.append(UNKNOWN_WALLTIME_REASON)
+        # A chain stops once less than a minute of its walltime remains.
+        elif budget.max_walltime_s - budget.walltime_used_s < 60:
+            blockers.append(f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)")
+    if not blockers:
+        return ""
+    return f"; a resume of them would also stop, as {' and '.join(blockers)}: lift every blocker in one call"
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
@@ -2010,16 +2016,24 @@ def _operator_continuation(
     changed.
     """
 
-    def stop(why: str) -> RecoveryDecision:
-        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}"})
+    def stop(why: str, guard: str) -> RecoveryDecision:
+        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}", "continuation_refused": guard})
 
     if collected.accounting_unknown_reason in (UNOBSERVED_CLAIM_REASON, UNREADABLE_CLAIM_REASON):
-        return stop("a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up")
+        return stop(
+            "a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up",
+            "claim_unidentified",
+        )
     states = collected.counter_states
     if states is None:
-        return stop("the chain's accounting files changed while they were read, so an operator continuation waits")
+        return stop(
+            "the chain's accounting files changed while they were read, so an operator continuation waits",
+            "counters_changed",
+        )
     if configured_retries is None:
-        return stop("the run configures no infra-retry cap, so an operator continuation has no budget to fill")
+        return stop(
+            "the run configures no infra-retry cap, so an operator continuation has no budget to fill", "no_retry_cap"
+        )
     unknown: list[str] = []
     writes: dict[str, dict[str, Any]] = {}
     if collected.infra_retry_extension_state in ("absent", "ok"):
@@ -2114,6 +2128,10 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     decision = _decide_from_collected(collected, **options).model_copy(
         update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
     )
+    if unrecorded := _unrecorded_notes(decision, options):
+        # Beside the stop they belong to, before any hint line that ends the reason.
+        first, *rest = decision.reason.split("\n", 1)
+        decision = decision.model_copy(update={"reason": "\n".join(["; ".join([first, *unrecorded]), *rest])})
     notes = [resume_drift_note(collected.resume_drift_keys)]
     blocked = failed_judge_jobs_blocking(collected.judge_jobs, collected.judge_job_acknowledgements)
     if blocked is not None and decision.action == RecoveryAction.REVERIFY:
@@ -2122,6 +2140,27 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
     notes = [note for note in notes if note]
     return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
+
+
+def _unrecorded_notes(decision: RecoveryDecision, options: Mapping[str, Any]) -> list[str]:
+    """A stop that a budget, unknown accounting or a refused extension blocks records none of the options this call
+    asked for (nothing is queued): one note per option the reason does not already name, so the next advice keeps
+    it and one call can carry them all."""
+    if decision.action != RecoveryAction.STOP or decision.operator_continuation is not None:
+        return []
+    if not _continuation_options(decision):
+        return []
+    reason, budget = decision.reason, options.get("operator_budget")
+    asked = (
+        (f"--extend-attempts {options.get('extend_attempts')}", _ATTEMPTS_USED_TOKEN, options.get("extend_attempts")),
+        (
+            f"--extend-retries {options.get('extend_retries')}",
+            _INFRA_BUDGET_USED_PREFIX,
+            options.get("extend_retries"),
+        ),
+        (f"--max-walltime {getattr(budget, 'max_walltime', '')}", _WALLTIME_USED_TOKEN, budget),
+    )
+    return [f"{flag} {_NOT_RECORDED_TOKEN}" for flag, named, value in asked if value and named not in reason]
 
 
 # The saved rows a decision reads; one that exists but cannot be read stops it.
@@ -2274,10 +2313,11 @@ def _decide_from_collected(
     )
     decision = decide_recovery(**inputs, budget=budget)
     if rerun_refused:
+        # The stop it would have lifted stays named, so the advice keeps every option the next call needs.
         return decision.model_copy(
             update={
                 "action": RecoveryAction.STOP,
-                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}",
+                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}; {decision.reason}",
             }
         )
     if decision.rerun_masked and decision.action == RecoveryAction.RESUBMIT:
@@ -2291,7 +2331,7 @@ def _decide_from_collected(
         return decision.model_copy(
             update={
                 "action": RecoveryAction.STOP,
-                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}",
+                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}; {decision.reason}",
             }
         )
     saved = _saved_attempt_cap(collected)
@@ -2337,13 +2377,18 @@ def _decide_from_collected(
                 update={
                     "action": RecoveryAction.STOP,
                     "reason": f"{decision.reason}; {why}" if decision.action == RecoveryAction.STOP else why,
+                    "continuation_refused": "scheduler_unreachable",
                 }
             )
         if decision.scheduler_live and accounting_unknown:
             job = f"continuation {live_job_name}" if live_job_name else "a job of this run"
             why = f"the chain accounting is unknown and {job} is still pending or running"
             return decision.model_copy(
-                update={"action": RecoveryAction.STOP, "reason": f"{why}, so an operator continuation is refused"}
+                update={
+                    "action": RecoveryAction.STOP,
+                    "reason": f"{why}, so an operator continuation is refused",
+                    "continuation_refused": "job_live",
+                }
             )
         if unknown:
             return _operator_continuation(
@@ -2354,6 +2399,26 @@ def _decide_from_collected(
                 configured_retries=configured,
                 max_walltime_s=max_walltime_s,
                 extend_retries=extend_retries,
+            )
+    if unknown and operator_budget is None and live_job is False:
+        # What an explicit budget alone would do: refused by a guard, or stopped on a budget it cannot fill. The
+        # advice then names the guard to clear first, or every option the continuation needs in one call.
+        alone = _operator_continuation(
+            decision,
+            collected,
+            inputs,
+            OperatorBudget(max_walltime="HH:MM:SS", reason="inspection", retries=extend_retries or 1, user="-"),
+            configured_retries=configured,
+            max_walltime_s=max_walltime_s,
+            extend_retries=extend_retries,
+        )
+        if alone.continuation_refused is not None:
+            decision = alone
+            unknown = False
+        elif alone.action == RecoveryAction.STOP:
+            still = alone.reason.split(f"; {OPERATOR_CONTINUATION} by")[0]
+            decision = decision.model_copy(
+                update={"reason": f"{decision.reason}; an explicit budget alone would still stop: {still}"}
             )
     # The cap note explains an infra-cap decision (a resubmit, or the stored budget is used); a stop for the
     # identities' own states (exhausted, terminal, masked) does not depend on it.
@@ -2378,17 +2443,6 @@ def _decide_from_collected(
             "records, as no allocation stored it"
         )
         decision = decision.model_copy(update={"reason": f"{decision.reason}; {derived}"})
-    if decision.action == RecoveryAction.STOP and _budget_extensions(decision.reason):
-        # A stop on one spent budget records no extension this call asked for: name each, so the next call keeps it.
-        asked = (
-            (f"--extend-attempts {extend_attempts}", extend_attempts and _ATTEMPTS_USED_TOKEN not in decision.reason),
-            (
-                f"--extend-retries {extend_retries}",
-                extend_retries and _INFRA_BUDGET_USED_PREFIX not in decision.reason,
-            ),
-        )
-        if notes := [f"{flag} {_NOT_RECORDED_TOKEN}" for flag, unrecorded in asked if unrecorded]:
-            decision = decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
     if unknown:
         decision = decision.model_copy(update={"reason": f"{decision.reason}\n{UNKNOWN_BUDGET_HINT}"})
     return decision
@@ -6141,21 +6195,99 @@ def _flagged_everything(
     return None
 
 
-def _budget_extensions(reason: str) -> list[str]:
-    """The explicit operator options that continue a run whose STOP names a spent operational budget, else []: each
-    spent budget, and each extension the stopped call asked for but did not record, so one call carries them all."""
-    notes = reason.split("; ")
-    options = {
-        "--extend-attempts N": _ATTEMPTS_USED_TOKEN in reason,
-        "--extend-retries N": _INFRA_BUDGET_USED_PREFIX in reason,
-        "--max-walltime HH:MM:SS --walltime-reason TEXT": _WALLTIME_USED_TOKEN in reason,
-    }
-    if not any(options.values()):
+_EXPLICIT_BUDGET = "--max-walltime HH:MM:SS --walltime-reason TEXT"
+_REPIN_IN_THE_SAME_RESUBMIT = "(--repin COMMIT --repin-reason TEXT) in the same resubmit"
+
+
+def _continuation_options(decision: RecoveryDecision) -> list[str]:
+    """The options of the one ``gym eval resubmit --recover`` call that continues a run this STOP blocks, else [].
+
+    A blocker is a spent budget (attempts, infra retries, walltime), unknown chain accounting (an explicit budget
+    fills it), a masked result without an artifact (an approved rerun), or an extension the run's pinned Gym cannot
+    apply (a repin in the same call). Every option a blocker needs is named, with each one the stopped call asked for
+    and did not record, so following the advice never drops one."""
+    reason = decision.reason
+    notes = re.split(r"; |\n", reason)
+
+    def asked(flag: str) -> bool:
+        return any(note.startswith(f"{flag} ") and note.endswith(_NOT_RECORDED_TOKEN) for note in notes)
+
+    budget_unknown = decision.accounting_unknown == "budget" or UNKNOWN_BUDGET_REASON in reason
+    unknown = budget_unknown or decision.accounting_unknown is not None or UNKNOWN_WALLTIME_REASON in reason
+    # A refused extension or rerun continues only with a repin in the same call; refused for any other reason, it
+    # cannot continue the run at all, and the refusal itself says what to do.
+    refused = re.match(rf"(--extend-attempts \d+|{RERUN_MASKED_FLAGS.split()[0]}) is refused: ", reason)
+    repin = _REPIN_IN_THE_SAME_RESUBMIT in reason
+    if refused and not repin:
         return []
-    for option in ("--extend-attempts N", "--extend-retries N"):
-        flag = option.split()[0]
-        options[option] |= any(n.startswith(f"{flag} ") and n.endswith(_NOT_RECORDED_TOKEN) for n in notes)
+    masked = decision.counts.get(IdentityState.MASKED, 0)
+    rerun = (bool(masked) and masked == len(decision.masked_without_artifact)) or bool(
+        refused and refused[1] == RERUN_MASKED_FLAGS.split()[0]
+    )
+    attempts = _ATTEMPTS_USED_TOKEN in reason or bool(refused and refused[1].startswith("--extend-attempts"))
+    retries = _INFRA_BUDGET_USED_PREFIX in reason
+    walltime = _WALLTIME_USED_TOKEN in reason or unknown
+    if not (attempts or retries or walltime or rerun or repin):
+        return []
+    options = {
+        "--extend-attempts N": attempts or asked("--extend-attempts"),
+        "--extend-retries N": retries or asked("--extend-retries"),
+        f"{RERUN_MASKED_FLAGS} TEXT": rerun,
+        _EXPLICIT_BUDGET: walltime or asked("--max-walltime"),
+        "[--extend-retries N]": budget_unknown and not (retries or asked("--extend-retries")),
+        "--repin COMMIT --repin-reason TEXT": repin,
+    }
     return [option for option, needed in options.items() if needed]
+
+
+def _continuation_text(options: list[str]) -> str:
+    """The recovery command of ``_continuation_options`` and what in it is the operator's to choose."""
+    choices = [
+        name
+        for name, flag in (("N", " N"), ("the walltime", "HH:MM:SS"), ("the commit", "COMMIT"))
+        if any(flag in option for option in options)
+    ]
+    chosen = f"; {' and '.join(choices)} {'are' if len(choices) > 1 else 'is'} yours to choose" if choices else ""
+    return f"`gym eval resubmit --recover {' '.join(options)}`{chosen}" + (
+        "; every option named goes in the same call" if sum(not o.startswith("[") for o in options) > 1 else ""
+    )
+
+
+# Stops on evidence that cannot be read yet, and how to read it, instead of a fresh submit over the saved run.
+_UNKNOWN_EVIDENCE_STOPS = (
+    ("the scheduler query failed", "wait until the scheduler answers and inspect again"),
+    ("saved rows are unreadable", "make the saved rows readable again and inspect again"),
+    ("is unreadable", "make the file the reason names readable again and inspect again"),
+    ("changed while it was read", "inspect again once nothing writes the run's files"),
+    (
+        "authoritative Store reader is unavailable",
+        "inspect again once the run's Store reader can verify its artifacts",
+    ),
+)
+# What clears each guard that refuses an operator continuation, before the continuation itself, and the state of
+# the run while it holds.
+_CONTINUATION_GUARDS = {
+    "scheduler_unreachable": (
+        "unknown",
+        "the scheduler did not answer, so a live or pending job of the run cannot be ruled out",
+        "wait until the scheduler answers and inspect again",
+    ),
+    "job_live": (
+        "unknown",
+        "a job of the run is pending or running while its chain accounting is unknown",
+        "wait for that job to end and inspect again",
+    ),
+    "claim_unidentified": (
+        "needs_action",
+        "a follow-up claim names no job, so a queued follow-up cannot be ruled out",
+        "reconcile the scheduler queue with the run's follow-up claims first (one names no job id)",
+    ),
+    "counters_changed": (
+        "unknown",
+        "the chain's accounting files changed while they were read",
+        "inspect again once no job of the run writes them",
+    ),
+}
 
 
 def _refusal_verdict(refusal: Mapping[str, Any]) -> dict[str, str]:
@@ -6165,12 +6297,14 @@ def _refusal_verdict(refusal: Mapping[str, Any]) -> dict[str, str]:
         return _verdict(
             "needs_action",
             f"the scheduler refused the resubmit: {text}; nothing was queued",
-            "correct what the scheduler text names before redispatching; the same resubmit would be refused again",
+            "correct what the scheduler text names before redispatching with every option of the refused call; the "
+            "same resubmit would be refused again",
         )
     return _verdict(
         "needs_action",
         f"the scheduler did not confirm the resubmit ({text}); whether a job was queued is unknown",
-        "reconcile the scheduler queue and the run's chain files first, then decide whether to redispatch",
+        "reconcile the scheduler queue and the run's chain files first, then decide whether to redispatch with every "
+        "option of that call",
     )
 
 
@@ -6195,7 +6329,8 @@ def operator_verdict(
         return _verdict(
             "needs_action",
             f"the walltime raise was refused before any evidence was read: {refused}",
-            "correct the walltime or the partition so the segment fits, then run the recovery again",
+            "correct the walltime or the partition so the segment fits, then run the recovery again with its other "
+            "options",
         )
     if gate_task is None or decision is None:
         return _verdict("unknown", "no evidence was collected", "inspect again once the reader runs")
@@ -6245,26 +6380,45 @@ def operator_verdict(
                 f"{waiting} of {expected} saved answers wait on the grading provider quota",
                 f"{wait} then {_RECOVER} (quota)",
             )
-        if extensions := _budget_extensions(decision.reason):
-            counted, walltime = any(e.endswith(" N") for e in extensions), "--max-walltime" in extensions[-1]
-            choices = {(True, False): "N is", (False, True): "the walltime is"}.get(
-                (counted, walltime), "N and the walltime are"
-            )
+        stopped = f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}"
+        options = _continuation_options(decision)
+        if decision.continuation_refused == "no_retry_cap":
+            # No continuation exists: the explicit budget has no cap to fill.
             return _verdict(
                 "needs_action",
-                f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason[:160]}",
-                f"your decision: continue the saved run (completed work is kept) with `gym eval resubmit --recover "
-                f"{' '.join(extensions)}`; {choices} yours to choose"
-                + ("; every spent budget named must be raised in the same call" if len(extensions) > 1 else ""),
+                f"{stopped}; the saved run cannot continue, as it configures no infra-retry cap",
+                f"set the infra-retry cap then {_SUBMIT_AGAIN}",
             )
-        if UNKNOWN_BUDGET_HINT in decision.reason:
-            # The planner's supported way on: an explicit, journaled budget that fills only the unknown counters.
+        if decision.continuation_refused is not None:
+            # A guard refuses the continuation: clear it first, and keep every option the continuation needs.
+            state, why, clear = _CONTINUATION_GUARDS[decision.continuation_refused]
+            return _verdict(
+                state,
+                f"an operator continuation is refused: {why}",
+                f"{clear}; the saved run then continues (completed work is kept) with "
+                + (_continuation_text(options) if options else f"{_RECOVER}"),
+            )
+        if options:
             return _verdict(
                 "needs_action",
-                f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}",
-                "your decision: continue the saved run (completed work is kept) with an explicit budget, "
-                "`gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT [--extend-retries N]`; "
-                "the walltime and N are yours to choose, and it is refused while a job of the run is pending or running",
+                stopped,
+                f"your decision: continue the saved run (completed work is kept) with {_continuation_text(options)}"
+                + (
+                    "; it is refused while a job of the run is pending or running"
+                    if _EXPLICIT_BUDGET in options
+                    else ""
+                ),
+            )
+        if unread := next((action for token, action in _UNKNOWN_EVIDENCE_STOPS if token in decision.reason), None):
+            # What the saved run holds is unknown for now: a fresh submit would discard it, so learn it first.
+            return _verdict("unknown", stopped, f"{unread} (completed work is kept)")
+        if _RESERVATIONS_UNKNOWN in decision.reason and "nobody owns them" not in decision.reason:
+            # Whether they ran is unknown until the allocation is known to have ended; then a recovery resumes them.
+            return _verdict(
+                "needs_action",
+                stopped,
+                "confirm with the scheduler that the allocation that made the reservations has ended, then inspect "
+                "again: a recovery resumes them once that is known (completed work is kept)",
             )
         thing = next((name for token, name in _STOP_CAUSES if token in decision.reason), None)
         if thing is None:

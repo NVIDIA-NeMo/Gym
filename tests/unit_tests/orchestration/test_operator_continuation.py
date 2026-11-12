@@ -136,9 +136,9 @@ def test_without_a_budget_unknown_accounting_stops_as_before_and_names_the_optio
     before = _accounting(job_dir)
 
     continuation = (
-        "your decision: continue the saved run (completed work is kept) with an explicit budget, "
+        "your decision: continue the saved run (completed work is kept) with "
         "`gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT [--extend-retries N]`; "
-        "the walltime and N are yours to choose, and it is refused while a job of the run is pending or running"
+        "N and the walltime are yours to choose; it is refused while a job of the run is pending or running"
     )
     for out in (inspect_recovery(*_handle(job_dir)), recover(*_handle(job_dir))):
         assert (out.decision.action.value, out.dispatched) == ("stop", None)
@@ -156,7 +156,13 @@ def test_without_a_budget_unknown_accounting_stops_as_before_and_names_the_optio
     assert (extended.decision.action.value, extended.dispatched) == ("stop", None)
     assert extended.decision.reason.startswith(UNKNOWN_BUDGET_REASON)
     assert extended.decision.reason.endswith(UNKNOWN_BUDGET_HINT)
-    assert extended.operator_verdict["action"] == continuation
+    # The retries this call asked for are not recorded, so the next call is told to ask for them again.
+    assert extended.operator_verdict["action"] == (
+        "your decision: continue the saved run (completed work is kept) with "
+        "`gym eval resubmit --recover --extend-retries N --max-walltime HH:MM:SS --walltime-reason TEXT`; "
+        "N and the walltime are yours to choose; every option named goes in the same call; it is refused while a job "
+        "of the run is pending or running"
+    )
     assert _accounting(job_dir) == before and not (slurm_bin / "env").exists()
 
 
@@ -301,3 +307,96 @@ def test_an_explicit_extension_raises_a_readable_spent_count_under_an_operator_c
     # The spent count is kept; the extension is the journaled raise.
     assert (job_dir / ".gym_infra_retries").read_text() == "3\n"
     assert (job_dir / RETRY_EXTENSION_NAME).read_text() == "1\n"
+
+
+ATTEMPT_EXTENSION = "artifacts/rollouts_attempt_extension"
+EXPLICIT_BUDGET = "--max-walltime HH:MM:SS --walltime-reason TEXT"
+
+
+def _exhausted_with_unknown_walltime(tmp_path):
+    """The walltime test run as a Store run: one scored rollout, one that used every attempt, and a capped walltime
+    whose used part is unreadable."""
+    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+
+    job_dir = _timed_run(tmp_path)
+    prepare_managed(job_dir, "exhausted", n=2)
+    (job_dir / ".gym_accumulated_walltime").write_text("unreadable\n")
+    return job_dir
+
+
+def _command(verdict) -> str:
+    return verdict["action"].split("`")[1]
+
+
+def test_spent_attempts_and_unknown_walltime_keep_both_options_through_every_stopped_recovery(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    job_dir = _exhausted_with_unknown_walltime(tmp_path)
+    before, saved = _accounting(job_dir), _saved_rows(job_dir)
+    # Inspection, and every recovery that follows a part of the advice, names both options in one call: none of
+    # these stopped calls records the extension or the budget it asked for.
+    for options in ({}, {"extend_attempts": 1}, BUDGET):
+        out = inspect_recovery(*_handle(job_dir)) if not options else recover(*_handle(job_dir), **options)
+        assert (out.decision.action.value, out.dispatched) == ("stop", None), (options, out.decision.reason)
+        command = _command(out.operator_verdict)
+        assert "--extend-attempts N" in command and EXPLICIT_BUDGET in command, (options, out.operator_verdict)
+        assert "`gym eval submit`" not in out.operator_verdict["action"]
+        assert _accounting(job_dir) == before and not (job_dir / ATTEMPT_EXTENSION).exists()
+        assert not (job_dir / OPERATOR_CONTINUATION_JOURNAL_NAME).exists()
+    # Both in one call continue the saved run and record both.
+    out = recover(*_handle(job_dir), extend_attempts=1, **BUDGET)
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert (job_dir / ATTEMPT_EXTENSION).read_text() == "1\n"
+    assert out.decision.operator_continuation is not None and (job_dir / OPERATOR_CONTINUATION_JOURNAL_NAME).exists()
+    assert _saved_rows(job_dir) == saved
+
+
+def test_spent_retries_and_unknown_walltime_keep_both_options_through_every_stopped_recovery(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _unknown_run(tmp_path, unreadable=(".gym_accumulated_walltime",))
+    (job_dir / ".gym_infra_retries").write_text("3\n")
+    before = _accounting(job_dir)
+    for options in ({}, BUDGET, {"extend_retries": 1}):
+        out = recover(*_handle(job_dir), **options)
+        assert (out.decision.action.value, out.dispatched) == ("stop", None), (options, out.decision.reason)
+        command = _command(out.operator_verdict)
+        assert "--extend-retries N" in command and EXPLICIT_BUDGET in command, (options, out.operator_verdict)
+        assert "[--extend-retries N]" not in command, (options, out.decision.reason)
+        assert _accounting(job_dir) == before
+    out = recover(*_handle(job_dir), extend_retries=1, **BUDGET)
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert out.decision.operator_continuation["budget"]["infra_retry_extension_added"] == 1
+
+
+def test_a_continuation_the_scheduler_cannot_clear_waits_and_keeps_the_options(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _unknown_run(tmp_path)
+    (slurm_bin / "squeue").write_text(
+        "#!/bin/bash\necho 'squeue: error: Unable to contact the controller' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), **BUDGET)
+
+    verdict = out.operator_verdict
+    assert out.decision.action.value == "stop" and out.dispatched is None
+    assert verdict["state"] == "unknown" and "scheduler" in verdict["reason"]
+    assert verdict["action"].startswith("wait until the scheduler answers")
+    assert EXPLICIT_BUDGET in _command(verdict) and "`gym eval submit`" not in verdict["action"]
+
+
+def test_an_unidentified_follow_up_claim_is_reconciled_before_any_continuation(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    job_dir = _unknown_run(tmp_path)
+    (job_dir / ".gym_followup_queued.101").write_text("not-a-job\n")
+    before = _accounting(job_dir)
+
+    for out in (inspect_recovery(*_handle(job_dir)), recover(*_handle(job_dir), **BUDGET)):
+        verdict = out.operator_verdict
+        assert out.decision.action.value == "stop" and out.dispatched is None
+        assert verdict["state"] == "needs_action" and "follow-up claim" in verdict["reason"]
+        assert verdict["action"].startswith("reconcile the scheduler queue with the run's follow-up claims first")
+        assert EXPLICIT_BUDGET in _command(verdict) and "`gym eval submit`" not in verdict["action"]
+    assert _accounting(job_dir) == before and not (slurm_bin / "env").exists()

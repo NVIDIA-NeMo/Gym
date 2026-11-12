@@ -14,6 +14,8 @@
 # limitations under the License.
 """The operator verdict: accept, needs_action or unknown, and an UNVERIFIED that names its cause."""
 
+import pytest
+
 from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
     IdentityEvidence,
@@ -503,3 +505,50 @@ def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
         "your decision: continue the saved run (completed work is kept) with "
         "`gym eval resubmit --recover --extend-attempts N`; N is yours to choose"
     )
+
+
+def test_reservations_without_an_outcome_wait_for_the_allocation_not_a_fresh_submit(tmp_path):
+    from nemo_gym.orchestration.recovery import decide_from_collected, select_managed_evidence
+    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+
+    prepare_managed(tmp_path, "prior_reservation")
+    collected = select_managed_evidence(collect(tmp_path), tmp_path)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.action == RecoveryAction.STOP and "whether they ran is unknown" in decision.reason
+
+    verdict = operator_verdict({"status": "FAILED", "expected_samples": 1, "errors": []}, decision)
+
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert verdict["action"] == (
+        "confirm with the scheduler that the allocation that made the reservations has ended, then inspect again: "
+        "a recovery resumes them once that is known (completed work is kept)"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason,action",
+    [
+        (
+            "admitted re-judgment outcome unknown for [(0, 0)]: the scheduler query failed, so the pass that "
+            "admitted them may still run",
+            "wait until the scheduler answers and inspect again (completed work is kept)",
+        ),
+        (
+            "saved rows are unreadable (rollouts.jsonl), so what they hold is unknown",
+            "make the saved rows readable again and inspect again (completed work is kept)",
+        ),
+        (
+            "the run was written by a rollout store (an attempt manifest, an attempt journal or run-tagged rows); an "
+            "authoritative Store reader is unavailable or could not verify these artifacts; recovery stops",
+            "inspect again once the run's Store reader can verify its artifacts (completed work is kept)",
+        ),
+    ],
+)
+def test_a_stop_whose_evidence_is_unknown_waits_and_inspects_again_not_a_fresh_submit(reason, action):
+    decision = _decision(RecoveryAction.STOP, reason, {IdentityState.UNKNOWN: 10})
+    verdict = operator_verdict(_failed_task(), decision)
+    assert verdict == {
+        "state": "unknown",
+        "reason": f"recovery stopped with 10 unknown: {reason[:160]}",
+        "action": action,
+    }

@@ -464,3 +464,17 @@ def test_an_approval_belongs_to_the_rollouts_file_it_was_journaled_beside(tmp_pa
     assert rerun_masked_journal_path_for(first).name == RERUN_MASKED_JOURNAL_NAME
     assert load_rerun_masked_approvals(first) == frozenset({(3, 1, 0)})
     assert load_rerun_masked_approvals(second) == frozenset()
+
+
+def test_the_verdict_of_a_masked_stop_names_the_rerun_not_a_fresh_submit(tmp_path):
+    from nemo_gym.orchestration.recovery import operator_verdict
+
+    _run(tmp_path, [[_kept()]])
+    decision = _decide(tmp_path)
+    assert decision.action.value == "stop" and decision.masked_without_artifact == [(1, 0)]
+
+    verdict = operator_verdict({"status": "FAILED", "expected_samples": 2, "errors": []}, decision)
+
+    assert verdict["state"] == "needs_action"
+    assert "`gym eval resubmit --recover --rerun-masked-without-artifact --rerun-reason TEXT`" in verdict["action"]
+    assert "`gym eval submit`" not in verdict["action"]
