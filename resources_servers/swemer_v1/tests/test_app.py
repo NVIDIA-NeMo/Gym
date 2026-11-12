@@ -27,6 +27,8 @@ multi-worker entrypoint with no module-level `app`. Both looked fine locally and
 failed once real traffic hit them, so the same tests are written here from the start.
 """
 
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -215,31 +217,13 @@ class TestSeedSessionMavenSettings:
     """The agent sandbox is created on the same provider as the eval sandbox, so it must honor
     overwrite_maven_settings too or a read-only ~/.m2/settings.xml still fails every rollout."""
 
-    class _Stop(Exception):
-        pass
-
     @pytest.mark.parametrize("overwrite", [True, False])
-    async def test_seed_sandbox_follows_config(self, overwrite: bool) -> None:
-        from unittest.mock import AsyncMock
-
-        from nemo_gym.client import SESSION_ID_KEY
+    def test_seed_sandbox_follows_config(self, overwrite: bool) -> None:
         from resources_servers.swemer_v1.app import SwemerV1ResourcesServer
 
-        create_sandbox = AsyncMock(side_effect=self._Stop)
-        server = SimpleNamespace(
-            config=SimpleNamespace(overwrite_maven_settings=overwrite),
-            _stop_sandbox=AsyncMock(),
-            _create_sandbox=create_sandbox,
-            _session_id_to_sandbox={},
-            _session_id_to_pristine_untracked={},
-            _session_id_to_base_commit={},
-        )
-        with pytest.raises(self._Stop):
-            await SwemerV1ResourcesServer.seed_session(
-                server, SimpleNamespace(session={SESSION_ID_KEY: "s"}), SimpleNamespace()
-            )
+        server = SimpleNamespace(config=SimpleNamespace(overwrite_maven_settings=overwrite))
+        files = SwemerV1ResourcesServer._session_files(server, SimpleNamespace())
 
-        files = create_sandbox.await_args.kwargs["files"]
         assert (MAVEN_SETTINGS_PATH in files) is overwrite
         assert GRADLE_INIT_PATH in files
 
@@ -583,3 +567,14 @@ class TestMultiWorkerEntrypoint:
                 assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
                     f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
                 )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order() -> None:
+    """E2B returns a command's stdout and stderr apart: the graded region between the markers must hold both."""
+    header = build_eval_script(_inputs()).split("\ncd ", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"], capture_output=True, text=True
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""

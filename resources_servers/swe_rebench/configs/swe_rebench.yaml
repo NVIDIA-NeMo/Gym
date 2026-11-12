@@ -6,7 +6,7 @@
 swe_rebench_resources_server:
   resources_servers:
     swe_rebench:
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [opencode_sandboxed_agent, opencode_agent]
       entrypoint: app.py
       domain: coding
       verified: false
@@ -14,6 +14,9 @@ swe_rebench_resources_server:
       evaluation_timeout: 3600
       is_verifying_golden_patch: false
       apply_anti_cheating: true
+      # A seed whose scrub did not complete fails (and the rollout is retried) instead of handing the agent
+      # a git history that may hold the fix.
+      anti_cheat_required: true
 
       sandbox_provider: sandbox
       sandbox_config:
