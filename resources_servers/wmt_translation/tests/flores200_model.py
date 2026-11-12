@@ -29,14 +29,20 @@ def _validate_model(data: bytes) -> None:
         raise ValueError("FLORES-200 tokenizer size or SHA-256 mismatch")
 
 
+def verify_flores200_model(cache_root: Path) -> Path:
+    """Read and verify an existing model without changing the supplied cache."""
+    model = cache_root / "models" / MODEL_FILENAME
+    if model.stat().st_size != MODEL_SIZE:
+        raise ValueError("FLORES-200 tokenizer size or SHA-256 mismatch")
+    _validate_model(model.read_bytes())
+    return model
+
+
 def prepare_flores200_model(cache_root: Path) -> Path:
     """Verify or atomically populate SacreBLEU's FLORES-200 model cache for tests."""
     model = cache_root / "models" / MODEL_FILENAME
     if model.exists():
-        if model.stat().st_size != MODEL_SIZE:
-            raise ValueError("FLORES-200 tokenizer size or SHA-256 mismatch")
-        _validate_model(model.read_bytes())
-        return model
+        return verify_flores200_model(cache_root)
 
     # SacreBLEU's TinyURL redirects to a Meta endpoint whose certificate expired.
     with urlopen(MODEL_URL, timeout=30) as response:
