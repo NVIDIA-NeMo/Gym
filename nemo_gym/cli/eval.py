@@ -1602,7 +1602,7 @@ def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: Har
             agent = resolve_agent(agent_name)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
-    except (ValueError, OSError, yaml.YAMLError) as exc:
+    except (ValueError, OSError, yaml.YAMLError, ConfigError) as exc:
         args._parser.error(str(exc))
     if agent.impl_name == ORACLE_AGENT:
         # The oracle runs the reference solution, not a model: its run is `gym dataset validate`, whose results
@@ -1841,6 +1841,32 @@ def _without_config_paths(overrides: list[str], paths: set[Path]) -> list[str]:
     return kept
 
 
+def harbor_config_from_overrides(overrides: list[str]) -> tuple[Path, str] | None:
+    """The first file a ``+config_paths=[...]`` token names that sets ``harbor_target`` itself, with its target.
+
+    Such a config (``--config <harbor-backed preset>``) runs only through ``--benchmark``, which composes the Harbor
+    environment server; plain collection would start its bare agent. Files that cannot be read are left to the
+    parser to report.
+    """
+    prefix = "+config_paths="
+    for token in overrides:
+        if not token.startswith(prefix):
+            continue
+        try:
+            entries = yaml.safe_load(token[len(prefix) :])
+        except yaml.YAMLError:
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            path = Path(str(entry))
+            try:
+                config = yaml.safe_load(path.read_text()) if path.is_file() else None
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(config, dict) and config.get(HARBOR_TARGET_KEY) is not None:
+                return path, str(config[HARBOR_TARGET_KEY])
+    return None
+
+
 def _with_config_path_first(overrides: list[str], path: Path) -> list[str]:
     """``overrides`` with ``path`` loaded before every file their ``+config_paths=[...]`` token names."""
     prefix = "+config_paths=["
@@ -1857,7 +1883,7 @@ def prepare_harbor_benchmark(args: argparse.Namespace, overrides: list[str], ben
     and write the rows its harness runs, as ``gym eval run --benchmark`` prepares them before starting servers."""
     try:
         agent, _, preparation_overrides = _benchmark_agent(args, overrides, benchmark)
-    except (ValueError, OSError, yaml.YAMLError) as exc:
+    except (ValueError, OSError, yaml.YAMLError, ConfigError) as exc:
         args._parser.error(str(exc))
     prepared = _prepare_for_agent(args, preparation_overrides, agent, sandbox=None)
     print(f"Prepared {len(prepared.tasks)} task(s) of {benchmark.target} at {prepared.rows_path}")

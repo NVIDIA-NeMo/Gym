@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models.token_capture import TokenCaptureStore
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import (
     VLLMContextCompactionResponseCreateParams,
@@ -43,6 +44,21 @@ def test_rejects_forward_unvalidated_reasoning_effort() -> None:
 
 def test_tokenize_route_is_non_generating() -> None:
     assert ("POST", "/tokenize") in VLLMModelWithCompaction.non_generating_model_routes
+
+
+@pytest.mark.parametrize(("path", "incomplete"), [("/context/measure", False), ("/unlisted", True)])
+def test_inherited_measure_route_keeps_captured_rollout_complete(tmp_path, path: str, incomplete: bool) -> None:
+    """The /tokenize declaration extends VLLMModel's routes, so a context measurement is not a generation."""
+    model = _make_model()
+    model.server_client.global_config_dict = {"token_id_capture": {"enabled": True, "dir": str(tmp_path)}}
+    app = model.setup_webserver()
+    # Deployed only under source_history capture; a stub isolates the request classification.
+    app.post(path)(lambda: {"prompt_token_count": 1})
+
+    response = TestClient(app).post(f"/ng-rollout/measure-roll0/training-token-capture{path}", json={})
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("measure-roll0").incomplete is incomplete
 
 
 def test_base_vllm_model_has_no_compaction_routes() -> None:

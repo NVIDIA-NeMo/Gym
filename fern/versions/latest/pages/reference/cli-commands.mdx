@@ -124,8 +124,10 @@ gym eval run \
 
 Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. For benchmarks that
 compose their own servers, the selectors are pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and
-`--config <that file>` behave identically. For a Harbor-backed benchmark, use `--agent-type` to swap the harness;
-loading an agent config with `--config` does not select it.
+`--config <that file>` behave identically. A Harbor-backed benchmark (one whose config sets `harbor_target`) runs only
+through `gym eval run --benchmark`; there, use `--agent-type` to swap the harness, since loading an agent config with
+`--config` does not select it. `gym env start`, `gym env prefetch`, `gym eval reverify` and `gym eval submit` do not
+compose its Harbor environment server.
 
 Run `gym list agents` to see the harnesses you can pass.
 

@@ -121,6 +121,31 @@ class TestHarborBenchmarkConfig:
         with pytest.raises(ValueError, match="configs it includes cannot define extra_verifier"):
             harbor_benchmark(_benchmark(tmp_path, "tb", config))
 
+    def test_included_settings_ride_along_but_the_harness_config_stays_with_its_harness(self, tmp_path: Path) -> None:
+        overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": "${episode_bound}"}}}
+        settings = tmp_path / "settings.yaml"
+        settings.write_text(yaml.safe_dump({"harbor_environment_server": overlay, "episode_bound": 54000}))
+        # A config that defines the agent instance is the harness's: its other keys are not the benchmark's.
+        harness = tmp_path / "harness.yaml"
+        harness.write_text(
+            yaml.safe_dump({"config_paths": [MINISWE_CONFIG], "mini_swe_agent": {}, "harness_only": {"a": 1}})
+        )
+        config = _harbor_config(builds={"enabled": False})
+        config["config_paths"] = [str(harness), str(settings)]
+        benchmark = harbor_benchmark(_benchmark(tmp_path, "tb", config))
+        assert benchmark.agent.benchmark_settings == {
+            "harbor_environment_server": overlay,
+            "episode_bound": 54000,
+            "builds": {"enabled": False},
+        }
+
+    def test_a_target_only_an_include_sets_is_refused(self, tmp_path: Path) -> None:
+        """A variant that includes a Harbor-backed preset would otherwise fall through to the composed-server path."""
+        base = _benchmark(tmp_path, "tb", _harbor_config())
+        variant = _benchmark(tmp_path, "tb_variant", {"config_paths": [str(base)], "mini_swe_agent": {}})
+        with pytest.raises(ValueError, match="set `harbor_target` in the benchmark file itself"):
+            harbor_benchmark(variant)
+
     def test_the_agent_may_come_from_an_include_alone(self, tmp_path: Path) -> None:
         config = _harbor_config()
         config.pop("mini_swe_agent")
@@ -192,16 +217,47 @@ class TestEvalRunDelegation:
         assert "cannot define extra_verifier" in capsys.readouterr().err
 
     @pytest.mark.parametrize("command", ["run", "prepare"])
-    def test_malformed_benchmark_yaml_is_a_usage_error(self, monkeypatch: MonkeyPatch, tmp_path, capsys, command):
+    @pytest.mark.parametrize("where", ["benchmark", "include"])
+    def test_malformed_benchmark_yaml_is_a_usage_error(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys, command, where
+    ):
         path = tmp_path / "benchmarks" / "bad" / "config.yaml"
         path.parent.mkdir(parents=True)
-        path.write_text("config_paths: [\n")
+        if where == "benchmark":
+            path.write_text("config_paths: [\n")
+        else:
+            include = tmp_path / "broken.yaml"
+            include.write_text("a: [\n")
+            path.write_text(yaml.safe_dump(_harbor_config(config_paths=[MINISWE_CONFIG, str(include)])))
         with pytest.raises(SystemExit) as raised:
             _main(monkeypatch, ["eval", command, "--search-dir", str(tmp_path), "--benchmark", "bad"])
         assert raised.value.code != 0
         err = capsys.readouterr().err
         assert "Traceback" not in err
-        assert "expected" in err or "while parsing" in err
+        assert "expected" in err or "while parsing" in err or "broken.yaml" in err
+
+    @pytest.mark.parametrize("command", ["run", "prepare"])
+    def test_a_variant_that_only_includes_the_target_is_a_usage_error(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys, command
+    ) -> None:
+        base = _benchmark(tmp_path, "tb", _harbor_config())
+        _benchmark(tmp_path, "tb_variant", {"config_paths": [str(base)], "mini_swe_agent": {}})
+        monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("must be refused"))
+        with pytest.raises(SystemExit):
+            _main(monkeypatch, ["eval", command, "--search-dir", str(tmp_path), "--benchmark", "tb_variant"])
+        assert "set `harbor_target` in the benchmark file itself" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("no_serve", [False, True])
+    def test_a_harbor_backed_config_is_refused_by_plain_collection(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys, no_serve
+    ) -> None:
+        """`gym eval run --config <harbor-backed preset>` would start its bare agent with no Harbor server or rows."""
+        path = _benchmark(tmp_path, "tb", _harbor_config())
+        monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("must be refused"))
+        with pytest.raises(SystemExit):
+            _main(monkeypatch, ["eval", "run", "--config", str(path), *(["--no-serve"] if no_serve else [])])
+        err = capsys.readouterr().err
+        assert "sets `harbor_target` ('terminal_bench_4')" in err and "--benchmark <name>" in err
 
 
 class _Stop(Exception):
@@ -245,9 +301,10 @@ class TestRunTargetWithABenchmark:
         assert seen["agent"] == "hermes_agent"
         assert seen["rows_name"] == "tasks_hermes_agent.jsonl"
 
-    @pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+    @pytest.mark.parametrize("agent_type", [None, "hermes_agent", "harbor_oracle_agent"])
     def test_preparation_reads_the_benchmarks_settings(self, monkeypatch: MonkeyPatch, tmp_path, agent_type) -> None:
-        """Preparation runs before the run config exists: it reads the preset's `builds:` block itself."""
+        """Preparation runs before the run config exists: it reads the preset's `builds:` block itself, also for the
+        oracle, which validates through `validate_target`."""
         seen, _ = self._run(
             monkeypatch, tmp_path, config=_harbor_config(builds={"enabled": False}), agent_type=agent_type
         )
@@ -350,6 +407,18 @@ def test_an_interpolated_server_setting_keeps_its_input(tmp_path: Path, agent_ty
     later.write_text(yaml.safe_dump({"episode_bound": 60000}))
     merged, server = _merged_run_config(tmp_path / "overlaid", config, agent_type, [f"+config_paths=[{later}]"])
     assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 60000
+
+
+@pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+def test_an_included_server_setting_wins_in_the_runs_merged_config(tmp_path: Path, agent_type) -> None:
+    """The benchmark's server settings win over the server's default when an included config sets them too, and
+    the keys they interpolate travel with a swapped-in harness."""
+    overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": "${episode_bound}"}}}
+    settings = tmp_path / "settings.yaml"
+    settings.write_text(yaml.safe_dump({"harbor_environment_server": overlay, "episode_bound": 54000}))
+    config = _harbor_config(config_paths=[MINISWE_CONFIG, str(settings)])
+    merged, server = _merged_run_config(tmp_path, config, agent_type)
+    assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 54000
 
 
 class TestEvalPrepareDelegation:

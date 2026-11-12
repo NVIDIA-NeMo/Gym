@@ -805,10 +805,11 @@ def _harbor_benchmark(args: argparse.Namespace):
     from yaml import YAMLError
 
     from nemo_gym.cli.eval import harbor_benchmark_from_args
+    from nemo_gym.config.config_types import ConfigError
 
     try:
         return harbor_benchmark_from_args(args)
-    except (ValueError, OSError, YAMLError) as exc:
+    except (ValueError, OSError, YAMLError, ConfigError) as exc:
         args._parser.error(str(exc))
 
 
@@ -844,6 +845,15 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(
             "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference, "
             "or a --benchmark whose config names one"
+        )
+    from nemo_gym.cli.eval import harbor_config_from_overrides
+
+    if (harbor := harbor_config_from_overrides(overrides)) is not None:
+        # Collection would start the config's bare agent with no Harbor environment server or rows.
+        path, harbor_target = harbor
+        args._parser.error(
+            f"{path} sets `harbor_target` ({harbor_target!r}); run it with `--benchmark <name>`, which composes its "
+            f"Harbor environment server, or as `gym eval run {harbor_target} --agent <harness>`"
         )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)

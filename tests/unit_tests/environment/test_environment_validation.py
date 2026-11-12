@@ -1011,6 +1011,25 @@ def test_harbor_backed_manifest_validates_its_harness_and_target(tmp_path: Path,
     assert resolve_config_servers(path.parent / "config.yaml") == (None, harness)
 
 
+def test_dataset_owner_does_not_apply_to_a_harbor_target(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    manifest = yaml.safe_load(path.read_text())
+    manifest["dataset_owner"] = "mini_swe_agent"
+    path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="dataset_owner does not apply to harbor_target"):
+        validate_environment(path)
+
+
+def test_a_harbor_target_only_an_include_sets_is_refused(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    config = path.parent / "config.yaml"
+    base = path.parent / "base.yaml"
+    base.write_text(config.read_text(), encoding="utf-8")
+    config.write_text(yaml.safe_dump({"config_paths": [str(base)]}), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="set `harbor_target` in the benchmark file itself"):
+        validate_environment(path)
+
+
 def test_harbor_target_is_mirrored_from_the_config(tmp_path: Path) -> None:
     path = _harbor_asset(tmp_path, config_target="terminal_bench_4", manifest_target="terminal_bench_2_1")
     with pytest.raises(EnvironmentValidationError, match="harbor_target"):
@@ -1041,3 +1060,17 @@ def test_a_file_is_not_a_task_folder_target(tmp_path: Path) -> None:
     task_file.write_text("")
     with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
         validate_environment(_harbor_asset(tmp_path / "file", config_target=str(task_file)))
+
+
+def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    (manifest_path.parent / "data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    report = validate_environment(manifest_path, validate_datasets=False)
+    assert report.datasets == ()
+    assert report.components
+    # Dataset-free validation must still catch a stale manifest composition.
+    _replace_manifest(manifest_path, resources_server="wrong_server")
+    with pytest.raises(EnvironmentValidationError, match="composition is stale"):
+        validate_environment(manifest_path, validate_datasets=False)

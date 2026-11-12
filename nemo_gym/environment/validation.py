@@ -273,10 +273,9 @@ def _resolve_config_wiring(
     harbor_target = None
     if resolved.get(HARBOR_TARGET_KEY) is not None:
         # Harbor-backed: the config's one agent instance runs the target's tasks, the rows prepare writes.
-        if benchmark is None or benchmark.agent.instance_name not in by_instance:
-            raise EnvironmentValidationError(
-                f"{config_path} must set {HARBOR_TARGET_KEY} and its agent instance in the file itself."
-            )
+        if benchmark is None:
+            # harbor_benchmark refuses a target only an include sets; this covers one it could not read.
+            raise EnvironmentValidationError(f"{config_path} must set {HARBOR_TARGET_KEY} in the file itself.")
         harbor_target = benchmark.target
 
     # Datasets may live on a resources server (decoupled layout) or on an agent (legacy and
@@ -846,8 +845,13 @@ def validate_environment(
     config_path: str | Path | None = None,
     *,
     sync: bool = False,
+    validate_datasets: bool = True,
 ) -> EnvironmentValidationReport:
-    """Validate a manifest without probing services or runtime output paths."""
+    """Validate a manifest without probing services or runtime output paths.
+
+    Component CI may disable dataset checks to exercise committed verifier fixtures
+    without downloading a workload's full benchmark or training dataset.
+    """
     resolved_manifest_path = Path(manifest_path).expanduser().resolve()
     manifest = load_manifest(resolved_manifest_path)
     resolved_config_path = (
@@ -896,6 +900,7 @@ def validate_environment(
                 dataset, standard_prompt_config=manifest.standard_prompt_config, prompt_source=manifest.prompt_source
             )
             for dataset in manifest.datasets
+            if validate_datasets
         )
     if synchronized:
         _write_manifest_atomically(resolved_manifest_path, manifest)
