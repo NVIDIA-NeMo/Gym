@@ -809,11 +809,12 @@ class TestRun:
 
 
 class TestEnvironmentRewardRecord:
-    async def _run(self, steps, *, max_steps=10):
+    async def _run(self, steps, *, max_steps=10, model_responses=None, rollout_keys=True):
         agent = _make_agent(max_steps=max_steps)
         payloads = {
             "/reset": [{"observation": "go", "info": {}}],
-            "/ng-rollout/2-0/v1/responses": [_model_response("a") for _ in steps],
+            ("/ng-rollout/2-0/v1/responses" if rollout_keys else "/v1/responses"): model_responses
+            or [_model_response("a") for _ in steps],
             "/step": list(steps),
         }
 
@@ -823,7 +824,7 @@ class TestEnvironmentRewardRecord:
         agent.server_client.post = AsyncMock(side_effect=_post)
         body = GymnasiumAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "play"}]},
-            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+            **({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0} if rollout_keys else {}),
         )
         return await agent.run(MagicMock(cookies={}), body)
 
@@ -862,3 +863,54 @@ class TestEnvironmentRewardRecord:
         step = {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}}
         row = (await self._run([step], max_steps=1)).model_dump(mode="json")
         assert row["truncated"] is True and "result" not in row
+
+
+class TestAgentObservation:
+    """The agent's one invocation and the model responses it asked for, so a cut-off answer joins its owner."""
+
+    @staticmethod
+    def _responses(ids, last_status="completed"):
+        responses = []
+        for index, response_id in enumerate(ids):
+            response = _model_response("a")
+            response["id"] = response_id
+            if index == len(ids) - 1:
+                response["status"] = last_status
+            responses.append(response)
+        return responses
+
+    @pytest.mark.asyncio
+    async def test_a_finished_episode_records_one_completed_invocation_with_every_model_response(self):
+        steps = [
+            {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
+            {"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}},
+        ]
+        row = (
+            await TestEnvironmentRewardRecord()._run(steps, model_responses=self._responses(["r1", "r2"]))
+        ).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "completed"
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r1", "r2"]
+
+    @pytest.mark.asyncio
+    async def test_an_answer_the_model_cut_off_is_an_incomplete_invocation_not_a_missing_one(self):
+        step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
+        row = (
+            await TestEnvironmentRewardRecord()._run([step], model_responses=self._responses(["r1"], "incomplete"))
+        ).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "incomplete"
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r1"]
+
+    @pytest.mark.asyncio
+    async def test_an_episode_cut_by_the_step_limit_is_an_incomplete_invocation(self):
+        step = {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}}
+        row = (await TestEnvironmentRewardRecord()._run([step], max_steps=1)).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_a_rollout_identity_records_no_invocation(self):
+        step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
+        row = (await TestEnvironmentRewardRecord()._run([step], rollout_keys=False)).model_dump(mode="json")
+        assert "ng_agent_observations" not in row
