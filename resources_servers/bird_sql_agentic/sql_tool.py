@@ -79,29 +79,34 @@ def format_rows(
 def run_readonly_query(
     db_path: Path, sql: str, timeout_s: float, max_rows: int, max_cell_chars: int
 ) -> dict[str, Any]:
-    """Run one allowed query on a read-only connection. Never raises for SQL problems.
+    """Run one allowed query on a read-only connection. Never raises for SQL problems."""
+    error = check_sql_allowed(sql)
+    if error:
+        return {"error": error}
 
-    TODO(Sally): implement. Steps:
-      1. error = check_sql_allowed(sql); if error, return {"error": error}.
-      2. Open the database READ-ONLY:
-             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-         If opening fails (sqlite3.Error) -> return {"error": f"Could not open database: {e}"}.
-      3. Set up the connection (given, just copy these two lines):
-             deadline = time.monotonic() + timeout_s
-             conn.text_factory = lambda b: b.decode(errors="replace")
-             conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
-         The progress handler makes SQLite abort the query once the deadline passes
-         (it raises sqlite3.OperationalError with "interrupted" in the message).
-      4. cur = conn.execute(sql)
-         columns = [d[0] for d in cur.description or []]
-         rows = cur.fetchmany(max_rows)
-         total_rows = len(rows) + (count the remaining rows by looping over cur, WITHOUT storing them)
-      5. Errors (catch sqlite3.Error, don't let them escape):
-           - "interrupted" in the message -> {"error": f"Query timed out after {timeout_s:g} seconds."}
-           - anything else                -> {"error": f"SQL error: {e}"}
-      6. Always close the connection (try/finally).
-      7. On success: return format_rows(columns, rows, total_rows, max_rows, max_cell_chars)
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        return {"error": f"Could not open database: {e}"}
 
-    Think about: why fetchmany + counting instead of fetchall()?
-    """
-    raise NotImplementedError
+    try:
+        deadline = time.monotonic() + timeout_s
+        conn.text_factory = lambda b: b.decode(errors="replace")
+        conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+
+        cur = conn.execute(sql)
+        columns = [d[0] for d in cur.description or []]
+        rows = cur.fetchmany(max_rows)
+        # Count the remaining rows without storing them.
+        count = 0
+        for _ in cur:
+            count += 1
+        total_rows = len(rows) + count
+    except sqlite3.Error as e:
+        if "interrupted" in str(e):
+            return {"error": f"Query timed out after {timeout_s:g} seconds."}
+        return {"error": f"SQL error: {e}"}
+    finally:
+        conn.close()
+
+    return format_rows(columns, rows, total_rows, max_rows, max_cell_chars)
