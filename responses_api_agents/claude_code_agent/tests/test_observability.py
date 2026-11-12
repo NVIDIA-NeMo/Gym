@@ -676,7 +676,7 @@ def test_compaction_call_correlation_rejects_inexact_matches(case: str) -> None:
 
 @pytest.mark.parametrize("broken", [None, "missing", "ambiguous", "unknown_usage"])
 def test_captured_usage_counts_owned_calls_once_including_cache(broken):
-    from nemo_gym.trajectory.model_call_record import build_model_call_record
+    from nemo_gym.trajectory import build_model_call_record
 
     exchanges = [
         _captured_call("call-before", "msg-before"),
