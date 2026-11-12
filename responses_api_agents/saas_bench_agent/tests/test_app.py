@@ -180,3 +180,43 @@ async def test_cancellation_reaps_actual_worker_process(agent, monkeypatch):
     assert child[0].returncode is not None
     with pytest.raises(ProcessLookupError):
         os.kill(child[0].pid, 0)
+
+
+@pytest.mark.parametrize(
+    "ending,kind",
+    [
+        ("malformed_tool_call", "agent_invalid_output"),
+        ("model_protocol_error", "agent_invalid_output"),
+        ("output_token_limit", "agent_limit"),
+        ("context_limit", "model_context_limit"),
+        ("timeout", "agent_timeout"),
+        ("agent_error", "agent_invalid_output"),
+        ("permission_abort", "agent_command_not_allowed"),
+    ],
+)
+def test_model_endings_are_explicit_counted_zeros(agent, ending, kind):
+    from responses_api_agents.saas_bench_agent.app import SaasBenchVerifyResponse
+
+    native = result(score=0.75, masked=True)
+    native.update(failure_kind="saas_bench:model_ending", execution_health={"termination": ending})
+    response = agent._response(request(), native)
+    assert response.reward == 0 and response.mask_sample is False
+    assert response.failure_kind == kind
+    assert response.failure_outcome_action == "count_as_zero"
+    assert response.failure_outcome_attribution == "model"
+    restored = SaasBenchVerifyResponse.model_validate(response.model_dump(mode="json"))
+    assert restored.failure_outcome_action == "count_as_zero"
+    assert restored.failure_outcome_attribution == "model"
+
+
+@pytest.mark.parametrize("kind", ["judge_failed", "judge_unparseable"])
+def test_judge_fault_wins_over_model_ending_and_requests_row_retry(agent, kind):
+    native = result(score=0.75)
+    native["verify"]["judge_failures"] = [{"failure_kind": kind, "reason": "fixture"}]
+    native["execution_health"] = {"termination": "timeout"}
+    response = agent._response(request(), native)
+    assert response.mask_sample is True and response.reward == 0
+    assert response.failure_kind == kind
+    assert response.failure_outcome_action == "retry"
+    assert response.failure_outcome_attribution == "evaluation"
+    assert response.native_metrics == {}

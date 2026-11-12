@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         TaskId,
     )
     from nemo_gym.core.failure_kinds import (
+        AGENT_COMMAND_NOT_ALLOWED,
         AGENT_INVALID_OUTPUT,
         AGENT_LIMIT,
         AGENT_ROUTE_FAILED,
@@ -174,6 +175,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "AGENT_COMMAND_NOT_ALLOWED": "failure_kinds",
     "MediaFile": "media",
     "UnsupportedContentError": "media",
     "split_text_and_media": "media",

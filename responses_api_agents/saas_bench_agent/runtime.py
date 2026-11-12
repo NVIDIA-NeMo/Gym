@@ -137,8 +137,7 @@ def configure_cache(root: str) -> Path:
         os.environ["TMPDIR"] = str(temporary)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     os.environ["SAAS_UID_SHIM"] = str(cache / "saas-uid-shim.so")
-    if os.environ.get("SAAS_BENCH_JUDGE_HTTP_TIMEOUT"):
-        os.environ["SAAS_VERIFIER_LAUNCHER"] = str(Path(__file__).with_name("verifier_transport.py"))
+    os.environ["SAAS_VERIFIER_LAUNCHER"] = str(Path(__file__).with_name("verifier_transport.py"))
     return cache
 
 

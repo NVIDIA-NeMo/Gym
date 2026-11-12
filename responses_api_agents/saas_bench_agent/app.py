@@ -25,10 +25,22 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    AGENT_COMMAND_NOT_ALLOWED,
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
     AGENT_RUN_ERROR,
+    AGENT_TIMEOUT,
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
+    MODEL_CONTEXT_LIMIT,
     VERIFIER_ERROR,
+    FailureClass,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    OutcomeAction,
+    StageOutcomePolicyConfig,
+    StagePolicyConfig,
+    choose_stage_outcome,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.server_runtime import (
@@ -39,8 +51,35 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.saas_bench_agent.runtime import DEFAULT_BUNDLE_ROOT, HARNESS_VERSIONS, configure_cache
 
 
+_MODEL_ENDINGS = {
+    "malformed_tool_call": AGENT_INVALID_OUTPUT,
+    "model_protocol_error": AGENT_INVALID_OUTPUT,
+    "output_token_limit": AGENT_LIMIT,
+    "context_limit": MODEL_CONTEXT_LIMIT,
+    "timeout": AGENT_TIMEOUT,
+    "agent_error": AGENT_INVALID_OUTPUT,
+    "permission_abort": AGENT_COMMAND_NOT_ALLOWED,
+}
+
+
+def default_outcome_policy() -> StageOutcomePolicyConfig:
+    """Count model failures, while preserving evaluation failures for recovery."""
+    return StageOutcomePolicyConfig(
+        by_stage={
+            "agent": StagePolicyConfig(
+                by_failure_class={
+                    FailureClass.MODEL: OutcomeAction.COUNT_AS_ZERO,
+                    FailureClass.EVALUATION: OutcomeAction.RETRY,
+                },
+                default_action=OutcomeAction.RETRY,
+            )
+        }
+    )
+
+
 class SaasBenchConfig(BaseResponsesAPIAgentConfig):
     num_workers: int = 1
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=default_outcome_policy)
     source_root: str = str(DEFAULT_BUNDLE_ROOT)
     harness: Literal["opencode", "browser_use"] = "opencode"
     cache_root: str
@@ -229,7 +268,35 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         from saas_bench.opencode.observability import native_trajectory
 
         masked = result.get("mask_sample", True)
-        reward = 0.0 if masked else measured_score(result["verify"])
+        kind = None
+        decision = None
+        # Judge/readback faults take precedence over the actor's ending: there
+        # is no usable evaluation verdict, even when the actor also failed.
+        diagnostics = result.get("verifier_diagnostics") or {}
+        judge_faults = (result.get("verify") or {}).get("judge_failures") or diagnostics.get("judge_failures") or []
+        if judge_faults:
+            kind = (
+                JUDGE_UNPARSEABLE
+                if all(f["failure_kind"] == JUDGE_UNPARSEABLE for f in judge_faults)
+                else JUDGE_FAILED
+            )
+        elif result.get("failure_kind") == "saas_bench:verifier" or diagnostics.get("unavailable"):
+            kind = VERIFIER_ERROR
+        else:
+            kind = _MODEL_ENDINGS.get((result.get("execution_health") or {}).get("termination"))
+            if kind is None and result.get("failure_kind"):
+                kind = AGENT_RUN_ERROR
+        if kind is not None:
+            stage = "verification" if kind in {VERIFIER_ERROR, JUDGE_FAILED, JUDGE_UNPARSEABLE} else "agent"
+            decision = choose_stage_outcome(
+                failure_kind=kind, http_status=None, stage=stage, config=self.config.outcome_policy
+            )
+            masked = decision.action not in {OutcomeAction.COUNT_AS_ZERO, OutcomeAction.VERIFY}
+        reward = (
+            0.0
+            if masked or decision and decision.action == OutcomeAction.COUNT_AS_ZERO
+            else measured_score(result["verify"])
+        )
         # Earlier episodes may have a projected trajectory plus native events.
         # Always expose the original OpenCode events, without browser-use fields.
         native = result.get("native_trajectory", result.get("trajectory", []))
@@ -275,6 +342,10 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                     "model_protocol_error",
                     "timeout",
                     "native_error",
+                    "agent_error",
+                    "context_limit",
+                    "output_token_limit",
+                    "permission_abort",
                 }
                 else "completed",
                 "output": items,
@@ -289,13 +360,9 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                 "response": response,
                 "reward": reward,
                 "mask_sample": masked,
-                "failure_kind": (
-                    VERIFIER_ERROR
-                    if result.get("failure_kind") == "saas_bench:verifier"
-                    else AGENT_RUN_ERROR
-                    if result.get("failure_kind")
-                    else None
-                ),
+                "failure_kind": kind,
+                "failure_outcome_action": decision.action if decision else None,
+                "failure_outcome_attribution": decision.attribution if decision else None,
                 "native_failure_kind": result.get("failure_kind"),
                 "native_metrics": {} if masked else {"weighted_score": reward, "execution": 1.0},
                 "native_diagnostics": {}

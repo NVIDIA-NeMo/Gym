@@ -46,10 +46,11 @@
       "source_path": "saas_bench/verify_runner.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/verify_runner.py",
       "source_sha256": "bbd35af7f9cf81bf5d3297138f3bb648cec402e513713be8864af0a708933117",
-      "vendored_sha256": "329a7d6b89dd7ec922679d5ae037b43741c77d64f33b480ff1c968ad45fc1033",
+      "vendored_sha256": "c7794e785e7b6cc4cbf844d2ac45788821fe4027c45811407b912acadc8d03ac",
       "license": "Apache-2.0",
       "python_ast_unchanged": false,
-      "adaptation": "Judge-only transport launcher and explicit infrastructure-warning propagation; native task checks unchanged"
+      "adaptation": "Judge-only transport launcher and explicit infrastructure-warning propagation; native task checks unchanged",
+      "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged."
     },
     {
       "source_path": "saas_bench/runtime_assets.py",
@@ -199,9 +200,10 @@
       "source_path": "saas_bench/opencode/protocol.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/opencode/protocol.py",
       "source_sha256": "2012518eddfe1215bab30347549444d0516d3603594a85cfa3b1d2b89ed4c60a",
-      "vendored_sha256": "da5c483a982cea0fb9dcc7855d2b5b5e88a6a3658832296e6fa3f5f4286ba926",
+      "vendored_sha256": "716bdb514237879f51708532d9110ae73e1c8a281a4dea1142821f40eb5eb727",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged."
     },
     {
       "source_path": "saas_bench/opencode/runtime_check.py",
@@ -215,9 +217,10 @@
       "source_path": "saas_bench/opencode/verifier.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/opencode/verifier.py",
       "source_sha256": "f86f45a6bba7ba185c5f2845251bfd72e51b14ef5a7c5867dd683e5a3abf62cf",
-      "vendored_sha256": "35ff75a388c07e3fbc204156f2b316ec694527d9376719918c42d1fa7bbc8831",
+      "vendored_sha256": "aa1cd185f0d687fa9814a5b90733f0219f6296d6d02568254db2699867f28f2a",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged."
     },
     {
       "source_path": "saas_bench/opencode/visual_refresh.mjs",
@@ -231,9 +234,10 @@
       "source_path": "saas_bench/opencode/worker.py",
       "source_url": "https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/opencode/worker.py",
       "source_sha256": "6d247edf9efa029bd1981436c0ee734bdda0da06423dab7c1912ff20e0c2dd70",
-      "vendored_sha256": "5c4cbb7433a41dd19ef422716e8ca280dfd7b6dc375022585b8d6b00637a2b22",
+      "vendored_sha256": "6800e8b9bd6a0b68c5887a52eda93d2c99cb2a862a139247e137fe040ad301af",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged."
     },
     {
       "source_path": "docker/README.md",

@@ -107,6 +107,7 @@ def execute(config: dict) -> dict:
                 os.environ["SAAS_LLM_CONTEXT_WINDOW"] = str(config["context_tokens"])
                 from saas_bench.agent import run_task
 
+                actor_error = None
                 try:
                     actor = asyncio.run(
                         asyncio.wait_for(
@@ -125,6 +126,12 @@ def execute(config: dict) -> dict:
                             timeout=config["agent_timeout"],
                         )
                     )
+                except TimeoutError as exc:
+                    actor_error = "timeout"
+                    actor = {"status": "error", "error": str(exc), "trajectory": []}
+                except Exception as exc:
+                    actor_error = "agent_error"
+                    actor = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "trajectory": []}
                 finally:
                     for key, value in judge_env.items():
                         if value is None:
@@ -137,16 +144,24 @@ def execute(config: dict) -> dict:
                 diagnostics = verifier_diagnostics(verify)
                 native = actor.get("trajectory", [])
                 actor_failed = actor.get("status") != "completed"
+                if actor_failed and actor_error is None:
+                    detail = json.dumps({k: actor.get(k) for k in ["error", "error_steps", "stop_reason"]})
+                    actor_error = (
+                        "context_limit"
+                        if "context" in detail.lower()
+                        and any(word in detail.lower() for word in ["limit", "overflow", "exceed"])
+                        else "agent_error"
+                    )
                 result.update(actor)
                 result.update(
                     native_trajectory=native,
                     verify=verify,
                     verifier_diagnostics=diagnostics,
-                    reward=measured_score(verify) if not diagnostics["unavailable"] else 0.0,
-                    mask_sample=diagnostics["unavailable"] or actor_failed,
+                    reward=measured_score(verify) if not diagnostics["unavailable"] and not actor_failed else 0.0,
+                    mask_sample=diagnostics["unavailable"],
                     failure_kind="saas_bench:verifier"
                     if diagnostics["unavailable"]
-                    else "saas_bench:harness"
+                    else "saas_bench:model_ending"
                     if actor_failed
                     else None,
                     status="completed",
@@ -155,7 +170,7 @@ def execute(config: dict) -> dict:
                 )
                 tool_calls, tool_errors = _trace_counts(native)
                 result["execution_health"] = {
-                    "termination": "native_error"
+                    "termination": actor_error
                     if actor_failed
                     else "task_incomplete"
                     if verify.get("status") != "PASS"

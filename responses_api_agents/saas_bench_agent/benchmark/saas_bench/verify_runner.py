@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # -- SITE_CONFIG --------------------------------------------------------------
@@ -357,13 +358,17 @@ def run_verify(
     command = [sys.executable, launcher, verify_path] if launcher else [sys.executable, verify_path]
     budget = 600 if launcher else 300
     try:
-        proc = subprocess.run(
-            command,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=budget,
-        )
+        with tempfile.TemporaryDirectory(prefix="judge-", dir=result_dir) as directory:
+            faults = Path(directory) / "faults.jsonl"
+            env["SAAS_VERIFIER_JUDGE_FAILURES"] = str(faults)
+            proc = subprocess.run(
+                command,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=budget,
+            )
+            judge_failures = [json.loads(line) for line in faults.read_text().splitlines()] if faults.exists() else []
     except subprocess.TimeoutExpired:
         return _save({"task_id": task_id, "status": "ERROR", "score": 0.0,
                       "checks": [], "error": f"timeout after {budget}s"})
@@ -374,6 +379,8 @@ def run_verify(
     parsed = _parse_verify_output(proc.stderr)
     status = "PASS" if parsed["all_pass"] else ("FAIL" if parsed["checks"] else "ERROR")
     errors = parsed["errors"]
+    if judge_failures:
+        errors.append("Judge unavailable: " + ", ".join(f["failure_kind"] for f in judge_failures))
     if proc.returncode not in (0, 1):
         errors.append(f"verifier exited {proc.returncode}")
     if errors or status == "ERROR":
@@ -383,6 +390,7 @@ def run_verify(
         error = None
     result = {
         "task_id":  task_id,
+        "judge_failures": judge_failures,
         "status":   status,
         "score":    parsed["score"] if status != "ERROR" else 0.0,
         "earned":   parsed["earned"],

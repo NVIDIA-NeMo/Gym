@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/opencode/protocol.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
+# Gym adaptation: preserve task checks while separating model and evaluation failures.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Keep the Gym/OpenCode boundary native and detect incomplete model replies."""
@@ -91,6 +91,8 @@ def execution_health(events: list[dict], *, timed_out: bool = False) -> dict:
         if timed_out
         else "model_protocol_error"
         if protocol_errors
+        else "context_limit"
+        if not recovered and any(e.get("error", {}).get("name") == "ContextOverflowError" for e in errors)
         else "native_error"
         if errors and not recovered
         else "output_token_limit"

@@ -50,7 +50,9 @@ def test_forbidden_cache_roots(root):
         ("PASS", False, "completed", False),
         ("FAIL", False, "completed", False),
         ("ERROR", True, "completed", True),
-        ("FAIL", False, "error", True),
+        ("FAIL", False, "error", False),
+        ("FAIL", False, "timeout", False),
+        ("FAIL", False, "exception", False),
     ],
 )
 def test_browser_worker_grades_live_state_and_always_stops(
@@ -89,6 +91,10 @@ def test_browser_worker_grades_live_state_and_always_stops(
     actor = types.ModuleType("saas_bench.agent")
 
     async def run_task(*args, **kw):
+        if actor_status == "timeout":
+            raise TimeoutError("actor deadline")
+        if actor_status == "exception":
+            raise RuntimeError("actor exception")
         assert __import__("os").environ["LLM_API_KEY"] == "EMPTY"
         return {
             "status": actor_status,
@@ -124,6 +130,12 @@ def test_browser_worker_grades_live_state_and_always_stops(
         }
     )
     assert result["mask_sample"] is masked, result
+    assert result["verify"]["status"] == status
+    if actor_status in {"timeout", "exception"}:
+        assert result["reward"] == 0 and not result["mask_sample"]
+        assert result["execution_health"]["termination"] == ("timeout" if actor_status == "timeout" else "agent_error")
+        slot.stop_apps.assert_called_once_with(["fixture"])
+        return
     assert result["native_trajectory"][0]["screenshot"] == "original.png"
     assert result["execution_health"]["tool_calls"] == 2
     assert result["execution_health"]["tool_errors"] == 1

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/31177a7a80040edf588388dd982af4b678d1e544/saas_bench/opencode/worker.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
+# Gym adaptation: preserve task checks while separating model and evaluation failures.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """One process owns app startup, OpenCode, native verification and teardown."""
@@ -381,14 +381,19 @@ def execute(config: dict) -> dict:
                     for e in events
                 ) and any(e.get("type") in {"tool_use", "step_finish"} for e in events)
                 if permission_abort:
+                    health["termination"] = "permission_abort"
                     result["execution_error"] = (
                         "OpenCode aborted on doom_loop permission"
                     )
-                if not events or (
+                model_endings = {
+                    "timeout", "context_limit", "model_protocol_error",
+                    "malformed_tool_call", "output_token_limit", "permission_abort",
+                }
+                if (not events and not timed_out) or (
                     any(e.get("type") == "error" for e in events)
                     and not recovered
                     and not permission_abort
-                    and health["termination"] != "model_protocol_error"
+                    and health["termination"] not in model_endings
                 ):
                     raise RuntimeError(
                         "OpenCode returned no trajectory or an error event; inspect native artifacts"
@@ -398,7 +403,7 @@ def execute(config: dict) -> dict:
                     and not timed_out
                     and not (process.returncode == 1 and recovered)
                     and not permission_abort
-                    and health["termination"] != "model_protocol_error"
+                    and health["termination"] not in model_endings
                 ):
                     raise RuntimeError(f"OpenCode exited {process.returncode}")
                 if config.get("training_reward_mode", "native") == "llm_judge":
@@ -438,18 +443,13 @@ def execute(config: dict) -> dict:
                     verify=verify,
                     reward=0.0
                     if diagnostics["unavailable"]
-                    else measured_score(verify),
+                    else 0.0 if health["termination"] in model_endings else measured_score(verify),
                     status="completed",
                     mask_sample=diagnostics["unavailable"],
                     failure_kind="saas_bench:verifier"
                     if diagnostics["unavailable"]
-                    else "saas_bench:harness"
-                    if permission_abort
-                    else "saas_bench:model_protocol"
-                    if health["termination"]
-                    in {"malformed_tool_call", "model_protocol_error"}
-                    else "saas_bench:model_output_limit"
-                    if health["termination"] == "output_token_limit"
+                    else "saas_bench:model_ending"
+                    if health["termination"] in model_endings
                     else None,
                 )
             finally:

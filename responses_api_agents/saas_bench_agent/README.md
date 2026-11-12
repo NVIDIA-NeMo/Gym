@@ -128,3 +128,24 @@ is retained for other executables. Explicit native `context load failed` and
 checks afterwards; they are not model-quality zeros. Native stderr is preserved
 for diagnosis. Missing expected objects without a grader exception remain valid
 failures with their original scores and weights.
+
+
+### Failure outcomes and result compatibility
+
+Judge HTTP exhaustion (including 429/5xx), invalid JSON and missing or empty
+completions are recorded separately from task verifier text. This works for both
+requests and urllib judge calls even when a task catches the exception and prints
+FAIL. The entire row is masked with a retry/evaluation outcome; legitimate NO
+answers remain task failures. Retry budgets remain owned by Gym/the caller.
+
+Malformed model output, output caps, unrecovered context limits and actor timeouts
+are explicit model failures counted as zero. Browser-use actor exceptions are
+also model failures. Both harnesses still run final-state verification before
+stopping applications, retaining measured checks for diagnostics. Verification
+unavailability takes precedence over an actor failure. The typed
+failure_outcome_action and failure_outcome_attribution fields survive JSON
+serialization and recovery. Infrastructure startup failures remain retryable.
+
+This corrects the scoring denominator and failure attribution. Existing artifacts
+and active campaigns pinned to earlier Gym revisions are not rewritten; use a
+fresh campaign at the corrected pin for comparable evaluation results.
