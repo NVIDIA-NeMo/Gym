@@ -87,6 +87,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     associate_codex_compaction_calls,
@@ -1917,3 +1918,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CodexAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CodexAgent.run_webserver()  # noqa: F401

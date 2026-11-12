@@ -45,6 +45,7 @@ from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     PROVIDER_IO_TIMEOUT,
+    PROVIDER_REQUEST_FAILED,
     FailureBoundary,
     FailureReportRow,
     NeMoGymResponse,
@@ -58,7 +59,7 @@ from nemo_gym.core import (
     observe_failure,
     sdk_error_details,
 )
-from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN, PROVIDER_REQUEST_FAILED
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -67,8 +68,8 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_failure,
 )
-from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.utils.exception_inspection import error_to_http_status
