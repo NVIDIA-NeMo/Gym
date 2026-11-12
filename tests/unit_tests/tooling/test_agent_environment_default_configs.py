@@ -135,6 +135,45 @@ def test_default_claude_composes_with_exactly_one_session_environment(tmp_path: 
     assert resolved.claude_code_agent.responses_api_agents.claude_code_agent.resources_server is None
 
 
+def test_default_openhands_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/openhands_agent/configs/openhands_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("openhands_agent", name="session_environment", server_type="single_agent_turn")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"openhands_agent": ["session_environment"]}
+    assert resolved.openhands_agent.responses_api_agents.openhands_agent.resources_server is None
+
+
+@pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
+def test_openhands_gets_no_legacy_relay_whatever_its_resources_binding(
+    tmp_path: Path, resources: dict[str, str] | None
+) -> None:
+    # OpenHands answers /run with 422, so a legacy relay in front of it could never run an episode.
+    config = tmp_path / "agent.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "my_agent": {
+                    "responses_api_agents": {
+                        "openhands_agent": {"entrypoint": "app.py", "resources_server": resources}
+                    }
+                }
+            }
+        )
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+
+
 def test_default_droid_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / "responses_api_agents/droid_agent/configs/droid_agent.yaml"
