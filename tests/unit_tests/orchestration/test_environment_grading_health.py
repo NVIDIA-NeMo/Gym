@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,6 +25,7 @@ from nemo_gym.orchestration.recovery import (
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading, observe_verifier
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
 from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score
@@ -151,23 +153,34 @@ class _ObservedDependencies(_Client):
 
     reward: float = 1.0
     judged: bool = False
+    judge_sequence: int = 0
+    verifier: Literal["string_match", "tool_rewards", "math_tool_rewards"] | None = None
     capture_dir: Path | None = None
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
         if server_name == "judge":
             reply = _agent_response().model_dump(mode="json")
-            reply.update(id="judge-response", status="completed")
+            sequence = getattr(self, "judge_sequence", 0)
+            self.judge_sequence = sequence + 1
+            reply.update(
+                id=f"judge-response-{sequence}" if self.verifier == "math_tool_rewards" else "judge-response",
+                status="completed",
+            )
             reply["output"][0]["content"][0]["text"] = "correct" if self.reward else "incorrect"
+            if self.verifier == "math_tool_rewards":
+                reply["output"][0]["content"][0]["text"] = "[[A=B]]" if self.reward else "[[A!=B]]"
             exchange = _capture_exchange("responses", server_name, {}, reply)
+            if self.verifier == "math_tool_rewards":
+                exchange["model_call_id"] = f"call-judge-{sequence}"
             exchange.update(
                 request=kwargs["json"],
                 verifier_invocation_id=kwargs["headers"][VERIFIER_INVOCATION_HEADER],
                 failure_report={"events": {}, "omitted": False, "failure_id": None},
                 model_operations=[
                     {
-                        "operation_id": "judge-operation",
+                        "operation_id": f"judge-operation-{sequence}",
                         "outcome": "completed",
-                        "final_attempt_id": "judge-attempt",
+                        "final_attempt_id": f"judge-attempt-{sequence}",
                         "failure_id": None,
                         "http_attempts": 1,
                         "transport_failures": 0,
@@ -180,6 +193,71 @@ class _ObservedDependencies(_Client):
             return _Response(reply)
         if url_path != "/verify":
             return await super().post(server_name, url_path, **kwargs)
+
+        if self.verifier is not None:
+            from resources_servers.opencode_string_match_tool_rewards.app import (
+                ToolRewardConfig,
+                ToolRewardServer,
+            )
+            from resources_servers.string_match.app import StringMatchResourcesServer, StringMatchResourcesServerConfig
+
+            if self.verifier == "math_tool_rewards":
+                from resources_servers.opencode_math_tool_rewards.app import (
+                    ToolRewardConfig as MathConfig,
+                )
+                from resources_servers.opencode_math_tool_rewards.app import (
+                    ToolRewardServer as MathServer,
+                )
+
+                server = MathServer(
+                    config=MathConfig(
+                        name=server_name,
+                        host="127.0.0.1",
+                        port=1,
+                        entrypoint="app.py",
+                        tool_rewards={
+                            "correct_only": False,
+                            "correct_tool_call_bonuses": [0.0, 0.1],
+                            "tool_success_reward": 0.02,
+                            "tool_success_reward_cap": 0.2,
+                        },
+                        judge_model_server={"type": "responses_api_models", "name": "judge"},
+                        judge_responses_create_params={"input": []},
+                    ),
+                    server_client=self,
+                )
+            elif self.verifier != "string_match":
+                server = ToolRewardServer(
+                    config=ToolRewardConfig(
+                        name=server_name,
+                        host="127.0.0.1",
+                        port=1,
+                        entrypoint="app.py",
+                        tool_rewards={"correct_tool_call_bonuses": [0.0, 0.1]},
+                    ),
+                    server_client=self,
+                )
+            else:
+                server = StringMatchResourcesServer(
+                    config=StringMatchResourcesServerConfig(
+                        name=server_name, host="127.0.0.1", port=1, entrypoint="app.py"
+                    ),
+                    server_client=self,
+                )
+            with TestClient(server.setup_webserver()) as client:
+                reply = client.post(
+                    f"/ng-rollout/{current_rollout_id()}/verify",
+                    json=kwargs["json"]
+                    | (
+                        {"expected_answer": "3", "question": "Solve the task"}
+                        if self.verifier == "math_tool_rewards"
+                        else {"expected_answer": "A" if self.reward else "B", "extraction_mode": "full_response"}
+                    ),
+                    headers=kwargs.get("headers"),
+                )
+            assert reply.status_code == 200, reply.text
+            result = reply.json()
+            return _Response(result)
 
         async def grade():
             reply = await call_judge(
@@ -204,18 +282,50 @@ class _ObservedDependencies(_Client):
 
 
 async def _collect_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reward: float, empty=False, judged=False
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reward: float,
+    empty=False,
+    judged=False,
+    verifier: Literal["string_match", "tool_rewards", "math_tool_rewards"] | None = None,
 ):
     environment, dependencies = _environment_server(client_type=_ObservedDependencies)
+    environment.config.forward_agent_evidence = True
     dependencies.reward = reward
     dependencies.judged = judged
+    dependencies.verifier = verifier
+    dependencies.global_config_dict.observability_enabled = True
     dependencies.capture_dir = tmp_path / "captures"
     response = _agent_response().model_dump(mode="json")
     if empty:
         response |= {"status": "incomplete", "output": [{"type": "reasoning", "id": "reasoning", "summary": []}]}
     else:
         response["status"] = "completed"
+    if verifier is not None:
+        response["output"][0]["content"][0]["text"] = "A"
+    if verifier in {"tool_rewards", "math_tool_rewards"}:
+        response["output"][0]["content"][0]["text"] = "<think>private reasoning</think>A"
+        response["output"][:0] = [
+            {"type": "function_call", "call_id": "bash-1", "name": "bash", "arguments": '{"command":"echo evidence"}'},
+            {"type": "function_call_output", "call_id": "bash-1", "output": "evidence"},
+        ]
+    if verifier == "math_tool_rewards":
+        response["output"][-1]["content"][0]["text"] = "\\boxed{2}"
     trajectory = raw_trial()["ng_trajectory"]
+    if verifier in {"tool_rewards", "math_tool_rewards"}:
+        trajectory["schema_version"] = "2.0"
+        trajectory["capture_key"] = trajectory.pop("rollout_id")
+        trajectory["tool_calls"] = [
+            {
+                "invocation_id": "root",
+                "tool_call_id": "bash-1",
+                "native_tool_call_id": "bash-1",
+                "span_id": "span-bash-1",
+                "tool_name": "bash",
+                "status": "completed",
+            }
+        ]
     trajectory["task_id"] = "task"
     trajectory["verifier_invocations"] = []
     invocation = trajectory["invocations"][0]
@@ -281,13 +391,15 @@ async def _collect_session(
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])
 async def test_collected_taskset_score_is_observed_without_an_agent_ref(tmp_path, monkeypatch, reward):
-    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward)
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward, verifier="string_match")
     assert "agent_ref" not in saved and "agent_ref" not in collected.results[0]
     assert "ng_verifier_invocations" not in saved
     [verifier] = saved["ng_trajectory"]["verifier_invocations"]
     assert verifier["grading_record"]["verifier"] == "resources"
     assert verifier["grading_record"]["score"] == saved["reward"] == reward
+    assert "ng_grading_transform" not in saved
     projected = collected.results[0]
+    assert "_ng_collected_grading_transform" not in projected
     binding = projected["_ng_collected_grading_binding"]
     assert isinstance(binding, str) and len(binding) == 64
     assert (
@@ -297,6 +409,49 @@ async def test_collected_taskset_score_is_observed_without_an_agent_ref(tmp_path
     passed, reason, report, counts = _gate(collected)
     assert passed is True and report["exact"] is True, reason
     assert counts == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 1}
+
+
+async def test_current_tool_reward_projection_is_observed_after_persisted_collection(tmp_path, monkeypatch):
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    assert saved["reward"] == pytest.approx(1.1)
+    assert "ng_grading_transform" not in saved
+    projected = collected.results[0]
+    assert "_ng_collected_grading_transform" not in projected
+    assert "private reasoning" not in json.dumps(projected)
+    [verifier] = projected["ng_trial_observations"]["verifier_invocations"]
+    assert verifier["grading_record"]["score"] == pytest.approx(saved["reward"])
+    assert verifier["grading_record"]["result_binding_sha256"] == grading_result_binding(saved)
+    passed, reason, report, counts = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert counts == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 1}
+
+
+@pytest.mark.parametrize("change", ["score", "binding", "verifier"])
+async def test_final_tool_grade_requires_matching_saved_evidence(tmp_path, monkeypatch, change):
+    _, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    row = collected.results[0]
+    [invocation] = row["ng_trial_observations"]["verifier_invocations"]
+    record = invocation["grading_record"]
+    if change == "score":
+        record["score"] = 1.0  # An answer-only grade cannot certify the shaped score.
+    elif change == "binding":
+        record["result_binding_sha256"] = "0" * 64
+    else:
+        record["verifier"] = "another_resources_server"
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 1
+
+
+async def test_nonfinite_final_grade_is_neither_recorded_nor_a_complete_trial(tmp_path, monkeypatch):
+    _, collected = await _collect_session(tmp_path, monkeypatch, reward=1.0, verifier="tool_rewards")
+    row = collected.results[0]
+    [invocation] = row["ng_trial_observations"]["verifier_invocations"]
+    row["reward"] = invocation["grading_record"]["score"] = float("inf")
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report is None and counts is None
+    assert "not complete" in reason
 
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])

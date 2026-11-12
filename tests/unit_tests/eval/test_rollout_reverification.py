@@ -799,6 +799,31 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    @pytest.mark.parametrize("forward", [None, False, True])
+    def test_saved_agent_evidence_requires_explicit_opt_in(self, forward):
+        evidence = {"schema_version": "2.0", "source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input={"responses_create_params": {"input": []}},
+            rollout={
+                "response": {"output": []},
+                "ng_trajectory": trajectory,
+                "ng_agent_observations": evidence,
+                "opencode_tool_reward": {"auxiliary_reward": 0.1},
+            },
+        )
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        payload = _build_verify_payload(pair, **options)
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
+        assert "opencode_tool_reward" not in payload
+
     def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
         """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
         pair = InputRolloutPair(
@@ -1316,13 +1341,15 @@ class TestPreparePayloads:
         build_calls: list = []
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._build_verify_payload",
-            lambda p: build_calls.append(p) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            lambda p, *, forward_agent_evidence: build_calls.append((p, forward_agent_evidence))
+            or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
         )
 
         _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
 
         assert len(build_calls) == 1
-        assert build_calls[0] is pair
+        assert build_calls[0][0] is pair
+        assert build_calls[0][1] is False
 
     def test_resume_from_cache_drops_already_completed_keys(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2946,6 +2973,32 @@ class TestRunFromConfigResumeFromCache:
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
+    @pytest.mark.parametrize("forward", [None, False, True])
+    @pytest.mark.parametrize("resume", [False, True])
+    async def test_reverification_config_controls_saved_evidence(self, tmp_path, monkeypatch, forward, resume):
+        evidence = {"source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input=self._row("agent_a", 0),
+            rollout={"response": {"output": []}, "ng_trajectory": trajectory, "ng_agent_observations": evidence},
+        )
+        dispatched = []
+        self._patch(monkeypatch, [pair], dispatched)
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        config = self._make_config(tmp_path, resume_from_cache=resume, **options)
+        assert config.forward_agent_evidence is bool(forward)
+        await RolloutReverificationHelper().run_from_config(config)
+        [payload] = dispatched
+        assert payload["response"] == pair.rollout["response"]
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
+
     async def test_resume_preserves_prior_output_and_reruns_only_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3191,6 +3244,283 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
             **overrides,
         )
 
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "none",
+            "resolved_path",
+            "null_cached_route",
+            "ambiguous_population",
+            "conflicting_identity",
+            "one",
+            "masked",
+            "resource_only_unknown",
+            "empty",
+            "population",
+            "known_population",
+            "proven_population",
+            "proven_custom_population",
+            "unrelated_population",
+        ],
+    )
+    async def test_original_attempt_inventory_reaches_actual_visual_aggregator(self, tmp_path, monkeypatch, missing):
+        from fastapi.testclient import TestClient
+        from omegaconf import OmegaConf
+
+        from nemo_gym.client.server_client import ServerClient
+        from nemo_gym.rollouts.rollout_recovery import RunManifest
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+        from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
+        from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request
+        from tests.helpers.single_agent_turn import _Response
+
+        transport = MagicMock(spec=ServerClient)
+        transport.global_config_dict = OmegaConf.create({"observability_enabled": True})
+        transport.post = AsyncMock(
+            side_effect=TimeoutError("scripted judge transport timeout")
+            if missing == "masked"
+            else AssertionError("These explicit answers must not call a judge")
+        )
+        visual = VisualBenchmarksServer(
+            config=VisualBenchmarksConfig(
+                name="visual",
+                host="localhost",
+                port=1,
+                entrypoint="app.py",
+                judge_server="judge",
+                judge_model="fixture-judge",
+                judge_attempts=1,
+            ),
+            server_client=transport,
+        )
+        inputs, source = [], []
+        separate = missing in {"population", "known_population", "unrelated_population"}
+        proven = missing in {"proven_population", "proven_custom_population", "ambiguous_population"}
+        for task in range(3 if missing == "unrelated_population" else 2):
+            for repeat in range(2):
+                prediction = (
+                    "the fuzzy feline on the left" if missing == "masked" and (task, repeat) == (1, 1) else "A"
+                )
+                body = request(
+                    "VStarBench", prediction, index=str(task), expected_samples=1 if separate else 2
+                ).model_dump(mode="json")
+                row = {key: value for key, value in body.items() if key != "response"} | {
+                    "_ng_task_index": task,
+                    "_ng_rollout_index": repeat,
+                    "agent_ref": {"name": "agent_b" if task == 2 else "agent_a"},
+                    "task_source": "visual",
+                }
+                environment = "env_b" if task == 2 or (separate and task == 1) else "env_a"
+                if missing in {"known_population", "empty"}:
+                    row["_ng_environment_server"] = environment
+                if missing == "conflicting_identity":
+                    row["_ng_environment_server"] = "env_b"
+                if missing == "proven_custom_population":
+                    row["_ng_rollout_id"] = f"custom-task-{task}-repeat-{repeat}"
+                inputs.append(row)
+                if (
+                    missing == "empty"
+                    or (missing == "one" and (task, repeat) == (1, 1))
+                    or ((separate or proven) and task == 1)
+                    or (missing == "resource_only_unknown" and repeat == 1)
+                ):
+                    continue
+                source.append(
+                    row
+                    | {
+                        "response": body["response"],
+                        "reward": 0.0,
+                        "_ng_environment_server": environment,
+                        "_ng_result_type": "legacy_agent",
+                    }
+                )
+        self._write(tmp_path / "inputs.jsonl", inputs)
+        store = None
+        if proven:
+            config = {
+                "agent_a": {"responses_api_agents": {"fixture": {"resources_server": {"name": "visual"}}}},
+                "visual": {"resources_servers": {"fixture": {}}},
+                "env_a": {
+                    "environment_servers": {
+                        "single_agent_turn": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"name": "agent_a"},
+                            "resources_server": {"name": "visual"},
+                        }
+                    }
+                },
+            }
+            if missing == "ambiguous_population":
+                config["env_b"] = config["env_a"]
+            with RolloutStore.start_or_resume(
+                tmp_path / "rollouts.jsonl",
+                lambda: (inputs, RunManifest.create(tmp_path / "inputs.jsonl", inputs, {}, config)),
+                resume=False,
+            ) as store:
+                pending = store.pending()
+                source = [pending[index] | row for index, row in enumerate(source)]
+                for row in source:
+                    store.record_dispatch(row)
+                    store.record_outcome(row)
+        else:
+            self._write(tmp_path / "rollouts.jsonl", source)
+        cached = [
+            {key: value for key, value in row.items() if key not in {"_ng_environment_server", "_ng_result_type"}}
+            | {"reward": 1.0}
+            for row in (source if missing == "conflicting_identity" else source[:2])
+        ]
+        if missing == "null_cached_route":
+            cached = [row | {"_ng_environment_server": None, "_ng_result_type": "legacy_agent"} for row in cached]
+        if missing == "resource_only_unknown":
+            cached = [{key: value for key, value in row.items() if key != AGENT_REF_KEY_NAME} for row in cached]
+        if store is not None:
+            import nemo_gym.eval.rollout_reverification as reverify
+
+            cached = [
+                reverify._project_reverification_row(row)
+                | {
+                    "_ng_reverification_source_answer": reverify._rescoring_source_answer(
+                        original, store.manifest.run_id
+                    )
+                }
+                for row, original in zip(cached, source, strict=True)
+            ]
+        self._write(tmp_path / "output.jsonl", cached)
+        posted, verified = [], []
+        with TestClient(visual.setup_webserver()) as http:
+
+            class Client:
+                global_config_dict = OmegaConf.create(
+                    {"visual": {"resources_servers": {"opencode_multimodal_benchmarks": {}}}}
+                )
+
+                async def get(self, *, url_path, **kwargs):
+                    response = http.get(url_path)
+                    assert response.status_code == 200
+                    return _Response(response.json(), dict(response.headers))
+
+                async def post(self, *, server_name, url_path, json, **kwargs):
+                    assert server_name == "visual"
+                    payload = json.model_dump() if hasattr(json, "model_dump") else json
+                    if url_path == "/aggregate_metrics":
+                        posted.append(payload)
+                    else:
+                        assert url_path == "/verify"
+                        verified.append((payload["_ng_task_index"], payload["_ng_rollout_index"]))
+                    response = http.post(url_path, json=payload)
+                    assert response.status_code == 200, response.text
+                    return _Response(response.json(), dict(response.headers))
+
+            monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", Client)
+            monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
+            config = self._config(tmp_path, resume=True)
+            if missing == "resolved_path":
+                config.materialized_inputs_jsonl_fpath = "installed-inputs.jsonl"
+                monkeypatch.setattr(
+                    "nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install",
+                    lambda path: tmp_path / "inputs.jsonl" if path == "installed-inputs.jsonl" else Path(path),
+                )
+            if missing == "ambiguous_population":
+                original = (tmp_path / "output.jsonl").read_bytes()
+                with pytest.raises(ConfigError, match="digest-verified source configuration has ambiguous routes"):
+                    await RolloutReverificationHelper().run_from_config(config)
+                assert verified == posted == []
+                assert (tmp_path / "output.jsonl").read_bytes() == original
+                return
+            if missing == "conflicting_identity":
+                protected = [tmp_path / "inputs.jsonl", tmp_path / "rollouts.jsonl", tmp_path / "output.jsonl"]
+                original = {path: path.read_bytes() for path in protected}
+                with pytest.raises(ConfigError, match="Conflicting original rollout identity"):
+                    await RolloutReverificationHelper().run_from_config(config)
+                assert verified == posted == []
+                assert {path: path.read_bytes() for path in protected} == original
+                return
+            returned = await RolloutReverificationHelper().run_from_config(config)
+        assert len(returned) == (
+            4
+            if missing in {"none", "resolved_path", "null_cached_route", "unrelated_population"}
+            else 3
+            if missing in {"one", "masked"}
+            else 0
+            if missing == "empty"
+            else 2
+        )
+        assert all(row["reward"] == 1.0 for row in returned)
+        assert len(verified) == (
+            2
+            if missing in {"none", "resolved_path", "null_cached_route", "masked", "unrelated_population"}
+            else 1
+            if missing == "one"
+            else 0
+        )
+        metrics = json.loads((tmp_path / "output_aggregate_metrics.json").read_text())
+        if missing in {"none", "resolved_path", "null_cached_route"}:
+            assert len(posted) == len(metrics) == 1
+            assert posted[0]["expected_rollout_indices"] == {0: [0, 1], 1: [0, 1]}
+            assert metrics[0]["agent_metrics"]["VStarBench/complete"] is True
+            assert metrics[0]["key_metrics"]["accuracy"] == 1.0
+        elif missing == "empty":
+            assert len(posted) == len(metrics) == 1
+            assert posted[0]["expected_rollout_indices"] == {0: [0, 1], 1: [0, 1]}
+            assert posted[0]["verify_responses"] == []
+            assert metrics[0]["agent_metrics"].get("VStarBench/complete") is not True
+            assert "accuracy" not in metrics[0]["key_metrics"]
+        elif missing == "known_population":
+            assert len(posted) == len(metrics) == 2
+            by_task = {next(iter(row["expected_rollout_indices"])): row for row in posted}
+            assert by_task[1]["expected_rollout_indices"] == {1: [0, 1]}
+            assert by_task[1]["verify_responses"] == []
+            by_name = {row["agent_ref"]["name"]: row for row in metrics}
+            assert by_name["env_a"]["key_metrics"]["accuracy"] == 1.0
+            assert "accuracy" not in by_name["env_b"]["key_metrics"]
+        elif missing == "unrelated_population":
+            assert len(posted) == len(metrics) == 2
+            by_name = {row["agent_ref"]["name"]: row for row in metrics}
+            assert by_name["agent_a"]["agent_metrics"]["VStarBench/complete"] is False
+            assert "accuracy" not in by_name["agent_a"]["key_metrics"]
+            assert by_name["agent_b"]["key_metrics"]["accuracy"] == 1.0
+        else:
+            assert len(posted) == len(metrics) == 1
+            assert metrics[0]["agent_metrics"]["VStarBench/complete"] is False
+            assert "accuracy" not in metrics[0]["key_metrics"]
+            assert posted[0]["expected_rollout_indices"] is None or 1 in posted[0]["expected_rollout_indices"]
+            if missing in {"one", "population"}:
+                assert posted[0]["expected_rollout_indices"] is None
+            if proven:
+                assert posted[0]["expected_rollout_indices"] == {0: [0, 1], 1: [0, 1]}
+        if missing == "resource_only_unknown":
+            assert posted[0]["expected_rollout_indices"] is None
+            assert all(AGENT_REF_KEY_NAME not in row for row in returned)
+        if missing == "masked":
+            failures = [orjson.loads(line) for line in (tmp_path / "output_failures.jsonl").read_bytes().splitlines()]
+            assert len(failures) == 1
+            assert (failures[0]["_ng_task_index"], failures[0]["_ng_rollout_index"]) == (1, 1)
+            assert failures[0]["_ng_failure_class"] == failures[0]["failure_kind"] == "judge_failed"
+            assert failures[0]["mask_sample"] is True
+            assert posted[0]["expected_rollout_indices"] == {0: [0, 1], 1: [0, 1]}
+            transport.post.assert_awaited_once()
+            assert transport.post.await_args.kwargs["server_name"] == "judge"
+            assert transport.post.await_args.kwargs["url_path"] == "/v1/chat/completions"
+        else:
+            transport.post.assert_not_awaited()
+
+    @pytest.mark.parametrize("value", [[], None, 1])
+    def test_non_object_materialized_plan_stays_unknown(self, tmp_path, value):
+        from nemo_gym.eval.rollout_reverification import _aggregation_plan
+
+        materialized = tmp_path / "inputs.jsonl"
+        materialized.write_bytes(orjson.dumps(value) + b"\n")
+        plan = _aggregation_plan(
+            [materialized],
+            stamps={},
+            replay_source=None,
+            routing_rows=[],
+            agent_to_rs={},
+            global_config={},
+        )
+        assert plan.inventory is None
+        assert plan.rows == [] and plan.unknown == set()
+
     async def test_cached_rows_take_their_source_stamps_and_group_with_the_new_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3302,6 +3632,74 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         assert posted == [[0, 1, 2, 3]]
         assert not any("_ng_environment_server" in r for r in returned)
 
+    @pytest.mark.parametrize("resume", [False, True])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_stamped_source_plan_keeps_all_repeats_with_resource_only_reverification(
+        self, tmp_path, monkeypatch, resume, missing
+    ):
+        async def aggregate(request):
+            return {"agent_metrics": {}, "key_metrics": {}, "group_level_metrics": []}
+
+        await self._stamped_source_plan(tmp_path, monkeypatch, resume, missing, aggregate)
+
+    async def _stamped_source_plan(self, tmp_path, monkeypatch, resume, missing, aggregate):
+        inputs = [
+            {
+                TASK_INDEX_KEY_NAME: task,
+                ROLLOUT_INDEX_KEY_NAME: repeat,
+                AGENT_REF_KEY_NAME: {"name": "agent_a"},
+                TASK_SOURCE_KEY_NAME: "rs_a",
+                "verifier_metadata": {
+                    "benchmark": "VStarBench",
+                    "index": str(task),
+                    "expected_samples": 2,
+                },
+            }
+            for task in range(2)
+            for repeat in range(2)
+        ]
+        self._write(tmp_path / "inputs.jsonl", inputs)
+        self._write(tmp_path / "rollouts.jsonl", [r | self._STAMP | {"response": {}, "reward": 1.0} for r in inputs])
+        if resume:
+            self._write(tmp_path / "output.jsonl", [inputs[0] | {"reward": 1.0}])
+        self._patch(monkeypatch, [], [])
+        client = MagicMock(global_config_dict={"rs_a": {"resources_servers": {"visual": {}}}})
+        requests, metrics = [], []
+
+        async def post(server_name, url_path, json):
+            assert server_name == "rs_a" and url_path == "/aggregate_metrics"
+            requests.append(json)
+            value = await aggregate(json)
+            metrics.append(value)
+            return value
+
+        async def response_json(value):
+            return value
+
+        def run(payloads, semaphore=None):
+            async def grade(row):
+                failed = missing and row[TASK_INDEX_KEY_NAME] == 1 and row[ROLLOUT_INDEX_KEY_NAME] == 1
+                result = row | {"reward": 1.0}
+                if failed:
+                    result |= {
+                        "mask_sample": True,
+                        "failure_kind": "judge_failed",
+                        "_ng_failure_class": "judge_failed",
+                    }
+                return row, result
+
+            return [grade(row) for row in payloads]
+
+        client.post = post
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_response_json", response_json)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._run_verification_payloads", run)
+        await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=resume))
+        assert len(requests) == 1
+        assert requests[0].expected_rollout_indices == {0: [0, 1], 1: [0, 1]}
+        assert len(requests[0].verify_responses) == (3 if missing else 4)
+        return metrics[0]
+
 
 class TestRunFromConfigJudgeFailedOnly:
     """Smoke test: the whole `gym eval reverify --judge-failed-only` recovery path end to end.
@@ -3379,6 +3777,9 @@ class TestRunFromConfigJudgeFailedOnly:
         """Stub the dispatch/guard/aggregate delegates; result_fn(payload) chooses each row's /verify
         result (so a test can make some rows re-fail on a first pass)."""
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client", lambda: MagicMock(global_config_dict={})
+        )
 
         def fake_run(payloads, semaphore=None):
             dispatched.extend(payloads)
@@ -3892,3 +4293,75 @@ class TestVerifyAggregationRoutingConsistency:
         await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
 
         assert posted == ["math_rs"]
+
+
+@pytest.mark.parametrize("stamped_inputs", [False, True])
+def test_repeat_inventory_keeps_shared_agent_environments_and_authoritative_resources(tmp_path, stamped_inputs):
+    from nemo_gym.eval.rollout_reverification import _aggregation_plan, _source_identity_stamps
+
+    inputs = [
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            AGENT_REF_KEY_NAME: {"name": "shared"},
+            TASK_SOURCE_KEY_NAME: "remapped",
+            **({"_ng_environment_server": f"env_{task}"} if stamped_inputs else {}),
+        }
+        for task in range(2)
+        for repeat in range(2)
+    ]
+    materialized = tmp_path / "inputs.jsonl"
+    materialized.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in inputs))
+    # An unstamped missing repeat cannot inherit another attempt's environment when agents are shared.
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(
+        b"".join(
+            orjson.dumps(row | {"_ng_environment_server": f"env_{row[TASK_INDEX_KEY_NAME]}"}) + b"\n"
+            for row in inputs
+            if row[ROLLOUT_INDEX_KEY_NAME] == 0
+        )
+    )
+    stamps, _ = _source_identity_stamps((source,))
+    plan = _aggregation_plan(
+        [materialized],
+        stamps=stamps,
+        replay_source=None,
+        routing_rows=[],
+        agent_to_rs={"shared": "old_resources"},
+        global_config={"remapped": {"resources_servers": {"fixture": {}}}},
+    )
+    expected_repeats = [0, 1] if stamped_inputs else [0]
+    assert plan.inventory == {
+        ("env_0", "remapped"): {0: expected_repeats},
+        ("env_1", "remapped"): {1: expected_repeats},
+    }
+    assert plan.unknown == (set() if stamped_inputs else {("shared", "remapped")})
+
+
+def test_unresolved_planned_task_does_not_guess_between_environments(tmp_path):
+    from nemo_gym.eval.rollout_reverification import _aggregation_plan
+
+    materialized = tmp_path / "inputs.jsonl"
+    materialized.write_bytes(
+        orjson.dumps(
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "shared"},
+            }
+        )
+        + b"\n"
+    )
+    plan = _aggregation_plan(
+        [materialized],
+        stamps={},
+        replay_source=None,
+        routing_rows=[
+            {TASK_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "shared"}, "_ng_environment_server": "env_a"},
+            {TASK_INDEX_KEY_NAME: 1, AGENT_REF_KEY_NAME: {"name": "shared"}, "_ng_environment_server": "env_b"},
+        ],
+        agent_to_rs={"shared": "resources"},
+        global_config={},
+    )
+    assert plan.unknown == {("shared", "resources")}
+    assert plan.inventory == {} and plan.rows == []

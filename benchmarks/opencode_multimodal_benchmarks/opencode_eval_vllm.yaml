@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Select explicitly with the vllm_model policy adapter; evaluation only.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      chat_template_kwargs:
+        truncate_history_thinking: false
+      uses_interleaved_reasoning: true
+      sampling_overrides:
+        max_tokens: null
+        max_completion_tokens: null
+      extra_body: null
+      propagate_context_overflow_errors: true
