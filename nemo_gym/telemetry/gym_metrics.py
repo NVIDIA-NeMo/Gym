@@ -133,7 +133,8 @@ Partial-rollout checkpoints
 ---------------------------
 ``gym.checkpoint.operation_duration_ms`` (histogram): wall-clock of one checkpoint operation.
 ``nemo.gym.checkpoint.operation`` is a participant's control operation (``prepare``, ``commit``, ``restore``,
-``resume``, ``retire``, or ``forget``), ``lease_reopen`` for one attempt to reopen a participant whose lease expired,
+``resume``, ``retire``, ``forget``, or ``release``), ``lease_reopen`` for one attempt to reopen a participant whose
+lease expired,
 or ``coordinate.<operation>`` for one call the controller makes to every participant.
 It also carries ``nemo.gym.checkpoint.participant_kind`` (``controller`` for coordination) and ``outcome``
 (``ok`` or ``error``).
