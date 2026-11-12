@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -934,10 +935,16 @@ def _rejudge_saved_judge_failures(
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
     ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
     incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
-    (always False without ``complete_only``).
+    (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
+    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
-    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import (
+        RolloutAggregationConfig,
+        RolloutAggregationHelper,
+        refresh_agent_complete_files,
+    )
+    from nemo_gym.utils.path_utils import agent_complete_dir_for
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
     if isinstance(global_config_dict, DictConfig):
@@ -971,6 +978,17 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+        shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
+        return complete
+    try:
+        refresh_agent_complete_files(output, OmegaConf.create(run_config))
+    except Exception as error:  # the recomputed run-wide metrics stand; only the per-agent copies are behind them
+        print(
+            f"Per-agent completion files were not refreshed after the re-judgment ({type(error).__name__}: {error}); "
+            f"they are removed, and {output.stem}_aggregate_metrics.json holds every agent's metrics.",
+            flush=True,
+        )
+        shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
     return complete
 
 

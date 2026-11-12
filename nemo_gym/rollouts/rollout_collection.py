@@ -3079,6 +3079,52 @@ def _agent_complete_fpath(output_fpath: Path, label: str) -> Path:
     return agent_complete_dir_for(output_fpath) / (quote(label, safe="._-") + ".json")
 
 
+def refresh_agent_complete_files(output_fpath: Path, global_config_dict: DictConfig) -> None:
+    """Bring each completion file in line with the run-wide aggregate metrics after they were recomputed in place.
+
+    The saved-answer re-judge pass at the end of ``gym eval run`` grades judge failures again and recomputes
+    ``<stem>_aggregate_metrics.json``. A completion file written during collection still holds the scores from before
+    that pass, so each file takes its environment server's recomputed entry, without the run-level health summary,
+    and its rollout counts from the Store. A file whose entry and counts did not change keeps its ``completed_at``.
+    A file whose environment server has no recomputed entry is removed.
+    """
+    complete_dir = agent_complete_dir_for(output_fpath)
+    if not complete_dir.is_dir():
+        return
+    entries = {
+        entry[NG_ENVIRONMENT_SERVER_KEY]: {
+            key: value for key, value in entry.items() if key != "_ng_run_health_metrics"
+        }
+        for entry in orjson.loads(aggregate_metrics_path_for(output_fpath).read_bytes())
+    }
+    store = RolloutStore.read(output_fpath, import_legacy=False)
+    if store is None:
+        raise RuntimeError(f"{output_fpath} has no Store to count its agents' rollouts from.")
+    servers_by_agent = _environment_servers_by_agent(global_config_dict)
+    # Scored and failed rollouts per environment server, grouped and counted as ``_write_agent_complete`` does.
+    counts: Dict[str, List[int]] = defaultdict(lambda: [0, 0])
+    for disposition, column in (("success", 0), ("failure", 1), ("omitted", 1)):
+        selected = store.selected_records(disposition)
+        for row in store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity, _ in selected]):
+            group_name = _metrics_group(row, lambda: servers_by_agent) or RolloutCollectionHelper._dispatch_name(row)
+            counts[group_name][column] += 1
+    for fpath in complete_dir.glob("*.json"):
+        current = orjson.loads(fpath.read_bytes())
+        entry = entries.get(current.get(NG_ENVIRONMENT_SERVER_KEY))
+        if entry is None:
+            fpath.unlink()
+            continue
+        completed, failed = counts[entry[NG_ENVIRONMENT_SERVER_KEY]]
+        refreshed = current | {
+            "completed_rollouts": completed,
+            "failed_rollouts": failed,
+            "aggregation_status": "error" if AGGREGATION_ERROR_KEY in entry else "complete",
+            "aggregate": entry,
+        }
+        if refreshed != current:
+            _atomic_write_json(fpath, refreshed | {"completed_at": datetime.now(timezone.utc).isoformat()})
+
+
 def _failure_export_metrics(
     failures_fpaths: List[Path],
     identity: Callable[[Mapping[str, Any]], Any],
@@ -5272,8 +5318,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         reader sees it whole or not at all. It holds the entry ``_call_aggregate_metrics`` gives this
         agent at the end of the run: its scored rows plus the failures the run's policy counts as zero.
         Every rollout is settled (``RolloutStore.settled``), so no resume changes the entry and no
-        missing rollout is left to count. An aggregation failure is recorded in the file as in the
-        run-wide aggregate, and the end of the run reports it.
+        missing rollout is left to count. The saved-answer re-judge pass after collection can still
+        grade a judge failure again; ``refresh_agent_complete_files`` then brings the file up to date.
+        An aggregation failure is recorded in the file as in the run-wide aggregate, and the end of the
+        run reports it.
 
         The agent's rows are the rows the store selects for its rollouts (the same selection the end of
         the run aggregates), whether or not the run keeps results in memory. Only the agent's own lines

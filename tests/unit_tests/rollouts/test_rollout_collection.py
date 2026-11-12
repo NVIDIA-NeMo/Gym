@@ -143,6 +143,7 @@ from nemo_gym.rollouts.rollout_collection import (
     is_omitted_rollout_row,
     is_terminal_failure,
     loads_jsonl_line,
+    refresh_agent_complete_files,
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf, _build_ng_perf
@@ -1797,6 +1798,89 @@ class TestRolloutCollection:
                 completion[AGENT_REF_KEY_NAME]["name"] == run_aggregate[server][AGENT_REF_KEY_NAME]["name"] == server
             )
             assert completion["aggregate"] == run_aggregate[server]
+
+    def test_a_rejudged_judge_failure_refreshes_its_agent_completion_file(self, tmp_path: Path) -> None:
+        """After the re-judge pass recomputes the run-wide metrics, a file holds its agent's new entry and counts."""
+        from nemo_gym.rollouts.rollout_recovery import RunManifest
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+        from tests.unit_tests.eval.test_rejudge_saved_judge_failures import ANSWER, _settle
+
+        # alpha scored task 0 and failed to judge task 1; beta scored task 2. No config fronts the agents with
+        # environment servers, so each agent is its own group.
+        rows = [
+            {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": agent}}
+            for task, agent in enumerate(("alpha", "alpha", "beta"))
+        ]
+        source = tmp_path / "source.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        agents = {name: {"responses_api_agents": {}} for name in ("alpha", "beta")}
+        output = tmp_path / "rollouts.jsonl"
+        with RolloutStore.start_or_resume(
+            output, lambda: (rows, RunManifest.create(source, rows, {}, agents)), resume=False
+        ) as store:
+            for row in store.pending():
+                store.record_dispatch(row)
+                if row[TASK_INDEX_KEY_NAME] == 1:
+                    judge_failure = row | {
+                        "_ng_failure_class": "judge_failed",
+                        "_ng_failure_id": "judge-1",
+                        "failure_kind": "judge_failed",
+                        "mask_sample": True,
+                        "reward": 0.0,
+                        "response": ANSWER,
+                    }
+                    store.record_outcome(judge_failure)
+                else:
+                    store.record_outcome(row | {"reward": 1.0, "response": ANSWER})
+
+        # The files collection wrote: alpha scored over its one judged rollout, beta as the run-wide entry has it.
+        def entry(agent: str, mean_reward: float) -> dict:
+            return {
+                AGENT_REF_KEY_NAME: {"name": agent},
+                NG_ENVIRONMENT_SERVER_KEY: agent,
+                "key_metrics": {"mean/reward": mean_reward},
+            }
+
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        complete_dir.mkdir()
+        before = {
+            "alpha": (1, 1, entry("alpha", 1.0)),
+            "beta": (1, 0, entry("beta", 1.0)),
+            "gamma": (1, 0, entry("gamma", 1.0)),
+        }
+        for agent, (completed, failed, aggregate) in before.items():
+            (complete_dir / f"{agent}.json").write_bytes(
+                orjson.dumps(
+                    {
+                        "schema_version": "1",
+                        AGENT_REF_KEY_NAME: {"name": agent},
+                        NG_ENVIRONMENT_SERVER_KEY: agent,
+                        "expected_rollouts": completed + failed,
+                        "completed_rollouts": completed,
+                        "failed_rollouts": failed,
+                        "completed_at": "2026-01-01T00:00:00+00:00",
+                        "aggregation_status": "complete",
+                        "aggregate": aggregate,
+                    }
+                )
+            )
+        beta_before = (complete_dir / "beta.json").read_bytes()
+
+        # The re-judge pass grades the saved answer correct, then the run-wide metrics are recomputed: alpha is 2/2,
+        # beta is unchanged, and gamma has no entry. The first entry carries the run-level health summary.
+        _settle(output, judge_failure, 0.5)
+        recomputed = [entry("alpha", 0.75) | {"_ng_run_health_metrics": {"metrics": {}}}, entry("beta", 1.0)]
+        (tmp_path / "rollouts_aggregate_metrics.json").write_bytes(orjson.dumps(recomputed))
+
+        refresh_agent_complete_files(output, OmegaConf.create({}))
+
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"], alpha["failed_rollouts"]) == (2, 2, 0)
+        assert alpha["aggregate"] == entry("alpha", 0.75)
+        assert alpha["aggregation_status"] == "complete"
+        assert alpha["completed_at"] != "2026-01-01T00:00:00+00:00"
+        assert (complete_dir / "beta.json").read_bytes() == beta_before
+        assert not (complete_dir / "gamma.json").exists()
 
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",

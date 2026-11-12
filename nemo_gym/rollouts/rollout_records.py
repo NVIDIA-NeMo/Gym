@@ -911,6 +911,7 @@ class RolloutRecords:
         """Whether this rollout's outcome is final: a success no resume reruns, or a failure or omission none retries.
 
         The complement of ``pending`` for a rollout with an outcome, so a later attempt can never change a settled one.
+        A settled judge failure keeps its saved answer, which the saved-answer re-judge pass can still grade again.
         """
         disposition = self.disposition(identity)
         if disposition == "success":
