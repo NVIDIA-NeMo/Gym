@@ -10,7 +10,7 @@ a separate sandbox, and cleans up both sandboxes. Identical activation retries
 join the same execution. Continuations and required external tool grants are
 unsupported.
 
-The loop implements LAB's workspace tools. Turn, context, and
+The loop implements LAB's workspace tools and `finish`. Turn, context, and
 agent-budget exhaustion are scoreable incomplete outcomes after confirmed
 cleanup. Model, provider, and cleanup failures remain operational failures.
 The budget includes connection and activation setup. Responses and tool

@@ -24,12 +24,12 @@ from resources_servers.legal_agent_bench import prepare
 TASK_IDS = ("area/task-one", "area/task-group/scenario-01")
 
 
-def test_prepared_verifier_imports_without_repository(monkeypatch, tmp_path: Path) -> None:
+def test_prepared_verifier_imports_identity_correction_without_repository(monkeypatch, tmp_path: Path) -> None:
     _, tasks, _ = _build_caches(monkeypatch, tmp_path)
     task = tasks / prepare.flatten_task_id(TASK_IDS[0])
-    module = task / "tests" / "lab_harbor" / "judge.py"
-    assert module.read_bytes() == (prepare.LAB_HARBOR_SOURCE_DIR / "judge.py").read_bytes()
-    assert not list((task / "environment").rglob("judge.py"))
+    module = task / "tests" / "lab_harbor" / "document_ids.py"
+    assert module.read_bytes() == (prepare.LAB_HARBOR_SOURCE_DIR / "document_ids.py").read_bytes()
+    assert not list((task / "environment").rglob("document_ids.py"))
     result = subprocess.run(
         [sys.executable, str(task / "tests" / "legal_agent_bench_verify.py"), "--help"],
         cwd=tmp_path,

@@ -26,13 +26,13 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 
 LAB_SOURCE_REPOSITORY = "https://github.com/harveyai/harvey-labs"
-LAB_SOURCE_REVISION = "f46ef86e4788545622db25dcffa3aebb7a139929"  # pragma: allowlist secret
+LAB_SOURCE_REVISION = "9e9fa7fe126103de1fceb2227b7c70bf59b67f73"  # pragma: allowlist secret
 LAB_SOURCE_ARCHIVE_URL = f"https://codeload.github.com/harveyai/harvey-labs/tar.gz/{LAB_SOURCE_REVISION}"
 LAB_SOURCE_ARCHIVE_SHA256 = (
-    "e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c"  # pragma: allowlist secret
+    "333223f7bd293e075ba3d3444f0752b210d52ff2b4f961e888b20afe771c8261"  # pragma: allowlist secret
 )
 LAB_SOURCE_ARCHIVE_ROOT = f"harvey-labs-{LAB_SOURCE_REVISION}"
-EXPECTED_TASK_COUNT = 1_749
+EXPECTED_TASK_COUNT = 2_010
 REQUIRED_SKILLS = ("docx", "pptx", "xlsx")
 SMOKE_TASK_IDS = (
     "trusts-estates-private-client/compare-trust-documents-against-client-instructions",
@@ -44,7 +44,7 @@ SMOKE_TASK_IDS = (
 
 DEFAULT_TASKS_DIR = PACKAGE_DIR / "data" / "cache" / "harbor_tasks" / "legal_agent_bench"
 DEFAULT_SKILLS_DIR = PACKAGE_DIR / "data" / "cache" / "harness" / "skills"
-SOURCE_SKILLS_PATH = Path("harness/skills")
+SOURCE_SKILLS_PATH = Path("lab_core/harness/skills")
 CORPORA_DIRNAME = ".corpora"
 INDEX_FILENAME = "all.jsonl"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
@@ -54,13 +54,16 @@ LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "lab_harbor"
 TOOL_RUNNER_SOURCE = LAB_HARBOR_SOURCE_DIR / "container_tool_runner.py"
 BUILD_CONTEXT_FILES: dict[str, Path] = {
     "requirements.txt": PACKAGE_DIR / "sandbox" / "requirements.txt",
+    "install-pandoc.sh": PACKAGE_DIR / "install-pandoc.sh",
     "LICENSE.harvey-labs": PACKAGE_DIR / "vendor" / "harvey_labs" / "LICENSE",
 }
 VERIFIER_TEMPLATE_SOURCES = {
     "tests/legal_agent_bench_verify.py": PACKAGE_DIR / "verifier.py",
     "tests/lab_harbor/__init__.py": LAB_HARBOR_SOURCE_DIR / "__init__.py",
+    "tests/lab_harbor/judge_config.py": LAB_HARBOR_SOURCE_DIR / "judge_config.py",
     "tests/lab_harbor/judge.py": LAB_HARBOR_SOURCE_DIR / "judge.py",
     "tests/lab_harbor/scoring.py": LAB_HARBOR_SOURCE_DIR / "scoring.py",
+    "tests/lab_harbor/document_ids.py": LAB_HARBOR_SOURCE_DIR / "document_ids.py",
 }
 REQUIRED_TASK_PATHS = (
     "instruction.md",
@@ -84,7 +87,7 @@ ENV DEBIAN_FRONTEND=noninteractive \\
 RUN apt-get update \\
     && apt-get install -y --no-install-recommends \\
         bash ca-certificates coreutils curl file findutils fonts-liberation g++ \\
-        gawk gcc git grep jq libreoffice nodejs npm pandoc poppler-utils procps \\
+        gawk gcc git grep jq libreoffice nodejs npm poppler-utils procps \\
         iproute2 qpdf ripgrep sed tesseract-ocr unzip \\
     && rm -rf /var/lib/apt/lists/*
 
@@ -105,6 +108,8 @@ RUN npm install -g @marp-team/marp-cli docx pptxgenjs react react-dom react-icon
 COPY harness/container_tool_runner.py /opt/legal-agent-bench/container_tool_runner.py
 
 COPY LICENSE.harvey-labs /opt/legal-agent-bench/LICENSE.harvey-labs
+COPY install-pandoc.sh /tmp/install-pandoc.sh
+RUN sh /tmp/install-pandoc.sh && rm /tmp/install-pandoc.sh
 
 # Harbor prepares verifier paths before agent execution, including with OpenShell's restricted user.
 RUN install -d -o sandbox -g sandbox /tests /logs /logs/agent /logs/verifier

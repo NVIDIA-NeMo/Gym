@@ -72,7 +72,7 @@ def test_materialization_preserves_identity_params_and_isolates_rubric(assets, t
         assert not (folder / name / "environment/task.json").exists()
         assert task.python_verifier is not None
         assert task.config.verifier.environment_mode == "separate"
-        assert task.config.verifier.env["LAB_JUDGE_MODEL"] == "${LAB_JUDGE_MODEL}"
+        assert task.config.verifier.env["LAB_JUDGES"] == "${LAB_JUDGES}"
     source = cache / "_corpora/firm/document.txt"
     assert os.path.samefile(folder / "one/environment/vdr/document.txt", source)
     assert os.path.samefile(folder / "two/environment/vdr/document.txt", source)

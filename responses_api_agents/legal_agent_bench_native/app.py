@@ -36,6 +36,7 @@ from nemo_gym.core import (
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config, upload_text
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.legal_agent_bench.lab_harbor.completion import CompletionState
 from resources_servers.legal_agent_bench.lab_harbor.tools import get_all_tool_definitions
 
 
@@ -66,6 +67,7 @@ class LegalAgentBenchNativeAgentConfig(BaseResponsesAPIAgentConfig):
 @dataclass
 class LabNativeSession(AgentSessionState):
     session: SandboxSession[str]
+    completion: CompletionState
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     tool_index: int = 0
@@ -107,6 +109,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 # Closing the agent stops its processes and disconnects; the environment server stops the sandbox.
                 owns_sandbox=False,
             ),
+            completion=CompletionState(),
             deadline=deadline,
         )
 
@@ -169,7 +172,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 "input": [
                     {
                         "role": "developer",
-                        "content": "Use the LAB workspace tools and save requested deliverables under /workspace/output. When complete, respond with a summary of the files you created.",
+                        "content": "Use the LAB workspace tools. When complete, call finish with a summary and the deliverable paths under /workspace/output. Missing files are rejected twice, then accepted as incomplete evidence.",
                     },
                     *messages,
                 ]
@@ -283,11 +286,14 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 if remaining <= 0:
                     finish_reason = "agent_timeout"
                     break
-                try:
-                    tool_output = await self._execute_tool(state, call.name, call.arguments, deadline=deadline)
-                except _AgentDeadlineExceeded:
-                    tool_output = "Error: agent time limit reached; tool cleanup completed."
-                    finish_reason = "agent_timeout"
+                if state.completion.finished:
+                    tool_output = "Task already finished; no further tools were executed."
+                else:
+                    try:
+                        tool_output = await self._execute_tool(state, call.name, call.arguments, deadline=deadline)
+                    except _AgentDeadlineExceeded:
+                        tool_output = "Error: agent time limit reached; tool cleanup completed."
+                        finish_reason = "agent_timeout"
                 item = NeMoGymFunctionCallOutput(type="function_call_output", call_id=call.call_id, output=tool_output)
                 messages.append(item)
                 output.append(item)
@@ -296,11 +302,16 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
             if finish_reason == "agent_timeout" or asyncio.get_running_loop().time() >= deadline:
                 finish_reason = "agent_timeout"
                 break
-        clean = finish_reason == "no_tool_calls"
+            if state.completion.finished:
+                finish_reason = "finish_tool"
+                break
+        clean = finish_reason in {"finish_tool", "no_tool_calls"}
         metadata = dict(model_response.metadata or {})
         metadata["lab_finish_reason"] = finish_reason
         if finish_reason == "model_error" and "ng_agent_outcome" not in metadata:
             metadata["ng_agent_outcome"] = '{"failure_kind":"unknown"}'
+        if state.completion.summary:
+            metadata["lab_finish_summary"] = state.completion.summary
         response = model_response.model_copy(
             update={
                 "output": output,
@@ -391,6 +402,12 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 data = json.loads(next(line for line in reversed(text.splitlines()) if line.strip()))
             except (ValueError, StopIteration):
                 return f"Error: invalid container tool response: {text[: self.config.max_output_chars]}"
+            if name == "finish":
+                if "missing_deliverables" not in (data.get("metrics") or {}):
+                    return f"Error: completion check failed: {data.get('result')}"
+                return state.completion.finish(
+                    summary=str(parsed.get("summary", "")), missing=data["metrics"]["missing_deliverables"]
+                )
             text = str(data.get("result", ""))
         full_read = name == "read" and "limit" in parsed and parsed["limit"] in (None, 0)
         return text if full_read else text[: self.config.max_output_chars]

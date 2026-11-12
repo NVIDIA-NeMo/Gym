@@ -32,8 +32,9 @@ legal_agent_bench_environment_server:
       cleanup_timeout_seconds: 180
       enforce_task_timeouts: true
       separate_verifier_for_artifacts: true
-      judge_model_name: ${oc.select:judge_model_name,null}
+      judges: ${oc.select:lab_judges,null}
       judge_base_url: ${oc.select:judge_base_url,null}
       judge_api_key: ${oc.select:judge_api_key,null}
+      judge_reasoning_effort: ${oc.select:judge_reasoning_effort,null}
       reward_mode: ${lab.reward_mode}
       judge_parallelism: ${lab.judge_parallelism}

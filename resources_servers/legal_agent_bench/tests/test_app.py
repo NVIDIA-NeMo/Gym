@@ -30,8 +30,7 @@ def server(tmp_path, **overrides):
         agent_server={"type": "responses_api_agents", "name": "agent"},
         prepared_tasksets_file=str(mapping),
         artifacts_dir=tmp_path / "artifacts",
-        judge_model_name="test-model",
-        judge_api_key="test-only-judge-key",
+        judges=[{"model_name": "gpt-5.5", "api_key": "test-only-judge-key"}],
         **overrides,
     )
     return LegalAgentBenchEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -40,7 +39,7 @@ def server(tmp_path, **overrides):
 def test_prepared_mapping_and_secrets_are_loaded_without_rewriting_task_files(tmp_path):
     app = server(tmp_path)
     assert app.config.tasksets["legal_agent_bench"].tasks == {"one": "digest"}
-    assert "test-only-judge-key" in app.config.secrets["LAB_JUDGE_API_KEY"]
+    assert "test-only-judge-key" in app.config.secrets["LAB_JUDGES"]
     assert "test-only-judge-key" not in (tmp_path / "tasks.json").read_text()
     assert app.config.reward_mode == "full_task"
     assert app.config.judge_parallelism == 6
@@ -99,41 +98,6 @@ async def test_masked_verification_uses_operational_failure_boundary(tmp_path, m
         await app._verified_outcome(None, None, None)
     assert error.value.status_code == 503
     assert "/reports/task" in error.value.detail
-
-
-async def test_verifier_provenance_comes_from_server_settings(tmp_path, monkeypatch):
-    from resources_servers.legal_agent_bench import app as module
-
-    app = server(tmp_path)
-    app._gym_commit = "tested-source-commit"
-    monkeypatch.setattr(
-        module,
-        "get_global_config_dict",
-        lambda: {"agent": {"responses_api_agents": {"legal_agent_bench_native": {"max_turns": 60}}}},
-    )
-    response = NeMoGymResponse(
-        id="response",
-        created_at=0,
-        model="policy",
-        object="response",
-        output=[],
-        status="completed",
-        tools=[],
-        tool_choice="auto",
-        parallel_tool_calls=False,
-        metadata={"lab_harness_provenance": '{"gym_commit":"forged"}', "lab_finish_reason": "no_tool_calls"},
-    )
-    parent = AsyncMock(return_value={"reward": 1.0})
-    monkeypatch.setattr(HarborEnvironmentServer, "_run_verifier", parent)
-    await app._run_verifier(None, b"trajectory", response=response)
-    sent = parent.call_args.kwargs["response"]
-    assert json.loads(sent.metadata["lab_harness_provenance"]) == {
-        "agent_id": "legal_agent_bench_native",
-        "harness_pin": {"max_turns": 60},
-        "gym_commit": "tested-source-commit",
-    }
-    assert sent.metadata["lab_finish_reason"] == "no_tool_calls"
-    assert "forged" in response.metadata["lab_harness_provenance"]
 
 
 @pytest.mark.parametrize(
@@ -197,3 +161,38 @@ async def test_staging_copies_only_public_inputs_using_shared_transfer(tmp_path)
     assert "/workspace/vdr" in commands and "/workspace/skills" in commands
     assert not sandbox.stopped
     await app.shutdown()
+
+
+async def test_verifier_provenance_comes_from_server_settings(tmp_path, monkeypatch):
+    from resources_servers.legal_agent_bench import app as module
+
+    app = server(tmp_path)
+    app._gym_commit = "tested-source-commit"
+    monkeypatch.setattr(
+        module,
+        "get_global_config_dict",
+        lambda: {"agent": {"responses_api_agents": {"legal_agent_bench_native": {"max_turns": 60}}}},
+    )
+    response = NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[],
+        status="completed",
+        tools=[],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+        metadata={"lab_harness_provenance": '{"gym_commit":"forged"}', "lab_finish_reason": "no_tool_calls"},
+    )
+    parent = AsyncMock(return_value={"reward": 1.0})
+    monkeypatch.setattr(HarborEnvironmentServer, "_run_verifier", parent)
+    await app._run_verifier(None, b"trajectory", response=response)
+    sent = parent.call_args.kwargs["response"]
+    assert json.loads(sent.metadata["lab_harness_provenance"]) == {
+        "agent_id": "legal_agent_bench_native",
+        "harness_pin": {"max_turns": 60},
+        "gym_commit": "tested-source-commit",
+    }
+    assert sent.metadata["lab_finish_reason"] == "no_tool_calls"
+    assert "forged" in response.metadata["lab_harness_provenance"]

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +18,8 @@ from pydantic import (
     PositiveFloat,
     PositiveInt,
     PrivateAttr,
+    field_validator,
+    model_validator,
 )
 
 from environment_servers.harbor.app import (
@@ -31,11 +34,12 @@ from nemo_gym.core import NeMoGymResponse
 from nemo_gym.data.tasks.harbor import HarborTask, HarborTurn
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, upload_dir
 from nemo_gym.utils import installed_gym_commit, is_nemo_gym_fastapi_entrypoint
+from resources_servers.legal_agent_bench.lab_harbor.judge_config import LabJudgeConfig, validate_judges
 
 
 RewardMode = Literal["full_task", "criteria_pass_rate"]
 JUDGE_CONFIG_TO_ENV = {
-    "judge_model_name": "LAB_JUDGE_MODEL",
+    "judge_reasoning_effort": "LAB_JUDGE_REASONING_EFFORT",
     "judge_base_url": "LAB_JUDGE_BASE_URL",
     "judge_api_key": "LAB_JUDGE_API_KEY",  # pragma: allowlist secret
     "judge_temperature": "LAB_JUDGE_TEMPERATURE",
@@ -54,7 +58,8 @@ class LegalAgentBenchEnvironmentConfig(HarborEnvironmentServerConfig):
 
     prepared_tasksets_file: str = "resources_servers/legal_agent_bench/data/environment/tasksets.json"
     reward_mode: RewardMode = "full_task"
-    judge_model_name: str | None = None
+    judges: list[LabJudgeConfig]
+    judge_reasoning_effort: str | None = None
     judge_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL for the LAB judge.")
     judge_api_key: str | None = Field(default=None, description="API key for the LAB judge endpoint.")
     judge_temperature: float | None = Field(
@@ -81,6 +86,25 @@ class LegalAgentBenchEnvironmentConfig(HarborEnvironmentServerConfig):
     )
     judge_max_tokens: PositiveInt = Field(default=4096, description="Maximum output tokens for LAB judge requests.")
     judge_parallelism: PositiveInt = Field(default=6, description="Maximum concurrent LAB judge requests per task.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_judge_selection(cls, value: object) -> object:
+        if isinstance(value, Mapping) and ("judge_profile" in value or "judge_model_name" in value):
+            raise ValueError(
+                "Select judges through lab_judges; remove judge_profile and judge_model_name from LAB settings"
+            )
+        return value
+
+    @field_validator("judges", mode="before")
+    @classmethod
+    def validate_judge_selection(cls, value: object) -> list[LabJudgeConfig]:
+        return validate_judges(value)
+
+    @property
+    def judge_profile(self) -> Literal["official_dual", "single"]:
+        """Report the scoring profile implied by the explicitly selected judges."""
+        return "single" if len(self.judges) == 1 else "official_dual"
 
 
 class LegalAgentBenchEnvironmentServer(HarborEnvironmentServer):
@@ -184,9 +208,8 @@ def _build_verifier_env(config: LegalAgentBenchEnvironmentConfig) -> dict[str, s
         value = getattr(config, config_key)
         if value in (None, "", "****"):
             continue
-        if config_key == "judge_model_name" and not str(value).startswith("openai-compatible/"):
-            value = f"openai-compatible/{value}"
         env[env_key] = str(value).lower() if isinstance(value, bool) else str(value)
+    env["LAB_JUDGES"] = json.dumps(config.judges)
     return env
 
 

@@ -1,10 +1,10 @@
 name: legal_agent_bench
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
-description: Harvey LAB legal-document tasks through the Harbor Environment Server and native LAB agent.
+description: Harvey LAB legal-document tasks with the native agent and single or dual judging.
 modality: multimodal
 licensing: MIT
 authors:

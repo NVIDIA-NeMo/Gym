@@ -35,9 +35,10 @@ def grading(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setitem(sys.modules, "legal_agent_bench_verify", verifier)
     for name in os.environ:
-        if name.startswith("LAB_JUDGE_") or name == "LEGAL_AGENT_BENCH_REWARD_MODE":
+        if name.startswith("LAB_JUDGE") or name == "LEGAL_AGENT_BENCH_REWARD_MODE":
             monkeypatch.delenv(name)
     monkeypatch.setenv("LAB_JUDGE_PARALLELISM", "1")
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": "test-judge"}]))
     parser = verifier.build_parser()
     invocations = []
 

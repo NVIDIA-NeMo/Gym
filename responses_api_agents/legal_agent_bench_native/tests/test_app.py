@@ -17,6 +17,7 @@ import pytest
 from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from resources_servers.legal_agent_bench.lab_harbor.completion import CompletionState
 from responses_api_agents.legal_agent_bench_native.app import (
     LabNativeSession,
     LegalAgentBenchNativeAgent,
@@ -141,7 +142,7 @@ async def test_native_staging_preserves_literal_arguments(tmp_path, monkeypatch,
         execute=execute_activation,
         read_output_log=AsyncMock(),
     )
-    state = LabNativeSession(request=seed(), session=session)
+    state = LabNativeSession(request=seed(), session=session, completion=CompletionState())
     try:
         result = await agent()._execute_tool(
             state, tool, json.dumps(arguments), deadline=asyncio.get_running_loop().time() + 30
@@ -155,6 +156,96 @@ async def test_native_staging_preserves_literal_arguments(tmp_path, monkeypatch,
             assert set(uploaded) == {"arguments.json"}
             assert json.loads(uploaded["arguments.json"]) == arguments
             assert result == f"Wrote {len(content)} bytes to {output}"
+    finally:
+        for directory in activation_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_missing", [False, True])
+async def test_finish_checks_files_and_stops_later_tools(tmp_path, monkeypatch, repair_missing):
+    from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+    from resources_servers.legal_agent_bench.prepare import TOOL_RUNNER_SOURCE
+    from responses_api_agents.legal_agent_bench_native import app
+
+    workspace = tmp_path / "workspace"
+    output = workspace / "output"
+    output.mkdir(parents=True)
+    monkeypatch.setattr(app, "_TOOL_RUNNER", str(TOOL_RUNNER_SOURCE))
+    monkeypatch.setattr(
+        app, "_TOOL_ENV", {**app._TOOL_ENV, "WORKSPACE_DIR": str(workspace), "OUTPUT_DIR": str(output)}
+    )
+    activation_dirs = []
+
+    async def run_process(argv):
+        result = await asyncio.to_thread(
+            subprocess.run,
+            argv,
+            cwd=workspace,
+            env={**os.environ, "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}"},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    async def execute(command, **kwargs):
+        return SandboxExecResult(stdout=await run_process(["/bin/bash", "-c", command]), stderr="", return_code=0)
+
+    async def upload(source, destination):
+        shutil.copyfile(source, destination)
+
+    async def begin_activation(*, session_dir, **kwargs):
+        activation_dirs.append(Path(session_dir))
+
+    async def execute_activation(*, stage_activation, **kwargs):
+        staged = await stage_activation()
+        return await run_process(staged.argv)
+
+    box = AsyncMock(spec=AsyncSandbox)
+    box.exec.side_effect = execute
+    box.upload.side_effect = upload
+    session = SimpleNamespace(
+        sandbox=box,
+        expired=False,
+        begin_activation=begin_activation,
+        execute=execute_activation,
+        read_output_log=AsyncMock(),
+    )
+
+    def call(call_id, name, **arguments):
+        return {"type": "function_call", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+
+    calls = [
+        call("write", "write", file_path="memo.txt", content="Original deliverable"),
+        call("finish", "finish", summary="Completed memo", deliverables=["memo.txt"]),
+        call("late-write", "write", file_path="memo.txt", content="Unexpected overwrite"),
+    ]
+    replies = [response(output=calls)]
+    if repair_missing:
+        replies.insert(0, response(output=[call("early-finish", "finish", summary="Done", deliverables=["memo.txt"])]))
+    runner = agent()
+    runner.server_client.post = AsyncMock(side_effect=[Reply(reply.model_dump(mode="json")) for reply in replies])
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda reply: reply.body))
+    state = LabNativeSession(request=seed(), session=session, completion=CompletionState())
+    try:
+        result = await runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
+        assert result.status == "completed"
+        assert result.metadata["lab_finish_reason"] == "finish_tool"
+        assert result.metadata["lab_finish_summary"] == "Completed memo"
+        assert (output / "memo.txt").read_text() == "Original deliverable"
+        assert runner.server_client.post.await_count == len(replies)
+        assert state.tool_index == 2 + int(repair_missing)
+        assert state.completion.rejections == int(repair_missing)
+        observations = {item.call_id: item.output for item in result.output if item.type == "function_call_output"}
+        assert observations["finish"] == "Finished."
+        assert observations["late-write"] == "Task already finished; no further tools were executed."
+        if repair_missing:
+            assert observations["early-finish"].startswith("Not finished:")
+            assert "memo.txt" in observations["early-finish"]
     finally:
         for directory in activation_dirs:
             shutil.rmtree(directory, ignore_errors=True)
@@ -184,7 +275,7 @@ async def test_loop_retains_tools_usage_and_supplied_parameters(monkeypatch, max
     monkeypatch.setattr(app, "raise_for_status", AsyncMock())
     monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda reply: reply.body))
     monkeypatch.setattr(LegalAgentBenchNativeAgent, "_execute_tool", AsyncMock(return_value="written"))
-    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False))
+    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False), completion=CompletionState())
     result = await runner._run_loop(
         state,
         NeMoGymResponseCreateParamsNonStreaming(
@@ -220,7 +311,7 @@ async def test_max_turn_exhaustion_is_incomplete_and_model_failure_is_ungraded(m
     )
     runner.server_client.post = AsyncMock(return_value=Reply({}))
     monkeypatch.setattr(LegalAgentBenchNativeAgent, "_execute_tool", AsyncMock(return_value="done"))
-    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False))
+    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False), completion=CompletionState())
     result = await runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
     assert result.status == "incomplete" and result.metadata["lab_finish_reason"] == "max_turns_exceeded"
     monkeypatch.setattr(
@@ -246,7 +337,7 @@ async def test_close_cancels_running_loop_and_disconnects_borrower():
     box_session = SandboxSession(
         sandbox=sandbox, session_dir="/tmp/lab-session", workdir="/workspace", harness="lab", owns_sandbox=False
     )
-    state = LabNativeSession(request=seed(), session=box_session, task=task)
+    state = LabNativeSession(request=seed(), session=box_session, completion=CompletionState(), task=task)
     result = await runner._close_agent_session_state(state)
     assert task.cancelled()
     assert result.cleanup_confirmed and box_session.closed
@@ -259,7 +350,7 @@ async def test_duplicate_activation_joins_one_loop_and_conflicting_body_is_rejec
     from fastapi import HTTPException, Request
 
     runner = agent()
-    state = LabNativeSession(request=seed(), session=SimpleNamespace(closing=False))
+    state = LabNativeSession(request=seed(), session=SimpleNamespace(closing=False), completion=CompletionState())
     monkeypatch.setattr(LegalAgentBenchNativeAgent, "_require_agent_session", lambda self, session_id: state)
     loop = AsyncMock(return_value=response())
     monkeypatch.setattr(LegalAgentBenchNativeAgent, "_run_loop", loop)
@@ -291,7 +382,7 @@ async def test_explicit_context_rejection_is_scoreable_but_other_model_errors_pr
     error = ClientResponseError(request_info=SimpleNamespace(real_url="http://policy.test"), history=(), status=400)
     error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
     monkeypatch.setattr(app, "raise_for_status", AsyncMock(side_effect=error))
-    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False))
+    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False), completion=CompletionState())
     result = await runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
     assert result.status == "incomplete" and result.metadata["lab_context_limit"] == "true"
     error.response_content = b'{"error":{"code":"invalid_api_key"}}'
@@ -321,7 +412,7 @@ async def test_overall_agent_budget_cancels_model_wait_and_returns_scoreable_inc
             canceled.set()
 
     runner.server_client.post = post
-    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False))
+    state = LabNativeSession(request=seed(), session=SimpleNamespace(expired=False), completion=CompletionState())
     result = await runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
     assert canceled.is_set() and result.status == "incomplete"
     assert result.metadata["lab_finish_reason"] == "agent_timeout" and result.usage is None
@@ -340,7 +431,7 @@ def _tool_loop(monkeypatch, *, budget=0.2):
     session = SandboxSession(
         sandbox=box, session_dir="/initial", workdir="/workspace", harness="lab", owns_sandbox=False
     )
-    state = LabNativeSession(request=seed(), session=session)
+    state = LabNativeSession(request=seed(), session=session, completion=CompletionState())
     call = {"type": "function_call", "call_id": "tool1", "name": "bash", "arguments": '{"command":"true"}'}
     runner.server_client.post = AsyncMock(return_value=Reply(response(output=[call]).model_dump(mode="json")))
     monkeypatch.setattr(app, "raise_for_status", AsyncMock())

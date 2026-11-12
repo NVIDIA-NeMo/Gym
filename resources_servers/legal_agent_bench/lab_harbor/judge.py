@@ -11,7 +11,9 @@
 """OpenAI-compatible judge transport for the Legal Agent Bench verifier.
 
 The rubric prompt is adapted from Harvey LAB ``evaluation/prompts/rubric_criterion.txt``
-at the pinned source revision. Transport, retries, repair, and tracing are Gym-specific.
+at https://github.com/harveyai/harvey-labs/blob/
+9e9fa7fe126103de1fceb2227b7c70bf59b67f73/lab_core/evaluation/prompts/rubric_criterion.txt
+(MIT). Transport, retries, repair, and tracing are Gym-specific.
 """
 
 from __future__ import annotations
@@ -49,8 +51,8 @@ Respond with JSON only:
 
 ```json
 {{
-  "verdict": "pass" | "fail",
-  "reasoning": "Brief explanation"
+  "reasoning": "Brief explanation",
+  "verdict": "pass" | "fail"
 }}
 ```
 """
@@ -58,10 +60,10 @@ Respond with JSON only:
 VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
-        "verdict": {"type": "string", "enum": ["pass", "fail"]},
         "reasoning": {"type": "string"},
+        "verdict": {"type": "string", "enum": ["pass", "fail"]},
     },
-    "required": ["verdict", "reasoning"],
+    "required": ["reasoning", "verdict"],
     "additionalProperties": False,
 }
 
@@ -82,6 +84,7 @@ class OpenAICompatibleJudge:
         parse_repair_attempts: int = 2,
         repair_max_tokens: int = 1024,
         transcript_path: Path | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.model = model
         self.api_model = self._normalize_api_model(model)
@@ -94,6 +97,7 @@ class OpenAICompatibleJudge:
         self.parse_repair_attempts = max(0, parse_repair_attempts)
         self.repair_max_tokens = max(1, repair_max_tokens)
         self.transcript_path = transcript_path
+        self.reasoning_effort = reasoning_effort
         self.trace_context: dict[str, Any] = {}
         self.last_raw_response: str | None = None
         self.last_structured: bool | None = None
@@ -325,8 +329,12 @@ class OpenAICompatibleJudge:
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
         }
-        if self.temperature is not None:
+        if self.temperature is not None and not self.api_model.split("/")[-1].startswith(
+            ("gpt-5.5", "gpt-5.6", "gpt-6", "o1", "o3", "o4")
+        ):
             payload["temperature"] = self.temperature
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
         if structured:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -416,7 +424,7 @@ class OpenAICompatibleJudge:
         if "/" not in model:
             return model
         provider, model_id = model.split("/", 1)
-        if provider in {"anthropic", "nvidia", "vllm", "openai-compatible", "trtllm"}:
+        if provider == "openai-compatible":
             return model_id
         return model
 

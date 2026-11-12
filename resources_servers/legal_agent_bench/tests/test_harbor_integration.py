@@ -40,11 +40,11 @@ def _write_skills(skills_dir: Path) -> None:
     (skills_dir / ".nemo_gym_asset.json").write_text(json.dumps(marker), encoding="utf-8")
 
 
-def test_pinned_snapshot_has_1749_tasks_and_five_committed_examples() -> None:
+def test_pinned_snapshot_has_2010_tasks_and_five_committed_examples() -> None:
     examples = [json.loads(line) for line in (BENCH_DIR / "data" / "example.jsonl").read_text().splitlines()]
     expected_ids = {f"legal_agent_bench::{flatten_task_id(source_id)}" for source_id in SMOKE_TASK_IDS}
 
-    assert EXPECTED_TASK_COUNT == 1749
+    assert EXPECTED_TASK_COUNT == 2010
     assert len(examples) == 5
     assert {row["instance_id"] for row in examples} == expected_ids
 
@@ -145,6 +145,7 @@ def test_scoring_includes_docx_redlines_when_requested(monkeypatch, tmp_path) ->
         def evaluate_prompt(self, *_args, **_kwargs):
             return {"verdict": "pass", "reasoning": "redlines reviewed"}
 
+    monkeypatch.setattr(lab_scoring, "pandoc_version", lambda: "3.5")
     monkeypatch.setattr(lab_scoring, "_read_file_as_text", read_file)
     scores = score_rubric(
         criteria=[

@@ -103,33 +103,64 @@ def test_preparation_failure_preserves_previous_output(monkeypatch, tmp_path):
     assert output.read_text() == "previous"
 
 
+@pytest.mark.parametrize("count", [1, 2])
 @pytest.mark.parametrize("reward_mode", ["full_task", "criteria_pass_rate"])
-def test_native_alias_preserves_grading_and_dataset(reward_mode, tmp_path):
+def test_harness_switch_preserves_grading_and_dataset(count, reward_mode, tmp_path):
+    judges = [
+        {"model_name": "route/claude-sonnet-4-6", "base_url": "https://claude.example/v1", "api_key": "test-c"},
+        {"model_name": "route/gpt-5.5", "reasoning_effort": "high"},
+    ][:count]
+    expected = None
     for harness in PRESETS:
         initial, resolved = resolve(
             harness,
-            judge_model_name="test-judge",
-            judge_base_url="https://judge.example/v1",
-            judge_api_key="test-only-key",
+            lab_judges=judges,
+            judge_base_url="https://shared.example/v1",
+            judge_api_key="test-shared",
             prepare_script_args={"output": str(tmp_path / "selected.jsonl")},
-            lab={"reward_mode": reward_mode},
+            lab={
+                "reward_mode": reward_mode,
+                "judge_parallelism": 2,
+                "agent_timeout_seconds": 300,
+                "verifier_timeout_seconds": 600,
+            },
             num_samples_in_parallel=2,
         )
         config = environment_config(resolved)
         verifier_env = _build_verifier_env(config)
-        assert verifier_env["LAB_JUDGE_MODEL"] == "openai-compatible/test-judge"
-        assert verifier_env["LAB_JUDGE_API_KEY"] == "test-only-key"
+        assert json.loads(verifier_env["LAB_JUDGES"]) == judges
+        assert verifier_env["LAB_JUDGE_BASE_URL"] == "https://shared.example/v1"
+        assert verifier_env["LAB_JUDGE_API_KEY"] == "test-shared"
+        assert verifier_env["LAB_JUDGE_PARALLELISM"] == "2"
         assert config.reward_mode == reward_mode
         assert config.max_concurrent_episodes == 2
         assert config.prepared_tasksets_file == str(tmp_path / "selected.jsonl.tasksets.json")
         assert config.separate_verifier_for_artifacts
+        assert not set(resolved.get("responses_create_params", {})) & {"temperature", "top_p"}
         benchmark = BenchmarkConfig.from_initial_config_dict(
             path=BENCHMARK_DIR / f"config_{harness}.yaml", initial_config_dict=initial, strict=False
         )
         assert benchmark.agent_name == "legal_agent_bench_benchmark_agent"
         assert benchmark.dataset.jsonl_fpath == tmp_path / "selected.jsonl"
         assert benchmark.dataset.prepare_script == Path("benchmarks/legal_agent_bench/prepare.py")
+        current = verifier_env, benchmark.dataset
+        if expected is None:
+            expected = current
+        assert current == expected
+        agent = next(iter(resolved.legal_agent_bench_benchmark_agent.responses_api_agents.values()))
+        if harness == "native":
+            assert agent.agent_timeout_seconds == 300
+        else:
+            assert agent.concurrency == 2
+            assert (agent.sandbox_runner_timeout_seconds if harness == "hermes" else agent.timeout) == 300
         assert config.agent_server.name == benchmark.agent_name
+
+
+@pytest.mark.parametrize("harness", PRESETS)
+def test_every_harness_requires_explicit_judges(harness):
+    _, resolved = resolve(harness)
+    with pytest.raises(ValueError, match="Configure lab_judges"):
+        environment_config(resolved)
 
 
 def test_default_alias_selects_lab_native():

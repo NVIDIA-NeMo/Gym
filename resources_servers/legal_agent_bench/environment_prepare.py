@@ -28,9 +28,10 @@ from resources_servers.legal_agent_bench.prepare import (
 
 TASKSET = "legal_agent_bench"
 VERIFIER_VARIABLES = (
-    "LAB_JUDGE_MODEL",
+    "LAB_JUDGES",
     "LAB_JUDGE_BASE_URL",
     "LAB_JUDGE_API_KEY",
+    "LAB_JUDGE_REASONING_EFFORT",
     "LAB_JUDGE_TEMPERATURE",
     "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS",
     "LAB_JUDGE_MAX_RETRIES",
