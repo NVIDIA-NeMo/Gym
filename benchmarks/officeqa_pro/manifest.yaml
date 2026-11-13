@@ -13,6 +13,7 @@ maintainers:
 - jseppanen
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-5]/accuracy_no_net
 requirements:
   gpu: false
   network: allowlist

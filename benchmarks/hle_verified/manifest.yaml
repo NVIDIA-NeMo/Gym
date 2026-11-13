@@ -13,6 +13,7 @@ maintainers:
 - gnalbandyan
 intended_use:
 - evaluation
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

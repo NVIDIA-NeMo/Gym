@@ -13,6 +13,7 @@ maintainers:
 - SeanNaren
 intended_use:
 - evaluation
+primary_metric: total_score
 requirements:
   gpu: false
   network: no-network

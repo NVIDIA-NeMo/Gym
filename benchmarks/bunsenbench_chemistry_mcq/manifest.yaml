@@ -13,6 +13,7 @@ maintainers:
 - eric-tramel
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-8]/accuracy
 requirements:
   gpu: false
   network: no-network

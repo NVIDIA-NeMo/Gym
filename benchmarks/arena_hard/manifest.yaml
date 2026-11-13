@@ -14,6 +14,7 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+primary_metric: arena_elo/score
 requirements:
   gpu: false
   network: allowlist

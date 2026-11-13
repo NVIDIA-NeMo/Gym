@@ -16,6 +16,7 @@ maintainers:
 - yaoyu-33
 intended_use:
 - evaluation
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

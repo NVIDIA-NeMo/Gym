@@ -13,6 +13,7 @@ maintainers:
 - jveronvialard
 intended_use:
 - evaluation
+primary_metric: metrics/overall
 requirements:
   gpu: false
   network: no-network

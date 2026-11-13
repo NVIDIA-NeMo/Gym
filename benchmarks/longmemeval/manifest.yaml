@@ -13,6 +13,7 @@ maintainers:
 - pachmu
 intended_use:
 - evaluation
+primary_metric: accuracy
 requirements:
   gpu: false
   network: allowlist

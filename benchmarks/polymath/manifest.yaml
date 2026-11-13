@@ -14,6 +14,7 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-1]/symbolic_accuracy_weighted
 requirements:
   gpu: false
   network: no-network

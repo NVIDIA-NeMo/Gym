@@ -18,6 +18,7 @@ maintainers:
 - katherineh123
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-3]/all_if_pass
 requirements:
   gpu: false
   network: public

@@ -15,6 +15,7 @@ maintainers:
 - dkmisra
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false
   network: no-network

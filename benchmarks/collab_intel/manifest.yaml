@@ -13,6 +13,7 @@ maintainers:
 - cmunley1
 intended_use:
 - evaluation
+primary_metric: collab_intel/score
 requirements:
   gpu: false
   network: allowlist
