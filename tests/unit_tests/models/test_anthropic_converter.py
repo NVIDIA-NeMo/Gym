@@ -26,7 +26,7 @@ import json
 import pytest
 from anthropic.types import Message
 
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
@@ -364,6 +364,51 @@ class TestResponsesToAnthropicResponse:
         request_body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         return conv, conv.anthropic_to_responses(anthropic_response, request_body=request_body, model="m")
 
+    @pytest.mark.parametrize(
+        ("stop_reason", "metadata"),
+        [
+            ("end_turn", {"native_finish_reason": "repetition"}),
+            ("end_turn", {"native_stop_reason": "repetition_detected"}),
+            ("end_turn", {"native_stop_reason": 0}),
+            ("end_turn", {"native_stop_reason": 11}),
+            ("end_turn", {"native_finish_reason": ""}),
+            ("end_turn", {"native_finish_reason": "stop", "native_stop_reason": "stop_sequence"}),
+            ("end_turn", {}),
+            ("end_turn", {"native_finish_reason": None, "native_stop_reason": None}),
+            ("tool_use", {"native_finish_reason": "repetition", "native_stop_reason": "repetition_detected"}),
+            ("max_tokens", {"native_finish_reason": "repetition", "native_stop_reason": "repetition_detected"}),
+            ("refusal", {"native_finish_reason": "repetition", "native_stop_reason": "repetition_detected"}),
+        ],
+    )
+    def test_preserves_provider_termination_without_replacing_anthropic_stop(
+        self, stop_reason: str, metadata: dict[str, str | int | None]
+    ) -> None:
+        content = [{"type": "text", "text": "Retained answer."}]
+        if stop_reason == "tool_use":
+            content.append({"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"city": "Paris"}})
+        usage = {"input_tokens": 3, "output_tokens": 5}
+        conv, response = self._response_from_anthropic(
+            {"content": content, "stop_reason": stop_reason, "usage": usage}
+        )
+        response = NeMoGymResponse.model_validate_json(response.model_copy(update=metadata).model_dump_json())
+        original = response.model_dump_json()
+
+        result = conv.responses_to_anthropic_response(response, model="m")
+
+        assert result["stop_reason"] == stop_reason
+        assert result["content"] == content
+        assert result["usage"] == usage
+        retained = {
+            field: result[field] for field in ("native_finish_reason", "native_stop_reason") if field in result
+        }
+        assert retained == {field: value for field, value in metadata.items() if value is not None}
+        message = Message.model_validate_json(json.dumps(result))
+        for field, value in retained.items():
+            assert getattr(message, field) == value
+            assert type(getattr(message, field)) is type(value)
+        assert message.stop_reason == stop_reason
+        assert response.model_dump_json() == original
+
     def test_text_and_tool_use_and_stop_reason(self) -> None:
         conv, resp = self._response_from_anthropic(
             {
@@ -385,6 +430,37 @@ class TestResponsesToAnthropicResponse:
         assert tool_use["input"] == {"a": 1}
         assert out["stop_reason"] == "tool_use"
         assert out["usage"] == {"input_tokens": 5, "output_tokens": 7}
+
+    def test_token_metadata_is_dropped_from_the_anthropic_response(self) -> None:
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "step", "signature": "sig"},
+                    {"type": "text", "text": "Hello"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"a": 1}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 5, "output_tokens": 7},
+            }
+        )
+        tokens = {
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3],
+            "generation_log_probs": [-0.5],
+            "routed_experts": [[[0]]],
+        }
+        # Served responses carry token metadata on training variants of their output items.
+        training_resp = NeMoGymResponse.model_validate(
+            {**resp.model_dump(), "output": [{**item.model_dump(), **tokens} for item in resp.output]}
+        )
+        assert all(item.prompt_token_ids == [1, 2] for item in training_resp.output)
+
+        out = conv.responses_to_anthropic_response(training_resp, model="m")
+
+        assert out == conv.responses_to_anthropic_response(resp, model="m")
+        assert not any(field in json.dumps(out) for field in tokens)
+        # The mapping ignores token fields either way; the item dumps skip them so the lists are not copied.
+        assert not any(field in item for item in conv._iter_output_dicts(training_resp) for field in tokens)
 
     def test_reasoning_becomes_thinking_block(self) -> None:
         conv, resp = self._response_from_anthropic(

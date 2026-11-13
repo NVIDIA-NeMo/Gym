@@ -891,6 +891,8 @@ layers = [
     "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils",
     # environment/
     "nemo_gym.environment",
+    # Shared web benchmark browser, session and task contracts.
+    "nemo_gym.web",
     # eval/
     "nemo_gym.eval",
     # orchestration/
@@ -907,7 +909,7 @@ layers = [
     # nothing that runs inside a server may import it
     "nemo_gym.server_runtime.supervisor",
     # server_runtime/
-    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.sandbox_lending : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.uvicorn_reuse_port : nemo_gym.server_runtime.verifier_observability",
+    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.agent_context : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.sandbox_lending : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.uvicorn_reuse_port : nemo_gym.server_runtime.verifier_observability",
     # artifacts/
     "nemo_gym.artifacts",
     # metrics/

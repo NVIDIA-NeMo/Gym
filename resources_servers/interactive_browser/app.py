@@ -26,12 +26,16 @@ when the same `session_id` is re-seeded, or when an Environment Server closes th
 session through `/close_session`. An Environment Server assigns the session id and
 registers that close before seeding, so a rollout abandoned before `verify` still
 has its browser released. An Agent's `/run` does not close, so there a rollout
-abandoned without `verify` or a re-seed keeps its browser until the process exits
-(local) or the provider reclaims it (remote).
+abandoned without `verify` or a re-seed keeps its browser until the server shuts
+down, when its lifespan closes every browser the process still holds. A process killed
+before that close finishes leaves its remote browsers for the provider to reclaim; the
+README says how long to give the server to shut down.
 """
 
+import asyncio
 import logging
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Dict, Optional, Tuple, Union
 
@@ -173,7 +177,30 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         app.post("/browser_type")(self.browser_type)
         app.post("/browser_observe")(self.browser_observe)
         app.post("/browser_finish")(self.browser_finish)
+
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
         return app
+
+    async def shutdown(self) -> None:
+        """Close every browser this process still holds, local and remote.
+
+        Browsers close concurrently, and a failed close is logged without stopping the others.
+        No limit covers a whole close: each teardown step has its own, and a limit around the
+        provider release could cancel it before the provider ends the session.
+        """
+        self._episode_identity.clear()
+        self._fences.clear()
+        await asyncio.gather(*(self._release(session_id) for session_id in list(self._session_id_to_state)))
 
     # ----- lifecycle ----------------------------------------------------- #
     async def seed_session(

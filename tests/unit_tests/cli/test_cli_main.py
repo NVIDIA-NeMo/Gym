@@ -153,6 +153,8 @@ class TestEvalRunFlags:
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
+            (["--task-ids", "a, b"], '+task_ids=["a","b"]'),
+            (["--task-ids-file", "subset_v1.txt"], "+task_ids_fpath='subset_v1.txt'"),
             (["--num-repeats", "4"], "+num_repeats=4"),
             (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
