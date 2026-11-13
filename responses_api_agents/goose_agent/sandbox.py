@@ -120,6 +120,8 @@ class GooseSession(AgentSessionState):
         """Upload the task and Goose's config as files, never through shell interpolation; return the runner command."""
         directory = self.session.session_dir
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
+        # A stop between the runner's fork and its stdout redirect must still leave a file to collect.
+        await upload_text(self.session.sandbox, path=f"{directory}/stdout.jsonl", text="")
         await upload_text(self.session.sandbox, path=f"{self.root}/config/config.yaml", text=config)
         params = {
             "cwd": self.session.workdir,

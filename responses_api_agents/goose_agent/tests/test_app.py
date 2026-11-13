@@ -18,6 +18,7 @@ from starlette.requests import Request
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     SandboxSession,
     check_agent_seed_rejected,
@@ -44,7 +45,7 @@ system = next((a[len("--system="):] for a in sys.argv if a.startswith("--system=
 (root / "seen.json").write_text(json.dumps({
     "argv": sys.argv[1:], "prompt": prompt, "system": system, "cwd": os.getcwd(),
     "config": (root / "config" / "config.yaml").read_text(),
-    "env": {k: v for k, v in os.environ.items() if k.startswith(("GOOSE_", "OPENAI_"))},
+    "env": {k: v for k, v in os.environ.items() if k.startswith(("GOOSE_", "OPENAI_", "OTEL_", "LANGFUSE_"))},
 }))
 # A shell tool call inherits Goose's environment, which keeps the task's HOME.
 subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
@@ -65,16 +66,31 @@ rows = [("m0", "user", [{"type": "text", "text": prompt}]), ("m1", "assistant", 
         ("m3", "assistant", [{"type": "text", "text": "Done."}])]
 con.executemany("insert into messages (message_id, session_id, role, content_json, created_timestamp) "
                 "values (?, 's1', ?, ?, 1)", [(i, r, json.dumps(c)) for i, r, c in rows])
+if mode == "delegate":
+    # A delegate hit a model-server error, and the root recovered and finished.
+    con.execute("insert into sessions values ('s2', 's1', '2026-11-03 00:00:01')")
+    error = [{"type": "text", "text": "Ran into this error: Server error: Server error (500 Internal Server Error)"}]
+    con.execute("insert into messages (message_id, session_id, role, content_json, created_timestamp) "
+                "values ('d1', 's2', 'assistant', ?, 1)", (json.dumps(error),))
 con.commit()
 con.close()
+if mode == "extension":
+    print("Failed to start extension 'developer': boom", file=sys.stderr)
+if mode == "extensions":
+    print("\u26a0 Failed to start extensions (boom)", file=sys.stderr)
 print("    goose is ready")
 print(json.dumps({"type": "message", "message": {"id": "m3", "role": "assistant",
                   "content": [{"type": "text", "text": "Done."}]}}), flush=True)
 notices = {"max_turns": "I've reached the maximum number of actions I can do without user input.",
-           "model_server": "Ran into this error: Server error: Server error (500 Internal Server Error) at x: boom."}
+           "model_server": "Ran into this error: Server error: Server error (500 Internal Server Error) at x: boom.",
+           "network": "Network error: connection refused",
+           "context_limit": "Unable to continue: Context limit still exceeded after compaction.",
+           "empty_response": "The model returned an empty response. Please resend your message to continue.",
+           "length": ""}
 if mode in notices:
     print(json.dumps({"type": "message", "message": {"id": "notice", "role": "assistant",
-                      "content": [{"type": "text", "text": notices[mode]}]}}))
+                      "content": [{"type": "text", "text": notices[mode]}],
+                      "metadata": {"outputTokenLimitReached": mode == "length"}}}))
 if mode == "sleep":
     time.sleep(60)
 print(json.dumps({"type": "complete"}))
@@ -271,7 +287,11 @@ def session(tmp_path: Path, mode: str) -> tuple[GooseSession, LocalSandbox]:
         "TASK_TEST": "task-value",
         "HOME": str(tmp_path / "task-home"),
         "OPENAI_BASE_URL": "http://must-not-inherit",
+        "OPENAI_ORG_ID": "must-not-inherit",
         "GOOSE_PROVIDER": "must-not-inherit",
+        "GOOSE_RECIPE": "must-not-inherit",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://must-not-inherit",
+        "LANGFUSE_HOST": "http://must-not-inherit",
     }
     sandbox = LocalSandbox()
     state = GooseSession(
@@ -286,8 +306,10 @@ def session(tmp_path: Path, mode: str) -> tuple[GooseSession, LocalSandbox]:
     return state, sandbox
 
 
-async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
-    server = agent(timeout=timeout, delegate=False, context_limit=262144)
+async def activate(
+    tmp_path: Path, mode: str, *, timeout: float = 20, delegate: bool = False, stop_before_launch: bool = False
+):
+    server = agent(timeout=timeout, delegate=delegate, context_limit=262144)
     state, sandbox = session(tmp_path, mode)
     archive = tmp_path / "release.tar.gz"
     archive.write_bytes(b"release")
@@ -299,6 +321,8 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
     assert download.await_args.args[0].endswith(f"/goose-{os.uname().machine}-unknown-linux-musl.tar.gz")
     request = body(temperature=0.6)
     state.activation_request = request
+    if stop_before_launch:
+        assert await state.session.expire(timeout=10, reason="budget")
     endpoint = SimpleNamespace(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
     with patch.object(GooseAgent, "model_endpoint", return_value=endpoint):
         try:
@@ -335,6 +359,7 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
     assert seen["env"]["GOOSE_TEMPERATURE"] == "0.6"
     assert seen["env"]["GOOSE_CONTEXT_LIMIT"] == "262144"
     assert seen["env"]["GOOSE_PATH_ROOT"] == state.root
+    assert not {"OPENAI_ORG_ID", "GOOSE_RECIPE", "OTEL_EXPORTER_OTLP_ENDPOINT", "LANGFUSE_HOST"} & set(seen["env"])
     # The tool shell kept the task's HOME and environment; Goose's own files stayed in the session directory.
     assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
         str(tmp_path / "task-home"),
@@ -352,20 +377,109 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
 @pytest.mark.parametrize(
-    ("mode", "status", "outcome"),
+    ("mode", "status", "outcome", "error"),
     [
-        ("max_turns", "incomplete", None),
-        ("model_server", "failed", {"failure_kind": "model_request_error", "status_code": 500}),
-        ("crash", "failed", {"failure_kind": "unknown"}),
-        ("killed", "failed", {"failure_kind": "unknown"}),
+        ("max_turns", "incomplete", None, None),
+        ("context_limit", "incomplete", None, None),
+        (
+            "model_server",
+            "failed",
+            {"failure_kind": "model_request_error", "status_code": 500},
+            "Ran into this error: Server error: Server error (500 Internal Server Error) at x: boom.",
+        ),
+        (
+            "network",
+            "failed",
+            {"failure_kind": "model_transport_error"},
+            "Network error: connection refused",
+        ),
+        (
+            "empty_response",
+            "failed",
+            {"failure_kind": "agent_invalid_output"},
+            "The model returned an empty response. Please resend your message to continue.",
+        ),
+        ("crash", "failed", {"failure_kind": "unknown"}, "Goose exited with code 3"),
+        ("killed", "failed", {"failure_kind": "unknown"}, "Goose exited with code 137"),
     ],
 )
-async def test_goose_stops_map_to_status_and_outcome(tmp_path, mode, status, outcome):
+async def test_goose_stops_map_to_status_and_outcome(tmp_path, mode, status, outcome, error):
     response, close, _, _, _ = await activate(tmp_path, mode)
     assert response.status == status
     reported = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
     assert (json.loads(reported) if reported else None) == outcome
+    assert (response.error.message if response.error else None) == error
     assert close.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_cut_completion_is_incomplete_for_length(tmp_path):
+    response, _, _, _, _ = await activate(tmp_path, "length")
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"
+    assert response.metadata["goose_stop_reason"] == "length"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_recovered_delegate_error_completes_and_credits_calls_to_the_root(tmp_path):
+    response, close, _, _, _ = await activate(tmp_path, "delegate", delegate=True)
+    assert response.status == "completed"
+    assert response.metadata["goose_subagents"] == "1"
+    gaps = {gap.code: gap.detail for gap in close.agent_observations.gaps}
+    assert "credited to the root" in gaps["model_call_ownership_unavailable"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+@pytest.mark.parametrize(("mode", "names"), [("extension", "developer"), ("extensions", "all")])
+async def test_extension_failures_raise(tmp_path, mode, names):
+    response, _, _, _, _ = await activate(tmp_path, mode)
+    assert isinstance(response, RuntimeError)
+    assert str(response) == f"Goose extensions could not start: {names}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_rollout_stop_before_launch_is_an_empty_incomplete_run(tmp_path):
+    response, close, seen, state, _ = await activate(tmp_path, "normal", stop_before_launch=True)
+    assert state.session.expired_before_launch and seen is None
+    assert response.status == "incomplete" and response.output == [] and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    assert close.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("uname", "arch"), [("amd64", "x86_64"), ("arm64", "aarch64"), ("riscv64", None)])
+async def test_install_maps_or_rejects_the_sandbox_architecture(tmp_path, uname, arch):
+    state, sandbox = session(tmp_path, "normal")
+    archive = tmp_path / "release.tar.gz"
+    archive.write_bytes(b"release")
+    run = sandbox.exec
+
+    async def exec(command, **kwargs):
+        return SandboxExecResult(uname + "\n", "", 0) if command == "uname -m" else await run(command, **kwargs)
+
+    sandbox.exec = exec
+    with patch(
+        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=archive)
+    ) as download:
+        if arch is None:
+            with pytest.raises(AgentSeedRejectedError, match="'riscv64'"):
+                await state.install(timeout=10)
+        else:
+            await state.install(timeout=10)
+            assert download.await_args.args[0].endswith(f"/goose-{arch}-unknown-linux-musl.tar.gz")
+
+
+@pytest.mark.asyncio
+async def test_staging_creates_stdout_before_the_runner_opens_it(tmp_path):
+    state, _ = session(tmp_path, "normal")
+    Path(state.root, "config").mkdir(parents=True)
+    await state.stage(command=["goose"], env={}, prompt="Fix the bug.", config="{}")
+    assert (Path(state.session.session_dir) / "stdout.jsonl").read_text() == ""
 
 
 @pytest.mark.asyncio

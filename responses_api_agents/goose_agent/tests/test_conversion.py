@@ -114,6 +114,18 @@ def test_unpersisted_last_message_is_goose_notice(notice, reason, failure):
     assert model_server_failure(NOTICES[notice]) == failure
 
 
+@pytest.mark.parametrize(
+    ("error", "failure"),
+    [
+        # errors.rs EndpointNotFound, raised by openai.rs for a 404 or a non-JSON body.
+        ("Endpoint not found (404): no route", ("model_request_error", 404)),
+        ("Request failed: Failed to read response body: connection reset", ("model_transport_error", None)),
+    ],
+)
+def test_gym_server_errors_outside_the_status_prefixes(error, failure):
+    assert model_server_failure(f"Ran into this error: {error}") == failure
+
+
 def test_context_limit_after_compaction_is_a_system_notification():
     text = "Unable to continue: Context limit still exceeded after compaction. Try using a shorter message."
     block = {"type": "systemNotification", "notificationType": "inlineMessage", "msg": text}

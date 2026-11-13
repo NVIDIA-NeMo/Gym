@@ -13,7 +13,10 @@ The harness conformance probes are not run at the Evaluation level.
 Goose's native subagents come from its built-in `summon` extension: the `delegate` tool runs a subagent in its own
 session, synchronously or with `async: true` followed by `load(task_id)`. Several delegate calls in one turn run
 concurrently. Delegates cannot delegate further (depth 1). `GOOSE_SUBAGENT_PROVIDER` and `GOOSE_SUBAGENT_MODEL` pin
-delegates to the same Gym Model Server and model, whatever provider or model the policy passes to `delegate`.
+delegates to the same Gym Model Server and model. They outrank the `delegate` tool's arguments, but a recipe's own
+`settings.goose_provider` or `goose_model` still outranks them. Delegates send the root's session header, so their
+model and compaction calls are credited to the root invocation, and the observation bundle reports
+`model_call_ownership_unavailable` while `delegate` is on.
 
 ## Configure and run
 
