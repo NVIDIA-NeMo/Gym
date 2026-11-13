@@ -21,7 +21,7 @@ import pytest
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from scripts.harness_conformance import episode
-from scripts.harness_conformance.provider import OpenClawProbe
+from scripts.harness_conformance.probes import OpenClawProbe
 from scripts.harness_conformance.runner import run_process
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -177,7 +177,7 @@ async def run_case(case: str, output: Path) -> None:
 
     with (
         patch.object(episode, "SCENARIOS", (scenario,)),
-        patch("scripts.harness_conformance.provider.OpenClawProbe", ErrorProbe),
+        patch("scripts.harness_conformance.probes.OpenClawProbe", ErrorProbe),
         patch.object(episode, "_config", config),
         patch.object(Scenario, "task", task),
         patch.object(OpenClawAgent, "_collect_sandbox_response", collect),
