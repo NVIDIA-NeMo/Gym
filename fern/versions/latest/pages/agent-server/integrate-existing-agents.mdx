@@ -100,61 +100,6 @@ before the profile's `"*": allow`, which then overrides them (see the
 Record prompt replacement and tool selection as evaluation treatments: they can
 change results relative to the harness's default coding behavior.
 
-### Images with Hermes, OpenClaw and Codex
-
-These agent sessions accept base64 data-URI `input_image` parts in the user
-prompt. Hermes also accepts images in earlier user turns and in its local
-execution path. Use a vision-capable model behind the NeMo Gym Model Server.
-For example, a user message can contain:
-
-```json
-{
-  "role": "user",
-  "content": [
-    {"type": "input_text", "text": "What color is the shape?"},
-    {"type": "input_image", "image_url": "data:image/png;base64,<base64-image-bytes>", "detail": "auto"}
-  ]
-}
-```
-
-The adapters validate PNG, JPEG, GIF and WebP data with NeMo Gym's shared media
-validator and correct the MIME label to match the image bytes. Their pinned
-runtimes attach images differently:
-
-| Harness | Attachment path | Model input |
-| --- | --- | --- |
-| Hermes | Ordered Chat Completions content lists | Preserves image bytes, `detail`, and text/image order; no resizing or separate image files |
-| OpenClaw | Files in the session's allowed media directory, referenced by markers appended to the prompt | The runtime loads and optimizes the files; input `detail` and text/image interleaving are not preserved |
-| Codex | Content-named files passed to `codex exec --image` | Images precede the joined prompt text; the CLI chooses image detail and applies its own size limits |
-
-Hermes and Codex need no `image_input` setting. OpenClaw declares image support
-when prompt images are present or `image_input: true` is configured. The latter
-also enables its runtime's image handling for tasks that provide images through
-files rather than prompt attachments. Text-only requests keep their existing behavior.
-
-Codex 0.144.4 processes local images with its high-detail limits (a 2048-pixel
-long edge and a patch budget); oversized images can be resized, and GIF inputs
-are reencoded. OpenClaw 2026.6.11 can optimize or reencode images and applies a
-1200-pixel default image-dimension limit. These native transformations can affect
-vision evaluation results; inspect captured model requests when comparing harnesses.
-OpenClaw deduplicates identical attachments. Its image markers remain in the model
-prompt and contain session-specific paths, so repeated requests have different path text.
-
-Image URLs, file IDs, invalid base64, unrecognized image signatures, unsupported
-media types, and images in system or assistant messages return HTTP 422 before
-activation. Hermes applies these rules to both local execution and sandbox
-sessions; OpenClaw and Codex support these attachments in sandbox sessions and
-return HTTP 422 for images in local execution.
-OpenClaw and Codex retain their existing single-user-prompt request contract.
-Image-only user prompts are accepted. Uploaded files are staged within the
-activation's deadline and close handling. OpenClaw's session media is removed on
-close; Codex's shared content-named files remain in a borrowed sandbox.
-
-Hermes response output keeps only each message's text. Exported conversations
-retain images when they are present in the runtime's
-transcript. Built-in vision tools and images returned by MCP tools remain
-governed by each pinned runtime; this feature adds supplied prompt images.
-
 ## Run an integrated agent on a benchmark
 
 An experiment is a few composable YAML files: the model and provider, the benchmark, the agent, and the Environment Server that binds them. To change the agent or the benchmark, replace one file; the others stay as they are.
