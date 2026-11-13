@@ -148,6 +148,12 @@ AGENT_SESSIONS = SessionKind(
 # Multi-turn continuation sessions use this same header without checkpointing.
 # Other adapters may treat requests without the header as new activations.
 AGENT_ACTIVATION_HEADER = "x-ng-agent-activation"
+# Request header an environment server sends with each activation when it drives an agent session one step per
+# activation: the episode's step limit, which the environment server owns (single_agent_turn's max_episode_steps).
+# An agent whose own step limit ends an activation records that step as completed, not as an incomplete run, unless
+# the activation's index reaches the episode's limit; and it keeps one record of the episode's invocation, which each
+# step extends, as when it runs its own loop.
+AGENT_EPISODE_STEP_LIMIT_HEADER = "x-ng-agent-episode-step-limit"
 # Bounds the sandbox command that asks a running harness's supervisor to end it.
 ROLLOUT_STOP_TIMEOUT_SECONDS = 60.0
 # Response metadata that marks a run POST /rollouts/{rollout_id}/stop ended: a JSON object with the caller's

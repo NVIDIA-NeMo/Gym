@@ -10,17 +10,17 @@
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 5,
-        "Average": 18.2,
+        "Average": 18.4,
         "Min": 1.0,
-        "Max": 43.0,
-        "Standard deviation": 22.2
+        "Max": 44.0,
+        "Standard deviation": 22.48
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 1531.4,
+        "Average": 1537.8,
         "Min": 194.0,
         "Max": 3980.0,
-        "Standard deviation": 1790.03
+        "Standard deviation": 1796.26
     },
     "Number of turns": {
         "Total # non-null values": 5,
