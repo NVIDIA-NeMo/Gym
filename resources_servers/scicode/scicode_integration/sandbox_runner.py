@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import PROVIDER_OOM_KILLED, NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, NgFailureEvent, observe_failure
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 
 
@@ -102,10 +102,12 @@ async def run_sandbox_substep(
         except NgFailureEvent as exc:
             if exc.failure_kind != PROVIDER_OOM_KILLED:
                 raise
+            observe_failure(exc)
             return {
                 "passed": False,
                 "error": "Generated code exceeded the sandbox memory limit",
-                "returncode": 137,
+                "returncode": None,
+                "exit_unknown": True,
                 "exception_class": "MemoryLimitExceeded",
             }
         if execution.error_type or execution.return_code != 0:

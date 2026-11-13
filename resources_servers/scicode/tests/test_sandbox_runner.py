@@ -8,7 +8,7 @@ import pytest
 import scicode_integration.sandbox_runner as runner
 
 import resources_servers.scicode.app as app
-from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, FailureHeader, NgFailureEvent, RequestFailureLog
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.scicode.tests.test_app import _request, _server
 
@@ -281,7 +281,8 @@ async def test_oom_counts_only_during_test_execution(during_preflight, confirmed
         if confirmed_oom and not during_preflight:
             result = await call
             assert result["passed"] is False
-            assert result["returncode"] == 137
+            assert result["returncode"] is None
+            assert result["exit_unknown"]
             assert result["exception_class"] == "MemoryLimitExceeded"
         else:
             with pytest.raises(NgFailureEvent):
@@ -331,5 +332,63 @@ async def test_confirmed_test_oom_scores_step_without_aborting_other_steps():
     assert result.num_steps_passed == 1
     assert result.num_steps_total == 2
     assert result.step_outputs[0]["exception_class"] == "MemoryLimitExceeded"
+    assert result.step_exits[0] == {"returncode": None, "timed_out": False, "exit": "unknown"}
     oom.stop.assert_awaited_once()
     healthy.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_interpreter_passes", [False, True])
+async def test_scored_oom_retains_failure_report(second_interpreter_passes):
+    server = _server(
+        "/data/targets.h5",
+        sandbox={"image": "test-image"},
+        num_processes=1,
+        grading_interpreters=[
+            {"name": "2024", "python_executable": "/opt/2024/python"},
+            {"name": "2025", "python_executable": "/opt/2025/python"},
+        ],
+        record_step_outputs=True,
+    )
+    error = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Confirmed container OOM",
+        operation="exec",
+        operation_id="sandbox-exec-1",
+    )
+    ok = SandboxExecResult(stdout="", stderr="", return_code=0)
+    first = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    first.exec = AsyncMock(side_effect=[ok, error])
+    second = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    second.exec = AsyncMock(
+        side_effect=[
+            ok,
+            SandboxExecResult(
+                stdout=json.dumps(
+                    {
+                        "passed": second_interpreter_passes,
+                        "error": "",
+                        "returncode": 0 if second_interpreter_passes else 1,
+                    }
+                ),
+                stderr="",
+                return_code=0,
+            ),
+        ]
+    )
+    with (
+        patch.object(runner, "get_global_config_dict", return_value={"sandbox": {"opensandbox": {}}}),
+        patch.object(runner, "AsyncSandbox", side_effect=[first, second]),
+        RequestFailureLog.capture() as log,
+    ):
+        result = await server.verify(_request({"1.1": "candidate"}, n_steps=1))
+        report = log.reply_report(None)
+    assert result.reward == float(second_interpreter_passes)
+    assert not result.mask_sample
+    assert report.failure_id is None
+    assert report.events[error.event.event_id].failure_kind == PROVIDER_OOM_KILLED
+    assert report.events[error.event.event_id].operation_id == "sandbox-exec-1"
+    assert FailureHeader.encode(report)
+    first.stop.assert_awaited_once()
+    second.stop.assert_awaited_once()
