@@ -455,9 +455,11 @@ budget, never fails the activation or blocks release: it is reported as an
 `export_dir_write_failed` observation gap whose detail names each failed session and
 why. Files the model's tools can reach are not a trusted
 channel; pick a fresh directory. The owner can then grade OpenCode's own transcript
-after agent close. In a sandbox the agent owns, the files last only as long as the
-provider keeps the sandbox's files after close: a provider that deletes the sandbox
-deletes them too.
+after agent close. In a borrowed sandbox the files last until the owner stops it:
+`opencode_search`, for example, copies them to its host at verify, before it stops the
+sandbox, when `episode_export_copy_dir` is set. In a sandbox the agent owns, the files
+last only as long as the provider keeps the sandbox's files after close: a provider that
+deletes the sandbox deletes them too.
 
 ### Session import
 
