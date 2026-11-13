@@ -28,6 +28,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
@@ -96,8 +97,10 @@ class AgenticMMERunRequest(BaseRunRequest):
 class PolicyCallError:
     """A policy-model call that failed and ended the episode.
 
-    ``status`` is the HTTP status when the model server answered with one. A call that failed before a status
-    (timeout, lost connection) is a transport error, and a reply that is not a Response has an unknown cause.
+    ``status`` is the HTTP status when the model server refused the call for a reason other than a context or
+    request-size limit; that refusal is ``model_context_limit`` instead, so an outcome policy can tell the two apart.
+    A call that failed before a status (timeout, lost connection) is a transport error, and a reply that is not a
+    Response has an unknown cause.
     """
 
     message: str
@@ -110,8 +113,9 @@ class PolicyCallError:
     def failed_response(self, response: NeMoGymResponse) -> NeMoGymResponse:
         """Mark the episode's response failed with this cause, as Gym's shared agent outcome.
 
-        The Environment Server then applies its outcome policy: by default it grades a rejected request (400, 413,
-        422) as the model's own result, and retries a transport failure or a retryable status such as 429 or 503.
+        The Environment Server then applies its outcome policy. ``configs/agentic_mme.yaml`` sets it to grade a
+        context-limit refusal as the model's own result and to fail any other rejected request (400, 413, 422)
+        ungraded, as ``/run`` does; a transport failure or a retryable status such as 429 or 503 is retried.
         """
         outcome = AgentOutcome(failure_kind=self.failure_kind, status_code=self.status)
         return NeMoGymResponse.model_validate(
@@ -240,12 +244,14 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                 break
             if not response.ok:
                 # A context or request-size refusal (many tool images accumulated) ends the episode
-                # unanswered; any other status (401, 429, 5xx) is infrastructure.
+                # unanswered; any other status (a serving limit such as vLLM's per-prompt image limit, an
+                # unsupported parameter, 401, 429, 5xx) is infrastructure.
+                context_limit = is_context_limit(response.status, error_body)
                 policy_error = PolicyCallError(
                     f"HTTP {response.status}: {error_body[:1000]}",
-                    MODEL_REQUEST_ERROR,
-                    response.status,
-                    infrastructure=not is_context_limit(response.status, error_body),
+                    MODEL_CONTEXT_LIMIT if context_limit else MODEL_REQUEST_ERROR,
+                    None if context_limit else response.status,
+                    infrastructure=not context_limit,
                 )
                 break
             cookies = response.cookies

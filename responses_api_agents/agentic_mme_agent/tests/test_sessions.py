@@ -4,15 +4,18 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import ClientConnectionError
 from fastapi import HTTPException, Request, Response
+from omegaconf import OmegaConf
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
+    AgentOutcomePolicyConfig,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     OutcomeAction,
@@ -199,26 +202,48 @@ async def run_session_with_failing_call(failure, failing_call: int):
     return await agent.responses(request, Response(), body().responses_create_params)
 
 
+CONTEXT_LIMIT = b'{"error": {"code": "request_too_large"}}'
+IMAGE_LIMIT = b'{"error": {"message": "At most 1 image(s) may be provided in one prompt."}}'
+UNSUPPORTED_PARAMETER = b'{"error": {"message": "Unsupported parameter: top_k"}}'
+# The Environment Server's outcome policy that every Agentic-MME config uses.
+BENCHMARK_POLICY = AgentOutcomePolicyConfig.model_validate(
+    OmegaConf.to_container(
+        OmegaConf.load(
+            Path(__file__).resolve().parents[3] / "resources_servers/agentic_mme/configs/agentic_mme.yaml"
+        ).agentic_mme_environment_server.environment_servers.single_agent_turn_legacy.agent_outcome_policy
+    )
+)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "action"),
-    [(400, OutcomeAction.VERIFY), (413, OutcomeAction.VERIFY), (503, OutcomeAction.RETRY), (401, OutcomeAction.FAIL)],
+    ("status", "error_body", "outcome", "action"),
+    [
+        (400, CONTEXT_LIMIT, {"failure_kind": "model_context_limit"}, OutcomeAction.VERIFY),
+        (413, CONTEXT_LIMIT, {"failure_kind": "model_context_limit"}, OutcomeAction.VERIFY),
+        (400, IMAGE_LIMIT, {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.FAIL),
+        (400, UNSUPPORTED_PARAMETER, {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.FAIL),
+        (503, IMAGE_LIMIT, {"failure_kind": "model_request_error", "status_code": 503}, OutcomeAction.RETRY),
+        (401, IMAGE_LIMIT, {"failure_kind": "model_request_error", "status_code": 401}, OutcomeAction.FAIL),
+    ],
+    ids=["context_400", "context_413", "image_limit", "unsupported_parameter", "unavailable", "bad_key"],
 )
-async def test_refused_model_call_reports_its_status(status, action) -> None:
-    # Under an agent session the Environment Server decides what a refused call means: by default a rejected
-    # request is the model's own result, a retryable status is retried, and a bad key or URL fails the rollout.
+async def test_refused_model_call_is_graded_only_when_the_context_refused_it(
+    status, error_body, outcome, action
+) -> None:
+    # As on /run: a context or request-size refusal is the model's own result and scores 0. A serving limit or an
+    # unsupported parameter is not, so under the benchmark's outcome policy the rollout fails ungraded.
     refused = FakeResponse(None)
     refused.ok, refused.status = False, status
-    refused.read = AsyncMock(return_value=b'{"error": {"code": "request_too_large"}}')
+    refused.read = AsyncMock(return_value=error_body)
     result = await run_session_with_failing_call(refused, failing_call=1)
 
     assert result.status == "failed" and result.incomplete_details is None
-    assert "request_too_large" in result.error.message
-    outcome = json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY])
-    assert outcome == {"failure_kind": "model_request_error", "status_code": status}
+    assert error_body.decode() in result.error.message
+    assert json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
     # The work before the refused call stays in the response: the tool call, its output and the tool image.
     assert [item.type for item in result.output][:2] == ["function_call", "function_call_output"]
-    assert agent_outcome_policy(result) == action
+    assert agent_outcome_policy(result, config=BENCHMARK_POLICY) == action
 
 
 @pytest.mark.asyncio

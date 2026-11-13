@@ -45,3 +45,14 @@ agentic_mme_environment_server:
       agent_server:
         type: responses_api_agents
         name: agentic_mme_agent
+      # A model call refused for its context or request size is the model's own result and scores 0, as on the agent's
+      # /run. A call the deployment refuses for another reason, such as vLLM's per-prompt image limit or an unsupported
+      # parameter, is not: the rollout fails ungraded instead of scoring 0. OpenCode and the Agentic-MME agent report a
+      # context limit as model_context_limit; simple_agent reports it as a plain 400, which this also fails ungraded.
+      agent_outcome_policy:
+        by_failure_kind:
+          model_context_limit: verify
+        by_status_code:
+          400: fail
+          413: fail
+          422: fail

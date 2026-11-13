@@ -54,7 +54,12 @@ retrieval).
   error, timeout, lost connection, unreadable reply) raises out of `/run`, and a failed judge call is masked by
   `judge_failsafe`. Both go to the failures sidecar (`agent_run_error` / `judge_failed`) and are retried or regraded
   on resume. To keep a fixed denominator, count what still fails as 0 in the metrics with
-  `count_failure_classes_as_zero`.
+  `count_failure_classes_as_zero`. Under an agent session, which every config here uses, the harness reports the
+  failed call and the Environment Server's `agent_outcome_policy` (in
+  `resources_servers/agentic_mme/configs/agentic_mme.yaml`) applies the same rule: a context-limit refusal
+  (`model_context_limit`) scores 0, another refused request (400, 413, 422) fails the rollout ungraded, and a
+  retryable status or a lost connection is retried. `simple_agent` reports a context limit as a plain 400, so in
+  `server_tools.yaml` that rollout fails ungraded too.
 - **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the
   episode ends when the model answers without a tool call or when a model call is refused. Set both to restore the
   component default of 15.
