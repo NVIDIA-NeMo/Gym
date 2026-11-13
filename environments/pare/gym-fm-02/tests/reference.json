@@ -1,0 +1,23 @@
+{
+  "task_request": "Reply to carlos's last email about 'Task Update on Develop prototype for report generation' with 'Thanks for the update - I will get back to you tomorrow.'",
+  "gym_agent_harnesses": ["codex_agent", "claude_code_agent"],
+  "verification_contract": {
+    "version": "gym-fm-02-hybrid-5",
+    "requirements": [
+      "carlos_task",
+      "gym_evaluation",
+      "gym_agent",
+      "saved_scored_result"
+    ],
+    "saved_result_evidence": [
+      "one_scored_carlos_rollout_saved",
+      "gym_reward_is_valid",
+      "gym_verification_not_skipped",
+      "rollout_is_not_collection_failure",
+      "model_interaction_saved",
+      "rollout_not_copied_from_bundled_samples",
+      "response_belongs_to_attempt",
+      "recorded_tool_calls_have_results"
+    ]
+  }
+}

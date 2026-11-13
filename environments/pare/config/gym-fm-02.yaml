@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared FM02 settings. Select an inner-agent preset.
+fm02_judge_base_url: https://inference-api.nvidia.com/v1
+fm02_judge_api_key: ${policy_api_key}
+fm02_judge_model: azure/openai/gpt-6.1-terra
+fm02_judge_reasoning_effort: high
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # These values fill task.toml verifier templates only when test.sh runs.
+      secrets:
+        VERIFIER_JUDGE_BASE_URL: ${fm02_judge_base_url}
+        VERIFIER_JUDGE_API_KEY: ${fm02_judge_api_key}
+        VERIFIER_JUDGE_MODEL: ${fm02_judge_model}
+        VERIFIER_JUDGE_REASONING_EFFORT: ${fm02_judge_reasoning_effort}
+      sandbox_provider_options:
+        # Single-attempt configuration: supply a fresh volume name for each attempt.
+        # Docker copies the image's fingerprints into the empty volume and mounts
+        # it read-only. Remove this named volume explicitly after the attempt;
+        # Docker's --rm removes the container but preserves named volumes.
+        run_args:
+          - --mount
+          - type=volume,source=${oc.env:PARE_FM02_FIXTURE_VOLUME},target=/opt/gym-fixture,readonly
+          - --env
+          - GYM_AGENT=${fm02_inner_agent}
+          - --env
+          - GYM_MODEL=${fm02_inner_model}
+          - --env
+          - GYM_API_KEY=${policy_api_key}
+          - --env
+          - OPENAI_BASE_URL=${policy_base_url}
+
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      reasoning_effort: high
+      model_server_forwards_reasoning_effort: true
+      timeout: 1200
+      sandbox_logs_dir: /logs/agent
+      # Preserve task settings such as GYM_AGENT and GYM_MODEL for the coding agent.
+      # The adapter still overrides OPENAI_API_KEY for its own model proxy.
+      inherit_sandbox_environment: true
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      is_responses_native: true
