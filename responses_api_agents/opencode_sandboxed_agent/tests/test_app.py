@@ -2195,7 +2195,18 @@ class TestBenchmarkLifecycle:
         assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
         assert server._sandbox_id_to_run_result == {}
 
-    async def test_explicit_nonzero_agent_result_with_intact_output_keeps_failure_status(self, tmp_path: Path) -> None:
+    @mark.parametrize(
+        "sandbox_error,export_error,expected_error",
+        [
+            ("timeout", None, "timeout"),
+            ("timeout", {"name": "APIError"}, "timeout"),
+            (None, {"name": "APIError"}, "APIError"),
+            (None, "session error", "OpenCodeError"),
+        ],
+    )
+    async def test_explicit_nonzero_agent_result_with_intact_output_keeps_failure_status(
+        self, tmp_path: Path, sandbox_error: str | None, export_error: dict | str | None, expected_error: str
+    ) -> None:
         config = self._create_config()
         config.artifacts_dir = str(tmp_path)
         config.preinstalled_opencode = True
@@ -2212,11 +2223,14 @@ class TestBenchmarkLifecycle:
             if "opencode db" in command:
                 return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
             return SimpleNamespace(
-                stdout="Shell: bash\npartial", stderr="time limit reached", return_code=124, error_type="timeout"
+                stdout="Shell: bash\npartial", stderr="command failed", return_code=124, error_type=sandbox_error
             )
 
         async def download(_remote: str, local: Path) -> None:
-            local.write_bytes((Path(__file__).parent / "opencode_export_test_data.json").read_bytes())
+            export = json.loads((Path(__file__).parent / "opencode_export_test_data.json").read_text())
+            assistant = next(m["info"] for m in reversed(export["messages"]) if m["info"]["role"] == "assistant")
+            assistant["error"] = export_error
+            local.write_text(json.dumps(export))
 
         sandbox = MagicMock(
             upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
@@ -2234,7 +2248,7 @@ class TestBenchmarkLifecycle:
         run_result = server._sandbox_id_to_run_result["session"]
         assert run_result["opencode_failed"] is True
         assert run_result["opencode_exit_code"] == 124
-        assert run_result["opencode_error_type"] == "timeout"
+        assert run_result["opencode_error_type"] == expected_error
         assert run_result["opencode_export_found"] is True
         assert run_result["opencode_finished"] is False
         sandbox.download.assert_awaited_once()

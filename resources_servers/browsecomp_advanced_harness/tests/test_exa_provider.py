@@ -233,6 +233,94 @@ class TestExaProvider:
 
     # ---- dispatch ----
 
+    @pytest.mark.parametrize("provider", ["exa", "tavily"])
+    @pytest.mark.parametrize("endpoint", ["search", "browse"])
+    async def test_content_refusal_fails_only_one_call(self, monkeypatch, provider: str, endpoint: str) -> None:
+        body = {"error": "Sorry, we've detected unsafe content and can't process this request."}
+        fake_request = AsyncMock(
+            side_effect=[self._http_response(403, body), self._http_response(200, {"results": []})]
+        )
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+        if provider == "exa":
+            client = ExaAIOHTTPClient(headers={}, debug=False)
+
+            async def invoke():
+                if endpoint == "search":
+                    return await client.search("q", num_results=5)
+                return await client.get_contents(["https://example.com"], max_characters=1000)
+        else:
+            client = TavilySearchAIOHTTPClient(headers={}, base_url="https://api.tavily.com", debug=False)
+
+            async def invoke():
+                return await client.post("/search" if endpoint == "search" else "/extract", "{}", 30)
+
+        with pytest.raises(app_module.SearchProviderRefusal, match="unsafe content"):
+            await invoke()
+        fake_request.assert_awaited_once()  # A refusal is not retried.
+        await invoke()  # A later request still works.
+        assert fake_request.await_count == 2
+        app_module.os._exit.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["exa", "tavily"])
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_failures_stay_fatal(self, monkeypatch, provider: str, status: int) -> None:
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+        with pytest.raises(SystemExit):
+            app_module._check_auth_failure(provider, status, "invalid API key")
+        app_module.os._exit.assert_called_once_with(1)
+
+    @pytest.mark.parametrize("provider", ["exa", "tavily"])
+    @pytest.mark.parametrize("workspace", ["none", "per_session"])
+    @pytest.mark.parametrize("operation", ["search", "browse"])
+    async def test_refusal_reaches_agent_and_next_call_succeeds(
+        self,
+        config: TavilySearchResourcesServerConfig,
+        monkeypatch,
+        tmp_path: Path,
+        provider: str,
+        workspace: str,
+        operation: str,
+    ) -> None:
+        config.search_provider = provider
+        config.tavily_api_key = "test_tavily_key"  # pragma: allowlist secret
+        config.workspace = workspace
+        config.workspace_root = str(tmp_path)
+        config.allow_host_execution = True
+        server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        fake_request = AsyncMock(
+            side_effect=[
+                self._http_response(403, {"error": "unsafe content"}),
+                self._http_response(
+                    200,
+                    {
+                        "results": [
+                            {
+                                "title": "Allowed content",
+                                "url": "https://example.com",
+                                "text": "Allowed content",
+                                "content": "Allowed content",
+                                "raw_content": "Allowed content",
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+        if operation == "search":
+            refused = await server.search(self._req(), TavilySearchRequest(queries=["refused query"]))
+            allowed = await server.search(self._req(), TavilySearchRequest(queries=["allowed query"]))
+        else:
+            refused = await server.browse(self._req(), BrowseRequest(urls=["https://example.com/refused"]))
+            allowed = await server.browse(self._req(), BrowseRequest(urls=["https://example.com"]))
+
+        assert f"{provider} refused this request" in refused.results_string
+        assert "Allowed content" in allowed.results_string
+        assert fake_request.await_count == 2
+        app_module.os._exit.assert_not_called()
+
     async def test_dispatch_routes_to_exa_not_tavily(self, server: TavilySearchResourcesServer) -> None:
         exa = MagicMock()
         exa.search = AsyncMock(return_value={"results": []})

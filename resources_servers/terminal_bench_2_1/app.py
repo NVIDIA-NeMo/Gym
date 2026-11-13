@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
@@ -109,6 +110,8 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
+    # Under set -e, pytest failures can end test.sh before it writes reward.txt.
+    score_pytest_failures_without_reward: bool = True
 
     outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
         default_factory=TerminalBench21OutcomePolicyConfig,
@@ -163,7 +166,17 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
     task_name: str
     test_output: str
+    reward_from_pytest_summary: bool = False
     golden_patch_output: Optional[str]
+
+
+_PYTEST_SUMMARY = re.compile(r"^=+ (?P<counts>[^=\n]*?) in [\d.]+s(?: \([^)\n]*\))? =+[ \t]*$", re.MULTILINE)
+
+
+def pytest_reported_failure(output: str) -> bool:
+    """Whether the last pytest summary counts failed tests or errors."""
+    summaries = _PYTEST_SUMMARY.findall(output)
+    return bool(summaries) and re.search(r"\b[1-9]\d* (failed|errors?)\b", summaries[-1]) is not None
 
 
 @dataclass
@@ -700,6 +713,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
         evaluation_completed = False
+        reward_from_pytest_summary = False
+        reward_missing = False
         reward = 0.0
         if eval_result is not None:
             try:
@@ -712,6 +727,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                         # confirms that reward.txt is absent.
                         if await self._reward_file_exists(eval_sandbox):
                             failure_cause = download_exc
+                        else:
+                            reward_missing = True
                         raise
                     # Providers such as Docker can replace the destination file during download.
                     reward = float(Path(temp_file.name).read_text())
@@ -720,6 +737,19 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             except Exception:
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+
+            if (
+                reward_missing
+                and failure_cause is None
+                and self.config.score_pytest_failures_without_reward
+                and getattr(eval_result, "error_type", None) is None
+                and eval_result.return_code is not None
+                and eval_result.return_code > 0
+                and pytest_reported_failure(test_output)
+            ):
+                evaluation_completed = True
+                reward_from_pytest_summary = True
+                LOG.info("Scoring failed pytest run without reward.txt as zero: task=%s", body.task_name)
 
         failure_reason: str | None = None
         counts_as_zero = False
@@ -758,6 +788,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             reward=reward,
             verification_time_taken=verification_time_taken,
             test_output=test_output,
+            reward_from_pytest_summary=reward_from_pytest_summary,
             golden_patch_output=golden_patch_output,
             mask_sample=failure_reason is not None and not counts_as_zero,
             failure_kind=failure_kind if failure_reason is not None else None,

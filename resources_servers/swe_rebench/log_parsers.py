@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import ModuleType
 from typing import Callable
 
@@ -40,7 +41,7 @@ from typing import Callable
 UPSTREAM_REPO = "https://github.com/SWE-rebench/SWE-rebench-V2.git"
 # Pinned so a parser change upstream cannot silently move scores between runs. Bump
 # deliberately, and re-baseline when you do.
-UPSTREAM_COMMIT = "main"
+UPSTREAM_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
 
 # Upstream has moved this file between releases; accept both layouts rather than pinning one.
 _PARSER_RELATIVE_PATHS = (Path("lib") / "agent" / "log_parsers.py", Path("agent") / "log_parsers.py")
@@ -74,14 +75,19 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
         if _parser_path(destination) is not None:
             return
         shutil.rmtree(destination, ignore_errors=True)
-        subprocess.run(
-            ["git", "clone", "--depth", "1", UPSTREAM_REPO, str(destination)],
-            check=True,
-            capture_output=True,
-        )
-        if UPSTREAM_COMMIT != "main":
-            subprocess.run(["git", "fetch", "--depth", "1", "origin", UPSTREAM_COMMIT], cwd=destination, check=True)
-            subprocess.run(["git", "checkout", UPSTREAM_COMMIT], cwd=destination, check=True)
+        # Publish only after checking out the pin: other workers must never load the initial main tree.
+        with TemporaryDirectory(prefix=f".{destination.name}.", dir=destination.parent) as temporary:
+            staged = Path(temporary) / "repo"
+            subprocess.run(
+                ["git", "clone", "--depth", "1", UPSTREAM_REPO, str(staged)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(["git", "fetch", "--depth", "1", "origin", UPSTREAM_COMMIT], cwd=staged, check=True)
+            subprocess.run(["git", "checkout", "--detach", UPSTREAM_COMMIT], cwd=staged, check=True)
+            if _parser_path(staged) is None:
+                raise FileNotFoundError(f"SWE-rebench log_parsers.py not found at {UPSTREAM_COMMIT}")
+            staged.rename(destination)
     finally:
         shutil.rmtree(lock_path, ignore_errors=True)
 
@@ -100,7 +106,7 @@ def load_parsers(cache_dir: Path) -> ModuleType:
     if _MODULE is not None:
         return _MODULE
 
-    repo_dir = Path(cache_dir) / "SWE-rebench-V2"
+    repo_dir = Path(cache_dir) / f"SWE-rebench-V2-{UPSTREAM_COMMIT}"
     _clone_locked(repo_dir)
     parser_path = _parser_path(repo_dir)
     if parser_path is None:

@@ -468,6 +468,21 @@ def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
     return n429, n_other
 
 
+_CONTENT_REFUSAL = re.compile(r"unsafe content|content (policy|filter|moderation)", re.IGNORECASE)
+
+
+class SearchProviderRefusal(Exception):
+    """The provider refused one request because of its content."""
+
+
+def _check_auth_failure(provider: str, status: int, body: str) -> None:
+    """Fail only the refused call for content-safety 403s; preserve fatal authentication failures."""
+    if status == 403 and _CONTENT_REFUSAL.search(body):
+        LOG.warning("Search provider %s refused one request: HTTP %s: %s", provider, status, body[:300])
+        raise SearchProviderRefusal(f"{provider} refused this request: {body[:200]}")
+    _abort_on_invalid_api_key(provider, status, body)
+
+
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
     """A 401/403 from the search provider means the API key is bad — every search in the
     run would silently degrade, so kill the benchmark instead of producing a garbage score."""
@@ -517,7 +532,9 @@ class TavilySearchAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("tavily", response.status, (await response.content.read()).decode())
+                _check_auth_failure(
+                    "tavily", response.status, (await response.content.read()).decode(errors="replace")
+                )
 
             if response.status in RETRY_ERROR_CODES:
                 # A rate limit does not spend an attempt, but only while the wait budget lasts.
@@ -598,7 +615,7 @@ class ExaAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("exa", response.status, (await response.content.read()).decode())
+                _check_auth_failure("exa", response.status, (await response.content.read()).decode(errors="replace"))
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
@@ -1563,7 +1580,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 search_depth="advanced",
                 include_raw_content=True,
             )
-        except BadRequestError as e:
+        except (BadRequestError, SearchProviderRefusal) as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
@@ -1599,7 +1616,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 search_depth="advanced",
                 include_raw_content=True,
             )
-        except BadRequestError as e:
+        except (BadRequestError, SearchProviderRefusal) as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"

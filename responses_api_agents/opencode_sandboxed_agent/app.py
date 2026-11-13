@@ -1745,7 +1745,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ]
             length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
             terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
-            if terminal_error and not run_error_type:
+            # A sandbox deadline outranks the error the interrupted session left in its export.
+            if terminal_error and not run_error_type and getattr(result, "error_type", None) is None:
                 run_error_type = (
                     terminal_error.get("name", "OpenCodeError")
                     if isinstance(terminal_error, dict)

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 from shlex import quote
@@ -475,6 +476,93 @@ async def test_absent_reward_file_is_still_scored_zero(tmp_path: Path, download_
     result = await server.verify(request, _verify_request(tmp_path))
     assert result.mask_sample is False and result.failure_kind is None
     assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("test_code", ["def test_answer(): assert False\n", "raise ValueError('collection failed')\n"])
+async def test_failed_pytest_under_set_e_is_a_completed_zero(tmp_path: Path, enabled: bool, test_code: str) -> None:
+    (tmp_path / "test_answer.py").write_text(test_code)
+    verifier = tmp_path / "verifier"
+    script = tmp_path / "test.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        f"{quote(sys.executable)} -m pytest --color=no -o addopts='' {quote(str(tmp_path / 'test_answer.py'))}\n"
+        f"echo 1 > {quote(str(verifier / 'reward.txt'))}\n"
+    )
+
+    async def execute(command, **kwargs):
+        command = command.replace("/logs/verifier", quote(str(verifier)))
+        command = command.replace("/tests/test.sh", quote(str(script)))
+        result = subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+        return SimpleNamespace(
+            stdout=result.stdout, stderr=result.stderr, return_code=result.returncode, error_type=None
+        )
+
+    async def download(remote_path, local_path):
+        copyfile(verifier / "reward.txt", local_path)
+
+    server, request = _infra_server(tmp_path, execute, download)
+    server.config.score_pytest_failures_without_reward = enabled
+    result = await server.verify(request, _verify_request(tmp_path))
+
+    assert not (verifier / "reward.txt").exists()
+    assert result.reward == 0.0
+    assert result.evaluation_completed is enabled
+    assert result.reward_from_pytest_summary is enabled
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+
+
+@pytest.mark.parametrize(
+    "return_code,error_type,probe,summary,completed,masked",
+    [
+        (1, None, 1, "=== 1 failed in 0.1s ===", True, False),
+        (1, None, 0, "=== 1 failed in 0.1s ===", False, True),
+        (1, None, 2, "=== 1 failed in 0.1s ===", False, True),
+        (124, "timeout", 1, "=== 1 failed in 0.1s ===", False, False),
+        (125, "sandbox", 1, "=== 1 failed in 0.1s ===", False, True),
+        (0, None, 1, "=== 1 failed in 0.1s ===", False, False),
+        (None, None, 1, "=== 1 failed in 0.1s ===", False, False),
+        (6, None, 1, "curl: Could not resolve host", False, False),
+        (1, None, 1, "=== 1 failed in 0.1s ===\n=== 4 passed in 0.2s ===", False, False),
+    ],
+)
+async def test_pytest_summary_does_not_override_inconclusive_verification(
+    tmp_path: Path,
+    return_code: int | None,
+    error_type: str | None,
+    probe: int,
+    summary: str,
+    completed: bool,
+    masked: bool,
+) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            return _ok(stdout=summary, return_code=return_code, error_type=error_type)
+        return _ok(return_code=probe) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.reward == 0.0
+    assert result.evaluation_completed is completed
+    assert result.reward_from_pytest_summary is completed
+    assert result.mask_sample is masked
+
+
+@pytest.mark.parametrize(
+    "reward_text,expected,completed", [("1", 1.0, True), ("0", 0.0, True), ("invalid", 0.0, False)]
+)
+async def test_reward_file_takes_precedence_over_pytest_summary(
+    tmp_path: Path, reward_text: str, expected: float, completed: bool
+) -> None:
+    async def execute(command, **kwargs):
+        return _ok(stdout="=== 1 failed in 0.1s ===", return_code=1 if "test.sh" in command else 0)
+
+    server, request = _infra_server(tmp_path, execute, lambda remote, local: Path(local).write_text(reward_text))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.reward == expected
+    assert result.evaluation_completed is completed
+    assert result.reward_from_pytest_summary is False
 
 
 @pytest.mark.asyncio
