@@ -10,6 +10,8 @@ modality: text
 licensing: Apache-2.0
 authors:
 - bxyu-nvidia
+maintainers:
+- bxyu-nvidia
 reward:
   range:
   - 0.0

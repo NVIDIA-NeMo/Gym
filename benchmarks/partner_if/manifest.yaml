@@ -13,6 +13,8 @@ modality: text
 licensing: internal
 authors:
 - Katherine Huang
+maintainers:
+- katherineh123
 reward:
   range:
   - 0.0

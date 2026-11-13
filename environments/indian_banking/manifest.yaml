@@ -11,6 +11,8 @@ modality: text
 licensing: Apache-2.0
 authors:
 - krishnpci
+maintainers:
+- krishnpci
 reward:
   range:
   - 0.0

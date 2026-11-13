@@ -10,6 +10,8 @@ modality: text
 licensing: LicenseRef-OpenMDW-1.1
 authors:
 - Olivia Viessmann
+maintainers:
+- OliviaViessmann
 reward:
   range:
   - 0.0

@@ -10,6 +10,8 @@ modality: text
 licensing: unknown
 authors:
 - Jonathan Li
+maintainers:
+- bxyu-nvidia
 reward:
   range:
   - 0.0

@@ -9,6 +9,8 @@ modality: text
 licensing: unknown
 authors:
   - Julien Veron Vialard
+maintainers:
+- jveronvialard
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

@@ -11,6 +11,9 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- gwarmstrong
+- YoavMiron
 reward:
   range:
   - 0.0

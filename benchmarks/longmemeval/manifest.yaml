@@ -9,6 +9,8 @@ modality: text
 licensing: MIT
 authors:
 - Maria Bagdasarova
+maintainers:
+- pachmu
 reward:
   range:
   - 0.0

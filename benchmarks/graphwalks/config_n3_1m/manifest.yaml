@@ -10,6 +10,8 @@ modality: text
 licensing: MIT
 authors:
 - Cheng-Ping Hsieh
+maintainers:
+- hsiehjackson
 reward:
   range:
   - 0.0

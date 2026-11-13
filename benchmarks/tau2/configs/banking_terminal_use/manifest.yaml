@@ -10,6 +10,9 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- bxyu-nvidia
+- jkyi-nvidia
 reward:
   range:
   - 0.0

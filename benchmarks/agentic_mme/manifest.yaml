@@ -10,6 +10,8 @@ modality: text, image
 licensing: Apache-2.0
 authors:
 - DanialTaheri
+maintainers:
+- DanialTaheri
 reward:
   range:
   - 0.0

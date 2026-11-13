@@ -10,6 +10,8 @@ modality: text
 licensing: unknown
 authors:
 - Christian Munley
+maintainers:
+- cmunley1
 reward:
   range:
   - 0.0

@@ -9,6 +9,8 @@ modality: text
 licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0
 authors:
 - i-vainn
+maintainers:
+- i-vainn
 reward:
   range:
   - 0.0

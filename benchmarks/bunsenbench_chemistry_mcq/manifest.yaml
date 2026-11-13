@@ -9,6 +9,8 @@ modality: text
 licensing: unknown
 authors:
 - eric-tramel
+maintainers:
+- eric-tramel
 reward:
   range:
   - 0.0

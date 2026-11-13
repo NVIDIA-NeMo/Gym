@@ -10,6 +10,8 @@ modality: multimodal
 licensing: CC-BY-4.0
 authors:
 - Tuomas Rintamaki
+maintainers:
+- trintamaki
 reward:
   range:
   - 0.0

@@ -10,6 +10,8 @@ modality: text
 licensing: unknown
 authors:
 - Kipok
+maintainers:
+- Kipok
 reward:
   range:
   - 0.0

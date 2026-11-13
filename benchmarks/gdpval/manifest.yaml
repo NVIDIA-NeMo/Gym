@@ -10,6 +10,14 @@ modality: multimodal
 licensing: unknown
 authors:
 - Serge Panev
+maintainers:
+- Kh4L
+- AdamRajfer
+- agronskiy
+- ananthsub
+- athitten
+- marta-sd
+- vadam5
 reward:
   range:
   - 0.0

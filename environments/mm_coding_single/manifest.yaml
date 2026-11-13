@@ -9,6 +9,8 @@ modality: image,text
 licensing: Apache-2.0
 authors:
 - Fuxiao Liu
+maintainers:
+- yfw
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

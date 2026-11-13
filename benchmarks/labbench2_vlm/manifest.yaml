@@ -10,6 +10,8 @@ modality: multimodal
 licensing: CC-BY-SA-4.0
 authors:
 - Sergey Kolchenko
+maintainers:
+- azkalot1
 reward:
   range:
   - 0.0

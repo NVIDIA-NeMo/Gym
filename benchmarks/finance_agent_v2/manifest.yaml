@@ -10,6 +10,8 @@ modality: text
 licensing: MIT
 authors:
 - ushnish-de
+maintainers:
+- ushnish-de
 reward:
   range:
   - 0.0

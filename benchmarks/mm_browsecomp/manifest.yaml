@@ -10,6 +10,8 @@ modality: multimodal
 licensing: MIT
 authors:
 - smohsenitahe
+maintainers:
+- DanialTaheri
 reward:
   range:
   - 0.0

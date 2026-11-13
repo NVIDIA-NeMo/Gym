@@ -9,6 +9,8 @@ modality: text
 licensing: MIT
 authors:
 - Sanyam Kapoor
+maintainers:
+- activatedgeek
 reward:
   range:
   - 0.0

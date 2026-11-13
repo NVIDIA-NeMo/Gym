@@ -11,6 +11,8 @@ modality: text
 licensing: unknown
 authors:
 - Rima Shahbazyan
+maintainers:
+- rimashahbazyan
 reward:
   range:
   - 0.0

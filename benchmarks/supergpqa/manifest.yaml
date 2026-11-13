@@ -9,6 +9,8 @@ modality: text
 licensing: unknown
 authors:
 - wedu-nvidia
+maintainers:
+- wedu-nvidia
 reward:
   range:
   - 0.0

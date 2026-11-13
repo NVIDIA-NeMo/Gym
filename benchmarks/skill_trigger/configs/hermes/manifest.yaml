@@ -9,6 +9,8 @@ modality: text
 licensing: unknown
 authors:
 - Daniel Burkhardt
+maintainers:
+- dburkhardt
 reward:
   range:
   - 0.0

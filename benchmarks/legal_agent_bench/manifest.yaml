@@ -9,6 +9,8 @@ modality: multimodal
 licensing: MIT
 authors:
 - rystewart-nvidia
+maintainers:
+- rystewart-nvidia
 reward:
   range:
   - 0.0

@@ -11,6 +11,8 @@ modality: text
 licensing: MIT
 authors:
 - rshahbazyan
+maintainers:
+- rimashahbazyan
 reward:
   range:
   - 0.0

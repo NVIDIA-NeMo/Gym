@@ -9,6 +9,9 @@ modality: text
 licensing: unknown
 authors:
 - fsiino-nvidia
+maintainers:
+- fsiino-nvidia
+- AdamRajfer
 reward:
   range:
   - 0.0

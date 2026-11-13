@@ -10,6 +10,8 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- ryan-lempka
 reward:
   range:
   - 0.0

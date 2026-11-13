@@ -10,6 +10,8 @@ modality: text
 licensing: CC-BY-NC-4.0
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- pachmu
 reward:
   range:
   - 0.0

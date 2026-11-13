@@ -11,6 +11,8 @@ modality: text
 licensing: Apache-2.0
 authors:
 - Khushi Bhardwaj
+maintainers:
+- kbhardwaj-nvidia
 reward:
   range:
   - 0.0

@@ -10,6 +10,8 @@ modality: text
 licensing: CC-BY-SA-4.0
 authors:
 - Felipe Vieira Frujeri
+maintainers:
+- ffrujeri
 reward:
   range:
   - 0.0

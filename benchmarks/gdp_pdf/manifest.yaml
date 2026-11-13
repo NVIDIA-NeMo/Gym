@@ -10,6 +10,9 @@ modality: multimodal
 licensing: MIT
 authors:
 - Cheng-Ping Hsieh
+maintainers:
+- hsiehjackson
+- trintamaki
 reward:
   range:
   - 0.0

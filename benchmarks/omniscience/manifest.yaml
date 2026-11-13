@@ -9,6 +9,8 @@ modality: text
 licensing: Apache-2.0
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
 reward:
   range:
   - 0.0

@@ -10,6 +10,8 @@ modality: text
 licensing: internal
 authors:
 - Eric Yang
+maintainers:
+- ericyang0
 reward:
   range:
   - 0.0

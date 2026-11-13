@@ -10,6 +10,8 @@ modality: text
 licensing: unknown
 authors:
 - Julien Veron Vialard
+maintainers:
+- jveronvialard
 reward:
   range:
   - 0.0

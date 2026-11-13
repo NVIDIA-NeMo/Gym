@@ -9,6 +9,8 @@ modality: audio
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
 reward:
   range:
   - 0.0

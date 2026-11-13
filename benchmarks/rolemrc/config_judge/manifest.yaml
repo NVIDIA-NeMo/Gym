@@ -10,6 +10,8 @@ modality: text
 licensing: CC-BY-4.0
 authors:
 - Maria Bagdasarova
+maintainers:
+- pachmu
 reward:
   range:
   - 0.0

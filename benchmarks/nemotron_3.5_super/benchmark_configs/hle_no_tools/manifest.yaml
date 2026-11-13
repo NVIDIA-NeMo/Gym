@@ -9,6 +9,12 @@ modality: text
 licensing: unknown
 authors:
 - fsiino-nvidia
+maintainers:
+- bxyu-nvidia
+- fsiino-nvidia
+- hemildesai
+- laszkiewiczp
+- sdevare-nv
 reward:
   range:
   - 0.0

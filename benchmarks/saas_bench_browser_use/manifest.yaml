@@ -9,6 +9,8 @@ modality: text, image
 licensing: CC-BY-4.0
 authors:
 - SaaS-Bench Authors
+maintainers:
+- bpritam14
 reward:
   range:
   - 0.0

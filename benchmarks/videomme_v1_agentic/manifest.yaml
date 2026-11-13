@@ -10,6 +10,8 @@ modality: video
 licensing: unknown
 authors:
 - Guo Chen
+maintainers:
+- cg1177
 reward:
   range:
   - 0.0

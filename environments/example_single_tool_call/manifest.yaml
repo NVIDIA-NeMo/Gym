@@ -10,6 +10,9 @@ licensing: Apache-2.0
 authors:
 - fsiino-nvidia
 - bxyu-nvidia
+maintainers:
+- adil-a
+- ananthsub
 reward:
   range:
   - 0.0

@@ -8,6 +8,8 @@ description: Synthetic document QA training with isolated OpenSandbox workspaces
 modality: multimodal
 licensing: Apache-2.0
 authors: [Jarno Seppänen]
+maintainers:
+- jseppanen
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

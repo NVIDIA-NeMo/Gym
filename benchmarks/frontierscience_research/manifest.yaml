@@ -9,6 +9,8 @@ modality: text
 licensing: unknown
 authors:
 - jiacheng-xu
+maintainers:
+- jiacheng-xu
 reward:
   range:
   - 0.0

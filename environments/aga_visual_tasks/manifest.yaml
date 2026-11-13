@@ -12,6 +12,8 @@ modality: multimodal
 licensing: internal
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- gerryche123
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

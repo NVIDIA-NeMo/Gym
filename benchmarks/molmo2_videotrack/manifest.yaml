@@ -10,6 +10,8 @@ modality: text, image
 licensing: ODC-BY-1.0
 authors:
 - Pulkit Khandelwal
+maintainers:
+- pulkitkumar95
 reward:
   range:
   - 0.0

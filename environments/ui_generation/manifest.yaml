@@ -11,6 +11,8 @@ modality: text
 licensing: Apache-2.0
 authors:
 - titu1994
+maintainers:
+- titu1994
 reward:
   range:
   - 0.0

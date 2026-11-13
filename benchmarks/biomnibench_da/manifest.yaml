@@ -9,6 +9,8 @@ modality: text
 licensing: CC-BY-4.0
 authors:
 - Sanyam Kapoor
+maintainers:
+- activatedgeek
 reward:
   range:
   - 0.0

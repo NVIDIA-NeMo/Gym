@@ -9,6 +9,8 @@ modality: text
 licensing: ODC-BY-1.0
 authors:
 - Daniel Egert
+maintainers:
+- trias702
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

@@ -10,6 +10,8 @@ description: MATH-500 in 12 default Indic languages using the English prompt and
 modality: text
 licensing: Apache-2.0
 authors: [anushaknvidia]
+maintainers:
+- anushaknvidia
 reward:
   range: [0, 1]
   higher_is_better: true

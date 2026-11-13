@@ -11,6 +11,8 @@ modality: text
 licensing: internal
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- katherineh123
 reward:
   range:
   - 0.0

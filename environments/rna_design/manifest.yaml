@@ -11,6 +11,8 @@ licensing: MIT
 authors:
 - Christian Munley
 - Youhan Lee
+maintainers:
+- cmunley1
 reward:
   range:
   - 0.0

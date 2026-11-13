@@ -11,6 +11,8 @@ modality: text
 licensing: Apache-2.0 AND CC-BY-4.0
 authors:
 - gnalbandyan
+maintainers:
+- gnalbandyan
 reward:
   range:
   - 0.0

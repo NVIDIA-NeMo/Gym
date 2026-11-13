@@ -11,6 +11,8 @@ licensing: Apache-2.0
 authors:
 - yyu22
 - cmunley1
+maintainers:
+- cmunley1
 reward:
   range:
   - 0.0
