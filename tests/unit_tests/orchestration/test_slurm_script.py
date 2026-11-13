@@ -89,6 +89,19 @@ def test_empty():
     assert _flatten_run_args({}) == []
 
 
+def test_a_run_task_id_list_reaches_the_collection_config_as_the_same_ids():
+    # A submit's `run: {task_ids: [...]}` runs only those tasks; Hydra reads an unquoted `7` as a number.
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
+
+    [arg] = _flatten_run_args({"task_ids": ["django__django-11099", "7", "org/repo.2"]})
+    override = OverridesParser.create().parse_overrides([shlex.split(arg)[0]])[0]
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl", task_ids=override.value()
+    )
+
+    assert [str(task_id) for task_id in config.task_ids] == ["django__django-11099", "7", "org/repo.2"]
+
+
 def test_value_with_spaces_is_quoted():
     assert _flatten_run_args({"name": "my model"}) == ["'+name=my model'"]
 
@@ -2867,7 +2880,7 @@ def test_a_ray_head_is_probed_beside_a_non_zero_driver_node(tmp_path):
 
 def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     script = _driver_on_aux(tmp_path, {})
-    assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+    assert "Waiting for otel_collector at http://${gym_nodes[1]}:4319" in script
 
 
 def test_services_on_node_0_are_probed_locally(tmp_path):

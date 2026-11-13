@@ -968,6 +968,111 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
         validate_environment(manifest_path)
 
 
+HARBOR_HARNESSES = {
+    "mini_swe_agent": (
+        "responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml",
+        {"step_limit": 500},
+    ),
+    # Its shipped template leaves `resources_server.name` for benchmark composition; the Harbor run clears it.
+    "terminus_2_sandboxed_agent": (
+        "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
+        {},
+    ),
+}
+
+
+def _harbor_asset(
+    tmp_path: Path, *, config_target: str, manifest_target: str | None = None, harness: str = "mini_swe_agent"
+) -> Path:
+    directory = tmp_path / "benchmarks" / "harbor_demo"
+    directory.mkdir(parents=True)
+    shipped, settings = HARBOR_HARNESSES[harness]
+    config = {
+        "harbor_target": config_target,
+        "config_paths": [shipped],
+        harness: {"responses_api_agents": {harness: settings}},
+    }
+    (directory / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    manifest = _manifest(kind="benchmark", profile="custom-gym-agent-loop")
+    manifest.update(
+        name="harbor_demo",
+        harbor_target=manifest_target or config_target,
+        resources_server=None,
+        agent_server=harness,
+        datasets=[],
+        prompt_source="agent",
+        grading_mode=None,
+    )
+    manifest.pop("standard_prompt_config")
+    path = directory / "manifest.yaml"
+    path.write_text(dump_manifest(manifest), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("harness", sorted(HARBOR_HARNESSES))
+def test_harbor_backed_manifest_validates_its_harness_and_target(tmp_path: Path, harness: str) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", harness=harness)
+    report = validate_environment(path)
+    assert report.datasets == ()
+    assert [(c.role, c.name) for c in report.components] == [
+        ("agent_server", harness),
+        ("model_server", "policy_model"),
+    ]
+    assert report.components[0].implementation == harness
+    assert resolve_config_servers(path.parent / "config.yaml") == (None, harness)
+
+
+def test_dataset_owner_does_not_apply_to_a_harbor_target(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    manifest = yaml.safe_load(path.read_text())
+    manifest["dataset_owner"] = "mini_swe_agent"
+    path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="dataset_owner does not apply to harbor_target"):
+        validate_environment(path)
+
+
+def test_a_harbor_target_only_an_include_sets_is_refused(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    config = path.parent / "config.yaml"
+    base = path.parent / "base.yaml"
+    base.write_text(config.read_text(), encoding="utf-8")
+    config.write_text(yaml.safe_dump({"config_paths": [str(base)]}), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="set `harbor_target` in the benchmark file itself"):
+        validate_environment(path)
+
+
+def test_harbor_target_is_mirrored_from_the_config(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", manifest_target="terminal_bench_2_1")
+    with pytest.raises(EnvironmentValidationError, match="harbor_target"):
+        validate_environment(path)
+
+
+def test_harbor_target_must_resolve_without_a_fetch(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path, config_target="no_such_harbor_entry"))
+    folder = tmp_path / "tasks"
+    folder.mkdir()
+    assert validate_environment(_harbor_asset(tmp_path / "local", config_target=str(folder))).datasets == ()
+
+
+@pytest.mark.parametrize("target", ["harbor:", "harbor:org/name/extra"])
+def test_a_malformed_harbor_reference_is_refused(tmp_path: Path, target: str) -> None:
+    with pytest.raises(EnvironmentValidationError):
+        validate_environment(_harbor_asset(tmp_path, config_target=target))
+
+
+def test_a_well_formed_harbor_reference_is_accepted_without_a_fetch(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="harbor:terminal-bench/terminal-bench@4.0.0")
+    assert validate_environment(path).datasets == ()
+
+
+def test_a_file_is_not_a_task_folder_target(tmp_path: Path) -> None:
+    task_file = tmp_path / "task.toml"
+    task_file.write_text("")
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path / "file", config_target=str(task_file)))
+
+
 def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path, kind="benchmark")
     (manifest_path.parent / "data/example.jsonl").unlink()
