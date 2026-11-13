@@ -111,11 +111,15 @@ Apply the checks for the areas the diff touches.
   environments a reward profile is optional, not a merge gate (see
   CONTRIBUTING.md); behavior-changing verifier or agent code there needs the
   representative real smoke-rollout evidence AGENTS.md requires instead.
-- **Manifests (`manifest.yaml`).** A new or changed manifest fills the
-  selection fields (`maintainers`, `intended_use`, `training_allowed`,
-  `primary_metric` for benchmarks, and `requirements`), writing `unknown` where
-  nobody knows. A `TODO` left from the scaffold is a finding. Check that
-  `training_allowed` comes from the data's licence and terms, not a guess.
+- **Manifests (`manifest.yaml`).** A new manifest completes its authored
+  metadata and selection fields (`maintainers`, `intended_use`,
+  `training_allowed`, `primary_metric` for benchmarks, and `requirements`).
+  Follow the [field reference](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#field-reference);
+  the literal `unknown` is supported by `training_allowed`, `requirements.gpu`
+  and `requirements.internet`. New or modified metadata must not leave scaffold
+  `TODO` values. For an existing manifest, review the affected declarations
+  without requiring unrelated metadata backfilling. Check new or changed
+  `training_allowed` declarations against the data's licence and terms, not a guess.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not
