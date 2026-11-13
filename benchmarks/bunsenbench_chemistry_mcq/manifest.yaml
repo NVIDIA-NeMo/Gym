@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: Public BunsenBench chemistry multiple-choice benchmark verifier
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - eric-tramel

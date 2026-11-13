@@ -6,7 +6,8 @@ integration_profile: external-agent-loop
 domain: coding
 description: OpenThoughts-TBLite (Terminal-Bench Lite), 100 Harbor-format terminal tasks run by Harbor's Terminus-2
   with each task's own time limits and tests.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - NVIDIA NeMo Gym contributors

@@ -1096,6 +1096,8 @@ def publish_environment_manifest() -> None:
         raise ConfigError(f"'{entry.name}' has no manifest and cannot be published.")
 
     validation = validate_environment(entry.manifest_path, entry.config_path)
+    for warning in validation.warnings:
+        rich.print(f"[yellow]Warning:[/yellow] {warning}", file=sys.stderr)
     verifier = _run_manifest_verifier(entry, update_expected=False, validation=validation)
     report = finalize_publication(entry, validation, verifier)
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
@@ -1200,7 +1202,7 @@ def _inspect_environment(
     for label, value in (
         ("version", entry.version),
         ("profile", entry.integration_profile),
-        ("modality", entry.modality),
+        ("modality", ", ".join(entry.modality or ())),
         ("licensing", entry.licensing),
         ("lifecycle", entry.lifecycle),
     ):
@@ -1322,7 +1324,11 @@ def list_environments() -> None:
                 f"{attribute} metadata and could not be matched.",
                 file=sys.stderr,
             )
-        entries = [entry for entry in entries if getattr(entry, attribute) == expected]
+        if field == "modality":
+            # A manifest lists every kind of input; the filter keeps entries whose list includes the one asked for.
+            entries = [entry for entry in entries if expected in (entry.modality or ())]
+        else:
+            entries = [entry for entry in entries if getattr(entry, attribute) == expected]
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(json.dumps([_catalog_payload(entry) for entry in entries]))

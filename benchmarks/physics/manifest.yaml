@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: Physics QA verified by NeMo Skills' physics judge LLM with math-verify
   symbolic fallback
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

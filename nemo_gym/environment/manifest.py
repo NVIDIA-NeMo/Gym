@@ -173,6 +173,41 @@ class PromptSource(StrEnum):
     AGENT = "agent"
 
 
+class Modality(StrEnum):
+    """A kind of input the model receives."""
+
+    TEXT = "text"
+    IMAGE = "image"
+    AUDIO = "audio"
+    VIDEO = "video"
+
+
+# Before `modality` was a list it was one free-text value. Gym still reads that text, and `gym env validate` asks for
+# the list instead, until this release.
+LEGACY_MODALITY_REMOVED_IN = "0.9.0"
+_LEGACY_MODALITY_WORDS = {"multimodal": ["text", "image"], "vision": ["text", "image"]}
+
+
+def legacy_modality(value: object) -> list[str] | None:
+    """The list that a ``modality`` written as text stands for, or None when it is not text.
+
+    ``text, image`` reads as written. One word other than ``text`` named the input beyond the text prompt, so
+    ``image`` reads as ``[text, image]``; ``multimodal`` and ``vision`` read as ``[text, image]``, the input they
+    meant in Gym's manifests. Any other word is kept, so the schema rejects it and names the values it takes.
+    """
+    if not isinstance(value, str):
+        return None
+    words = [word.strip().casefold() for word in value.split(",") if word.strip()]
+    if len(words) != 1:
+        return words
+    word = words[0]
+    if word in _LEGACY_MODALITY_WORDS:
+        return list(_LEGACY_MODALITY_WORDS[word])
+    if word in {modality.value for modality in Modality} - {Modality.TEXT.value}:
+        return [Modality.TEXT.value, word]
+    return [word]
+
+
 _PROFILE_REQUIRED_FIELDS = {
     IntegrationProfile.CUSTOM_GYM_VERIFIER: ("model_server", "resources_server"),
     IntegrationProfile.CUSTOM_GYM_AGENT_LOOP: ("model_server",),
@@ -357,7 +392,11 @@ class EnvironmentManifest(_ManifestModel):
     integration_profile: IntegrationProfile
     domain: Domain
     description: NonEmptyString
-    modality: NonEmptyString
+    modality: list[Modality] = Field(
+        min_length=1,
+        json_schema_extra={"uniqueItems": True},
+        description="Every kind of input the model receives: text, image, audio or video.",
+    )
     licensing: License = Field(
         default="unknown",
         description="SPDX license expression, internal, proprietary, or unknown.",
@@ -435,7 +474,14 @@ class EnvironmentManifest(_ManifestModel):
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
 
-    @field_validator("authors", "maintainers", "capabilities", "domains", "overlaps_with")
+    @field_validator("modality", mode="before")
+    @classmethod
+    def read_modality_text(cls, value: object) -> object:
+        """Read a manifest written before ``modality`` was a list; ``gym env validate`` asks for the list."""
+        legacy = legacy_modality(value)
+        return value if legacy is None else legacy
+
+    @field_validator("authors", "maintainers", "capabilities", "domains", "overlaps_with", "modality")
     @classmethod
     def validate_unique_items(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
         if isinstance(value, list) and len(value) != len(set(value)):

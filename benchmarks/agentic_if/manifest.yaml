@@ -7,7 +7,8 @@ domain: instruction_following
 description: Instruction following by a coding agent (OpenCode) that completes repository and terminal tasks in
   their sandboxes; reward is the task's own verifier result, and an LLM judge's per-instruction verdicts give
   if_all, if_frac and task_and_if.
-modality: text
+modality:
+- text
 licensing: internal
 authors:
 - NVIDIA NeMo Gym contributors

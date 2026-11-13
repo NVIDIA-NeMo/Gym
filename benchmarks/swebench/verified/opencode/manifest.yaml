@@ -7,7 +7,8 @@ domain: coding
 description: SWE-bench Verified test-split software engineering tasks using prepared repair
   prompts, OpenCode agent sessions in the benchmark's task sandbox, and binary patch-resolution
   scoring.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

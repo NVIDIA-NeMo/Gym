@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+import yaml
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -38,11 +39,13 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_types import MaterializedTask, is_materialized_task_row
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.environment.manifest import (
+    LEGACY_MODALITY_REMOVED_IN,
     DatasetKind,
     EnvironmentKind,
     EnvironmentManifest,
     ManifestDataset,
     dump_manifest,
+    legacy_modality,
     load_manifest,
     resolve_manifest_config_path,
 )
@@ -710,6 +713,21 @@ def _profile_warnings(declared: str, inferred: str, evidence: str) -> tuple[str,
     return ()
 
 
+def _legacy_modality_warnings(manifest_path: Path) -> tuple[str, ...]:
+    """Ask for the list when a manifest still writes ``modality`` as text, which loads until it is removed."""
+    try:
+        written = yaml.safe_load(manifest_path.read_text(encoding="utf-8")).get("modality")
+    except (OSError, UnicodeError, YAMLError, AttributeError):
+        return ()  # load_manifest reports a manifest it cannot read.
+    read = legacy_modality(written)
+    if read is None:
+        return ()
+    return (
+        f"{manifest_path}: modality {written!r} is text; write the list [{', '.join(read)}] instead. Gym reads the "
+        f"text form until {LEGACY_MODALITY_REMOVED_IN}.",
+    )
+
+
 def _validate_prepare_script(path: Path) -> None:
     tree = _parse_python_file(path, "Dataset prepare script")
     if not any(isinstance(node, ast.FunctionDef) and node.name == "prepare" for node in tree.body):
@@ -1067,9 +1085,8 @@ def validate_environment(
         rollout_driver=composition.rollout_driver,
         grading_mode=composition.grading_mode,
         synchronized_fields=synchronized,
-        warnings=_profile_warnings(
-            manifest.integration_profile.value,
-            inferred_profile,
-            profile_evidence,
+        warnings=(
+            *_profile_warnings(manifest.integration_profile.value, inferred_profile, profile_evidence),
+            *_legacy_modality_warnings(resolved_manifest_path),
         ),
     )

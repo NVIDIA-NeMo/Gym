@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: other
 description: FrontierScience answer grading via single-pass LLM judge
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

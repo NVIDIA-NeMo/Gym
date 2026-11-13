@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: SimpleQA short-form factual QA with 3-tier LLM judge (CORRECT / INCORRECT
   / NOT_ATTEMPTED)
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

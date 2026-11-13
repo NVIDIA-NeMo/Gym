@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: PolyMath multilingual math benchmark with weighted (difficulty) and per-language
   metrics
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

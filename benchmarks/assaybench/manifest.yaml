@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: AssayBench -- rank the hit genes of a CRISPR screen from its plain-text
   description (arXiv:2605.10876)
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - lilithgrigoryan

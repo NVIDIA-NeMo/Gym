@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
 description: 30 olympiad proof problems graded 0-7 by a reference-free jury of three frontier LLM judges
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0
 authors:
 - i-vainn

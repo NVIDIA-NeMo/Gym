@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: rlhf
 description: GenRM judge evaluation on hs4 validation response pairs
-modality: text
+modality:
+- text
 licensing: internal
 authors:
 - Julien Veron Vialard

@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: Litmus-Bench held-out molecular-property and ADME questions, scored
   with per-question answer extraction and comparison rules.
-modality: text
+modality:
+- text
 licensing: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
 authors:
 - Dane

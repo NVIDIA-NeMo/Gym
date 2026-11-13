@@ -9,7 +9,8 @@ domain: instruction_following
 description: Internal instruction-following tasks as text, tool, SWE and bounded recorded-context
   Gymnasium episodes. Stock gymnasium_agent with PartnerIF Resources simulation and shared
   verification; private registry rows and frozen assets.
-modality: text
+modality:
+- text
 licensing: internal
 authors:
 - Katherine Huang

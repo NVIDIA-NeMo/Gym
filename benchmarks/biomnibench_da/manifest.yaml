@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
 description: BiomniBench data-analysis tasks adapted to Harbor and evaluated with its rubric-based LLM judge.
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0
 authors:
 - Sanyam Kapoor

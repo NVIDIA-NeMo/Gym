@@ -1734,7 +1734,7 @@ class TestListEnvironments:
         manifest_path=Path("environments/alpha/manifest.yaml"),
         version="1.2.3",
         integration_profile="custom-gym-verifier",
-        modality="text",
+        modality=("text", "image"),
         licensing="Apache-2.0",
         lifecycle="active",
         resources_server="alpha",
@@ -1799,7 +1799,7 @@ class TestListEnvironments:
                 "description": "Alpha env",
                 "version": "1.2.3",
                 "integration_profile": "custom-gym-verifier",
-                "modality": "text",
+                "modality": ["text", "image"],
                 "licensing": "Apache-2.0",
                 "lifecycle": "active",
                 "path": str(tmp_path.resolve() / "environments/alpha"),
@@ -2086,6 +2086,15 @@ class TestListEnvironments:
         assert "beta" in out
         assert "alpha" not in out
 
+    def test_modality_filter_keeps_entries_that_list_the_input(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_catalog(monkeypatch, overrides={"modality": "image"})
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "alpha" in out
+        assert "beta" not in out
+
     def test_filter_reports_entries_missing_metadata(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"modality": "text"})
 
@@ -2196,7 +2205,7 @@ class TestListEnvironments:
                 "manifest": str(self._ALPHA.manifest_path.resolve()),
                 "version": "1.2.3",
                 "profile": "custom-gym-verifier",
-                "modality": "text",
+                "modality": "text, image",
                 "licensing": "Apache-2.0",
                 "lifecycle": "active",
                 "resources servers": "alpha",
