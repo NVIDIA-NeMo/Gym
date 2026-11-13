@@ -98,9 +98,24 @@ def test_config_requires_base_url() -> None:
 
 
 def test_config_carries_every_genrm_field() -> None:
-    # A field added to GenRMModelConfig reaches the external config, so both servers can read it.
+    # A field GenRMModelConfig adds reaches the external config, so both servers can read it.
     assert issubclass(GenRMExternalModelConfig, GenRMModelConfig)
     assert _config(supports_principle_role=False).supports_principle_role is False
+
+
+def test_config_keeps_every_genrm_default_except_the_launch_settings() -> None:
+    # The external base wins for fields both bases have, so a default GenRMModelConfig sets for an inherited field
+    # would apply under app.py but not here unless GenRMExternalModelConfig redeclares it.
+    launch_settings = {"base_url", "vllm_serve_kwargs", "vllm_serve_env_vars"}
+    external_fields = GenRMExternalModelConfig.model_fields
+    mismatched = [
+        name
+        for name, field in GenRMModelConfig.model_fields.items()
+        if name not in launch_settings
+        and (field.default, field.default_factory)
+        != (external_fields[name].default, external_fields[name].default_factory)
+    ]
+    assert mismatched == []
 
 
 def test_config_accepts_the_shipped_local_launch_block() -> None:

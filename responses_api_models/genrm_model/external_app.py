@@ -30,7 +30,9 @@ from responses_api_models.local_vllm_model.external_app import LocalVLLMExternal
 
 
 # LocalVLLMExternalModelConfig comes first so its required `base_url` and optional launch settings win over the
-# local-launch defaults that GenRMModelConfig inherits.
+# local-launch defaults that GenRMModelConfig inherits. Pydantic takes every field both bases have from
+# LocalVLLMExternalModelConfig, so a default that GenRMModelConfig sets for an inherited field is ignored here:
+# redeclare it on this class.
 class GenRMExternalModelConfig(LocalVLLMExternalModelConfig, GenRMModelConfig):
     """GenRMModelConfig for an external pool: `base_url` is required and the launch settings are optional."""
 
