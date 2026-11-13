@@ -1798,3 +1798,52 @@ def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
 
     assert [reply.status_code for reply in replies] == [200] * 5
     assert {_graded(reply) for reply in replies} == {(0.0, True, "judge_unparseable", False)}
+
+
+# single_agent_turn's verify body for an episode: the task_data keys flat at the top level, then the request, the agent's
+# response and the failure report it forwards.
+SESSION_VERIFY_BODY = {
+    "question": "Which city?",
+    "ground_truth": "Paris",
+    "responses_create_params": {"input": [{"role": "user", "content": "Which city?"}]},
+    "response": _response("Exact Answer: Paris"),
+    "failure_report": None,
+}
+# The grading fields of a verify row, with their types.
+SEARCH_FIELD_TYPES = {
+    "extracted_final_answer": str,
+    "final_text": str,
+    "judge_parsed": bool,
+    "judge_attempts": int,
+    "judge_time_taken": float,
+    "mask_sample": bool,
+    "evaluation_completed": bool,
+}
+
+
+@pytest.mark.parametrize(
+    ("seed", "body", "headers"),
+    [(_row(), _verify_body(opencode_terminal_reason=""), {}), (_seed(), SESSION_VERIFY_BODY, EPISODE_VERIFY)],
+    ids=["relay", "session"],
+)
+def test_a_graded_row_keeps_the_search_fields_and_echoes_its_request(workdir, seed, body, headers) -> None:
+    """The relay agent's verify body and single_agent_turn's get the same row: the grading fields under their names and
+    types, and the request at the top level as it was sent."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=seed).status_code == 200
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=body, headers=headers)
+
+    assert verified.status_code == 200, verified.text
+    row = verified.json()
+    assert {field: type(row[field]) for field in SEARCH_FIELD_TYPES} == SEARCH_FIELD_TYPES
+    assert _graded(verified) == (1.0, False, None, True)
+    assert (row["extracted_final_answer"], row["final_text"]) == ("Paris", "Exact Answer: Paris")
+    assert (row["judge_parsed"], row["judge_attempts"], row["failure_reason"]) == (True, 1, None)
+    # The request comes back at the top level as it was sent, so the session's task_data keys stay flat.
+    sent = {key: value for key, value in body.items() if key not in ("responses_create_params", "response")}
+    assert {key: row[key] for key in sent} == sent and "task_data" not in row
+    assert row["responses_create_params"]["input"][0]["content"] == "Which city?"
+    assert row["response"]["output"][0]["content"][0]["text"] == "Exact Answer: Paris"
