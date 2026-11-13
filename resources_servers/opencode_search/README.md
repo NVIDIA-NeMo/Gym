@@ -25,17 +25,28 @@ The verdict parser takes the LAST `correct: yes|no` match: reasoning judges echo
 their think block, and a first-match parse grades the echo. A reply that echoes the template instead
 of grading counts as unparsed.
 
-Both judge failures count toward `judge_max_consecutive_failures`: after that many rollouts in a row
-without a verdict, verify answers 500 and the run stops, rather than masking every remaining row.
+Both judge failures count toward `judge_max_consecutive_failures`: once that many rollouts in a row
+get no verdict, verify answers 500 for that rollout and for each later one without a verdict, until a
+verdict resets the count, rather than masking every remaining row. On the relay pairing that 500 fails
+the agent's `/run`: without `route_failures_to_sidecar` the first one ends the run, and with it each
+becomes a failures-sidecar row. On an episode session each becomes a non-terminal failure row, and
+collection continues. Watch the failure rows for judge failures.
+
+`inconclusive_verification_retries`, which `AGENTS.md` asks for when verification starts sandboxes,
+does not apply: verify starts no sandbox of its own, and an episode's plugin log exists only in the
+sandbox the agent ran in, which cannot be replaced. The judge's own attempts are the grading retry, and
+a plugin log that cannot be read answers 500, so the episode fails ungraded and runs again on resume.
+None of these outcomes is recorded as a measured 0.
 
 Every verify response carries `evaluation_completed`: true when grading reached a result (a verdict, or
 an empty answer), false when the judge gave no verdict or never answered and when the session was
 lost. A rollout that ended on its budget keeps its judged reward and is masked, with the ending's
 `failure_kind`; when the judge gave it no verdict, it keeps that kind, with `judge_parsed` and
-`evaluation_completed` false. The ending (`max_iteration`, `context_window`, `agent_timed_out`) arrives as
-`opencode_terminal_reason` in the verify body, which `opencode_sandboxed_agent` sends; on an episode
-session with `plugin_log_path` set, verify reads it (`max_iteration`, `context_window`) from the plugin
-log instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality scores; the
+`evaluation_completed` false. Verify masks the endings `max_iteration`, `context_window` and
+`agent_timed_out` when the verify body's `opencode_terminal_reason` names one. `opencode_sandboxed_agent`
+sends only `max_iteration` or `context_window`, read from the turn-budget plugin's lines in its run
+output; on an episode session with `plugin_log_path` set, verify reads them from the plugin log
+instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality scores; the
 reward stays on each row.
 
 A verify that grades a saved answer again (`gym eval reverify`, which `REVERIFY_MODE: STATELESS` allows,
@@ -78,8 +89,9 @@ Grading reads nothing from it but the plugin log of an episode session, when `pl
   the ID: a seed for it gets 409 for `session_close_retry_window_seconds`. A close whose stop fails
   raises and keeps the sandbox, so a retried close stops it. A session that is never closed keeps its
   sandbox until the server shuts down, which stops every sandbox still running, or until the
-  provider reclaims it after `sandbox_config.ttl_s`; keep `ttl_s` above the episode deadline plus
-  grading and cleanup.
+  provider reclaims it after `sandbox_config.ttl_s`. Keep `ttl_s` above the episode deadline plus the
+  cleanup after it (the agent's close, then this server's, each within `cleanup_timeout_seconds`):
+  verify stops the sandbox before it calls the judge, so grading needs no margin.
 * **Agent-run seed, kept for compatibility.** An agent's own `/run` seeds with the dataset row and its
   session cookie and gets `{"sandbox_handle": ...}` back, the sandbox it attaches to. That sandbox is
   started exactly as before episode sessions existed (the image's working directory, no task
@@ -108,11 +120,11 @@ model sees differently. On this server's side:
   `episode_sandbox_env`). On the relay, `opencode_sandboxed_agent` uploads them and passes their settings
   to OpenCode.
 * **How a run ended.** Verify reads it from the plugin log. On the relay, the agent reads its run output
-  and sends the ending in the verify body. The plugin log gives no agent timeout, so `agent_timed_out`
-  comes only from the relay.
-* **A run whose plugins did not load.** A log without a required line is refused with 422, which an
-  Environment Server does not retry, and a log that cannot be read answers 500. The relay agent refuses a
-  run whose output lacks the sentinel's line with 500.
+  and sends the ending in the verify body. Neither agent sends an `agent_timed_out` ending, so neither
+  pairing masks a run that ran out of time: both grade what it produced.
+* **A run whose plugins did not load.** A log without the sentinel's line or a required line is refused
+  with 422, which an Environment Server does not retry, and a log that cannot be read answers 500. The
+  relay agent checks only the sentinel's line, and refuses a run whose output lacks it with 500.
 * **Working directory.** The lent sandbox's is `sandbox_workdir`, which the seed creates; the agent-run
   sandbox keeps the image's.
 * **Close.** An episode session ends with `/close_session`, which fences the ID and releases the sandbox if
