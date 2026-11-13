@@ -359,10 +359,26 @@ rollout id, for every sandbox whatever stopped it.
 | Provider | Source | Scope |
 | --- | --- | --- |
 | Docker | the container's cgroup v2, on the host when the daemon is local, otherwise read from inside the container | `container` |
+| Apptainer | the instance's cgroup when Apptainer created one; otherwise as Enroot | `container` |
+| Enroot | the live processes in the container's PID or mount namespace; the CPU of each completed `exec`; the cgroup it shares with Gym | `process_tree`, `shared_step` |
 
 Other providers, including OpenSandbox, report no usage yet.
 
 - `container` values are kernel counters for the sandbox's own cgroup; memory includes page cache.
+- `process_tree` values come from `/proc`, and `source` names the namespaces that selected the processes:
+  `procfs_pidns`, `procfs_mntns` or `procfs_pidns_mntns`. Enroot nested in another container shares Gym's PID
+  namespace, so its processes are found by their mount namespace. The CPU is a lower bound of the container's: the
+  CPU of a process that exits between two samples is missing after its last sample, so short commands are
+  under-counted (on Enroot nested in a Slurm container, process-tree CPU missed 27-57% of the CPU the sandbox's
+  own processes reported). The memory is the sum of per-process resident memory, sampled: it leaves out page
+  cache and kernel memory but counts a page shared by several processes once per process, so it is not a bound
+  of the container's memory, and its `sampled_lower_bound` peak bounds only that sum's own peak.
+- `exec_rusage` (Enroot) is the CPU of the commands `exec` ran to completion in the process that created the
+  sandbox, read from the kernel's accounting of each command's reaped process tree. It is exact for those commands,
+  so it counts short commands the process-tree samples miss, but it leaves out processes a command left running.
+  It overlaps the process tree, so the two are separate measurements and are never added together.
+- `shared_step` is a cgroup the sandbox shares with Gym and its sibling sandboxes, such as a Slurm job step.
+  Its `cpu_usage_usec_delta` is everything in that cgroup while the sandbox lived; never one sandbox's cost.
 
 ## Image Rewrites
 
