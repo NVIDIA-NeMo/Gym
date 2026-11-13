@@ -32,8 +32,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME, ROLLOUT_ID_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.config.global_config import RESPONSES_CREATE_PARAMS_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+from nemo_gym.config.keys import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 
 
 logger = logging.getLogger(__name__)

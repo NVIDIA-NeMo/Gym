@@ -155,12 +155,8 @@ def skips_token_capture(body: BaseModel | Mapping[str, Any] | None) -> bool:
     run's ``token_id_capture`` block: a rollout can turn capture off, never on.
     """
     # Imported here because global_config imports feature modules that import the episode identity.
-    from nemo_gym.config.global_config import (
-        ROLLOUT_ID_KEY_NAME,
-        ROLLOUT_INDEX_KEY_NAME,
-        SKIP_TOKEN_CAPTURE_KEY_NAME,
-        TASK_INDEX_KEY_NAME,
-    )
+    from nemo_gym.config.global_config import SKIP_TOKEN_CAPTURE_KEY_NAME
+    from nemo_gym.config.keys import ROLLOUT_ID_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
     if isinstance(body, Mapping):
         value = body.get(SKIP_TOKEN_CAPTURE_KEY_NAME)

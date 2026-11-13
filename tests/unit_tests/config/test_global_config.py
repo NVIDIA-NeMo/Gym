@@ -251,7 +251,7 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
-        hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
+        hydra_main_mock.return_value = lambda fn: lambda: fn(config_dict)
         monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
     def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
@@ -450,7 +450,7 @@ b: 2
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
@@ -497,7 +497,7 @@ config_paths:
 
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         get_global_config_dict()
@@ -587,7 +587,7 @@ config_paths:
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
     def test_get_global_config_dict_config_paths_later_sibling_wins(

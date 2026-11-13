@@ -21,14 +21,13 @@ import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from shlex import quote
+from typing import Protocol
 
 import anyio
 
-from nemo_gym.core.media import MediaFile
-from typing import Protocol
-
-from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.core.media import MediaFile
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
 class _SandboxFileTransfer(Protocol):
