@@ -39,6 +39,7 @@ Either way the walltime is the run's segment walltime bounded by the partition's
 known.
 """
 
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -75,6 +76,8 @@ _ALLOCATION_SHAPE_DIRECTIVES = frozenset(
 # Job-level directives of the original allocation's size, which the kept node pools state for themselves; its QOS and
 # per-node GRES stay with the served-judge job, a GPU job on nodes of the same allocation's shape.
 _SERVED_SHAPE_DIRECTIVES = _ALLOCATION_SHAPE_DIRECTIVES - {"gres", "qos"}
+# What choose_judge_partition's refusal says when no CPU partition is named anywhere; the dispatch classifies on it.
+NO_CPU_PARTITION = "no CPU partition is known"
 _NO_PROFILE = "this submission has no existing CPU-only judge execution profile and none can be derived"
 _NO_SERVED_PROFILE = "this submission has no served-judge execution profile"
 
@@ -188,10 +191,24 @@ def choose_judge_partition(
     if reader:
         return reader, "the launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN)"
     raise JudgeProfileUnsupported(
-        f"{_NO_PROFILE}: no CPU partition is known (the saved compute declares no node pool with gpus_per_node 0, "
+        f"{_NO_PROFILE}: {NO_CPU_PARTITION} (the saved compute declares no node pool with gpus_per_node 0, "
         "the launcher's NEMO_GYM_REMOTE_READER_SRUN names no partition, and no --judge-partition was given); policy "
         "services are not restarted"
     )
+
+
+# The scheduler's refusals of a job's placement: its partition, QOS, account or GPU request. Anything else the
+# scheduler answers (a controller it cannot reach, a timeout) is not a placement problem.
+_PLACEMENT_REFUSAL = re.compile(r"partition|\bqos|gres|account|node configuration", re.IGNORECASE)
+
+
+def placement_refusal(diagnostic: str, served: bool) -> str:
+    """The ``RecoveryDecision.judge_refusal`` of a judge-only job the scheduler did not take: its partition or QOS
+    (``cpu_placement``, or ``served_placement`` for a run that serves its judge on its own saved node pool), else
+    ``other``."""
+    if not _PLACEMENT_REFUSAL.search(diagnostic):
+        return "other"
+    return "served_placement" if served else "cpu_placement"
 
 
 def _slurm_duration(seconds: int) -> str:

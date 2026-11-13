@@ -535,6 +535,13 @@ class RecoveryDecision(BaseModel):
     # The typed driver failure the chain's incomplete marker opens with (one of GUARDED_DRIVER_FAILURE_KINDS) when the
     # chain stopped on one: the next recovery needs its remedy first, or the resumed segment stops the same way.
     chain_stop_kind: str | None = Field(default=None, exclude=True)
+    # Why a judge-only job was not queued, as the dispatch classified it: ``cpu_partition_unknown`` (no CPU partition
+    # is named), ``cpu_placement`` (the scheduler refused the CPU partition or QOS), ``served_placement`` (it refused the
+    # saved node pool of a run that serves its judge, which no recovery option changes) or ``other`` (anything else,
+    # such as the scheduler not answering). The operator verdict offers the judge placement options only for the first two.
+    judge_refusal: Literal["cpu_partition_unknown", "cpu_placement", "served_placement", "other"] | None = Field(
+        default=None, exclude=True
+    )
     # An option this call asked for that the run cannot take (``--extend-attempts`` or the masked rerun), and the
     # action the plan would take without it: a RESUBMIT or REVERIFY continues once the option is dropped.
     refused_option: str | None = Field(default=None, exclude=True)
@@ -6218,20 +6225,14 @@ _PROTOCOL_VIOLATION_REMEDY = (
     "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again, as the stop says; "
     "a recovery would get the same replies"
 )
-# Stops of a judge-only job that a judge placement option clears, and the options.
-_JUDGE_PLACEMENT_STOPS = (
-    ("no CPU partition is known", ("--judge-partition PARTITION",), "name a CPU partition of the cluster"),
-    (
-        "judge-only job was not queued",
+# What a judge-only job the dispatch did not queue needs, by the cause it classified (``RecoveryDecision.judge_refusal``).
+_JUDGE_PLACEMENT_REMEDIES = {
+    "cpu_partition_unknown": (("--judge-partition PARTITION",), "name a CPU partition of the cluster"),
+    "cpu_placement": (
         ("--judge-partition PARTITION", "--judge-qos QOS"),
         "correct the partition or QOS the scheduler refused (a GPU QOS can require GPUs: QOSMinGRES)",
     ),
-    (
-        "judge-only job was not admitted",
-        ("--judge-partition PARTITION", "--judge-qos QOS"),
-        "correct the partition or QOS the scheduler refused",
-    ),
-)
+}
 # An UNVERIFIED cause no resubmit and no flag changes, and where it is fixed (benchmark-notes: "UNVERIFIED by
 # construction").
 _UNVERIFIED_PRODUCERS = {
@@ -6765,13 +6766,32 @@ def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> 
             "confirm with the scheduler that the allocation that made the reservations has ended, then inspect "
             "again: a recovery resumes them once that is known (completed work is kept)",
         )
-    for token, placement, fix in _JUDGE_PLACEMENT_STOPS:
-        if token in decision.reason:
-            return _verdict(
-                "needs_action",
-                stopped,
-                f"{fix}: {_command(decision, *placement)} queues the judge-only job (completed work is kept)",
-            )
+    if decision.judge_refusal in _JUDGE_PLACEMENT_REMEDIES:
+        placement, fix = _JUDGE_PLACEMENT_REMEDIES[decision.judge_refusal]
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"{fix}: {_command(decision, *placement)} queues the judge-only job (completed work is kept)",
+        )
+    if decision.judge_refusal == "served_placement":
+        # The judge runs on the run's own saved node pool; --judge-partition and --judge-qos name a CPU placement.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "the scheduler refused the saved node pool this run serves its judge on, and no recovery option changes "
+            "it (--judge-partition and --judge-qos apply to a CPU judge only): read the scheduler's refusal in the "
+            "reason and have the pool's partition, QOS or account fixed on the cluster, then inspect again "
+            "(completed work is kept)",
+        )
+    if decision.judge_refusal == "other":
+        # Not a placement problem: the scheduler's own diagnostic is in the reason.
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"the judge-only job was refused for a reason other than its placement (the reason has the scheduler's "
+            f"diagnostic): wait until the scheduler answers and inspect again, then {_command(decision)} (completed "
+            "work is kept)",
+        )
     if kind in _TYPED_REMEDIES and decision.chain_stop_kind is None:
         # Every terminal row is the typed failure: its fix, then the recovery its own text names. A chain's typed
         # stop alone never names a recovery for a stop of another cause.

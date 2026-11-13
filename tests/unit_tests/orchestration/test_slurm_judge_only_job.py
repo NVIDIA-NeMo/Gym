@@ -259,6 +259,45 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     assert not (job_dir / sm._RESUBMIT_LOCK).exists()
 
 
+def test_a_served_judge_the_scheduler_refuses_is_not_offered_the_cpu_placement_options(
+    tmp_path, judge_slurm_bin
+) -> None:
+    # A run that serves its judge on a node pool of its own ignores --judge-partition/--judge-qos.
+    job_dir = _model_served_run(tmp_path, judge_pool="judge")
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Job violates accounting/QOS policy (QOSMinGRES)' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="cpu_qos")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "QOSMinGRES" in out.unsupported and _journal(job_dir) == []
+    verdict = out.operator_verdict
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert "--judge-qos QOS" not in verdict["action"] and "--judge-partition PARTITION" not in verdict["action"]
+    assert "saved node pool" in verdict["action"] and "no recovery option changes it" in verdict["action"]
+
+
+def test_a_cpu_judge_refused_for_a_reason_other_than_placement_is_not_offered_placement_options(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Batch job submission failed: Unable to contact slurm controller "
+        "(connect failure)' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "Unable to contact slurm controller" in out.unsupported and _journal(job_dir) == []
+    verdict = out.operator_verdict
+    assert "--judge-qos QOS" not in verdict["action"] and "--judge-partition PARTITION" not in verdict["action"]
+    assert "`gym eval submit`" not in verdict["action"]
+    assert "wait until the scheduler answers" in verdict["action"]
+    assert "gym eval resubmit gym-job-x bench --recover --judge-partition cpu --judge-qos normal" in verdict["action"]
+
+
 def test_a_saved_cpu_pool_queues_the_judge_only_job_without_an_option(tmp_path, judge_slurm_bin) -> None:
     job_dir = _model_served_run(tmp_path, cpu_pool=True)
     out = recover(*_handle(job_dir))
