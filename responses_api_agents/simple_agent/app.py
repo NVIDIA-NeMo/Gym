@@ -18,14 +18,14 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from time import monotonic, perf_counter, time
 from typing import Any, ClassVar
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
@@ -131,6 +132,8 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 RESOURCE_ONLY_METADATA_KEYS = frozenset(
     {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
 )
+# A continuation activation runs in this process, so a cancelled one stops at its next await.
+_CONTINUATION_CLOSE_TIMEOUT_SECONDS = 30.0
 
 # Legacy /run episodes are checkpointed under their logical rollout ID so a replacement attempt finds them.
 _LEGACY_SESSION_PREFIX = "run:"
@@ -182,6 +185,16 @@ class SimpleAgentSessionState(AgentSessionState):
     # a restored reply holds the JSON it was exported as.
     completed_activation: int = 0
     completed_reply: dict[str, Any] | None = None
+    # A continuation session keeps its conversation as JSON input items, so each activation sends only new input.
+    history: list[dict[str, Any]] = field(default_factory=list)
+    # The first activation's request without its input. Later activations keep its tools and instructions.
+    settings: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # Where a continuation activation sends its model calls, read from the route of its request.
+    model_url_path: str = "/v1/responses"
+    # The model server's cookies, so every activation stays on one model-server session (and conversation ID).
+    model_server_cookies: dict[str, str] = field(default_factory=dict)
+    # The turns of every continuation activation, returned at close.
+    trajectory: TrajectoryRecord | None = None
 
 
 def _dump_reply(reply: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -346,6 +359,9 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     checkpoint_mode = "exported"
     config: SimpleAgentConfig
+    # Continuation runs this class's turn loop on the session's history. A subclass can replace that loop, as
+    # DeepAgentsAgent replaces responses(), so only a class that sets this in its own body supports continuation.
+    continuation_supported: ClassVar[bool] = True
     # With checkpointing, each legacy /run's loop reply, by its session key.
     # An entry leaves with its /run, or with a retire.
     _legacy_replies: dict[str, _LegacyLoopReply] = PrivateAttr(default_factory=dict)
@@ -367,7 +383,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         """Validate a seed request's grants and build its session state; a restore rebuilds sessions the same way."""
         if body.sandbox_access is not None:
             raise AgentSeedRejectedError("Simple Agent does not support sandbox access")
-
         accesses = self.effective_tool_accesses(body)
         unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
         if unsupported:
@@ -450,6 +465,155 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
             resources_cookies=state.resources_cookies,
+            trajectory=state.trajectory,
+        )
+
+    def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
+        # A checkpoint does not export a continuation session's conversation, so its episode starts over after a
+        # restore.
+        return body.continuation is not None
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
+        if not type(self).__dict__.get("continuation_supported", False):
+            return None
+        return AgentContinuationCapabilities(observations=["trajectory", "timing"])
+
+    def _continuation_close_timeout(self) -> float:
+        return _CONTINUATION_CLOSE_TIMEOUT_SECONDS
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        if not isinstance(state, SimpleAgentSessionState):
+            raise TypeError("Expected Simple Agent session state")
+        if not body.input:
+            raise HTTPException(422, "A continuation activation requires new input")
+        if state.settings is None:
+            if state.activations > 0:
+                # A session restored from a checkpoint has no conversation; its episode starts over instead.
+                raise HTTPException(409, "Simple Agent continuation session lost its conversation in a restore")
+            return
+        # Every activation runs with the first activation's settings, so a changed one would be silently dropped.
+        changed = sorted(
+            name
+            for name in body.model_fields_set - {"input", "metadata"}
+            if getattr(body, name) != getattr(state.settings, name)
+        )
+        if changed:
+            raise HTTPException(422, f"Simple Agent continuation cannot change session {', '.join(changed)}")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Run the turn loop on the session's conversation plus this activation's new input.
+
+        ``max_steps`` bounds each activation, as it bounds one ``/v1/responses`` call; the Environment Server bounds
+        how many activations an episode has.
+        """
+        if not isinstance(state, SimpleAgentSessionState):
+            raise TypeError("Expected Simple Agent session state")
+        new_input = [
+            _to_json(item)
+            for item in (
+                [NeMoGymEasyInputMessage(role="user", content=body.input)]
+                if isinstance(body.input, str)
+                else body.input
+            )
+        ]
+        if state.settings is None:
+            state.settings = body.model_copy(update={"input": []})
+        conversation = _INPUT_ITEMS_ADAPTER.validate_python([*state.history, *new_input])
+        request_body = state.settings.model_copy(update={"input": conversation, "metadata": body.metadata})
+        state.activations = activation_id
+        invocation_id = "root" if activation_id == 1 else f"activation-{activation_id}"
+        started = perf_counter()
+        try:
+            model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
+                request_body,
+                model_url_path=state.model_url_path,
+                model_server_cookies=state.model_server_cookies,
+                resources_server_cookies=state.resources_cookies,
+                tool_access=state.tool_access,
+                in_session=True,
+                execute_tools=self.config.execute_tools,
+                invocation_id=invocation_id,
+                task_id=state.request.task_id.task_id,
+                rollout_id=state.request.episode_id.capture_key,
+                # The seed confirms the trajectory and timing, so a continuation session always collects them.
+                collect_trajectory=True,
+            )
+        except BaseException as error:
+            # The turn the activation started is the one to debug, so it stays in the trajectory.
+            failed = AgentInvocation(
+                invocation_id=invocation_id,
+                activation_id=activation_id,
+                in_session=True,
+                status="failed" if isinstance(error, Exception) else "incomplete",
+                error_type=type(error).__name__,
+                duration_ms=(perf_counter() - started) * 1000,
+                conversation=_INPUT_ITEMS_ADAPTER.validate_python(new_input),
+            )
+            gap = ObservationGap(code="agent_activation_interrupted", invocation_id=invocation_id)
+            self._record_activation(
+                state,
+                TrajectoryRecord(
+                    task_id=state.request.task_id.task_id,
+                    rollout_id=state.request.episode_id.capture_key,
+                    invocations=[failed],
+                    gaps=[gap],
+                ),
+            )
+            raise
+        duration_ms = (perf_counter() - started) * 1000
+        state.history = [*state.history, *new_input, *(_to_json(item) for item in model_response.output)]
+        state.model_server_cookies = _cookie_values(model_server_cookies) or state.model_server_cookies
+        if state.tool_access is not None:
+            state.resources_cookies = dict(resources_server_cookies or {})
+        if trajectory is not None:
+            # The session's conversation is its activations' conversations in order, so each invocation keeps only
+            # this activation's new input and output, and the close payload grows with the conversation, not its square.
+            self._record_activation(
+                state,
+                trajectory.model_copy(
+                    update={
+                        "invocations": [
+                            invocation.model_copy(
+                                update={
+                                    "activation_id": activation_id,
+                                    "duration_ms": duration_ms,
+                                    "conversation": _INPUT_ITEMS_ADAPTER.validate_python(
+                                        [*new_input, *(_to_json(item) for item in model_response.output)]
+                                    ),
+                                }
+                            )
+                            for invocation in trajectory.invocations
+                        ],
+                        "turns": [
+                            turn.model_copy(update={"activation_id": activation_id}) for turn in trajectory.turns
+                        ],
+                    }
+                ),
+            )
+        return model_response
+
+    @staticmethod
+    def _record_activation(state: SimpleAgentSessionState, activation: TrajectoryRecord) -> None:
+        """Add one activation's evidence to the session's observations and trajectory."""
+        previous = state.observations
+        state.observations = AgentObservationBundle(
+            source="simple_agent",
+            records=[*(previous.records if previous else []), *activation.invocations, *activation.tool_calls],
+            gaps=[*(previous.gaps if previous else []), *activation.gaps],
+        )
+        so_far = state.trajectory or TrajectoryRecord(task_id=activation.task_id, rollout_id=activation.rollout_id)
+        state.trajectory = so_far.model_copy(
+            update={
+                "invocations": [*so_far.invocations, *activation.invocations],
+                "turns": [*so_far.turns, *activation.turns],
+                "model_calls": [*so_far.model_calls, *activation.model_calls],
+                "tool_calls": [*so_far.tool_calls, *activation.tool_calls],
+                "gaps": [*so_far.gaps, *activation.gaps],
+            }
         )
 
     async def _create_episode(
@@ -457,6 +621,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         model_url_path: str,
+        model_server_cookies: Any = None,
         resources_server_cookies: Any = None,
         tool_access: DirectHTTPToolAccess | None = None,
         resources_prefix: str = "",
@@ -484,7 +649,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         step = 0
         invocation_status = "completed"
         invocation_error_type = None
-        model_server_cookies = None
         # A restored boundary after a model response resumes with that response's tool calls.
         pending_tools = False
         model_response: NeMoGymResponse | None = None
@@ -856,6 +1020,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None
         if state is not None and not isinstance(state, SimpleAgentSessionState):
             raise TypeError("Expected Simple Agent session state")
+        if state is not None and state.request.continuation is not None:
+            # Every activation of the session arrives on the same rollout route.
+            state.model_url_path = self.url_path_for_request("/v1/responses", request)
+            return await self.activate_agent_session(request, body)
         if state is None and not self.config.execute_tools:
             raise ValueError(
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
