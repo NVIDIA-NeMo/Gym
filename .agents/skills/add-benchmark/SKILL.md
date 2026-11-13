@@ -176,6 +176,21 @@ datasets:
 
 Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
 
+### Step 4b: Complete the manifest
+
+A benchmark or environment under `benchmarks/` or `environments/` has a `manifest.yaml`. `gym env init --benchmark <name>` (or `--environment <name>`) writes one with placeholders. Fill its authored fields, and keep its composition mirror in line with the config: `gym env validate --manifest <path> --sync`.
+
+The selection fields tell people whether the environment suits them. Fill each one from what you know, and never guess:
+
+- `maintainers`: GitHub logins of the people who will fix it. Ask the user if they have not said.
+- `intended_use`: `evaluation`, `training`, or both.
+- `training_allowed`: whether the data may be used for training. Decide it with the user from the data's licence and terms. Write `unknown` when nobody knows.
+- `primary_metric` (benchmarks): the key metric reported as the headline score.
+- `requirements`: `gpu` (the environment itself needs a GPU) and `internet` (a run needs outbound access). Write `unknown` when the code does not tell you.
+- `overlaps_with`: benchmarks whose tasks this data overlaps, when known.
+
+`unknown` is an answer. A missing field or a leftover `TODO` is not, so replace every `TODO` the scaffold wrote.
+
 ### Step 5: Test
 
 ```bash
