@@ -1049,12 +1049,12 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     # included Harbor-backed benchmark (it sets `harbor_target`) also defines the agent, but its settings are the
     # benchmark's: a variant that includes a preset keeps the preset's server settings.
     harnesses = [entry for entry in included if agents[0] in entry and HARBOR_TARGET_KEY not in entry]
-    benchmark_sources = [config, *(entry for entry in included if agents[0] not in entry or HARBOR_TARGET_KEY in entry)]
+    benchmark_sources = [
+        config,
+        *(entry for entry in included if agents[0] not in entry or HARBOR_TARGET_KEY in entry),
+    ]
     harness_only = {
-        key
-        for entry in harnesses
-        for key in entry
-        if not any(key in source for source in benchmark_sources)
+        key for entry in harnesses for key in entry if not any(key in source for source in benchmark_sources)
     }
     settings = {
         key: value
