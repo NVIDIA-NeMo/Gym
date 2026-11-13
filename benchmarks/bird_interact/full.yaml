@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD-Interact Full in c-Interact: config.yaml on the Full release, with the image built for it. See README.md.
+#
+#   gym eval prepare --config benchmarks/bird_interact/full.yaml +prepare_script_args.ground_truth_jsonl=<file>
+#   gym eval run --config benchmarks/bird_interact/full.yaml --model-type vllm_model --split benchmark \
+#     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_full_c.jsonl
+
+config_paths:
+  - benchmarks/bird_interact/config.yaml
+
+bird_interact_release: full
+bird_interact_mode: c_interact
+
+bird_interact_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: bird_interact_full_c_interact
+          type: benchmark
+          jsonl_fpath: benchmarks/bird_interact/data/full/c_interact.jsonl
+          taskset: bird_interact:c_interact
+          prepare_script: benchmarks/bird_interact/prepare.py
+          num_repeats: 1
+          license: CC BY-SA 4.0
