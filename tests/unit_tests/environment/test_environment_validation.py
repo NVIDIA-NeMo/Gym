@@ -1049,6 +1049,48 @@ def test_protocol_may_run_its_own_copy_of_the_tasks(tmp_path: Path) -> None:
     assert validate_environment(protocol_path).name == "demo/variant"
 
 
+def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
+    # Same tasks, scorer and harness plus a system prompt changes the benchmark's rules: a protocol, not a setup.
+    with_system = "benchmarks/demo/prompts/with_system.yaml"
+    setup = _linked_manifest(tmp_path, name="demo/as_setup", setup_of="demo", standard_prompt_config=with_system)
+    protocol = _linked_manifest(
+        tmp_path, name="demo/as_protocol", protocol_of="demo", standard_prompt_config=with_system
+    )
+    (tmp_path / with_system).write_text("system: Answer briefly.\nuser: '{question}'\n", encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="another prompt template"):
+        validate_environment(setup)
+    assert validate_environment(protocol).name == "demo/as_protocol"
+
+
+@pytest.mark.parametrize("absolute", [False, True], ids=["dot-relative", "absolute"])
+def test_a_link_is_written_as_the_targets_declared_name(absolute: bool, tmp_path: Path) -> None:
+    _asset(tmp_path, kind="benchmark")
+    written = str(tmp_path / "benchmarks/demo") if absolute else "./demo"
+
+    with pytest.raises(EnvironmentValidationError, match="must be written as the name"):
+        validate_environment(_linked_manifest(tmp_path, setup_of=written))
+
+
+def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> None:
+    # An environment declares only example datasets, so those are what a setup must share.
+    main_path = _asset(tmp_path)
+    setup_path = main_path.parent / "variant/manifest.yaml"
+    setup_path.parent.mkdir()
+    setup = load_manifest(main_path).model_copy(
+        update={"name": "demo/variant", "config_path": "../config.yaml", "setup_of": "demo"}
+    )
+    setup_path.write_text(dump_manifest(setup), encoding="utf-8")
+    assert validate_environment(setup_path).name == "demo/variant"
+
+    raw = load_manifest(main_path).model_dump(mode="json", exclude_none=True)
+    raw["datasets"][0]["jsonl_fpath"] = "environments/demo/data/other.jsonl"
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="other task datasets.*--sync"):
+        validate_environment(setup_path)
+
+
 def test_link_outside_a_catalog_directory_is_rejected(tmp_path: Path) -> None:
     manifest = EnvironmentManifest.model_validate(_manifest() | {"name": "standalone", "setup_of": "demo"})
 
