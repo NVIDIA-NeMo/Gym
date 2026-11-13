@@ -124,6 +124,31 @@ class TestAggregateMetricsPath:
 
 
 class TestLoadRunFile:
+    def test_a_subset_run_is_labelled_as_one(self, tmp_path):
+        # A run that selected its tasks by id keeps its record beside the rollouts; its label says it is a subset.
+        rollouts = _write_run(tmp_path, "sub", [_entry()])
+        (rollouts.parent / "rollouts_task_selection.json").write_text(
+            '{"source": "subset_v1.txt", "tasks": 2, "rows": 8, "task_ids_sha256": "'
+            + "ab" * 32
+            + '", "task_ids": ["a"]}'
+        )
+        run_file = load_agg_metrics_file(str(rollouts), role="candidate")
+
+        assert run_file.label == "sub [subset abababababab]"
+        assert run_file.task_selection == {
+            "source": "subset_v1.txt",
+            "tasks": 2,
+            "rows": 8,
+            "task_ids_sha256": "ab" * 32,
+        }
+        assert "task_ids" not in run_file.model_dump(mode="json")["task_selection"]
+
+    def test_a_run_of_every_task_has_no_subset_label(self, tmp_path):
+        run_file = load_agg_metrics_file(str(_write_run(tmp_path, "full", [_entry()])), role="baseline")
+
+        assert run_file.label == "full"
+        assert run_file.task_selection is None
+
     def test_reads_entries_keyed_by_agent(self, tmp_path):
         rollouts = _write_run(tmp_path, "base", [_entry()])
         run_file = load_agg_metrics_file(str(rollouts), role="baseline")

@@ -1675,6 +1675,9 @@ class CollectedEvidence(BaseModel):
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
     # the benchmark's headline metric covered, as the benchmark declares them.
     benchmark_metric_coverage: tuple[int, int, str | None] | None = None
+    # rollouts_task_selection.json: the subset the run selected by task id (source, tasks, rows, task_ids_sha256; a
+    # field is None when the record was unreadable), or None when the run took every task of its input.
+    task_selection: dict[str, Any] | None = None
     # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
     # states (absent, ok, malformed) when the sources were stable.
     accounting_unknown_reason: str | None = None
@@ -5720,6 +5723,17 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     return {"trials": trials, "expected": expected, "source": "saved_rows"}
 
 
+def subset_note(selection: Mapping[str, Any]) -> str:
+    """The label of a run that selected its tasks by id: its score is the subset's, never the benchmark's."""
+    if selection.get("task_ids_sha256") is None:
+        return "subset run: the task selection record is unreadable; its score is a subset score, not the benchmark's"
+    return (
+        f"subset run: {selection['tasks']} tasks ({selection['rows']} rows) selected by task id from "
+        f"{selection['source']} (task_ids sha256 {selection['task_ids_sha256'][:12]}); its score is a subset score, "
+        "report it under the subset's name, never as the benchmark's"
+    )
+
+
 def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | None) -> str:
     """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...;
     metric over 1000 of 1000 trials``."""
@@ -5867,6 +5881,9 @@ def gate_summary_from_collected(
         health_reasons=[] if trial_passed else [trial_reason],
     )
     task["criteria"] = criteria.report(classification=decision_classification(decision))
+    task["task_selection"] = collected.task_selection
+    if collected.task_selection is not None:
+        task["warnings"] = [subset_note(collected.task_selection)] + task["warnings"]
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
