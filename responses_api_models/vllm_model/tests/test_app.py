@@ -122,6 +122,7 @@ from responses_api_models.vllm_model.app import (
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
+    apply_sampling_overrides,
 )
 
 
@@ -7404,6 +7405,21 @@ class TestSamplingOverrides:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
             self._server({"max_output_tokens": None, "max_tokens": None, "max_completion_tokens": None})
         assert "different values under different names" not in caplog.text
+
+    @mark.parametrize(
+        ("api", "limit"),
+        [
+            ("chat", {"max_tokens": None}),
+            ("completions", {"max_tokens": None}),
+            ("responses", {"max_output_tokens": None}),
+        ],
+    )
+    def test_a_limit_pin_replaces_every_limit_name_and_keeps_the_other_pins(self, api: str, limit: dict) -> None:
+        """Other pins still apply, every limit name is replaced, and the caller's pins are not mutated."""
+        pins = {"temperature": 1.0, "max_tokens": None}
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert apply_sampling_overrides(body, sampling_overrides=pins, api=api) == {"temperature": 1.0, **limit}
+        assert pins == {"temperature": 1.0, "max_tokens": None}
 
     def test_transport_log_records_the_request_the_engine_receives(
         self, monkeypatch: MonkeyPatch, tmp_path, capsys
