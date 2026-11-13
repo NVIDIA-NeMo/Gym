@@ -117,11 +117,26 @@ def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
 
     # \b after "sql" so IGNORECASE doesn't also match unrelated tags that merely start with
     # those letters (```SQLite, ```sqlalchemy, ...).
-    matches = re.findall(r"(?:```sql\b)(.*?[a-zA-Z].*?)(?:```)", text, flags=re.DOTALL | re.IGNORECASE)
-    if not matches:
+    opening = re.compile(r"```sql\b", re.IGNORECASE)
+    letter = re.compile(r"[a-zA-Z]", re.IGNORECASE)
+    last_content = None
+    position = 0
+    # Match the same non-overlapping spans as the former lazy regex, without
+    # backtracking over long unfinished responses. In particular, its required
+    # letter can occur after an intervening fence; retain that existing behavior.
+    while start := opening.search(text, position):
+        first_letter = letter.search(text, start.end())
+        if first_letter is None:
+            break
+        end = text.find("```", first_letter.end())
+        if end == -1:
+            break
+        last_content = text[start.end() : end]
+        position = end + 3
+    if last_content is None:
         return None
 
-    ans = matches[-1].strip()
+    ans = last_content.strip()
     ans = re.sub(r"^\*\*.*\*\*", "", ans).strip()
     return ans
 
