@@ -350,6 +350,7 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
+| `retire_covered_model_call_captures` | `bool` | `false` | Deletes a rollout's capture file once the persisted rollout covers it. Has no effect unless `observability_enabled` is true. See [Delete covered capture files](#delete-covered-capture-files). |
 | `strip_duplicate_token_metadata` | `bool` | `false` | Keeps each call's token IDs, log-probs, and routed experts only on `response.output`. See [Keep token metadata once in a rollout](#keep-token-metadata-once-in-a-rollout). |
 
 You can put the same settings in a YAML config instead:
@@ -387,6 +388,33 @@ locking.
 
 Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id. Use a
 separate capture directory for concurrent collection jobs whose indices can overlap.
+
+## Delete covered capture files
+
+A capture file duplicates the model calls that its rollout already holds, including their payloads in
+`ng_trajectory.model_calls`. Set `retire_covered_model_call_captures: true` to delete a rollout
+attempt's capture file once the persisted rollout covers it.
+
+Collection records the file's size before it reads the file. After a successful rollout is written,
+its rollouts file is made durable with one sync per batch (up to 100 rollouts or 5 seconds), and the
+capture file is deleted only if all of these hold:
+
+- The rollout has no capture gap (`model_call_capture_pending` included) and carries an `ng_trajectory`.
+- Every call in `ng_model_call_capture.calls` has its request and response in `ng_trajectory.model_calls`.
+  A rollout with a `multimodal_history_redacted` or `trajectory_projection_failed` gap does not qualify.
+- The file has not grown since collection read it, and no model call of the rollout still has a pending write.
+
+Duplicate logical rollout ids are rejected before dispatch; retries use distinct capture keys.
+
+Capture files of failed rollouts, of earlier attempts of a retried rollout, and of any rollout that
+does not meet these conditions stay in place, so the files left in a capture directory after a run are
+the exceptions. A file that cannot be deleted is left in place and counted, and a run that aborts
+deletes nothing still waiting in its batch. The collection output reports how many capture files were
+deleted and why others were kept.
+
+A model call that reaches the rollout after its capture file was deleted is written to a new capture
+file for that rollout, which holds only that call. A write that was already waiting on the old file
+when it was deleted detects this and writes to the new file, so no call is lost to a deletion.
 
 ## Keep token metadata once in a rollout
 

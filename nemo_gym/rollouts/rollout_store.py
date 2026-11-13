@@ -617,6 +617,13 @@ class RolloutStore:
             self.progress_outcomes_recorded += 1
         _record_output_write(write_started, raw)
 
+    def sync_outcomes(self) -> None:
+        """Make saved outcomes durable before retiring their source capture files."""
+        self._require_open()
+        for file in (self._results_file, self._failures_file):
+            file.flush()
+            os.fsync(file.fileno())
+
     def record_omission(self, row: dict, reason: str) -> None:
         """Save intentional omissions separately from scored results and failures."""
         self.record_dispatch(row)
