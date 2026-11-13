@@ -83,8 +83,13 @@ log of an episode session, when `plugin_log_path` is set. Sessions are not expor
   directory in it, and returns `sandbox_access` (an `operate` descriptor and the workdir) for a session
   harness to borrow; only this server stops the sandbox. Without `sandbox_workdir` the seed is refused
   with 422. A seed whose `task_data` lacks `question` or `ground_truth` is refused with 422 and starts
-  nothing; an ID bound to another episode or task, or one already closed, gets 409; repeating the seed
-  returns the same sandbox.
+  nothing; an ID bound to another episode or task, or one already closed, gets 409, and so does an
+  episode seed for an agent run's session or for a session already verified; repeating the seed returns
+  the same sandbox. A seed whose `mkdir` of the workdir exits non-zero is refused with 422, which an
+  Environment Server does not retry: the image causes it (permission denied, a read-only root, a file in
+  the way), so every episode would fail the same way. A sandbox that cannot start or be described, or a
+  `mkdir` that does not complete (an error type, such as a timeout), answers 500, which an Environment
+  Server retries, since a fresh sandbox may succeed. A seed that fails stops the sandbox it started.
 * **Verify.** `/verify` stops the sandbox before it calls the judge. A session is verified once: an
   identical retry replays the verdict, and a retry with another body gets 409. After an attempt that
   reached no verdict, an identical retry is graded again. A verify after the session's close is
@@ -93,15 +98,25 @@ log of an episode session, when `plugin_log_path` is set. Sessions are not expor
   Server's verify (it sends `x-ng-checkpoint-close-follows: 1`) for a session this server holds no
   sandbox or earlier verify for, as after a restart, is masked as `session_lost` instead: its plugin
   log went with the sandbox.
-* **Plugin log.** With `plugin_log_path` set, an episode's verify first reads that file from the sandbox,
-  base64-encoded so that no provider's output framing can split a line: the receipts plugin
-  (`opencode_bundle/nemo_gym_receipts.js`) copies the OpenCode plugins' lines there.
-  Verify takes the run's ending from the turn-budget plugin's lines, as `opencode_sandboxed_agent` reads
-  its run output, and returns the log with it (`opencode_terminal_reason`, `opencode_plugins_loaded`,
-  `opencode_plugin_log`). A log without the sentinel plugin's line, or without a line of
-  `required_plugin_markers`, is refused with 422 and not graded. A log that cannot be read answers 500,
-  which an Environment Server treats as retryable. Without `plugin_log_path`, verify reads and refuses
-  nothing, so a harness that brings no OpenCode plugins is graded on its answer alone.
+* **Plugin log.** With `plugin_log_path` set, an episode's verify first reads that file from the sandbox
+  (60 s at most): the receipts plugin (`opencode_bundle/nemo_gym_receipts.js`) copies the OpenCode
+  plugins' lines there. The read prints that the file is absent, or the file's size in bytes and then
+  exactly that many bytes in base64, so that no provider's output framing can split a line; a read whose
+  bytes differ from that size, as when a provider cut the output short, has failed. Verify takes the
+  run's ending from the turn-budget plugin's lines in the whole log, as `opencode_sandboxed_agent` reads
+  its run output, and returns the receipts with it (`opencode_terminal_reason`, `opencode_plugins_loaded`,
+  `opencode_plugin_log`). The row carries at most 1,048,576 characters of the log: a longer log keeps its
+  two ends around a line that gives its length. A log without the sentinel plugin's line, or without a
+  line of `required_plugin_markers`, is refused with 422 and not graded. An absent or empty log has no
+  sentinel line, so it is refused the same way. The refusal names the missing lines and gives whether the
+  file existed (`exists`), its size in bytes (`log_bytes`) and its first and last 600 characters with line
+  breaks escaped (`head`, `tail`); its failure report (the `X-NG-Failure-Report` header) names the kind
+  `opencode_search:plugins_not_loaded`. A log that cannot be read answers 500, which an Environment Server
+  treats as retryable. Its failure kind is `provider_io_timeout` when the read timed out;
+  `provider_request_failed` when it exited non-zero, reported another error type, or printed output cut
+  short or malformed; or the provider's own kind when `exec` raised a typed failure. An untyped exception
+  from `exec` carries no kind. Without `plugin_log_path`, verify reads and refuses nothing, so a harness
+  that brings no OpenCode plugins is graded on its answer alone.
 * **Close.** `/close_session` stops the sandbox by ID, with or without the session cookie, and fences
   the ID: a seed for it gets 409 for `session_close_retry_window_seconds`. A close whose stop fails
   raises and keeps the sandbox, so a retried close stops it. A session that is never closed keeps its
