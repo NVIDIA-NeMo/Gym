@@ -9,6 +9,7 @@ resources_servers/opencode_search/tests/test_browsecomp_presets.py: imported her
 the core suite's coverage."""
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -26,9 +27,11 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
 )
 from nemo_gym.server_runtime.sandbox_lending import STOP_TIMEOUT_S
+from nemo_gym.verification.judge import JUDGE_CALL_MAX_ATTEMPTS
 
 
 ROOT = Path(__file__).resolve().parents[3]
+README = ROOT / "benchmarks/browsecomp/README.md"
 SESSIONS = "benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml"
 RELAY = "benchmarks/browsecomp/configs/browsecomp_opencode.yaml"
 AGENT = "browsecomp_opencode_agent"
@@ -348,6 +351,37 @@ def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
     # allows times the episode out. After the deadline the Environment Server closes the agent's session and then the
     # resources server's, which stops the sandbox, each within cleanup_timeout_seconds.
     assert deadline + 2 * pairing["cleanup_timeout_seconds"] < sandbox["ttl_s"]
+
+
+def test_the_readme_gives_each_time_limit_the_presets_value() -> None:
+    """The README's time-limits section names each limit as `setting: value`. Every value the presets compose must be
+    the one it gives, so a preset change that leaves the section stale fails here. The judge's attempt count and the
+    timeout of its later attempts are opencode_search's defaults, which neither preset sets."""
+    _, config = sessions()
+    _, relay = resolve(RELAY)
+    pairing, agent, resources = settings(config, ENVIRONMENT), settings(config, AGENT), settings(config, RESOURCES)
+    section = README.read_text().split("\n### Time limits\n", 1)[1].split("\n### ", 1)[0]
+    documented = {name: float(value) for name, value in re.findall(r"`([\w.]+): (\d+)`", section)}
+
+    composed = {
+        "queue_timeout_seconds": pairing["queue_timeout_seconds"],
+        "max_concurrent_episodes": pairing["max_concurrent_episodes"],
+        "sandbox_config.ready_timeout_s": resources["sandbox_config"]["ready_timeout_s"],
+        "sandbox_install_timeout_seconds": agent["sandbox_install_timeout_seconds"],
+        "timeout": agent["timeout"],
+        "session_close_timeout_seconds": agent["session_close_timeout_seconds"],
+        "default_episode_timeout_seconds": pairing["default_episode_timeout_seconds"],
+        "judge_timeout_seconds": resources["judge_timeout_seconds"],
+        "cleanup_timeout_seconds": pairing["cleanup_timeout_seconds"],
+        "sandbox_config.ttl_s": resources["sandbox_config"]["ttl_s"],
+        # The relay agent's run budget, which the section gives beside the session preset's.
+        "sandbox_timeout": settings(relay, RELAY_AGENT)["sandbox_timeout"],
+    }
+    assert {name: documented.get(name) for name in composed} == composed
+    # Each judge attempt is one call_judge, which retries on its own.
+    assert f"tries up to {JUDGE_CALL_MAX_ATTEMPTS} times" in section
+    # The section says the relay preset has no episode deadline.
+    assert settings(relay, RELAY_ENVIRONMENT).get("default_episode_timeout_seconds") is None
 
 
 def test_the_resources_server_is_the_relay_presets_but_for_its_episode_settings() -> None:
