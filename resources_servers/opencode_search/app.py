@@ -80,6 +80,8 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import (
+    SHUTDOWN_STOP_CONCURRENCY,
+    STOP_TIMEOUT_S,
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
@@ -126,11 +128,6 @@ LOGGER = logging.getLogger(__name__)
 
 # A judge that echoes this instead of grading has repeated the template back at us.
 _JUDGE_TEMPLATE_ECHO = "The final exact answer extracted from the [response]"
-
-# The bounds LentSandboxes applies to the sandboxes it lends, applied to an agent run's sandbox too: a provider stop
-# that hangs must not hold a verify or the shutdown forever, and the shutdown stops this many at a time.
-_STOP_TIMEOUT_S = 120.0
-_SHUTDOWN_STOP_CONCURRENCY = 64
 
 # Every line the OpenCode plugins report starts with this marker.
 _PLUGIN_MARKER = "[nemo-gym-plugin] "
@@ -430,12 +427,13 @@ _NOT_GRADED: Dict[str, Any] = {
 
 
 async def _stop(sandbox: AsyncSandbox) -> None:
-    """Stop an agent run's sandbox within _STOP_TIMEOUT_S, even while the request that stops it is being cancelled.
+    """Stop an agent run's sandbox within STOP_TIMEOUT_S, the bound LentSandboxes applies to the sandboxes it lends,
+    even while the request that stops it is being cancelled.
 
     A client that disconnects cancels its request handler and every later await in it, so an unshielded stop would
     never run and the sandbox would outlive every reference to it.
     """
-    with anyio.CancelScope(shield=True), anyio.fail_after(_STOP_TIMEOUT_S):
+    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
         await sandbox.stop()
 
 
@@ -611,7 +609,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         if self._lent_sandboxes is not None:
             await self._lent_sandboxes.release_all()
         self._sandbox_access.clear()
-        stopping = asyncio.Semaphore(_SHUTDOWN_STOP_CONCURRENCY)
+        stopping = asyncio.Semaphore(SHUTDOWN_STOP_CONCURRENCY)
 
         async def stop(session_id: str, sandbox: AsyncSandbox) -> None:
             async with stopping:
