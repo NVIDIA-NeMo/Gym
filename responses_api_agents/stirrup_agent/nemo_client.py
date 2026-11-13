@@ -130,6 +130,10 @@ _MIN_COMPLETION_TOKENS = 1024
 # on long-context servers can degrade output quality for reasoning models.
 _DEFAULT_MAX_COMPLETION_TOKENS_CAP = 64000
 
+# Prompt tokens counted per image_url part: a vision model encodes an image into a bounded number of tokens, not
+# one per three base64 characters; completion_token_buffer absorbs the difference.
+_IMAGE_TOKEN_ESTIMATE = 1536
+
 # ---------------------------------------------------------------------------
 # Thinking-overrun recovery
 #
@@ -157,6 +161,22 @@ _TRUNCATION_RECOVERY_NUDGE = (
     "saved. Do not start that analysis over. Act now on what you already know: "
     "respond with a tool call and keep any preamble to a few sentences."
 )
+
+
+def _without_images(
+    messages: list[NeMoGymChatCompletionMessageParam],
+) -> tuple[list[NeMoGymChatCompletionMessageParam], int]:
+    """The messages without their image_url parts, and how many parts were dropped (estimator only)."""
+    counted: list[NeMoGymChatCompletionMessageParam] = []
+    images = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            kept = [part for part in content if not (isinstance(part, dict) and part.get("type") == "image_url")]
+            images += len(content) - len(kept)
+            message = {**message, "content": kept} if len(kept) < len(content) else message
+        counted.append(message)
+    return counted, images
 
 
 class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
@@ -284,8 +304,8 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         ``messages`` must already be serialized for the provider. Any residual gap is absorbed by
         ``completion_token_buffer``.
         """
-        counted_messages = self._messages_for_estimator_count(messages)
-        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3
+        counted_messages, images = _without_images(self._messages_for_estimator_count(messages))
+        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3 + images * _IMAGE_TOKEN_ESTIMATE
         if tools:
             try:
                 total += len(json.dumps(to_openai_tools(tools))) // 3

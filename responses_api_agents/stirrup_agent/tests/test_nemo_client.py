@@ -30,6 +30,7 @@ from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Too
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import (
+    _IMAGE_TOKEN_ESTIMATE,
     DynamicMaxTokensChatCompletionsClient,
 )
 from responses_api_agents.stirrup_agent.stirrup_utils import (
@@ -366,6 +367,22 @@ def test_character_fallback_counts_complete_serialized_messages() -> None:
     long_arguments = deepcopy(serialized)
     long_arguments[1]["tool_calls"][0]["function"]["arguments"] = "x" * 3000
     assert client._count_input_tokens(long_arguments, tools={}) >= count + 990
+
+
+def test_an_image_counts_a_fixed_token_estimate_not_its_base64_length() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+    )
+    text = {"role": "user", "content": [{"type": "text", "text": "frame"}]}
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 900_000}}
+
+    count = client._count_input_tokens([{**text, "content": [*text["content"], image]}], tools={})
+
+    # 900 KB of base64 would otherwise count as 300K tokens and pin every call to the completion floor.
+    assert count == client._count_input_tokens([text], tools={}) + _IMAGE_TOKEN_ESTIMATE
 
 
 @pytest.mark.asyncio
