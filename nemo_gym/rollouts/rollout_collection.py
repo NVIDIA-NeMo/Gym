@@ -82,6 +82,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
+    STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
@@ -172,6 +173,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     record_resubmit_offset as record_resubmit_offset,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.token_metadata import strip_duplicate_token_metadata
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -4201,6 +4203,7 @@ executions → not run again (left to recovery)
         # The post-run health check times failed rollouts from the same captures.
         self._health_capture_dirs = capture_dirs
         observability_enabled = observability_enabled_from_config(global_config)
+        strip_token_metadata = bool(global_config.get(STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME, False))
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -4520,6 +4523,10 @@ executions → not run again (left to recovery)
                                 f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
                                 "mostly token-less data."
                             )
+
+                # Last change to the record: everything that copies token metadata has been built by now.
+                if strip_token_metadata and not no_result:
+                    strip_duplicate_token_metadata(result)
 
                 if failure_class is not None:
                     result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.attempt_cap

@@ -350,6 +350,7 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
+| `strip_duplicate_token_metadata` | `bool` | `false` | Keeps each call's token IDs, log-probs, and routed experts only on `response.output`. See [Keep token metadata once in a rollout](#keep-token-metadata-once-in-a-rollout). |
 
 You can put the same settings in a YAML config instead:
 
@@ -386,6 +387,22 @@ locking.
 
 Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id. Use a
 separate capture directory for concurrent collection jobs whose indices can overlap.
+
+## Keep token metadata once in a rollout
+
+With `return_token_id_information` on, the items in `response.output` carry `prompt_token_ids`,
+`generation_token_ids`, and `generation_log_probs`, and `routed_experts` for MoE backends. The same
+items are copied into `ng_trajectory` (conversations, turns, and the captured requests and responses
+of later calls) and into `ng_agent_observations`, so one call's token metadata can appear several
+times in a rollout record.
+
+Set `strip_duplicate_token_metadata: true` to keep it only on `response.output`. A copy is stripped
+only when `response.output` holds an item with the same `id` that carries the three required token
+fields and the same values for every token-metadata field the copy has. If any value differs, the
+copy keeps its entire group; matching item IDs alone are not enough.
+A copy loses its whole group, including a null `routed_experts` placeholder, or none of it. Item ids
+stay, so a copy still joins to its canonical item.
+A raw response string that could not be parsed keeps whatever it contains.
 
 ## If you build a custom agent
 
