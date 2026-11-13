@@ -450,7 +450,8 @@ def test_an_episode_seed_cannot_replace_an_agent_run_session(workdir, started) -
     (session_id,) = server._agent_run_sandboxes
     client.cookies.clear()
 
-    refused = client.post("/seed_session", json=_seed(session_id))
+    # The rollout ID stays _seed()'s: one made from the cookie's random UUID can end in the reserved suffix "-a<N>".
+    refused = client.post("/seed_session", json=_seed() | {"resources_session_id": session_id})
 
     assert refused.status_code == 409, refused.text
     assert len(started) == 1 and server._lent_sandboxes.get(session_id) is None
