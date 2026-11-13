@@ -853,7 +853,8 @@ def _target_document_records(records: list[dict[str, Any]], field: str) -> list[
                 **record,
                 field: record[field] if target_document else "" if field == "value" else [],
                 "target_document": target_document,
-                "target_absent": navigation["status"] in {404, 410},
+                "target_absent": navigation["status"] in {404, 410}
+                and _snapshot_url_matches(record["url"], navigation["url"]),
             }
         )
     return normalized

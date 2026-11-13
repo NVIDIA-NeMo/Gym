@@ -335,6 +335,17 @@ NAVIGATION_CASES += [
     ("unchanged-absent-criterion", (404, "/page", _ERROR_TEXT), (404, "/page", _ERROR_TEXT), {"exact_match": ""}, 0),
     ("after-400-matching-error-text", (200, "/page", ""), (400, "/page", _ERROR_TEXT), {"must_include": ["saved"]}, 0),
 ]
+NAVIGATION_CASES += [
+    (
+        f"absence-identity-{kind}-{status}",
+        (200, "/page", "old"),
+        (status, path, _ERROR_TEXT),
+        {"exact_match": ""},
+        expected,
+    )
+    for status in (404, 410)
+    for kind, path, expected in (("unrelated", "/other-missing", 0), ("canonical", "/page/", 1))
+]
 
 
 @pytest.fixture
