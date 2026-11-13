@@ -3,12 +3,14 @@
 
 import asyncio
 import json
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import ClientResponseError
+from fastapi.testclient import TestClient
 
 from environment_servers.swe_together import app, evaluation
 from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
@@ -83,6 +85,29 @@ def server(tmp_path, **updates):
         **updates,
     )
     return SWETEnvironmentServer.model_construct(config=config)
+
+
+@pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+def test_run_rejects_unsupported_agent_context_before_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+) -> None:
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    run = AsyncMock()
+    monkeypatch.setattr(SWETEnvironmentServer, "run", run)
+    body = request().model_dump(mode="json")
+    task_input = body["task"]["task_input"]
+    target = task_input["task_data"] if nested else task_input
+    target["agent_context"] = context
+
+    with TestClient(environment.setup_webserver()) as client:
+        response = client.post("/run", json=body)
+
+    assert response.status_code == 422, response.text
+    location = ["body", "task", "task_input", *(["task_data"] if nested else []), "agent_context"]
+    assert any(error["loc"] == location and error["type"] == "extra_forbidden" for error in response.json()["detail"])
+    run.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

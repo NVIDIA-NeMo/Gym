@@ -28,6 +28,7 @@ from pytest import fixture, raises
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -283,6 +284,15 @@ class TestVerify:
         assert result.reward == 0.0 and mock.await_count == 0 and not result.mask_sample
 
     @pytest.mark.asyncio
+    async def test_context_rejection_is_a_typed_final_zero(self, server: ChartographyResourcesServer) -> None:
+        mock = _mock_judge(server, _judge_content(1))
+        overflow = _request([_assistant_msg("")])
+        overflow.response.metadata = {"nemo_gym_context_window_exceeded": "true"}
+        result = await server.verify(verify_http_request(), overflow)
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, MODEL_CONTEXT_LIMIT)
+        assert mock.await_count == 0
+
+    @pytest.mark.asyncio
     async def test_parse_failure_is_retried(self, server: ChartographyResourcesServer) -> None:
         mock = _mock_judge(server, "not json", _judge_content(1))
         result = await server.verify(verify_http_request(), _request([_assistant_msg("Head: 34.8 m")]))
@@ -338,6 +348,17 @@ class TestGradingRecord:
             verifier_observability._active_verifier.reset(token)
         return result, invocation.grading_operations
 
+    @staticmethod
+    async def _failed_verify(server: ChartographyResourcesServer, request: ChartographyVerifyRequest):
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            with raises(Exception) as failure:
+                await server.verify(verify_http_request(), request)
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        return failure.value, invocation.grading_operations
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("score,reward", [(1, 1.0), (0, 0.0)])
     async def test_a_parsed_verdict_completes_the_grading(
@@ -352,17 +373,40 @@ class TestGradingRecord:
         assert operation.result_binding_sha256 == grading_result_binding(result)
 
     @pytest.mark.asyncio
-    async def test_a_parse_retry_leaves_the_grading_unknown(self, server: ChartographyResourcesServer) -> None:
+    async def test_a_parse_retry_completes_the_grading(self, server: ChartographyResourcesServer) -> None:
         _mock_judge(server, "not json", _judge_content(1))
         result, operations = await self._verify(server, _request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0
-        assert [(o.outcome, len(o.dependencies)) for o in operations] == [("unknown", 2)]
+        # The unparsed reply is rejected before the re-ask, so the one grading completes and names both judge calls.
+        assert [(o.outcome, len(o.dependencies)) for o in operations] == [("completed", 2)]
 
     @pytest.mark.asyncio
     async def test_unparseable_output_fails_the_grading(self, server: ChartographyResourcesServer) -> None:
         _mock_judge(server, "not json")
-        with raises(JudgeError):
-            await self._verify(server, _request([_assistant_msg("Head: 34.8 m")]))
+        error, operations = await self._failed_verify(server, _request([_assistant_msg("Head: 34.8 m")]))
+        assert isinstance(error, JudgeError)
+        # Every reply is rejected, but with no parsed verdict the grading cannot complete.
+        assert [(o.outcome, len(o.dependencies)) for o in operations] == [("failed", 5)]
+
+    @pytest.mark.asyncio
+    async def test_a_transport_failure_after_a_rejected_reply_fails_the_grading(
+        self, server: ChartographyResourcesServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(judge, "_judge_retry_wait_s", lambda attempt: 0)
+        first = _mock_judge(server, "not json")
+        calls = 0
+
+        async def _post(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return await first(*args, **kwargs)
+            raise ConnectionError("judge down")
+
+        server.server_client.post = AsyncMock(side_effect=_post)
+        error, operations = await self._failed_verify(server, _request([_assistant_msg("Head: 34.8 m")]))
+        assert is_judge_failure(error)
+        assert [o.outcome for o in operations] == ["failed"]
 
     @pytest.mark.asyncio
     async def test_an_empty_answer_has_no_judge_grading(self, server: ChartographyResourcesServer) -> None:
