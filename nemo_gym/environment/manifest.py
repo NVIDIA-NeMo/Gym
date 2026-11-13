@@ -158,15 +158,20 @@ class AdoptedFrom(_ManifestModel):
 
 
 class ManifestRequirements(_ManifestModel):
-    """What a run needs beyond the model under test: each value is true, false or "unknown"."""
+    """What a run needs beyond the model under test. Each field also takes "unknown"."""
 
     gpu: BoolOrUnknown | None = Field(
         default=None,
         description="Whether the environment itself needs a GPU, for example to score answers.",
     )
-    internet: BoolOrUnknown | None = Field(
+    # The same words as a Harbor task's `network_mode`, so a cluster with restricted egress can tell an environment
+    # that calls a few named services, which it can allowlist, from one that needs the open internet.
+    network: Literal["no-network", "allowlist", "public", "unknown"] | None = Field(
         default=None,
-        description="Whether a run needs outbound internet access, for example web search or downloads.",
+        description=(
+            "Outbound network access a run needs: no-network; allowlist (only specific services, such as a search "
+            "API or a hosted judge model); or public (the open internet, for example browsing or downloads)."
+        ),
     )
 
 

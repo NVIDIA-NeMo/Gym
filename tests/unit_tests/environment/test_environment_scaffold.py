@@ -84,7 +84,7 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     assert manifest.intended_use == [IntendedUse.EVALUATION if benchmark else IntendedUse.TRAINING]
     assert manifest.training_allowed == "unknown"
     assert manifest.requirements is not None
-    assert (manifest.requirements.gpu, manifest.requirements.internet) == ("unknown", "unknown")
+    assert (manifest.requirements.gpu, manifest.requirements.network) == ("unknown", "unknown")
     assert manifest.primary_metric == ("TODO" if benchmark else None)
     report = validate_environment(asset / "manifest.yaml")
     if profile in {IntegrationProfile.CUSTOM_GYM_AGENT_LOOP, IntegrationProfile.EXTERNAL_AGENT_LOOP}:
