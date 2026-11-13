@@ -36,6 +36,8 @@ from pydantic_core import PydanticUndefined
 from rich.markdown import Markdown
 from rich.text import Text
 
+from nemo_gym.config.keys import ENTRYPOINT_KEY_NAME, SERVER_TYPE_KEYS
+
 
 ########################################
 # Base CLI configs
@@ -860,8 +862,6 @@ def maybe_get_server_instance_config(
 
 def is_almost_server(server_type_config_dict: Any) -> bool:
     """Detects if a config looks like a server but might fail validation."""
-    from nemo_gym.config.global_config import ENTRYPOINT_KEY_NAME, SERVER_TYPE_KEYS
-
     if not isinstance(server_type_config_dict, DictConfig):
         return False
 

@@ -17,7 +17,7 @@
 from typing import cast
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.keys import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
 from nemo_gym.eval.comparison.suite.schema import CoverageStatus, SuiteCoverage
 

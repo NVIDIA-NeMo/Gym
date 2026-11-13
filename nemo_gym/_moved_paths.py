@@ -183,6 +183,28 @@ def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
 
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.sandbox.utils": {
+        **_names("nemo_gym.sandbox.api", "0.8.0", "AsyncSandbox"),
+    },
+    "nemo_gym.config.global_config": {
+        **_names(
+            "nemo_gym.config.keys",
+            "0.8.0",
+            """
+            AGENT_REF_KEY_NAME AGENT_SERVER_TYPE_KEY_NAME ATTEMPT_INDEX_KEY_NAME ENTRYPOINT_KEY_NAME
+            ENVIRONMENT_SERVER_STAMP_KEY_NAME ENVIRONMENT_SERVER_TYPE_KEY_NAME
+            MODEL_SERVER_TYPE_KEY_NAME RESOURCES_SERVER_TYPE_KEY_NAME ROLLOUT_ID_KEY_NAME
+            ROLLOUT_INDEX_KEY_NAME SERVER_TYPE_KEYS TASK_INDEX_KEY_NAME
+            """,
+        ),
+        **_names(
+            "nemo_gym.config.rollout_keys",
+            "0.8.0",
+            """
+            label_runs rollout_agent_label rollout_run_key rollout_run_labels
+            """,
+        ),
+    },
     "nemo_gym.server_utils": {
         # Moved, or imported before the split, and no longer used by server_utils:
         # served by its __getattr__ with a warning.

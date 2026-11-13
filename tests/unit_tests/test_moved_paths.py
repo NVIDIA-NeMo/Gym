@@ -248,6 +248,23 @@ class TestMovedModuleFinder:
 
 
 class TestMovedNames:
+    @pytest.mark.parametrize(
+        ("name", "module"),
+        [("SERVER_TYPE_KEYS", "nemo_gym.config.keys"), ("rollout_run_key", "nemo_gym.config.rollout_keys")],
+    )
+    def test_extracted_config_names_warn_and_keep_the_same_object(
+        self, name: str, module: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = importlib.import_module("nemo_gym.config.global_config")
+        new = importlib.import_module(module)
+        # Reset warning history because other compatibility checks may already have used this path.
+        monkeypatch.setattr(old, "__getattr__", moved_names_getattr(old.__name__))
+        with pytest.warns(DeprecationWarning, match=re.escape(f"{old.__name__}.{name}")):
+            assert getattr(old, name) is getattr(new, name)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert getattr(old, name) is getattr(new, name)
+
     def test_old_name_is_the_new_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(
             moved_paths.MOVED_NAMES,

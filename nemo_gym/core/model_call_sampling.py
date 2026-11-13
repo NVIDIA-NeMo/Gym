@@ -185,7 +185,8 @@ def model_call_sampling_config(global_config_dict: Optional[Mapping[str, Any]]) 
     Raises ``ValueError`` when ``required_model_servers`` names a server that is not a Model Server of the run: a
     misspelled name would otherwise leave the trained agent's Model Server unenforced, without an error.
     """
-    from nemo_gym.config.global_config import MODEL_CALL_SAMPLING_BLOCK, MODEL_SERVER_TYPE_KEY_NAME
+    from nemo_gym.config.global_config import MODEL_CALL_SAMPLING_BLOCK
+    from nemo_gym.config.keys import MODEL_SERVER_TYPE_KEY_NAME
 
     if not isinstance(global_config_dict, Mapping):
         return None

@@ -931,7 +931,6 @@ ignore_imports = [
     "nemo_gym.client.server_client -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.artifacts.exporters",
-    "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.data.tasks.harbor.digest",

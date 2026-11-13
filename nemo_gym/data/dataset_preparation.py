@@ -40,16 +40,18 @@ from nemo_gym.config.config_types import (
     ServerInstanceConfig,
 )
 from nemo_gym.config.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
     HF_TOKEN_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
     SKIP_TOKEN_CAPTURE_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
     get_global_config_dict,
     resolve_dataset_agent,
+)
+from nemo_gym.config.keys import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.dataset_metrics import (

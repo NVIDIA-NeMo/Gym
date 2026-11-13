@@ -50,12 +50,12 @@ from nemo_gym.config.global_config import (
     PORT_RANGE_LOW_KEY_NAME,
     SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
-    SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     _find_open_port_using_range,
     get_global_config_dict,
 )
+from nemo_gym.config.keys import SERVER_TYPE_KEYS
 from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig

@@ -21,13 +21,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeGuard
 from scipy.stats import t
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    REWARD_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    ROLLOUT_INFOS_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config.global_config import REWARD_KEY_NAME, ROLLOUT_INFOS_KEY_NAME
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.loading import LoadedRun, is_token_accounting_only
 from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, Stat, is_primary_metric
 

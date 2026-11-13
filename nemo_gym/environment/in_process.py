@@ -49,12 +49,12 @@ from omegaconf import DictConfig, OmegaConf
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError, ignoring_command_line
 from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     scoped_global_config_dict,
 )
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME
 from nemo_gym.core.episode_types import is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     FailureStage,

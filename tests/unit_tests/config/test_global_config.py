@@ -251,7 +251,7 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
-        hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
+        hydra_main_mock.return_value = lambda fn: lambda: fn(config_dict)
         monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
     def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
@@ -450,7 +450,7 @@ b: 2
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
@@ -497,7 +497,7 @@ config_paths:
 
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         get_global_config_dict()
@@ -587,7 +587,7 @@ config_paths:
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
     def test_get_global_config_dict_config_paths_later_sibling_wins(
@@ -3761,7 +3761,7 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
 
 class TestRolloutRunLabels:
     def test_rows_group_by_environment_server_and_keep_agent_labels(self) -> None:
-        from nemo_gym.config.global_config import rollout_run_key, rollout_run_labels
+        from nemo_gym.config.rollout_keys import rollout_run_key, rollout_run_labels
 
         rows = [
             {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"},
@@ -3782,7 +3782,7 @@ class TestRolloutRunLabels:
         assert rollout_run_labels(reversed(rows)) == expected
 
     def test_a_stamped_record_and_an_older_record_of_one_agent_get_distinct_labels(self) -> None:
-        from nemo_gym.config.global_config import rollout_run_labels
+        from nemo_gym.config.rollout_keys import rollout_run_labels
 
         stamped = {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"}
         older = {"agent_ref": {"name": "hermes"}}
@@ -3792,7 +3792,7 @@ class TestRolloutRunLabels:
         assert labels == {"hermes_relay": "hermes_relay", "hermes": "hermes"}
 
     def test_labels_stay_unique_when_a_server_name_matches_another_agent(self) -> None:
-        from nemo_gym.config.global_config import label_runs
+        from nemo_gym.config.rollout_keys import label_runs
 
         # Servers "judge" and "judge_twin" share agent "policy", so both use their own names.
         # Server "grader" fronts an agent that happens to be named "judge", which would repeat that label.

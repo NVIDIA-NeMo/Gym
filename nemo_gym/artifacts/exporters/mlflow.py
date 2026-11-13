@@ -66,7 +66,7 @@ from nemo_gym.artifacts.exporters.metrics import (
 from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
-from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.keys import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
 logger = logging.getLogger(__name__)

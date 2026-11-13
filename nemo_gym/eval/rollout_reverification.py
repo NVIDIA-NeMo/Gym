@@ -49,18 +49,15 @@ from nemo_gym.config.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.config.global_config import (
+from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+from nemo_gym.config.keys import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
-    rollout_agent_label,
-    rollout_run_key,
-    rollout_run_labels,
 )
+from nemo_gym.config.rollout_keys import rollout_agent_label, rollout_run_key, rollout_run_labels
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.rollout_collection import (

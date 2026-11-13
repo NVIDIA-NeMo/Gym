@@ -20,11 +20,7 @@ import pytest
 
 from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.metrics.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.metrics.reward_profile import (
     RewardProfiler,

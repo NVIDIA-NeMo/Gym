@@ -34,7 +34,7 @@ import orjson
 from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.config.keys import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.core.failure_kinds import ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,

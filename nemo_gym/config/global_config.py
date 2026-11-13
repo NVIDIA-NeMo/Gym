@@ -18,7 +18,7 @@ import sys
 import textwrap
 import threading
 from argparse import ArgumentParser
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -33,7 +33,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.artifacts.exporters import setup_exporters
+from nemo_gym.config import keys as _keys
 from nemo_gym.config.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
@@ -68,8 +69,8 @@ from nemo_gym.config.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.config.provider_metadata import plugin_distributions
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
@@ -99,7 +100,6 @@ _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
-ENTRYPOINT_KEY_NAME = "entrypoint"
 DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
@@ -167,7 +167,7 @@ ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
 ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
-    ENTRYPOINT_KEY_NAME,
+    _keys.ENTRYPOINT_KEY_NAME,
     DEFAULT_HOST_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
@@ -217,10 +217,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
 ]
 
-AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # The field an environment server names its agent in.
 AGENT_SERVER_REF_KEY_NAME = "agent_server"
-ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Agent types whose servers implement agent sessions (`_seed_agent_session_state`), so an environment server
 # such as `single_agent_turn_legacy` can drive them. Config composition cannot import agent apps to ask,
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
@@ -276,16 +274,6 @@ _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets
 ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
 # Declared on a resources server: the model adapter types that can carry its workload. Absent means any adapter.
 ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
-MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
-RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
-
-# Public config-group keys, in discovery order, for Gym and downstream integrations.
-SERVER_TYPE_KEYS: Tuple[str, ...] = (
-    RESOURCES_SERVER_TYPE_KEY_NAME,
-    AGENT_SERVER_TYPE_KEY_NAME,
-    MODEL_SERVER_TYPE_KEY_NAME,
-    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
-)
 
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
@@ -301,7 +289,7 @@ def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
         for field, reference in server.items()
         if isinstance(reference, DictConfig)
         and (
-            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+            reference.get("type") == _keys.AGENT_SERVER_TYPE_KEY_NAME
             or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
         )
     ]
@@ -338,17 +326,6 @@ class _AgentInstance:
     server_config: DictConfig
 
 
-# Data keys
-TASK_INDEX_KEY_NAME = "_ng_task_index"
-ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
-# Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
-# (task, rollout) so their captured model calls stay separable.
-ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
-# An explicit capture id replaces the task and rollout derivation.
-# Set it when dispatches reuse task and rollout indices.
-# Otherwise two dispatches would share one capture key.
-# The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
-ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
 MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 # A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
@@ -356,9 +333,6 @@ MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
-AGENT_REF_KEY_NAME = "agent_ref"
-# Stamped by rollout collection on every record: the Environment Server that ran the rollout.
-ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
@@ -388,66 +362,6 @@ def get_hf_token() -> Optional[str]:  # pragma: no cover
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
-
-
-def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
-    """Identify what ran a rollout, for grouping: its Environment Server.
-
-    Records written before rollout collection stamped the Environment Server fall back to their agent.
-    """
-    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-    if server is not None:
-        return server
-    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-
-
-def label_runs(agent_by_key: Mapping[str, Optional[str]]) -> Dict[str, str]:
-    """Label each run key by its agent's name when that name identifies exactly one run, else by the key.
-
-    A run with one Environment Server per agent keeps its agent's name, so existing labels do not change.
-    Every run of an agent that several Environment Servers front is labelled by its own Environment Server.
-    A label that would still repeat, because one server's name equals another run's agent name, also falls back
-    to the key. The result depends only on the mapping, not on its order, and every label is unique.
-    """
-    keys_by_agent: Dict[str, set] = defaultdict(set)
-    for key, agent_name in agent_by_key.items():
-        if agent_name is not None:
-            keys_by_agent[agent_name].add(key)
-    labels = {
-        key: agent_name if agent_name is not None and len(keys_by_agent[agent_name]) == 1 else key
-        for key, agent_name in agent_by_key.items()
-    }
-    while True:
-        counts = Counter(labels.values())
-        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
-        if not clashing:
-            return labels
-        for key in clashing:
-            labels[key] = key
-
-
-def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
-    """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
-
-    See ``label_runs``. A row without an ``agent_ref`` is labelled by its Environment Server.
-    """
-    agent_by_key: Dict[str, Optional[str]] = {}
-    for row in rows:
-        key = rollout_run_key(row)
-        if key is not None and key not in agent_by_key:
-            agent_by_key[key] = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-    return label_runs(agent_by_key)
-
-
-def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
-    """Name the agent that acted in one rollout, for per-rollout output such as trajectories and debug lines.
-
-    Rows without an ``agent_ref``, such as episode rows, use their Environment Server.
-    """
-    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-    if agent_name is not None:
-        return agent_name
-    return row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -744,8 +658,8 @@ Duplicate config paths:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
                     if (
-                        maybe_server_ref.type == AGENT_SERVER_TYPE_KEY_NAME
-                        and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
+                        maybe_server_ref.type == _keys.AGENT_SERVER_TYPE_KEY_NAME
+                        and server_instance_config.get_server_ref().type == _keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME
                     ):
                         hint += (
                             "\nGym follows top-level `_inherit_from` agent renames when there is one destination "
@@ -826,9 +740,9 @@ Duplicate config paths:
         for name, value in global_config_dict.items_ex(resolve=False):
             if name in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(value, DictConfig):
                 continue
-            if AGENT_SERVER_TYPE_KEY_NAME not in value:
+            if _keys.AGENT_SERVER_TYPE_KEY_NAME not in value:
                 continue
-            agents = value[AGENT_SERVER_TYPE_KEY_NAME]
+            agents = value[_keys.AGENT_SERVER_TYPE_KEY_NAME]
             # Not our error to report: the type config pins exactly one, and almost-server detection flags it.
             if not isinstance(agents, DictConfig) or len(agents) != 1:
                 continue
@@ -870,7 +784,7 @@ Duplicate config paths:
         rejected: List[Tuple[_AgentInstance, str, str, str, List[str]]] = []
         for agent in self._agent_instances(global_config_dict):
             resources_reference = self._resources_server_reference(agent.server_config)
-            if not resources_reference or resources_reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME:
+            if not resources_reference or resources_reference.get("type") != _keys.RESOURCES_SERVER_TYPE_KEY_NAME:
                 continue
             resources_server_name = resources_reference.get("name")
             allowed = allowed_model_types_for(global_config_dict, resources_server_name)
@@ -878,7 +792,7 @@ Duplicate config paths:
                 continue
 
             model_reference = self._model_server_reference(agent.server_config)
-            if not model_reference or model_reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
+            if not model_reference or model_reference.get("type") != _keys.MODEL_SERVER_TYPE_KEY_NAME:
                 continue
             model_server_name = model_reference.get("name")
             model_type = model_type_for(global_config_dict, model_server_name)
@@ -998,7 +912,7 @@ Duplicate config paths:
                 # extract the target instance, remove the old agent config, add the new agent
                 # and add the whole thing back to the config under the new name
                 instance = global_config_dict.pop(target.name)
-                agents = instance[AGENT_SERVER_TYPE_KEY_NAME]
+                agents = instance[_keys.AGENT_SERVER_TYPE_KEY_NAME]
                 agents.pop(target.agent_type)
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
@@ -1023,7 +937,7 @@ Duplicate config paths:
         for instance in global_config_dict.values():
             if not isinstance(instance, DictConfig):
                 continue
-            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            servers = instance.get(_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
             for server_type, server in servers.items():
@@ -1051,7 +965,7 @@ Duplicate config paths:
         for instance_name, instance in global_config_dict.items():
             if not isinstance(instance, DictConfig):
                 continue
-            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            servers = instance.get(_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
             server = servers.get(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
@@ -1218,7 +1132,7 @@ the check."""
         """Merge the override held for `name` onto the composed agent, in place, after the bindings."""
         if held_agent_overrides is None:
             return
-        override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
+        override = OmegaConf.select(held_agent_overrides, f"{name}.{_keys.AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
         with open_dict(held_agent_overrides):
             held_agent_overrides.pop(name, None)
         if not isinstance(override, DictConfig):
@@ -1270,7 +1184,7 @@ the check."""
         for instance in global_config_dict.values():
             if not isinstance(instance, DictConfig):
                 continue
-            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            servers = instance.get(_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
@@ -1343,7 +1257,7 @@ For example, on the command line:
             name
             for name, instance in frozen_dict_config.items_ex(resolve=False)
             if isinstance(instance, DictConfig)
-            and isinstance(instance.get(RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
+            and isinstance(instance.get(_keys.RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
         }
         destinations: dict[str, list[str]] = defaultdict(list)
         # Only a top-level move retargets an environment participant. Copies and
@@ -1393,7 +1307,7 @@ For example, on the command line:
                 target
                 for target in targets
                 if isinstance(dict_config.get(target), DictConfig)
-                and isinstance(dict_config[target].get(RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
+                and isinstance(dict_config[target].get(_keys.RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
             ]
             for source, targets in destinations.items()
             if source not in dict_config
@@ -1401,7 +1315,7 @@ For example, on the command line:
         for name, instance in dict_config.items_ex(resolve=False):
             if not isinstance(instance, DictConfig):
                 continue
-            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            servers = instance.get(_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
             for server_type, server in servers.items_ex(resolve=False):
@@ -1412,7 +1326,7 @@ For example, on the command line:
                         continue
                     if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
                         continue
-                    if reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME and not (
+                    if reference.get("type") != _keys.RESOURCES_SERVER_TYPE_KEY_NAME and not (
                         field == "resources_server" and reference.get("type") is None
                     ):
                         continue
@@ -1421,7 +1335,7 @@ For example, on the command line:
                     if len(targets) == 1:
                         reference["name"] = targets[0]
                     elif len(targets) > 1:
-                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        path = f"{name}.{_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
                         raise AmbiguousResourcesRenameError(
                             f"Resources server '{source}' was inherited into several names: "
                             f"{', '.join(repr(target) for target in targets)}. "
@@ -1438,7 +1352,7 @@ For example, on the command line:
         for name, instance in dict_config.items_ex(resolve=False):
             if not isinstance(instance, DictConfig):
                 continue
-            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            servers = instance.get(_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
             for server_type, server in servers.items_ex(resolve=False):
@@ -1449,14 +1363,14 @@ For example, on the command line:
                         continue
                     if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
                         continue
-                    if reference.get("type") != AGENT_SERVER_TYPE_KEY_NAME and not (
+                    if reference.get("type") != _keys.AGENT_SERVER_TYPE_KEY_NAME and not (
                         field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None
                     ):
                         continue
                     source = reference.get("name")
                     if source in ambiguous:
                         targets = ", ".join(repr(target) for target in ambiguous[source])
-                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        path = f"{name}.{_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
                         raise AmbiguousAgentRenameError(
                             f"Agent '{source}' was inherited into several names: {targets}. "
                             f"'{path}' still references '{source}'. "
@@ -1738,13 +1652,13 @@ Found global config dict yaml:
             if isinstance(server_types, str) or not isinstance(server_types, Sequence):
                 raise ConfigError(
                     f"`{ABSOLUTE_IP_SERVER_TYPES_KEY_NAME}` must be a list of server types "
-                    f"({', '.join(SERVER_TYPE_KEYS)}) or null; got {server_types!r}"
+                    f"({', '.join(_keys.SERVER_TYPE_KEYS)}) or null; got {server_types!r}"
                 )
-            unknown = [t for t in server_types if t not in SERVER_TYPE_KEYS]
+            unknown = [t for t in server_types if t not in _keys.SERVER_TYPE_KEYS]
             if unknown:
                 raise ConfigError(
                     f"`{ABSOLUTE_IP_SERVER_TYPES_KEY_NAME}` names unknown server types {unknown!r}; expected "
-                    f"a subset of {', '.join(SERVER_TYPE_KEYS)}"
+                    f"a subset of {', '.join(_keys.SERVER_TYPE_KEYS)}"
                 )
             if default_host and not global_config_dict.get(DEFAULT_HOST_KEY_NAME):
                 host_by_server_type = {str(t): default_host for t in server_types}
@@ -2122,9 +2036,9 @@ def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Op
     server model is validated, and iterating it would read the name as its characters.
     """
     instance = global_config_dict.get(resources_server_name) if resources_server_name else None
-    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+    if not isinstance(instance, DictConfig) or _keys.RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
         return None
-    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    servers = instance[_keys.RESOURCES_SERVER_TYPE_KEY_NAME]
     if not isinstance(servers, DictConfig) or len(servers) != 1:
         return None
     implementation = next(iter(servers))
@@ -2135,7 +2049,7 @@ def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Op
         return [declared]
     if not isinstance(declared, ListConfig):
         raise ConfigError(
-            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"'{resources_server_name}.{_keys.RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
             f"{ALLOWED_AGENTS_KEY_NAME}' must be a list of agent types, got {type(declared).__name__}."
         )
     return [str(name) for name in declared]
@@ -2146,9 +2060,9 @@ def allowed_model_types_for(
 ) -> Optional[List[str]]:
     """The model adapter types `resources_server_name` declares support for, or None when unrestricted."""
     instance = global_config_dict.get(resources_server_name) if resources_server_name else None
-    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+    if not isinstance(instance, DictConfig) or _keys.RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
         return None
-    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    servers = instance[_keys.RESOURCES_SERVER_TYPE_KEY_NAME]
     if not isinstance(servers, DictConfig) or len(servers) != 1:
         return None
     implementation = next(iter(servers))
@@ -2159,7 +2073,7 @@ def allowed_model_types_for(
         return [declared]
     if not isinstance(declared, ListConfig):
         raise ConfigError(
-            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"'{resources_server_name}.{_keys.RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
             f"{ALLOWED_MODEL_TYPES_KEY_NAME}' must be a list of model types, got {type(declared).__name__}."
         )
     return [str(name) for name in declared]
@@ -2168,9 +2082,9 @@ def allowed_model_types_for(
 def model_type_for(global_config_dict: DictConfig, model_server_name: Optional[str]) -> Optional[str]:
     """The single model adapter type hosted by `model_server_name`, or None when it cannot be determined."""
     instance = global_config_dict.get(model_server_name) if model_server_name else None
-    if not isinstance(instance, DictConfig) or MODEL_SERVER_TYPE_KEY_NAME not in instance:
+    if not isinstance(instance, DictConfig) or _keys.MODEL_SERVER_TYPE_KEY_NAME not in instance:
         return None
-    models = instance[MODEL_SERVER_TYPE_KEY_NAME]
+    models = instance[_keys.MODEL_SERVER_TYPE_KEY_NAME]
     if not isinstance(models, DictConfig) or len(models) != 1:
         return None
     return str(next(iter(models)))
@@ -2195,10 +2109,10 @@ def legacy_environment_server_name(agent_name: str, agent_type: str) -> str:
 def legacy_environment_server_block(agent_name: str) -> dict[str, Any]:
     """The legacy_agent environment server config that relays to one agent."""
     return {
-        ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
+        _keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
             "legacy_agent": {
                 "entrypoint": "app.py",
-                AGENT_SERVER_REF_KEY_NAME: {"type": AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
+                AGENT_SERVER_REF_KEY_NAME: {"type": _keys.AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
             }
         }
     }
@@ -2317,7 +2231,9 @@ def resolve_dataset_agent(
         if not isinstance(environment_name, str) or not environment_name:
             raise ConfigError(f"No Environment Server route for taskset {taskset!r}; set environment_server_routes.")
         environment = global_config_dict.get(environment_name)
-        servers = environment.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
+        servers = (
+            environment.get(_keys.ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
+        )
         if not isinstance(servers, DictConfig) or len(servers) != 1:
             raise ConfigError(f"Taskset {taskset!r} route {environment_name!r} must name an Environment Server.")
         environment_config = next(iter(servers.values()))
@@ -2327,7 +2243,7 @@ def resolve_dataset_agent(
         for agent_ref in environment_server_agent_refs(environment_config):
             name = agent_ref.get("name")
             agent = global_config_dict.get(name) if isinstance(name, str) else None
-            if not isinstance(agent, DictConfig) or AGENT_SERVER_TYPE_KEY_NAME not in agent:
+            if not isinstance(agent, DictConfig) or _keys.AGENT_SERVER_TYPE_KEY_NAME not in agent:
                 raise ConfigError(
                     f"Environment Server {environment_name!r} references {name!r}, which is not an agent. "
                     "Its agent_server and other agent references must name agents."
@@ -2349,7 +2265,8 @@ def resolve_dataset_agent(
             if (
                 not isinstance(resources_ref, DictConfig)
                 or resources_ref.get("name") != declaring_instance_name
-                or resources_ref.get("type", RESOURCES_SERVER_TYPE_KEY_NAME) != RESOURCES_SERVER_TYPE_KEY_NAME
+                or resources_ref.get("type", _keys.RESOURCES_SERVER_TYPE_KEY_NAME)
+                != _keys.RESOURCES_SERVER_TYPE_KEY_NAME
             ):
                 raise ConfigError(
                     f"Environment Server {environment_name!r} must bind declaring resources server "
@@ -2452,7 +2369,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         loc = err["loc"]
         # loc[1] is the actual server type key.
         # Skip "missing" errors from the irrelevant Union variants.
-        if len(loc) > 1 and loc[1] in SERVER_TYPE_KEYS and err["type"] != "missing":
+        if len(loc) > 1 and loc[1] in _keys.SERVER_TYPE_KEYS and err["type"] != "missing":
             actual_server_type = loc[1]
             break
 
@@ -2460,7 +2377,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     if not actual_server_type:  # pragma: no cover
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
-                for key in SERVER_TYPE_KEYS:
+                for key in _keys.SERVER_TYPE_KEYS:
                     if key in err["input"]:
                         actual_server_type = key
                         break
@@ -2476,7 +2393,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         if (
             err["type"] == "missing"
             and len(loc) > 1
-            and loc[1] in SERVER_TYPE_KEYS
+            and loc[1] in _keys.SERVER_TYPE_KEYS
             and actual_server_type
             and loc[1] != actual_server_type
         ):
@@ -2533,7 +2450,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     """
 
 
-# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+# Serves moved and renamed names at their old paths with a deprecation warning.
 from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
 
 

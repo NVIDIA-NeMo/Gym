@@ -51,15 +51,14 @@ from nemo_gym.cli.utils import (
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
 from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
-    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
-    SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.config.keys import ENVIRONMENT_SERVER_TYPE_KEY_NAME, SERVER_TYPE_KEYS
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,

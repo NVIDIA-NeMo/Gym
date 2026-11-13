@@ -21,14 +21,13 @@ import pytest
 
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import (
+from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+from nemo_gym.config.keys import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollouts.batch_status import (
     BatchManifest,
@@ -762,7 +761,7 @@ def test_manifest_status_follows_the_latest_execution_too(
 
 
 def test_run_status_reports_failures_and_model_final_results_by_kind(tmp_path: Path) -> None:
-    from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.rollouts.batch_status import RunStatusTracker
 
     def row(task_index: int, **fields) -> dict:

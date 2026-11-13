@@ -19,6 +19,8 @@ import os
 import re
 from typing import Any, Iterable
 
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME
+
 
 _PRIMITIVE_TYPES = (bool, int, float, str, type(None))
 
@@ -110,9 +112,6 @@ def flatten_aggregate_metrics(
     Live runs and post-run export both build their metrics here, so a run looks the same in the backend
     either way: `<agent>/<metric>` and `key_metrics/<agent>/<metric>`, primitive values only.
     """
-    # Imported here because `global_config` imports this package to set up exporters.
-    from nemo_gym.config.global_config import AGENT_REF_KEY_NAME
-
     metrics: dict[str, Any] = {}
     health_seen = False
     health_metrics: dict[str, Any] = {}
