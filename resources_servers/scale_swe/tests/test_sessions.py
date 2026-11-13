@@ -106,7 +106,7 @@ def sandboxes() -> list[FakeSandbox]:
 def server(monkeypatch, sandboxes) -> ScaleSWEResourcesServer:
     server = ScaleSWEResourcesServer(config=config(), server_client=MagicMock(spec=ServerClient))
 
-    async def create(body, files=None):
+    async def create(body, files=None, *, for_agent=False):
         sandboxes.append(FakeSandbox())
         return sandboxes[-1]
 
@@ -130,7 +130,7 @@ def use_verifier_exec(monkeypatch, server, sandboxes, result: SandboxExecResult)
     async def run_without_logs(**kwargs):
         return await verification.run_verification(**{**kwargs, "log_dir": None})
 
-    async def create(body, files=None):
+    async def create(body, files=None, *, for_agent=False):
         sandboxes.append(FakeSandbox())
         if files:  # A verifier sandbox.
             sandboxes[-1].exec = AsyncMock(return_value=result)
@@ -533,7 +533,7 @@ async def test_close_records_are_kept_for_the_retry_window_only(server, monkeypa
 async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def slow_create(body, files=None):
+    async def slow_create(body, files=None, *, for_agent=False):
         entered.set()
         await release.wait()
         sandboxes.append(FakeSandbox())
@@ -702,7 +702,7 @@ async def test_seed_in_progress_at_shutdown_stops_its_own_sandbox(server, sandbo
     await lifespan.__aenter__()
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def slow_create(body, files=None):
+    async def slow_create(body, files=None, *, for_agent=False):
         entered.set()
         await release.wait()
         sandboxes.append(FakeSandbox())
@@ -823,7 +823,7 @@ def slow_verifier_stops(server, stop) -> None:
     """Give every verifier sandbox the server creates from now on ``stop`` as its stop."""
     create_task_sandbox = server._create_sandbox.side_effect
 
-    async def create(body, files=None):
+    async def create(body, files=None, *, for_agent=False):
         sandbox = await create_task_sandbox(body, files)
         if files:  # A verifier sandbox.
             sandbox.stop.side_effect = stop
