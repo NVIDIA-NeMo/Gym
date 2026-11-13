@@ -63,7 +63,7 @@
   "limitations": [
     "Evaluation only; resources-server/session migration and training remain separate.",
     "Linux namespaces share the host kernel.",
-    "Live smoke exercises the sandbox implementation working tree; final label/prefix hardening additionally covered by namespace and real CLI fixtures.",
+    "Live smoke exercises the sandbox implementation working tree; final label/prefix hardening and kernel-readiness updates are additionally covered by namespace and real CLI fixtures.",
     "No new Docker/Enroot image build; builders updated to provision Bubblewrap."
   ]
 }

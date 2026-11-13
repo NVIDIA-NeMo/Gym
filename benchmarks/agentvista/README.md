@@ -155,7 +155,8 @@ Rollout rows include `verifier_diagnostics`, `judge_response`, extracted predict
 judge model, native events and source/task bindings. Counted-zero collector rows
 remain in aggregate denominators even without verifier-generated fields.
 
-Harness version 3.0.0 changes scoring, reasoning, sampling and baseline limits.
+Harness version 4.0.0 adds mandatory code-tool isolation to the corrected scoring,
+reasoning, sampling and baseline limits.
 Prepare new rows and use new output directories. Older prepared rows are rejected;
 do not combine their scores with this version. The historical 2.1.1 smoke records
 under `smoke-results/` are retained for audit only: their default-harness reasoning

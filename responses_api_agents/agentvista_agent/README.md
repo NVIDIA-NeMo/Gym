@@ -16,7 +16,9 @@ The sandbox contains read-only Python runtime/libraries and three hash-verified
 upstream tool modules, a temporary writable workspace, and one socket channel.
 Task images cross that channel as bytes. Dataset files, episode configuration,
 judge/tool credentials, host homes and the Docker socket are never mounted or
-forwarded. Original stateful Jupyter execution and image variables are retained.
+forwarded. Original stateful Jupyter execution and image variables are retained. Kernel
+startup uses Jupyter's lifecycle API and a 60-second readiness handshake rather
+than the original ten-second connection-file polling limit on shared storage.
 Image results return as bytes; model-supplied paths never reach the host image
 loader. Network access from model-written code is disabled; the original web
 search/image search/visit tools remain trusted host-side services.

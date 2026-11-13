@@ -152,6 +152,7 @@ def test_real_kernel_state_image_output_and_reverse_reference(monkeypatch, tmp_p
 
     dataset, image = episode
     monkeypatch.setenv("SERPAPI_KEY", "fixture-key")
+    monkeypatch.setenv("VERIFIER_API_KEY", "HOST_JUDGE_CANARY")
     session = ToolSession({"output": str(tmp_path / "tools"), "images": [str(image)]})
     try:
         first = session.execute(
@@ -162,6 +163,22 @@ def test_real_kernel_state_image_output_and_reverse_reference(monkeypatch, tmp_p
         assert "tool_image_1" in session.image_map
         second = session.execute("code_interpreter", {"code": "print(counter + 2)\nprint(tool_image_1.size)"})
         assert "42" in second[0]["text"] and "100" in second[0]["text"]
+        # Attack the complete MCP -> proxy -> Gym -> namespace -> real kernel path.
+        # This would expose all three on the original same-user host kernel.
+        reference = tmp_path / "private-reference.json"
+        reference.write_text("HOST_REFERENCE_CANARY")
+        code = (
+            "import os,json\nfrom pathlib import Path\n"
+            + f"print(json.dumps({{'reference_visible': Path({str(reference)!r}).exists(), "
+            + "'judge_visible': 'VERIFIER_API_KEY' in os.environ, "
+            + f"'host_process_visible': Path('/proc/{os.getpid()}/environ').exists()}}))"
+        )
+        evidence = session.execute("code_interpreter", {"code": code})
+        text = json.loads(evidence[0]["text"])["result"]
+        assert '"reference_visible": false' in text
+        assert '"judge_visible": false' in text
+        assert '"host_process_visible": false' in text
+        assert "HOST_REFERENCE_CANARY" not in text and "HOST_JUDGE_CANARY" not in text
         other = ToolSession({"output": str(tmp_path / "other"), "images": [str(image)]})
         isolated = other.execute("code_interpreter", {"code": "print('counter' in globals())"})
         assert "False" in isolated[0]["text"]
