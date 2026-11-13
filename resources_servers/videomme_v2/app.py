@@ -26,7 +26,13 @@ from resources_servers.videomme_v2.metrics import (
     aggregate_benchmark_scores,
     validate_metric_cohort,
 )
-from resources_servers.videomme_v2.scoring import AnswerPolicy, Outcome, QuestionScore, grade_answer
+from resources_servers.videomme_v2.scoring import (
+    EXECUTION_FAILURE_METADATA_KEY,
+    AnswerPolicy,
+    Outcome,
+    QuestionScore,
+    grade_answer,
+)
 from resources_servers.videomme_v2.task import Setting, VerifierMetadata
 
 
@@ -133,6 +139,11 @@ class VideoMMEV2ResourcesServer(SimpleResourcesServer):
         elif body.setting == "single_turn" and any(item.type == "function_call" for item in body.response.output):
             failure = "execution_failure"
             failure_reason = "A tool call is not a valid single-turn answer."
+        elif (
+            body.setting == "agentic" and (body.response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == "true"
+        ):
+            failure = "execution_failure"
+            failure_reason = "The agent run failed; its final answer is not scored."
         score = grade_answer(
             final_assistant_text(body.response),
             body.verifier_metadata,

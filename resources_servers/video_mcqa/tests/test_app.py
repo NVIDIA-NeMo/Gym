@@ -20,7 +20,15 @@ from resources_servers.video_mcqa.app import (
     final_assistant_text,
 )
 from resources_servers.video_mcqa.prepare import prepare_dataset
-from resources_servers.video_mcqa.tests.helpers import REVISION, lv_record, media, response, v1_record
+from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY
+from resources_servers.video_mcqa.tests.helpers import (
+    REVISION,
+    grade_failed_run_and_replay,
+    lv_record,
+    media,
+    response,
+    v1_record,
+)
 from resources_servers.videomme_v1.app import VideoMMEV1ResourcesServer
 
 
@@ -101,6 +109,29 @@ async def test_model_failure_is_masked_and_cannot_be_called_correct(tmp_path, be
     assert metrics.key_metrics[f"{prefix}/raw_acc"] == 0
     assert metrics.agent_metrics[f"{prefix}/expected"] == 2
     assert metrics.agent_metrics[f"{prefix}/missing"] == 1
+
+
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+@pytest.mark.parametrize(
+    "updates",
+    [{}, {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}],
+    ids=["failed_run", "length_limited"],
+)
+async def test_failed_agent_run_stays_zero_when_its_saved_answer_is_replayed(tmp_path, benchmark, updates) -> None:
+    server, rows, _ = make_server(tmp_path, benchmark=benchmark, setting="agentic")
+    failed = response(metadata={EXECUTION_FAILURE_METADATA_KEY: "true"}, **updates)
+    saved, replayed = await grade_failed_run_and_replay(server, VideoMCQAVerifyRequest, rows[0], failed)
+    # The saved row keeps the correct-looking answer for inspection.
+    assert final_assistant_text(NeMoGymResponse.model_validate(saved["response"])) == r"\boxed{B}"
+    for result in (saved, replayed.model_dump()):
+        assert (result["outcome"], result["predicted_answer"], result["reward"]) == ("execution_failure", None, 0)
+        assert result["evaluation_completed"] and not result["mask_sample"]
+    # Without the agent's marker the same answer is correct; a failed model call stays inconclusive.
+    assert (await server.verify(request(rows[0], response=response(**updates)))).outcome == "correct"
+    infrastructure = await server.verify(
+        request(rows[0], response={**failed, "status": "failed", "error": {"code": "server_error", "message": "x"}})
+    )
+    assert infrastructure.outcome == "infrastructure_failure" and infrastructure.mask_sample
 
 
 @pytest.mark.parametrize("setting", ["single_turn", "agentic"])

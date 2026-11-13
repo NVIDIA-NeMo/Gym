@@ -3,6 +3,16 @@
 
 """Invented fixtures only; no real benchmark annotations or answers."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from pydantic import BaseModel, ConfigDict
+
+from nemo_gym.agents import verify_agent_response
+from nemo_gym.config import ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
+from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.video_mcqa.dataset import VideoSource
 
 
@@ -74,3 +84,28 @@ def response(text: str | None = r"\boxed{B}", **updates: object) -> dict[str, ob
         "tools": [],
         **updates,
     }
+
+
+class RunRequest(BaseRunRequest):
+    """The agent's run request, which carries the row's task fields to the verifier."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+async def grade_failed_run_and_replay(server, request_model: type[BaseModel], row: dict, generated: dict):
+    """Grade a failed agent run as Gym's agent helper does, then replay the row it saves."""
+
+    async def post(*, server_name: str, url_path: str, json: dict, cookies: dict) -> SimpleNamespace:
+        result = await server.verify(request_model.model_validate(json))
+        return SimpleNamespace(ok=True, read=AsyncMock(return_value=result.model_dump_json().encode()))
+
+    saved = await verify_agent_response(
+        SimpleNamespace(post=post),
+        ResourcesServerRef(type="resources_servers", name="verifier"),
+        RunRequest.model_validate(row),
+        NeMoGymResponse.model_validate(generated),
+        {},
+        force_zero_reward=True,
+    )
+    payload = _build_verify_payload(InputRolloutPair(input=row, rollout=saved))
+    return saved, await server.verify(request_model.model_validate(payload))

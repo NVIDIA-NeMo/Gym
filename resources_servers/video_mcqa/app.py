@@ -22,6 +22,7 @@ from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.video_mcqa.dataset import SOURCES, Benchmark, validate_subsets
 from resources_servers.video_mcqa.scoring import (
+    EXECUTION_FAILURE_METADATA_KEY,
     AnswerPolicy,
     Failure,
     Outcome,
@@ -138,6 +139,11 @@ class VideoMCQAResourcesServer(SimpleResourcesServer):
         elif body.setting == "single_turn" and any(item.type == "function_call" for item in body.response.output):
             failure = "execution_failure"
             reason = "Tool calls are not allowed in the single-turn setting."
+        elif (
+            body.setting == "agentic" and (body.response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == "true"
+        ):
+            failure = "execution_failure"
+            reason = "The agent run failed; its final answer is not scored."
         score = grade_answer(
             final_assistant_text(body.response),
             body.verifier_metadata,

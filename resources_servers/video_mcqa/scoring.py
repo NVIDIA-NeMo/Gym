@@ -37,6 +37,9 @@ _BOXED = re.compile(r"\\boxed\s*\{\s*(?:([A-Z])|\\(?:text|mathrm)\s*\{\s*([A-Z])
 # Boxed letters count up to H, as for the eight-option benchmarks, or up to the question's last option.
 _EIGHT_OPTIONS = 8
 _THOUGHT = re.compile(r"<(think|thinking)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+# Response metadata key the OpenCode video agent sets to "true" when its run failed. Gym grades such a run on an
+# emptied copy while the saved row keeps the original answer, so replaying that row reads the failure from here.
+EXECUTION_FAILURE_METADATA_KEY = "video_execution_failure"
 
 
 @dataclass(frozen=True, slots=True)

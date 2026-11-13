@@ -17,6 +17,7 @@ from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
+from resources_servers.video_mcqa.tests.helpers import grade_failed_run_and_replay
 from resources_servers.videomme_v2.app import (
     CohortManifest,
     VideoMMEV2ResourcesServer,
@@ -24,6 +25,7 @@ from resources_servers.videomme_v2.app import (
     VideoMMEV2VerifyRequest,
     final_assistant_text,
 )
+from resources_servers.videomme_v2.scoring import EXECUTION_FAILURE_METADATA_KEY
 from resources_servers.videomme_v2.task import VideoQuestion, prepare_agentic, prepare_single_turn
 
 
@@ -152,6 +154,25 @@ async def test_agentic_tool_calls_do_not_invalidate_a_final_answer(agentic_serve
     result = await agentic_server.verify(agentic_body())
     assert result.outcome == "correct" and result.reward == 1.0 and result.evaluation_completed
     assert result.setting == "agentic" and result.predicted_answer == "B"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [{}, {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}],
+    ids=["failed_run", "length_limited"],
+)
+async def test_failed_agent_run_stays_zero_when_its_saved_answer_is_replayed(agentic_server, updates) -> None:
+    row = prepare_agentic(question(), expected_answer="B", video_path="video/shapes.mp4")
+    failed = response(metadata={EXECUTION_FAILURE_METADATA_KEY: "true"}, **updates).model_dump()
+    saved, replayed = await grade_failed_run_and_replay(agentic_server, VideoMMEV2VerifyRequest, row, failed)
+    assert final_assistant_text(NeMoGymResponse.model_validate(saved["response"])) == r"\boxed{B}"
+    for result in (saved, replayed.model_dump()):
+        assert (result["outcome"], result["predicted_answer"], result["reward"]) == ("execution_failure", None, 0)
+        assert result["evaluation_completed"] and not result["mask_sample"]
+    plain = response(**updates).model_dump()
+    assert (
+        await agentic_server.verify(VideoMMEV2VerifyRequest.model_validate({**row, "response": plain}))
+    ).outcome == ("correct")
 
 
 async def test_setting_cannot_be_mixed_with_another_cohort(server, agentic_server) -> None:
