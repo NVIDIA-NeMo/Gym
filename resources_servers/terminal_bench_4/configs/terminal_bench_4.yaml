@@ -25,3 +25,6 @@ terminal_bench_4_miniswe_environment_server:
       agent_server:
         type: responses_api_agents
         name: terminal_bench_4_miniswe
+      # The agent's own 8-hour budget (agent_timeout_sec) bounds the episode;
+      # the relay's six-hour default would cut it short.
+      default_episode_timeout_seconds: null

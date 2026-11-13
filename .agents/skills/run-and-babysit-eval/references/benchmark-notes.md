@@ -125,13 +125,16 @@ into the 6 h limit, end as `environment_server_failed`, and are retried. In one 
 a graded result, so a retried row is a second sample of a generation that ran away once. Count these rows
 from the failure records before you compare MRCR scores.
 
-## Benchmarks on the legacy relay: no episode deadline by default
+## Benchmarks on the legacy relay: six-hour episode deadline by default
 
 CritPT, SciCode, tau2 and GDP-PDF reach their agents through `legacy_agent`, whose
-`default_episode_timeout_seconds` is null, and their benchmark configs do not set it. A hung policy call
-there runs until the Slurm segment ends. Set `legacy_agent.default_episode_timeout_seconds` below
-`compute.cluster.walltime` when the segment is short, so the row ends with a typed deadline instead of an
-allocation end.
+`default_episode_timeout_seconds` is 21600 (six hours) unless the benchmark config sets it, and theirs do not. A hung
+policy call there ends the row after six hours as `environment_server_failed` (`Episode timed out`) instead of
+waiting until the Slurm segment ends. The relay cancels its call to the agent, and collection does not replay the
+row automatically, because the agent may have stopped after generating an answer. Set
+`legacy_agent.default_episode_timeout_seconds` below `compute.cluster.walltime` when the segment is shorter than
+six hours, or to `null` when the agent's own budget is longer (mini-SWE on Terminal-Bench Science and 4 and the
+Partner IF dispatcher do), so that only the agent's limits apply.
 
 ## HLE: runaway generations
 

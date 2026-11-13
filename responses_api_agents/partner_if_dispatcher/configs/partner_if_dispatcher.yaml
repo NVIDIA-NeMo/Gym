@@ -35,3 +35,5 @@ partner_if_dispatcher_environment_server:
       agent_server:
         type: responses_api_agents
         name: partner_if_dispatcher
+      # The selected child environment's deadline applies; an enclosing deadline would end its text and tool episodes.
+      default_episode_timeout_seconds: null
