@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import io
+import json
 import shlex
 import shutil
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any, Callable
 
 import pytest
 
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
@@ -147,6 +149,80 @@ def _make_provider(
 # --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_connect_preserves_exec_and_borrower_disconnect(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_killpg: list[tuple[int, int]]
+) -> None:
+    provider, recorder, _ = _make_provider(monkeypatch, lambda argv: (0, "ok", ""), tmp_path)
+    handle = _make_handle(tmp_path, env={"GREETING": "hello"})
+
+    async def create(spec: SandboxSpec) -> SandboxHandle:
+        return handle
+
+    monkeypatch.setattr(provider, "create", create)
+    owner = AsyncSandbox(provider, SandboxSpec(image="test", workdir="/sandbox"))
+    await owner.start()
+    descriptor = json.loads(json.dumps(await owner.serialize()))
+    borrower_provider, borrower_recorder, _ = _make_provider(monkeypatch, lambda argv: (0, "ok", ""), tmp_path)
+    borrower = await AsyncSandbox.connect(descriptor, provider=borrower_provider)
+    result = await borrower.exec("printf ok")
+    assert result.return_code == 0
+    argv = borrower_recorder.calls[-1]["argv"]
+    assert _contains_seq(argv, ["-e", "GREETING=hello"])
+    assert str(FAKE_PID) in argv
+    assert "cd /sandbox" in argv[-1]
+    upload = tmp_path / "upload.txt"
+    upload.write_text("borrowed content")
+    await borrower.upload(upload, "/sandbox/borrowed.txt")
+    assert (tmp_path / "borrowed.txt").read_text() == "borrowed content"
+    await borrower.disconnect()
+    assert no_killpg == []
+    assert not any("remove" in call["argv"] for call in borrower_recorder.calls)
+    assert (await owner.exec("printf owner-alive")).return_code == 0
+    assert "owner-alive" in recorder.calls[-1]["argv"][-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("provider", "docker", "full serialized descriptor"),
+        ("hostname", "different-host", "same host and UID"),
+        ("uid", -1, "same host and UID"),
+        ("data_path", "/another/data", "creator's data_path"),
+        ("runtime_path", "/another/runtime", "creator's runtime_path"),
+        ("container_pid", 0, "positive container_pid"),
+        ("container_pid", True, "positive container_pid"),
+        ("staging_dir", "relative", "staging directory"),
+        ("mount_point", "relative", "mount point"),
+        ("env", {"KEY": 1}, "map strings to strings"),
+        ("start_pgid", -1, "positive integer"),
+    ],
+)
+async def test_connect_rejects_incompatible_descriptor(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    provider, _, _ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    descriptor = await provider.serialize_handle(_make_handle(tmp_path))
+    descriptor[field] = value
+    with pytest.raises(ValueError, match=message):
+        await provider.connect(descriptor)
+
+
+@pytest.mark.asyncio
+async def test_connect_and_serialize_refuse_stopped_or_reused_pid(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _, _ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    handle = _make_handle(tmp_path)
+    descriptor = await provider.serialize_handle(handle)
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: False)
+    with pytest.raises(RuntimeError, match="stale or reused"):
+        await provider.connect(descriptor)
+    with pytest.raises(RuntimeError, match="no longer running"):
+        await provider.serialize_handle(handle)
+
+
 def test_require_enroot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(enroot_provider.shutil, "which", lambda _name: "/opt/enroot")
     assert enroot_provider._require_enroot() == "/opt/enroot"
@@ -200,6 +276,13 @@ def test_translate_docker_uri() -> None:
     assert translate("docker.io/swebench/foo:latest") == "docker://swebench/foo:latest"
     assert translate("index.docker.io/library/ubuntu:22.04") == "docker://library/ubuntu:22.04"
     assert translate("registry-1.docker.io/swebench/foo:latest") == "docker://swebench/foo:latest"
+    digest = "sha256:" + "a" * 64
+    assert (
+        translate(f"harborframework/terminal-bench:task@{digest}")
+        == f"docker://harborframework/terminal-bench:{digest}"
+    )
+    assert translate(f"docker.io/library/ubuntu@{digest}") == f"docker://library/ubuntu:{digest}"
+    assert translate(f"localhost:5000/img:tag@{digest}") == f"docker://localhost:5000#img:{digest}"
 
 
 def test_resolve_image(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

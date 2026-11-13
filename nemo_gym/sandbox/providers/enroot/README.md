@@ -90,6 +90,19 @@ are grouped into three optional sections, each of which accepts a plain mapping
 (e.g. from Hydra YAML) or the corresponding dataclass. A ready-to-use config is
 shipped at [`configs/enroot.yaml`](./configs/enroot.yaml).
 
+The provider accepts Docker image references pinned by digest, including
+`repository:tag@sha256:<digest>`. The digest selects the image; the tag does not
+override it. These references are translated to Enroot's `repository:sha256:<digest>`
+URI spelling, and the original reference remains the squashfs cache key.
+
+`AsyncSandbox.serialize()` and `AsyncSandbox.connect()` let an environment server
+lend a running sandbox to an agent server. Both processes must run on the same
+host as the same OS user, with identical Enroot data and runtime paths and access
+to the same staging directory. The descriptor is trusted control-plane state,
+not a portable lease; `scope` does not create a separate lease. A stopped sandbox
+or reused init PID is refused. The borrower calls `disconnect()` when finished,
+and the creator remains responsible for `stop()`.
+
 ```yaml
 enroot:
   create:
