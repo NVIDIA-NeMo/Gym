@@ -2239,6 +2239,62 @@ class TestBenchmarkLifecycle:
         assert run_result["opencode_finished"] is False
         sandbox.download.assert_awaited_once()
 
+    @mark.parametrize(
+        ("return_code", "sandbox_error_type", "expected_error_type"),
+        [
+            # The sandbox killed the run at its deadline; the export error the killed session left must not hide it.
+            (124, "timeout", "timeout"),
+            # Without a sandbox-reported error, the export error still classifies the failure.
+            (1, None, "APIError"),
+        ],
+    )
+    async def test_sandbox_error_type_outranks_export_terminal_error(
+        self, tmp_path: Path, return_code: int, sandbox_error_type: str | None, expected_error_type: str
+    ) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+
+        async def execute(command: str, **_kwargs: Any) -> Any:
+            if "session list" in command:
+                return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
+            if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode db" in command:
+                return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
+            return SimpleNamespace(
+                stdout="Shell: bash\npartial", stderr="", return_code=return_code, error_type=sandbox_error_type
+            )
+
+        export = json.loads((Path(__file__).parent / "opencode_export_test_data.json").read_text())
+        last_assistant = [m for m in export["messages"] if m["info"].get("role") == "assistant"][-1]
+        last_assistant["info"]["error"] = {"name": "APIError", "data": {"message": "request aborted"}}
+
+        async def download(_remote: str, local: Path) -> None:
+            local.write_text(json.dumps(export))
+
+        sandbox = MagicMock(
+            upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+        )
+        server._sandbox_id_to_sandbox = {"session": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        await server.responses(request, body)
+
+        run_result = server._sandbox_id_to_run_result["session"]
+        assert run_result["opencode_failed"] is True
+        assert run_result["opencode_exit_code"] == return_code
+        assert run_result["opencode_error_type"] == expected_error_type
+        assert run_result["opencode_export_found"] is True
+
 
 @mark.parametrize(
     ("failure", "error"),
