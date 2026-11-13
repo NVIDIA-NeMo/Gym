@@ -26,8 +26,8 @@ Each request contains a stable string `task_id` and a complete resolved row
 ```
 
 At `/seed_session`, the Resources Server validates required fields, the
-configured NeMo User Sim revision, and the Nemotron-Personas version (`"0.0.2"`,
-or `"synthetic"` for the committed example rows), and rejects guarded health
+configured NeMo User Sim revision, and the Nemotron-Personas version pinned for
+the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded health
 rows. It then stores the row and its canonical SHA-256 digest. At `/verify`, it
 rejects mismatched episode identity, task identity, row content, or trajectory
 identity.

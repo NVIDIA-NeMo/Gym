@@ -21,6 +21,10 @@ inputs:
     description: Base commit or ref used to determine changed files
     required: false
     default: ""
+  head-sha:
+    description: Exact checked-out commit used to determine changed files
+    required: false
+    default: ""
   force-run-all:
     description: Run the full suite without inspecting changed files
     required: false
@@ -49,6 +53,7 @@ runs:
       uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
       with:
         base_sha: ${{ inputs.base-ref }}
+        sha: ${{ inputs.head-sha || github.sha }}
         # 'files' input enables global other_changed_files_count for uncategorized files.
         files: |
           **.md

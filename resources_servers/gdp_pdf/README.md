@@ -71,8 +71,8 @@ configs run the agent in an agent session (`single_agent_turn_legacy`), so a row
 with HTTP 422. Data prepared before the key existed lacks it: run `gym eval prepare --benchmark gdp_pdf` again.
 
 `verifier_metadata.prompt` is stored explicitly so `verify()` does not have to dig the prompt back
-out of the content blocks after the agent has rewritten them. `source_pdf` is provenance only
-(re-derives the original download without guessing a filename) — never read at rollout time.
+out of the content blocks after the agent has rewritten them. The OpenCode sandbox uses
+`source_pdf` to deliver the raw PDF; the single-turn agent uses `document_manifest`.
 
 The upstream table pads every row out to 30 fixed-width rubric column groups
 (`rubric - {i}. criterion`, `... criterion_type`, and so on); `extract_criteria` in
@@ -106,10 +106,12 @@ the agent raises an error naming the exact command to run.
 | Field | Default | Meaning |
 |---|---|---|
 | `judge_model_server` | `judge_model` | Model server used for grading |
-| `judge_chat_create_params` | `max_tokens: 1024` | Judge sampling params (Chat Completions) |
+| `judge_chat_create_params` | `reasoning_effort: medium`, `max_completion_tokens: 16384` | Judge sampling params (Chat Completions); the budget covers the judge's reasoning and its verdict |
 | `judge_prompt_template_fpath` | `prompt_templates/judge.txt` | Per-criterion judge prompt |
 | `judge_max_attempts` | 5 | Attempts on parse failure before the row is excluded (see Grading) |
 | `judge_endpoint_max_concurrency` | 64 | Caps concurrent judge calls; a single task fans out to up to 30 |
+| `reward_mode` | `mean_criteria` | Training reward: `mean_criteria`, `strict_pass` or `mixed` (see Training rewards) |
+| `mixed_reward_alpha` | 0.5 | All-pass weight in the `mixed` reward; range [0, 1] |
 
 ## Grading
 
@@ -160,11 +162,25 @@ directly interchangeable across implementations.
 
 ## Metrics
 
-Every verified rollout serializes both `all_pass` and `mean_criterion_pass`; `reward` is the latter.
+Every verified rollout serializes both `all_pass` and `mean_criterion_pass`; with the default
+`reward_mode`, `reward` is the latter.
 `compute_metrics` reports both metrics overall (plus `judge_no_verdict`, the
 share of criteria where no verdict token could be parsed — watch this, a non-trivial value means the
 judge is not following the output format), with a per-domain breakdown keyed on
 `verifier_metadata.domain`.
+
+### Training rewards
+
+For training on your own GDP.pdf-style tasks, `reward_mode` chooses what `reward` is:
+`mean_criteria` (default) uses the fraction of criteria passed, `strict_pass` uses all-pass, and
+`mixed` uses `(1 - alpha) * mean_criterion_pass + alpha * all_pass` with `alpha =
+mixed_reward_alpha`. All three report `all_pass` and `mean_criterion_pass` unchanged, and the
+response records the mode in `reward_mode`. In NeMo RL, set it through the environment config, e.g.
+`env.nemo_gym.gdp_pdf.resources_servers.gdp_pdf.reward_mode=mixed`. Keep benchmark evaluation on the
+default.
+
+The agent's `mask_failed_attempts` (off by default) leaves attempts that end without a gradable
+answer out of the training loss; see `responses_api_agents/gdp_pdf_agent/README.md`.
 
 ## Data Download
 
@@ -232,3 +248,49 @@ rollout row records the DPI/compositing actually used and every rejected attempt
 ## Licensing
 
 Upstream dataset: MIT. Evaluation only — see the warning above.
+
+## GDP.pdf with OpenCode
+
+OpenCode receives the raw PDF at `/workspace/document.pdf` and the question.
+The PDF path is included in the user message; OpenCode's system prompt is unchanged.
+It can inspect text/images and run Python; the existing grader scores only the
+final answer. Rubrics and reference answers stay outside the sandbox.
+
+Run Gym on the Linux Docker host. Create an internal network and bind only the
+Gym policy-model server to its gateway; the model server forwards inference to
+your API or vLLM endpoint using the host's network.
+
+```bash
+docker build -f resources_servers/gdp_pdf/Dockerfile -t gdp-pdf-tools .
+docker network create --internal gdp-pdf
+GDP_MODEL_HOST=$(docker network inspect gdp-pdf --format '{{(index .IPAM.Config 0).Gateway}}')
+gym eval prepare --config benchmarks/gdp_pdf/opencode.yaml \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools
+gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools \
+  ++sandbox.docker.create.network=gdp-pdf \
+  ++policy_model.responses_api_models.vllm_model.host="$GDP_MODEL_HOST" \
+  +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
+  +policy_model_name=MODEL --split benchmark --num-repeats 5 \
+  --output results/gdp-pdf-opencode.jsonl
+```
+
+Set judge credentials in private `env.yaml`. Keep the other Gym servers on their
+loopback defaults. Docker's internal network blocks internet access, including
+shell requests, while permitting the model proxy at the gateway. Host services
+bound to that gateway are also reachable, so expose only the model proxy there.
+With Docker in a VM, run Gym inside that VM. Before seeding, the resources server
+checks that the Docker network is internal and rejects extra mounts/run flags.
+Other deployments require the explicit `allow_unisolated_sandbox: true` opt-out
+on the resources server. It is logged and recorded in each verification result;
+those deployments must provide their own filesystem and network isolation.
+OpenCode 1.17.11 and document tools are preinstalled in the image.
+Defaults are eight concurrent episodes, 16,384 output tokens per model call and a
+two-hour timeout, with no episode turn cap.
+
+For your own tasks, override the agent's dataset with GDP.pdf rows. Required
+`verifier_metadata` fields are `task_id`, `prompt`, `criteria` (each with `index`
+and `criterion`), `source_pdf`, and `document_manifest: ""` for this raw-PDF path.
+`source_pdf` must resolve within `documents_base_dir`. Never train on benchmark questions.

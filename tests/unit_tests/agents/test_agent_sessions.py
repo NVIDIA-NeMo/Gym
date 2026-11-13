@@ -589,3 +589,32 @@ def test_rollout_stop_marks_only_the_timeout_shaped_response_it_ended(status: st
         assert reported.model_dump(exclude={"metadata"}) == response.model_dump(exclude={"metadata"})
     else:
         assert reported is response
+
+
+def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
+    class LegacyAgent(SimpleResponsesAPIAgent):
+        pass
+
+    class SeedOnlyAgent(LegacyAgent):
+        async def _seed_agent_session_state(self, body):
+            raise RuntimeError("setup failed")
+
+    class SessionAgent(SeedOnlyAgent):
+        async def _close_agent_session_state(self, state):
+            raise RuntimeError("cleanup failed")
+
+    class InheritedSessionAgent(SessionAgent):
+        pass
+
+    class PublicSessionAgent(LegacyAgent):
+        async def seed_agent_session(self, body, request):
+            raise RuntimeError("setup failed")
+
+        async def close_agent_session(self, body, request):
+            raise RuntimeError("cleanup failed")
+
+    assert not LegacyAgent.supports_agent_sessions()
+    assert not SeedOnlyAgent.supports_agent_sessions()
+    assert SessionAgent.supports_agent_sessions()
+    assert InheritedSessionAgent.supports_agent_sessions()
+    assert PublicSessionAgent.supports_agent_sessions()

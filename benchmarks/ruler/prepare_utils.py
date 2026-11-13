@@ -67,7 +67,7 @@ def prepare_helper(
     prepared_venv = environ.get("NEMO_GYM_PREPARE_VENV")
     venv = Path(prepared_venv) if prepared_venv else BENCHMARK_DIR / ".venv"
     if not prepared_venv:
-        from nemo_gym.cli._locked_env import sync_environment
+        from nemo_gym.server_runtime.supervisor import sync_environment
 
         sync_environment(BENCHMARK_DIR, venv, executable, [], [])
 

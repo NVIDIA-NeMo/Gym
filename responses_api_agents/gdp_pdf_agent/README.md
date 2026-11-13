@@ -41,6 +41,7 @@ writes them, `pages/<file>`); the agent refuses a manifest that names an image a
 | `include_images` | `true` | Attach the manifest's rendered page images |
 | `strip_images_from_output` | `true` | Drop base64 from the saved rollout artifacts |
 | `regenerate_on_incomplete_output` | `false` | Regenerate an incomplete answer with a smaller image footprint instead of keeping it as the result. Only for reproducing the earlier behaviour; counted in `document_delivery.output_truncation_regenerations` |
+| `mask_failed_attempts` | `false` | Training only: mark attempts that end without a gradable answer with `mask_sample` (see below) |
 
 `max_steps: 1` — GDP.pdf is single-turn with no tools.
 
@@ -81,6 +82,17 @@ the endpoint rejected for their input size, each answered by a smaller delivery)
 also carries them as `agent_adaptations`, which the run's failure facts sum per run under
 `failures.agent_adaptations`. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
 as a `multimodal_history_redacted` gap on the trajectory.
+
+## Failed attempts in training
+
+An attempt can end without a gradable answer when the input still does not fit after the backoff
+(a context, image-count or payload limit). It then scores 0 and carries a `failure_reason`.
+Evaluation should count that zero, so `mask_failed_attempts` is off by default. For training the
+zero says nothing about an answer, so set `mask_failed_attempts: true`: such attempts get
+`mask_sample: true` and a `failure_kind` (`model_context_limit` for a context limit,
+`model_request_error` for an image-count or payload limit), and the trainer leaves them out of the
+loss. A failed policy call or `/verify` is masked in either mode, and rows whose judge call failed
+are already masked by `judge_failsafe`.
 
 ## Agent sessions
 

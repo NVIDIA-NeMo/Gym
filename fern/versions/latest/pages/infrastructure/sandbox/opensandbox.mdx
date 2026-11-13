@@ -166,6 +166,12 @@ A `resource_requests` entry above the sandbox's limit is clamped to the limit wi
 declares no `resources` is held to the SDK's default limits (1 CPU, 2048 MiB), since those are what the
 server applies.
 
+When a create attempt times out or the caller cancels it, the provider finds the sandbox the attempt
+left behind by the attempt's metadata key, deletes it and cancels the create request. If it finds none
+(the server had not recorded the sandbox yet, or the lookup failed), it lets the request finish and
+deletes the sandbox the server's answer names. `aclose()` waits up to `operations.close_timeout_s` for
+those requests.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
@@ -327,7 +333,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 ## Network Policy
 
-`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.agents.agent_tools` builds one from endpoint URLs, and a harness that creates its own sandbox applies its `network_access` setting with `restrict_sandbox_network` in `nemo_gym.agents.utils.sandbox_network`, which builds that policy for the model and tool endpoints (see [Restrict the egress of an owned sandbox](/main/agent-server/add-or-update-a-harness#restrict-the-egress-of-an-owned-sandbox)); the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
+`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.utils.network_policy` (also importable from `nemo_gym.agents`) builds one from endpoint URLs. A harness that creates its own sandbox applies its `network_access` setting with `restrict_sandbox_network` in `nemo_gym.agents.utils.sandbox_network`, which builds that policy for the model and tool endpoints (see [Restrict the egress of an owned sandbox](/main/agent-server/add-or-update-a-harness#restrict-the-egress-of-an-owned-sandbox)). A resources server that lends a sandbox with `LentSandboxes` passes `network_access="model_only"` and `model_server`, and each lent sandbox then reaches only that model server's host. With `network_access="model_and_tools"` and `tool_servers` (the servers whose tools the harness calls over MCP, such as the resources server itself), it also reaches their hosts; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
 
 ```yaml
 sandbox_spec:
@@ -469,7 +475,7 @@ The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
 | Integer uid | Pass the uid through the OpenSandbox command options. |
 | Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
 
-Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. For session commands, Gym observes its own deadline directly: it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
+Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. Gym observes its own deadline directly. For session commands it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. For background commands (`operations.background_exec: true`) it records `provider_command_timeout`, interrupts a command still running at the deadline and returns code `124` with `error_type="timeout"`; execd's own timer is set `command_timeout_headroom_s / 2` later and only stops a command whose interrupt was refused. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
 
 If background status reads keep reporting `running=True` until Gym's overall client wait expires, Gym reports
 `provider_command_outcome_unknown` and retains that last Running observation in the reason. Failed status reads

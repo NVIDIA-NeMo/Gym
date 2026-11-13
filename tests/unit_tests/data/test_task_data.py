@@ -204,6 +204,16 @@ class TestTaskDataValidator:
         assert v.report.unknown_keys == {"difficulty": 1}
         assert "difficulty" in v.report.summary()
 
+    @pytest.mark.parametrize("skip_token_capture", [True, False])
+    def test_the_skip_token_capture_key_is_framework_owned(self, skip_token_capture):
+        v = self._validator()
+        row = {"question": "q", "expected_answer": "a", "_ng_skip_token_capture": skip_token_capture}
+        v.validate_row(0, row)
+        assert v.report.clean and v.report.unknown_keys == {}
+        # Only that key is reserved: a typo beside it still makes the report dirty.
+        v.validate_row(1, row | {"typo": 1})
+        assert v.report.unknown_keys == {"typo": 1}
+
     def test_conflicting_duplicate_marks_report_dirty(self):
         v = self._validator()
         v.validate_row(0, {"question": "q", "expected_answer": "a", "verifier_metadata": {"question": "other"}})

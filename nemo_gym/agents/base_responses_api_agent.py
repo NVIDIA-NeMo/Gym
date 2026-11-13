@@ -61,13 +61,28 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.episode_context import (
+    current_rollout_skips_token_capture,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+    skip_token_capture_context,
+    skips_token_capture,
+)
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
 from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.model_call_sampling import (
+    MODEL_SAMPLING_NULL,
+    current_model_sampling_segment,
+    encode_model_sampling,
+    model_sampling_context,
+    model_sampling_from_run_body,
+    model_sampling_path_segment,
+)
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -86,7 +101,10 @@ from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym.server_runtime._checkpoint.steps import (
+    CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER,
+    CHECKPOINT_RESTART_HEADER,
+)
 from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
@@ -95,6 +113,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
@@ -448,6 +467,22 @@ def _agent_boundary(
     return bounded
 
 
+def _without_token_capture(endpoint: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """``endpoint`` with token capture off for the model calls it makes.
+
+    It serves a rollout path without the training tag. The caller that built the path decided not to capture
+    this rollout's calls (an Environment Server, or a ``/run`` whose rollout skips capture), so the agent's
+    own ``token_id_capture`` setting does not turn it back on.
+    """
+
+    @wraps(endpoint)
+    async def without_capture(*args: Any, **kwargs: Any) -> Any:
+        with skip_token_capture_context(True):
+            return await endpoint(*args, **kwargs)
+
+    return without_capture
+
+
 class AgentSessionSetupError(Exception):
     """Retain incomplete setup for close while propagating the original setup error."""
 
@@ -470,6 +505,8 @@ class _AgentSessionRecord:
     # A rollout stop that arrived while the session was still seeding, and the caller's reason.
     stop_requested: bool = False
     stop_reason: str | None = None
+    # Installed by a checkpoint restore and not yet seeded again by its replacement attempt.
+    restored: bool = False
 
 
 # Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
@@ -537,6 +574,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
     # With several workers, which worker owns each agent_session_id (see nemo_gym.server_runtime.request_handling.session_routing).
     _agent_session_owners: Optional[SessionOwners] = PrivateAttr(default=None)
+
+    @classmethod
+    def supports_agent_sessions(cls) -> bool:
+        """Whether the agent implements session seed and close, directly or by inheritance."""
+        # Every agent exposes the session routes, including ones whose handlers raise NotImplementedError.
+        # Check implementations, not route presence.
+        return all(
+            getattr(cls, handler) is not getattr(SimpleResponsesAPIAgent, handler)
+            or getattr(cls, hook) is not getattr(SimpleResponsesAPIAgent, hook)
+            for handler, hook in (
+                ("seed_agent_session", "_seed_agent_session_state"),
+                ("close_agent_session", "_close_agent_session_state"),
+            )
+        )
 
     def owned_session_routing(self) -> dict[str, Any]:
         return {"kind": AGENT_SESSIONS, "agent_sessions": self}
@@ -707,8 +758,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # Agents that implement the AgentSessionHooks methods declare "exported".
     # The default fails closed: unfinished rollouts are restarts, which start over from their input after a crash.
     checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
+    # Whether a restored session takes the tool grants its replacement attempt's seed carries,
+    # such as a new MCP session token, in ``_rebind_restored_agent_session_state``.
+    # The seed reply says so, and an environment server then continues an episode with tool grants after a restore
+    # instead of starting it over.
+    rebinds_tool_accesses: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
     _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
+
+        Status, discovery and seed replies report it. An agent whose capture depends on its configuration,
+        such as on a sandbox provider that can snapshot, overrides it.
+        """
+        return self.checkpoint_mode
 
     @property
     def checkpoint_participant(self) -> Optional[AgentSessionParticipant]:
@@ -733,14 +797,26 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "restart_only":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in _AGENT_CHECKPOINT_MODES:
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode == "restart_only":
             # Fail closed: in-flight work is reported as restarts,
             # which never hold up a checkpoint and start over after a crash.
             self._restart_only = RestartOnlyAgentParticipant(self.retire_agent_session)
             participant = self._restart_only
             app.add_middleware(RestartOnlyTrackingMiddleware, participant=self._restart_only)
         else:
+            if self.rebinds_tool_accesses and not self._rebinds_restored_sessions():
+                # Its seed replies would let MCP episodes continue after a restore, and the re-seed would refuse them.
+                raise ValueError(
+                    f"{type(self).__name__} declares rebinds_tool_accesses but does not override "
+                    "_rebind_restored_agent_session_state, so a restored session could not take new tool grants"
+                )
             self._checkpoint_participant = AgentSessionParticipant(self)
+            self._checkpoint_participant.keeps_external_state = (
+                type(self).delete_external_state is not SimpleResponsesAPIAgent.delete_external_state
+            )
             participant = self._checkpoint_participant
         install_server_participant(
             app,
@@ -751,8 +827,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             instance_name=self.config.name,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
-        """Return the state of every session in ``session_keys`` for a checkpoint."""
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
+        """Return the state of every session in ``session_keys`` for checkpoint ``checkpoint_id``."""
         raise NotImplementedError
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -776,6 +854,59 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     await self._close_agent_session_state(record.state)
             record.state = None
 
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as snapshots of sandboxes the
+        agent owns. The default keeps nothing outside Gym.
+
+        Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;
+        an empty ``kept`` means nothing will be restored again.
+
+        - It holds the control lock: no prepare, commit, or restore runs meanwhile, and no checkpoint is open.
+        - It is cancelled at the release request's deadline, and the controller releases again later,
+          so it must tolerate state an earlier call already deleted and resume a deletion one left half done.
+        - Admission stays open: activations keep running, so it must not touch what live sessions use.
+        - With several workers every worker runs it, so deleting what another worker already deleted must not fail.
+        - Keep by reference, not by age: keep whatever a checkpoint in ``kept`` refers to, and delete the rest.
+        """
+
+    def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
+        """Whether this agent cannot capture the session ``body`` seeds, so its episode starts over after a crash.
+
+        An exported agent whose session state lives where no checkpoint reaches it, such as a sandbox it owns
+        without a snapshot, says so here. The seed reply then carries the restart header,
+        and the session is never exported nor waited for.
+        It only adds restarts: whatever it returns, ``_seed_must_restart`` restarts a session the agent could
+        not continue after a restore. The default adds none.
+        """
+        return False
+
+    def _seed_must_restart(self, body: AgentSeedSessionRequest) -> bool:
+        """Whether the session ``body`` seeds could not continue after a restore, whatever ``_seed_restarts`` says.
+
+        - A session granted MCP tools, unless the agent declares ``rebinds_tool_accesses``: its MCP session token
+          names the seeding attempt, and the Resources Server refuses it once a restore replaces that attempt.
+        - A session lent a sandbox, unless the agent re-binds restored sessions: the replacement attempt seeds it
+          with another sandbox, and the default ``_rebind_restored_agent_session_state`` refuses that seed.
+
+        Deciding it at the seed, before the session exists, keeps every checkpoint from exporting it.
+        """
+        if body.sandbox_access is not None and not self._rebinds_restored_sessions():
+            return True
+        return not self.rebinds_tool_accesses and any(access.kind == "mcp" for access in body.tool_accesses)
+
+    async def _rebind_restored_agent_session_state(
+        self, state: AgentSessionState, body: AgentSeedSessionRequest
+    ) -> AgentSessionState:
+        """Re-bind a restored session to the seed of the attempt that continues it, and return its state.
+
+        After a restore the environment server seeds the session again under the replacement attempt, with that
+        attempt's sandbox access and tool grants, which differ from the restored request.
+        An agent whose session borrows a sandbox overrides this to connect the new sandbox, and to take the new
+        grants if it declares ``rebinds_tool_accesses``. The base sets ``state.request`` to ``body`` afterwards.
+        The default refuses, as for any other seed that conflicts with the bound one.
+        """
+        raise AgentSessionConflictError("agent_session_id is already bound to another seed request")
+
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""
         accesses = {access.name: access for access in self.config.tool_accesses}
@@ -798,7 +929,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(traced_responses)
+        # Only the training-tagged twin captures: the caller that built the path decided.
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(_without_token_capture(traced_responses))
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
 
         # Traced *inside* rollout_context, not outside it. The span reads
@@ -813,7 +945,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(self.rollout_id_from_run(body)):
+            # The run's own rollout setting applies first, so its rollout id and model URLs follow it.
+            with (
+                skip_token_capture_context(skips_token_capture(body)),
+                rollout_context(self.rollout_id_from_run(body)),
+                model_sampling_context(self.model_sampling_segment_for_run(body)),
+            ):
                 return await run(*args, **kwargs)
 
         app.post("/run")(_agent_boundary(run_with_rollout_context, app=app, operation="agent.run", stage="agent"))
@@ -825,6 +962,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/rollouts/{rollout_id}/stop")(self.stop_rollout)
         app.get("/v1/agent_sessions/capabilities")(self.agent_session_capabilities)
 
+        # Outermost, so the session and checkpoint middleware route an activation without its sampling segment.
+        app.add_middleware(ModelSamplingContextMiddleware)
         return app
 
     @asynccontextmanager
@@ -885,7 +1024,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         except AgentSeedRejectedError as error:
             _log_seed_refusal(body.agent_session_id, error)
             raise
-        if self._restart_only is not None and response is not None:
+        restarts = self._restart_only is not None or (
+            self._checkpoint_participant is not None and (self._seed_restarts(body) or self._seed_must_restart(body))
+        )
+        if restarts and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
         capabilities = self._agent_continuation_capabilities() if body.continuation is not None else None
@@ -930,7 +1072,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise
                 try:
                     if participant is not None:
-                        participant.open_session(body.agent_session_id, body.episode_id, seed=True)
+                        participant.open_session(body.agent_session_id, body.episode_id, seed=True, restart=restarts)
                     elif self._restart_only is not None:
                         self._restart_only.open_session(body.agent_session_id, body.episode_id)
                 except Exception:
@@ -940,8 +1082,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise
                 if record.stop_requested and (session := self._rollout_sandbox_session(record.state)) is not None:
                     await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=record.stop_reason)
-            elif record.state.request != body:
-                raise AgentSessionConflictError("agent_session_id is already bound to another seed request")
+            elif record.state.request != body or (record.restored and self._rebinds_restored_sessions()):
+                # An agent that re-binds restored sessions does so even for an unchanged seed:
+                # its restore installed the session without a connection to the sandbox the seed names.
+                if not self._rebinds(record, body):
+                    raise AgentSessionConflictError("agent_session_id is already bound to another seed request")
+                record.state = await self._rebind_restored_agent_session_state(
+                    record.state, body.model_copy(deep=True)
+                )
+                record.state.request = body.model_copy(deep=True)
+                record.restored = False
+            if participant is not None and self.rebinds_tool_accesses and response is not None:
+                response.headers[CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER] = "1"
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return AgentSeedSessionResponse(
                 agent_session_id=body.agent_session_id,
@@ -1037,6 +1189,25 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.close_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         return await asyncio.shield(record.close_task)
 
+    def _rebinds_restored_sessions(self) -> bool:
+        """Whether this agent re-binds restored sessions, by overriding ``_rebind_restored_agent_session_state``."""
+        return (
+            type(self)._rebind_restored_agent_session_state
+            is not SimpleResponsesAPIAgent._rebind_restored_agent_session_state
+        )
+
+    def _rebinds(self, record: _AgentSessionRecord, body: AgentSeedSessionRequest) -> bool:
+        """Whether ``body`` is the replacement attempt's seed of a restored session that nothing has used yet."""
+        participant = self._checkpoint_participant
+        state = record.state
+        return (
+            participant is not None
+            and record.restored
+            and participant.restored_episode(body.agent_session_id) == body.episode_id
+            and state.request.task_id == body.task_id
+            and state.request.continuation == body.continuation
+        )
+
     def _require_current_session(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
         if self._session_records.get(agent_session_id) is not record:
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
@@ -1066,7 +1237,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def _install_restored_session(self, agent_session_id: str, state: AgentSessionState) -> None:
         """Install a session restored from a checkpoint, as its replacement attempt's seed would have."""
-        self._session_records[agent_session_id] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+        self._session_records[agent_session_id] = _AgentSessionRecord(
+            state=state, episode_id=state.request.episode_id, restored=True
+        )
         self._acquire_rollout_ownership(state.request.episode_id)
 
     def _release_retired_session(self, agent_session_id: str) -> None:
@@ -1241,14 +1414,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        ``rollout_correlation`` adds the prefix without any capture, e.g. so a model server can route by rollout.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
+        A rollout that skips capture keeps its correlation and drops only the training tag.
         Partial-rollout checkpointing also needs it for this agent.
         Missing global configuration disables correlation.
         """
         return (
             self._model_call_capture_enabled()
-            or self._token_id_capture_enabled()
+            or self._rollout_correlation_enabled()
+            or self._token_id_capture_configured()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
             or self._restart_only is not None
@@ -1261,8 +1437,23 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
 
+    def _rollout_correlation_enabled(self) -> bool:
+        """Whether the run asked for rollout prefixes without capture."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(ROLLOUT_CORRELATION_KEY_NAME, False))
+
     def _token_id_capture_enabled(self) -> bool:
-        """Whether this agent explicitly opted into training-token capture."""
+        """Whether this agent captures training tokens for the request it is handling.
+
+        The agent must opt in (or the run sets ``all_agents``), and the request's rollout must not skip capture:
+        a ``/run`` with ``_ng_skip_token_capture: true``, or an activation on a rollout path without the training tag.
+        """
+        return not current_rollout_skips_token_capture() and self._token_id_capture_configured()
+
+    def _token_id_capture_configured(self) -> bool:
+        """Whether the run's configuration has this agent capture training tokens, whatever the request."""
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
@@ -1283,55 +1474,97 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return None
         return maybe_rollout_id_from_run_body(body)
 
-    def url_path_for_run(self, url_path: str, body: Any) -> str:
-        """Apply this run's capture path to a downstream URL path.
+    def model_sampling_segment_for_run(self, body: Any, *, trained: bool = True) -> Optional[str]:
+        """Return the sampling segment for a run's model calls: the run's own values, else the current request's.
+
+        A run carries values when a training framework trains this agent (``nemo_gym.core.model_call_sampling``).
+        A role the agent runs that the framework does not train (``trained=False``), such as a simulated user or a
+        judge, gets ``null`` wherever the run carries a segment, so it keeps its own sampling.
+        """
+        sampling = model_sampling_from_run_body(body)
+        segment = encode_model_sampling(sampling) if sampling is not None else current_model_sampling_segment()
+        return segment if trained or segment is None else MODEL_SAMPLING_NULL
+
+    def url_path_for_run(self, url_path: str, body: Any, *, trained: bool = True) -> str:
+        """Apply this run's capture path and sampling segment to a downstream URL path.
 
         Evaluation uses ``/ng-rollout/<id>/...``.
-        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
-        Calls without a rollout id remain unchanged.
+        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``, unless the run's rollout skips capture
+        with ``_ng_skip_token_capture: true``.
+        A run with sampling values adds ``/ng-sampling/<values>`` after the rollout prefix, or ``null`` for a role the
+        framework does not train (``trained=False``).
+        Calls without a rollout id or values remain unchanged.
         """
         return (
-            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
+            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._run_captures(body))}"
+            f"{model_sampling_path_segment(self.model_sampling_segment_for_run(body, trained=trained))}"
             f"{url_path}"
         )
 
-    def base_url_for_run(self, base_url: str, body: Any) -> str:
-        """Apply this run's capture path to a model-server root URL.
+    def base_url_for_run(self, base_url: str, body: Any, *, trained: bool = True) -> str:
+        """Apply this run's capture path and sampling segment to a model-server root URL.
 
         Append the API-version suffix after this method returns. While traces export, the URL also
         names this run's current span, so the model server parents calls that arrive without a
-        ``traceparent`` header (a harness in a sandbox) to it.
+        ``traceparent`` header (a harness in a sandbox) to it. A role the framework does not train
+        (``trained=False``) gets ``null`` instead of the run's values.
         """
         return apply_rollout_prefix(
             base_url,
             self.rollout_id_from_run(body),
-            token_capture=self._token_id_capture_enabled(),
+            token_capture=self._run_captures(body),
+            model_sampling=self.model_sampling_segment_for_run(body, trained=trained),
         )
 
+    def _run_captures(self, body: Any) -> bool:
+        """Whether a run's model calls carry the training tag.
+
+        The run's own ``_ng_skip_token_capture`` applies even for an agent whose ``/run`` route does not set the
+        rollout's capture context.
+        """
+        return self._token_id_capture_enabled() and not skips_token_capture(body)
+
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
-        """Carry an inbound capture path onto a downstream URL path.
+        """Carry an inbound capture path and sampling segment onto a downstream URL path.
 
         Prefixed self-calls expose the rollout id as a path parameter.
         Training-capture requests preserve their dedicated path segment.
+        A request that arrived with a sampling segment passes it on after the rollout prefix.
         Unprefixed requests remain unchanged.
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         request_path = getattr(getattr(request, "url", None), "path", "")
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
-        return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
+        return (
+            f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}"
+            f"{model_sampling_path_segment(current_model_sampling_segment())}"
+            f"{url_path}"
+        )
 
     def resolve_model_base_url(
-        self, model_server_name: str, rollout_id: Optional[str] = None, *, trace_context: bool = True
+        self,
+        model_server_name: str,
+        rollout_id: Optional[str] = None,
+        *,
+        trace_context: bool = True,
+        trained: bool = True,
     ) -> str:
-        """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``).
+        """Resolve a model-server URL with an optional rollout prefix (and trace context and sampling segment, as
+        ``base_url_for_run``).
 
-        Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using.
+        Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using, and
+        ``trained=False`` for a role the training framework does not train, which keeps its own sampling.
         """
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
+        untrained = not trained and trace_context and current_model_sampling_segment() is not None
         prefixed = apply_rollout_prefix(
-            base_url, rollout_id, token_capture=self._token_id_capture_enabled(), trace_context=trace_context
+            base_url,
+            rollout_id,
+            token_capture=self._token_id_capture_enabled(),
+            trace_context=trace_context,
+            model_sampling=MODEL_SAMPLING_NULL if untrained else None,
         )
         return f"{prefixed}/v1"
 

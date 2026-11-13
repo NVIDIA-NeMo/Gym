@@ -41,7 +41,7 @@ async def test_one_actual_http_attempt(tmp_path, monkeypatch, rebind, failure, e
     async def handle(request):
         received.append(await request.json())
         if failure == "timeout":
-            await asyncio.sleep(1)
+            await asyncio.sleep(30)
         return web.json_response(
             {"error": {"message": "controlled unavailable"}}, status=503, headers={"Retry-After": "60"}
         )
@@ -59,7 +59,8 @@ async def test_one_actual_http_attempt(tmp_path, monkeypatch, rebind, failure, e
         endpoint_file=str(endpoint) if rebind else None,
         max_http_attempts=1,
         max_num_tries=1 if explicit_transport_bound else None,
-        request_timeout_seconds=0.04,
+        # Only the timeout case should hit the request timeout; a 503 round trip gets ample time on a busy runner.
+        request_timeout_seconds=0.5 if failure == "timeout" else 10,
     )
     server = VLLMModel(config=config(**overrides), server_client=MagicMock(spec=ServerClient))
     if rebind:
@@ -77,7 +78,8 @@ async def test_one_actual_http_attempt(tmp_path, monkeypatch, rebind, failure, e
                 await client.create_chat_completion(model="test", messages=[{"role": "user", "content": "test"}])
             elapsed = time.monotonic() - started
             assert len(received) == 1
-            assert elapsed < 0.3
+            # Far below the 60 s Retry-After and the 30 s stall, so neither was waited out.
+            assert elapsed < 5
             assert client.max_http_attempts == 1
             assert client.max_num_tries == overrides["max_num_tries"]
     finally:
