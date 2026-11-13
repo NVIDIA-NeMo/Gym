@@ -539,12 +539,19 @@ class RecoveryDecision(BaseModel):
     # is named), ``cpu_placement`` (the scheduler refused the CPU partition or QOS), ``served_placement`` (it refused the
     # saved node pool of a run that serves its judge, which no recovery option changes), ``unsupported_profile`` (the
     # saved config has no judge execution profile, decided locally before any scheduler call), ``refused`` (the
-    # scheduler or the dispatch refused it for a definite reason that is not placement, such as an invalid time limit)
-    # or ``other`` (the scheduler did not answer). The operator verdict offers the judge placement options only for
-    # the first two.
+    # scheduler refused it for a definite reason that is not placement, such as an invalid time limit), ``concurrent``
+    # (the dispatch found another recovery's lock or a job of the run on the scheduler: it waits) or ``other`` (the
+    # scheduler did not answer, or whether the job was queued is not known). The operator verdict offers the judge
+    # placement options only for the first two.
     judge_refusal: (
         Literal[
-            "cpu_partition_unknown", "cpu_placement", "served_placement", "unsupported_profile", "refused", "other"
+            "cpu_partition_unknown",
+            "cpu_placement",
+            "served_placement",
+            "unsupported_profile",
+            "refused",
+            "concurrent",
+            "other",
         ]
         | None
     ) = Field(default=None, exclude=True)
@@ -6880,14 +6887,22 @@ def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> 
             "refusal): remove what it names, then inspect again; waiting for the scheduler does not change it "
             "(completed work is kept)",
         )
-    if decision.judge_refusal == "other":
-        # The scheduler did not answer: its own diagnostic is in the reason.
+    if decision.judge_refusal == "concurrent":
+        # The dispatch's own guard: another recovery or a job of the run is active. Its lock and job are protection and
+        # work in progress, not an obstacle to remove.
         return _verdict(
             "needs_action",
             stopped,
-            f"the judge-only job could not be queued because the scheduler did not answer (the reason has its "
-            f"diagnostic): wait until the scheduler answers and inspect again, then {_command(decision)} (completed "
-            "work is kept)",
+            "another recovery of this run or a job of it is active, so the judge-only job was not queued: wait until "
+            "it ends and inspect again; do not remove its lock or cancel its job (completed work is kept)",
+        )
+    if decision.judge_refusal == "other":
+        # The scheduler did not answer, or the job's acknowledgement is missing: its own diagnostic is in the reason.
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"the judge-only job could not be confirmed queued, so it may exist (the reason has the diagnostic): "
+            f"wait until the scheduler answers and inspect again, then {_command(decision)} (completed work is kept)",
         )
     if kind in _TYPED_REMEDIES and decision.chain_stop_kind is None:
         # Every terminal row is the typed failure: its fix, then the recovery its own text names. A chain's typed

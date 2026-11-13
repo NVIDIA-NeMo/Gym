@@ -210,12 +210,32 @@ _SCHEDULER_UNAVAILABLE = re.compile(
 )
 
 
+# The dispatch script's own words when the scheduler refused the judge-only job's allocation (an sbatch that exited
+# nonzero); the text after it is the scheduler's.
+JUDGE_ALLOCATION_REFUSED = "judge allocation not admitted"
+# The dispatch script's own guards: a concurrent recovery holds the run's lock, or a job of the run (or a live
+# allocation of its chain) is still on the scheduler. Neither is a refusal of the judge-only job; waiting is the answer.
+_DISPATCH_CONCURRENCY = re.compile(
+    r"another recovery holds the lock|a job of this run is still pending or running|"
+    r"an original allocation is still live",
+    re.IGNORECASE,
+)
+
+
 def placement_refusal(diagnostic: str, served: bool) -> str:
-    """The ``RecoveryDecision.judge_refusal`` of a judge-only job the scheduler did not take: its partition or QOS
-    (``cpu_placement``, or ``served_placement`` for a run that serves its judge on its own saved node pool), else
-    ``other`` when the scheduler did not answer, else ``refused`` (a definite refusal of another kind)."""
-    if not _PLACEMENT_REFUSAL.search(diagnostic):
-        return "other" if _SCHEDULER_UNAVAILABLE.search(diagnostic) else "refused"
+    """The ``RecoveryDecision.judge_refusal`` of a judge-only job the dispatch did not queue.
+
+    Only the scheduler's own refusal of the allocation (``JUDGE_ALLOCATION_REFUSED``) is a placement problem
+    (``cpu_placement``, or ``served_placement`` for a run that serves its judge on its own saved node pool) or a
+    definite refusal of another kind (``refused``); a scheduler that did not answer is ``other``. A dispatch guard that
+    found a concurrent recovery or job of the run is ``concurrent``, and anything else (an acknowledgement that is
+    missing or unknown, a failed staging or journaling step) stays ``other``: whether the job was queued is not known.
+    """
+    _, found, refusal = diagnostic.partition(JUDGE_ALLOCATION_REFUSED)
+    if not found:
+        return "concurrent" if _DISPATCH_CONCURRENCY.search(diagnostic) else "other"
+    if not _PLACEMENT_REFUSAL.search(refusal):
+        return "other" if _SCHEDULER_UNAVAILABLE.search(refusal) else "refused"
     return "served_placement" if served else "cpu_placement"
 
 

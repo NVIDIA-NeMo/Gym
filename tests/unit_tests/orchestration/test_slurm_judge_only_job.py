@@ -627,3 +627,66 @@ def test_a_definite_refusal_that_is_not_placement_is_not_told_to_wait_for_the_sc
     action = out.operator_verdict["action"]
     assert "definite reason" in action and "wait until the scheduler answers" not in action
     assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
+
+
+def _assert_waits_and_keeps_the_guard(out, job_dir, judge_slurm_bin) -> None:
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert out.decision.judge_refusal == "concurrent", out.decision.reason
+    assert not (judge_slurm_bin / "sbatch_count").exists() and _journal(job_dir) == []
+    action = out.operator_verdict["action"]
+    assert "wait until it ends" in action and "do not remove its lock or cancel its job" in action
+    assert "remove what it names" not in action and "definite reason" not in action
+    assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
+
+
+def test_a_recovery_lock_held_at_dispatch_is_waited_for_not_called_a_definite_refusal(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    lock = job_dir / ".gym_resubmit.lock"
+    lock.write_text("")
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert "another recovery holds the lock" in out.unsupported
+    _assert_waits_and_keeps_the_guard(out, job_dir, judge_slurm_bin)
+    assert lock.exists()
+
+
+def test_a_job_that_appears_between_inspection_and_dispatch_is_waited_for_not_called_a_definite_refusal(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    # The inspection sees no job of the run; the dispatch's recheck, which runs under its lock, sees one.
+    (judge_slurm_bin / "squeue").write_text(
+        '#!/bin/bash\nhere="$(dirname "$0")"\n'
+        'if [[ " $* " == *" -j "* ]]; then cat "$here/squeue_jobs" 2>/dev/null; exit 0; fi\n'
+        'if [ -e .gym_resubmit.lock ]; then echo "$PWD"; fi\nexit 0\n'
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert "still pending or running" in out.unsupported
+    _assert_waits_and_keeps_the_guard(out, job_dir, judge_slurm_bin)
+    assert not (job_dir / ".gym_resubmit.lock").exists()
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "no scheduler acknowledgement",
+        "sbatch exited 0 with no output",
+        "Error: unknown job identity",
+        "Error: scheduler unknown",
+        "Error: cannot journal the judge-only job",
+    ],
+)
+def test_a_missing_or_unknown_job_acknowledgement_stays_uncertain(diagnostic) -> None:
+    from nemo_gym.orchestration.executors.judge_profile import placement_refusal
+
+    assert placement_refusal(diagnostic, served=False) == "other"
+    assert placement_refusal(diagnostic, served=True) == "other"
+    assert (
+        placement_refusal("Error: judge allocation not admitted: sbatch: error: Invalid time limit", False)
+        == "refused"
+    )
