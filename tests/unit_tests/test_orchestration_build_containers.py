@@ -1186,7 +1186,8 @@ def test_build_failure_does_not_submit_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("status", [0, 37])
-async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeypatch, status):
+@pytest.mark.parametrize("args_mode", ["evaluation", "omitted", "empty_list", "empty_string"])
+async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeypatch, status, args_mode):
     benchmark = tmp_path / BENCHMARK
     benchmark.mkdir(parents=True)
     for name in ("sbatch_external_vllm.sh", "save_warmed_vllm_container.py"):
@@ -1209,6 +1210,17 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     monkeypatch.setenv("NODELIST", "")
     monkeypatch.setenv("SAVE_WARMED_CONTAINER", "must-not-export.sqsh")
     monkeypatch.setenv("SBATCH_WAIT", "1")
+    monkeypatch.delenv("EXPERIMENT_NAME", raising=False)
+    monkeypatch.delenv("eval_command", raising=False)
+    run_args = {
+        "evaluation": {
+            "args": '--config model.yaml \\\n--config benchmark.yaml \\\n"++text=spaces $(touch INJECTED)"'
+        },
+        "omitted": {},
+        "empty_list": {"args": []},
+        "empty_string": {"args": ""},
+    }[args_mode]
+    evaluation = args_mode == "evaluation"
     config = BuildContainerConfig(
         input_container_fpath="missing.sqsh",
         output_container_fpath="built image.sqsh",
@@ -1218,14 +1230,14 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
                 "MODEL": "/models/test",
                 "VLLM_CONFIG": "serving.sh",
                 "MOUNTS": f"{tmp_path}:/opt/Gym",
-                "EXPERIMENT_NAME": "eval-test",
+                **({"EXPERIMENT_NAME": "eval-test"} if evaluation else {}),
                 "NUM_PREFILL_NODES": 2,
                 "NUM_DECODE_NODES": 2,
                 "ENABLE_MOONCAKE": True,
                 "SBATCH_TIMELIMIT": "01:30:00",
                 "SBATCH_QOS": "short",
             },
-            args='--config model.yaml \\\n--config benchmark.yaml \\\n"++text=spaces $(touch INJECTED)"',
+            **run_args,
         ),
     )
     config.output_container_fpath.write_bytes(b"built and warmed")
@@ -1237,7 +1249,7 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     else:
         await launch
     submissions = [json.loads(line) for line in (tmp_path / "submitted.jsonl").read_text().splitlines()]
-    assert len(submissions) == (1 if status else 2)
+    assert len(submissions) == (2 if evaluation and not status else 1)
     job = submissions[0]
     assert "--time=01:30:00" in job["args"]
     assert job["env"]["SBATCH_ACCOUNT"] == "build-account"
@@ -1247,8 +1259,14 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     assert job["env"]["CONTAINER"] == str(config.output_container_fpath)
     assert "SBATCH_WAIT" not in job["env"]
     assert "SAVE_WARMED_CONTAINER" not in job["env"]
-    prepare = next(line for line in job["env"]["eval_command"].splitlines() if line.startswith("gym eval prepare "))
-    assert shlex.split(prepare)[3:-1] == config.run.args
+    if evaluation:
+        prepare = next(
+            line for line in job["env"]["eval_command"].splitlines() if line.startswith("gym eval prepare ")
+        )
+        assert shlex.split(prepare)[3:-1] == config.run.args
+    else:
+        assert config.run.args == []
+        assert "vllm_only" in " ".join(job["args"])
     assert config.output_container_fpath.read_bytes() == b"built and warmed"
     assert config.log_file.read_text().startswith("existing build log\n")
     assert not (tmp_path / "INJECTED").exists()

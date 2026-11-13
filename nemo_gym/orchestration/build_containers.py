@@ -94,10 +94,10 @@ class WarmupConfig(BaseNeMoGymCLIConfig):
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
-    """Submit an evaluation with the built image, using literal environment values and arguments."""
+    """Submit evaluation or serving with the built image; empty args launch only vLLM."""
 
     env: dict[str, str | int | float | bool]
-    args: list[str] = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
 
     @field_validator("args", mode="before")
     @classmethod
@@ -154,7 +154,7 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
         if self.run_after_build and self.run_only:
             raise ValueError("--run and --run-only are mutually exclusive")
         if (self.run_after_build or self.run_only) and self.run is None:
-            raise ValueError("Define run.env and run.args in the container config before using --run or --run-only")
+            raise ValueError("Define run.env in the container config before using --run or --run-only")
 
         self.input_container_fpath = self.input_container_fpath.resolve()
         self.output_container_fpath = self.output_container_fpath.resolve()
@@ -934,7 +934,7 @@ class BuildContainerHelper(BaseModel):
         """Submit the YAML's run configuration without rebuilding or modifying the image."""
         config = self.config.run
         if config is None:
-            raise ValueError("Define run.env and run.args in the container config before using --run or --run-only")
+            raise ValueError("Define run.env in the container config before using --run or --run-only")
         launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
         if not launcher.is_file():
             raise FileNotFoundError(f"Launcher not found: {launcher}. Run from the Gym checkout.")
@@ -945,7 +945,7 @@ class BuildContainerHelper(BaseModel):
             {key: str(int(value)) if isinstance(value, bool) else str(value) for key, value in config.env.items()}
         )
         env["CONTAINER"] = str(self.config.output_container_fpath)
-        if not env.get("EXPERIMENT_NAME"):
+        if config.args and not env.get("EXPERIMENT_NAME"):
             raise ValueError("Set run.env.EXPERIMENT_NAME for the evaluation run")
         self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
         Path("slurm-logs").mkdir(exist_ok=True)
@@ -965,7 +965,7 @@ class BuildContainerHelper(BaseModel):
         result = await _run_command(command, self.config.log_file)
         if result.returncode:
             raise RuntimeError(
-                f"Evaluation submission failed with returncode {result.returncode}. See {self.config.log_file}"
+                f"Run submission failed with returncode {result.returncode}. See {self.config.log_file}"
             )
 
     async def _clean_on_failure(self) -> None:
