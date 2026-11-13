@@ -618,7 +618,8 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             == "http://model.example:9000/ng-rollout/opencode-smoke-a2/v1"
         )
         # As on opencode_sandboxed_agent with opencode_model_call_timeout null, only the run's own deadline bounds a
-        # model call: the provider timeout is off, and there is no chunkTimeout.
+        # model call. Here the provider timeout is off and there is no chunkTimeout; the relay's chunkTimeout is its
+        # run budget.
         options = config["provider"]["nemo_gym"]["options"]
         assert options["timeout"] is False
         assert "chunkTimeout" not in options
