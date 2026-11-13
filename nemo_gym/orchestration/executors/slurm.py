@@ -2820,7 +2820,12 @@ class SlurmExecutor(BaseExecutor):
         script = build_sbatch_script(
             target, benchmark, target.driver.benchmarks[benchmark], target.compute[record.cluster], job_dir
         )
-        resolved = yaml.safe_dump(target.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False)
+        # Only the fields the saved record holds (plus the ones this render sets): a field a newer Gym added with its
+        # default must not appear, because that changes the record, and so its certification hash, though the run's
+        # content did not change.
+        resolved = yaml.safe_dump(
+            target.model_dump(mode="json", exclude_unset=True, context={HOST_ENV_REFS: True}), sort_keys=False
+        )
         old_config = shlex.quote(str(run_dir / RESOLVED_CONFIG_NAME))
         kinds = [
             kind
