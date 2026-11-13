@@ -175,9 +175,11 @@ whether it holds the task images. Two configs run OpenCode this way:
 the policy model (`sandbox_model_server`), so OpenCode cannot install tools or look answers up on the internet, and it
 runs the copy of OpenCode that the sandbox image holds. `opencode_server_tools.yaml` uses `model_and_tools`, which
 also lets the sandbox reach this server's `/mcp` route. Only OpenSandbox enforces these rules; with another provider,
-set `sandbox_network_access: inherit`. A rule opens every port of an allowed host, so `opencode.yaml` gives the judge,
-the agent, the Environment Server and (except with server tools) this server the address `127.0.0.1`; a server's own
-host also wins over NeMo RL's `default_host`. The rules block raw IP addresses only on an OpenSandbox server that
+set `sandbox_network_access: inherit`. A rule opens every port of an allowed host, so `opencode.yaml` gives the head
+server (it returns the whole config, keys included), the judge, the agent, the Environment Server and (except with
+server tools) this server the address `127.0.0.1`; a server's own host also wins over a launcher's `default_host`.
+NeMo RL sets the head server's address itself, which wins over the recipe, so under NeMo RL the head server stays on
+the node's address. The rules block raw IP addresses only on an OpenSandbox server that
 enforces egress at the IP layer (`dns+nft`). The Environment Server admits 32 episodes at a time, the agent's
 concurrency, because each seed starts a sandbox.
 

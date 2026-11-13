@@ -79,8 +79,9 @@ def test_the_sandbox_image_carries_the_pinned_plugin_dependencies() -> None:
 def test_only_the_servers_the_sandbox_calls_take_a_launcher_s_host_address(recipe: str, reachable: set[str]) -> None:
     """The lent sandbox may reach every port of the hosts it is allowed, so other servers stay on loopback.
 
-    NeMo RL sets default_host to the node's address. A server's own host wins over it, so the judge, the agent and the
-    Environment Server (and the resources server, unless OpenCode calls its /mcp route) stay on 127.0.0.1.
+    A launcher sets default_host to the node's address. A server's own host wins over it, so the head server, the
+    judge, the agent and the Environment Server (and the resources server, unless OpenCode calls its /mcp route) stay
+    on 127.0.0.1.
     """
     parser = GlobalConfigDictParser()
     config = parser.parse(
@@ -104,6 +105,37 @@ def test_only_the_servers_the_sandbox_calls_take_a_launcher_s_host_address(recip
     }
     assert hosts == {name: "10.1.2.3" if name in reachable else "127.0.0.1" for name in hosts}
     assert set(hosts) >= {"agentic_mme_judge_model", "agentic_mme_opencode_agent", "agentic_mme_environment_server"}
+    # The head server answers /global_config_dict_yaml, the whole config with its keys, without authentication.
+    assert config.head_server.host == "127.0.0.1"
+
+
+@pytest.mark.parametrize("recipe", ["opencode", "opencode_server_tools"])
+@pytest.mark.parametrize(
+    "absolute_ip",
+    [{}, {"use_absolute_ip": True, "absolute_ip_server_types": ["responses_api_models", "resources_servers"]}],
+    ids=["default_host", "absolute_ip"],
+)
+def test_the_head_server_stays_on_loopback_beside_a_launcher_s_host(recipe: str, absolute_ip: dict) -> None:
+    """The head server returns the whole config, keys included, so the lent sandbox must not reach it."""
+    parser = GlobalConfigDictParser()
+    config = parser.parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {
+                    "config_paths": [str(BENCHMARKS / f"{recipe}.yaml")],
+                    "policy_model_name": "served-policy-model",
+                    "default_host": "10.1.2.3",
+                    **absolute_ip,
+                },
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+
+    assert config.head_server.host == "127.0.0.1"
 
 
 @pytest.mark.parametrize("recipe", ["opencode", "opencode_server_tools"])

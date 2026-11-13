@@ -14,10 +14,15 @@ config_paths:
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 # The lent sandbox's egress rule opens every port of the policy model's host. So every other server sets host
-# 127.0.0.1, which a launcher's default_host (NeMo RL sets one) cannot change: the judge (it spends the judge's API key
-# for any caller), the agent (a request without a session runs OpenCode on this host), and the resources and
-# Environment Servers (they start sandboxes and episodes). All their callers run on this host. opencode_server_tools.yaml
-# gives the resources server its reachable address back, because OpenCode calls its /mcp route from the sandbox.
+# 127.0.0.1, which a launcher's default_host (NeMo RL sets one) cannot change: the head server (it returns the whole
+# config, keys included, to any caller), the judge (it spends the judge's API key for any caller), the agent (a request
+# without a session runs OpenCode on this host), and the resources and Environment Servers (they start sandboxes and
+# episodes). All their callers run on this host. opencode_server_tools.yaml gives the resources server its reachable
+# address back, because OpenCode calls its /mcp route from the sandbox. NeMo RL sets the head server's address itself,
+# and that wins over this file.
+head_server:
+  host: 127.0.0.1
+
 agentic_mme_judge_model:
   responses_api_models:
     openai_model:
