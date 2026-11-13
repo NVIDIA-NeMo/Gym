@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 160" role="img" aria-labelledby="t d">
+  <title id="t">In-memory state is gone when the process stops</title>
+  <desc id="d">The dict is not saved to disk.</desc>
+  <rect width="960" height="160" fill="#0A0A0A"/>
+  <rect width="960" height="3" fill="#76B900"/>
+  <g font-family="Arial, Helvetica, sans-serif" text-anchor="middle">
+    <text x="480" y="40" fill="#FFFFFF" font-size="16" font-weight="700">Stop the process ? the dict is gone</text>
+    <rect x="40" y="56" width="880" height="72" rx="4" fill="#161616" stroke="#2A2A2A"/>
+    <text x="480" y="88" fill="#FFFFFF" font-size="18">session_id_to_counter = {}</text>
+    <text x="480" y="112" fill="#8A8A8A" font-size="13">Nothing is written to disk. A new process starts empty.</text>
+  </g>
+</svg>
