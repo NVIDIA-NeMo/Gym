@@ -21,7 +21,7 @@ BASH = {"name": "Bash", "input_schema": {"type": "object", "properties": {"comma
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429"])
 def test_messages_protocol_keeps_raw_exchanges_and_executes_tools(tmp_path, stream, scenario_name):
-    probe = Probe(SCENARIOS_BY_NAME[scenario_name], tmp_path, harness="claude_code")
+    probe = Probe(SCENARIOS_BY_NAME[scenario_name], tmp_path)
     body = {
         "model": "probe",
         "messages": [{"role": "user", "content": "Run checks"}],
@@ -66,7 +66,7 @@ def test_messages_protocol_keeps_raw_exchanges_and_executes_tools(tmp_path, stre
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure"])
 @pytest.mark.parametrize("stdout_visible", [False, True])
 def test_terminus_requires_stdout_not_just_echoed_keystrokes(tmp_path, scenario_name, stdout_visible):
-    probe = Probe(SCENARIOS_BY_NAME[scenario_name], tmp_path, harness="terminus_2_sandboxed")
+    probe = Probe(SCENARIOS_BY_NAME[scenario_name], tmp_path, tool_protocol="terminal_json")
     body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
     with TestClient(probe.model_app()) as client:
         response = client.post("/v1/responses", json=body)
@@ -94,7 +94,6 @@ def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_pa
     probe = Probe(
         replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=1),
         tmp_path,
-        harness="claude_code",
         responses=[
             {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
             {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
@@ -139,7 +138,7 @@ def test_messages_compaction_keeps_summary_and_usage_separate_from_policy(tmp_pa
 def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path, scenario_name):
     scenario = replace(SCENARIOS_BY_NAME[scenario_name], tool_steps=2)
     settings = _settings("terminus_2_sandboxed", tmp_path, 30, scenario)
-    probe = Probe(scenario, tmp_path, harness="terminus_2_sandboxed", **settings.probe_overrides)
+    probe = Probe(scenario, tmp_path, **settings.probe_overrides)
     body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
     with TestClient(probe.model_app()) as client:
         for index, reply in enumerate(probe.responses):
@@ -170,7 +169,7 @@ def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path,
 
 
 def test_miniswe_finishes_using_native_submission_sentinel(tmp_path):
-    probe = Probe(replace(SCENARIOS_BY_NAME["tool_success"], tool_steps=0), tmp_path, harness="miniswe_sandboxed")
+    probe = Probe(replace(SCENARIOS_BY_NAME["tool_success"], tool_steps=0), tmp_path, finish_protocol="bash_marker")
     body = {
         "model": "probe",
         "input": [],
@@ -188,7 +187,7 @@ def test_miniswe_finishes_using_native_submission_sentinel(tmp_path):
 def test_pi_overflow_preserves_error_and_resumes_scripted_replies(tmp_path):
     scenario = replace(SCENARIOS_BY_NAME["context_compaction"], tool_steps=2)
     settings = _settings("pi", tmp_path, 30, scenario)
-    probe = PiProbe(scenario, tmp_path, harness="pi", **settings.probe_overrides)
+    probe = PiProbe(scenario, tmp_path, **settings.probe_overrides)
     body = {
         "model": "probe",
         "messages": [{"role": "user", "content": "Run checks"}],

@@ -8,7 +8,6 @@ import asyncio
 import importlib
 import importlib.util
 import json
-import math
 import os
 import shutil
 import socket
@@ -38,31 +37,30 @@ class _Server(uvicorn.Server):
 
 def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
-    if harness == "terminus_2_sandboxed" and (os.geteuid() != 0 or not shutil.which("tmux")):
-        raise RuntimeError("Terminus conformance requires a disposable Linux runner as root with tmux installed")
-    if harness == "simple":
+    definition = HARNESSES[harness]
+    if definition.requires_root and os.geteuid() != 0:
+        raise RuntimeError(f"{harness} conformance requires a disposable Linux runner as root")
+    for command in definition.required_commands:
+        if not shutil.which(command):
+            raise RuntimeError(f"{harness} conformance requires {command} on PATH")
+    if definition.builtin:
         return {"installation": "builtin"}
-    if use_agent_sessions and harness != "hermes":
-        runtime = {"installation": "agent_session"}
-        if harness == "nooa":
-            adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
-            runtime.update(
-                pyproject_sha256=digest_file(adapter / "pyproject.toml"),
-                lock_sha256=digest_file(adapter / "uv.lock"),
-                bootstrap_sha256=digest_file(adapter / "sandbox_runtime.py"),
-                sandbox_ownership="resources",
-                execution_mode="sandboxed",
-                observer_sha256=digest_file(Path(__file__).with_name("nooa_observer.py")),
-            )
-        return runtime
-    if harness == "hermes":
-        if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
+    if use_agent_sessions and not definition.runtime_modules:
+        root = Path(__file__).resolve().parents[2]
+        return {
+            "installation": "agent_session",
+            **definition.runtime_metadata,
+            **{key: digest_file(root / path) for key, path in definition.runtime_files.items()},
+        }
+    if definition.runtime_modules:
+        modules = [importlib.util.find_spec(name) for name in definition.runtime_modules]
+        if any(module is None for module in modules):
             raise RuntimeError(
-                "sync responses_api_agents/hermes_agent with uv sync --locked in this isolated Python environment"
+                f"sync responses_api_agents/{harness}_agent with uv sync --locked in this isolated Python environment"
             )
-        source = Path(importlib.util.find_spec("run_agent").origin)
+        source = Path(modules[0].origin)
         return {"source": str(source), "sha256": digest_file(source)}
-    elif not shutil.which(harness):
+    if not shutil.which(harness):
         raise RuntimeError(f"install the {harness} runtime and put it on PATH before running probes")
     version = subprocess.run(
         [harness, "--version"], capture_output=True, text=True, errors="replace", timeout=10, check=True
@@ -70,303 +68,8 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     return {"executable": shutil.which(harness), "version": version.stdout.strip()}
 
 
-def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
-    """Describe harness settings, probe settings and setup requirements."""
-    workspace = str(directory / "workspace")
-    opencode = {"permission": {"bash": "allow"}}
-    settings = {
-        "simple": {
-            "harness_overrides": {"max_steps": 6},
-            "session": {"harness_overrides": None, "tool_transports": ["direct_http"], "sandbox_backend": None},
-        },
-        "opencode": {
-            "harness_overrides": {"timeout": timeout, "opencode_config": opencode},
-            "legacy": {
-                "harness_overrides": {
-                    "workspace_root": workspace,
-                    # Auxiliary requests would consume the scripted policy replies.
-                    "opencode_config": {
-                        "agent": {"title": {"disable": True}, "summary": {"disable": True}},
-                    },
-                },
-            },
-        },
-        "pi": {
-            "harness_overrides": {"timeout": timeout},
-            "legacy": {"harness_overrides": {"workspace_root": workspace}},
-        },
-        "copilot": {
-            "harness_overrides": {"timeout": timeout},
-            "legacy": {"harness_overrides": {"workspace_root": workspace}},
-        },
-        "crewai": {"harness_overrides": {"timeout": timeout}},
-        "openclaw": {
-            "probe": ".probes:OpenClawProbe",
-            "harness_overrides": {"timeout": math.ceil(timeout)},
-            "legacy": {"harness_overrides": {"workspace_root": workspace}},
-        },
-        "codex": {
-            "legacy": {
-                "requires_workspace": True,
-                "harness_overrides": {
-                    "cwd": workspace,
-                    "timeout": timeout,
-                    "sandbox_mode": "danger-full-access",
-                    "extra_config": {"features": {"shell_snapshot": False}, "web_search": "disabled"},
-                },
-            },
-        },
-        "nooa": {
-            "probe": ".probes:NOOAProbe",
-            "required_imports": ["scripts.harness_conformance.nooa"],
-            "inherit_adapter_fields": ["nooa"],
-            "harness_overrides": {
-                "sandbox_runner_timeout_seconds": timeout,
-                "nooa": {
-                    "execution_mode": "sandboxed",
-                    "invocation_adapter": "${harness_conformance.nooa_observer:}:invoke_with_witness",
-                },
-            },
-            "pop_fields": ["model", "concurrency"],
-            "session": {"harness_overrides": None, "sandbox_backend": "conformance_local"},
-        },
-        "claude_code": {
-            "harness_overrides": {
-                "claude_code_version": "2.1.108",
-                "timeout": int(timeout),
-                "max_turns": 6,
-                "allowed_tools": "Bash",
-                "tools": "Bash",
-                "session_name": "Conformance check",
-                "thinking": "disabled",
-            },
-        },
-        "miniswe_sandboxed": {
-            "requires_sandbox": True,
-            "harness_overrides": {
-                "harness": {"step_limit": 6, "step_timeout_sec": 10},
-                "agent_timeout_sec": timeout,
-                "setup_timeout_sec": timeout,
-                "artifacts_dir": str(directory / "native"),
-            },
-        },
-        "terminus_2_sandboxed": {
-            "requires_sandbox": True,
-            "requires_tmux": True,
-            "probe_overrides": {"final_responses": 2},
-            "inherit_adapter_defaults": True,
-            "harness_overrides": {
-                "max_turns": 6,
-                "enable_summarize": False,
-                "llm_request_timeout": int(timeout),
-                "sandbox_timeout": timeout,
-            },
-        },
-        "hermes": {
-            "harness_overrides": {
-                "max_turns": 6,
-                "enabled_toolsets": ["terminal"],
-                "terminal_backend": "local",
-                "terminal_timeout": 10,
-                "compression_enabled": False,
-                "checkpoints_enabled": False,
-                "api_key": "conformance",
-            },
-        },
-    }.get(harness, {})
-    return OmegaConf.merge(
-        {
-            "probe": ".probes:Probe",
-            # Whether the episode runner must prepare a sandbox for the agent to borrow.
-            "requires_sandbox": False,
-            "requires_tmux": False,
-            "session": {
-                # Session sandboxes replace provider settings inherited from adapter YAML.
-                "pop_fields": ["resources_server", "sandbox_config"],
-                "harness_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
-                "tool_transports": [],
-                "sandbox_backend": "local",
-            },
-            "legacy": {
-                "harness_overrides": {"resources_server": {"type": "resources_servers", "name": "probe_resources"}},
-            },
-        },
-        settings,
-    )
-
-
-def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
-    """Harness overrides and scripted replies for the compaction scenario."""
-    steps = scenario.tool_steps + 4
-    context = {"context_window": 32768, "max_output_tokens": 8192}
-    settings = {
-        "simple": {"unsupported_reason": "Simple Agent does not implement compaction."},
-        "opencode": {
-            "harness_overrides": context,
-            "probe_overrides": {
-                "responses": [
-                    {"kind": "tool", "input_tokens": 500, "output_tokens": 8},
-                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    *[
-                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 2)
-                    ],
-                    {"kind": "final", "input_tokens": 500, "output_tokens": 8},
-                ],
-            },
-        },
-        "pi": {
-            "probe": ".probes:PiProbe",
-            "harness_overrides": context,
-            "probe_overrides": {
-                "tool_output_chars": 20000,
-                "responses": [
-                    *[{"kind": "tool", "input_tokens": 500, "output_tokens": 8} for _ in range(scenario.tool_steps)],
-                    {"kind": "context_overflow"},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "kilocode": {
-            "harness_overrides": {
-                **context,
-                "kilo_config": {"compaction": {"auto": True}},
-            },
-            "probe_overrides": {
-                "responses": [
-                    *[
-                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 1)
-                    ],
-                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "openclaw": {
-            "harness_overrides": {"context_window": 131072, "max_output_tokens": 8192},
-            "probe_overrides": {
-                "context_window": 131072,
-                "command_padding_chars": 12000,
-                "responses": [
-                    *[{"kind": "tool", "input_tokens": 500, "output_tokens": 8} for _ in range(scenario.tool_steps)],
-                    {"kind": "context_overflow"},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "codex": {
-            "harness_overrides": {
-                "model_context_window": 32768,
-                "model_auto_compact_token_limit": 24000,
-                "request_max_retries": 0,
-                "stream_max_retries": 0,
-            },
-            "probe_overrides": {
-                "responses": [
-                    *[
-                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 1)
-                    ],
-                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "stirrup": {
-            "harness_overrides": {
-                "context_window_tokens": 32768,
-                "agent_max_turns": steps,
-            },
-            "probe_overrides": {
-                "responses": [
-                    *[
-                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 1)
-                    ],
-                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "hermes": {
-            "harness_overrides": {
-                "compression_enabled": True,
-                "context_length": 32768,
-                "compression_threshold": 0.5,
-                "max_turns": steps,
-            },
-            "probe_overrides": {
-                "responses": [
-                    *[
-                        {"kind": "tool", "input_tokens": 1000, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 1)
-                    ],
-                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "claude_code": {
-            "harness_overrides": {
-                "max_turns": steps,
-                "settings": {
-                    "autoCompactWindow": 100000,
-                    "autoMemoryEnabled": False,
-                    "promptSuggestionEnabled": False,
-                    "env": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096"},
-                },
-            },
-            "probe_overrides": {
-                "responses": [
-                    *[
-                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 1)
-                    ],
-                    {"kind": "tool", "input_tokens": 90000, "output_tokens": 8},
-                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
-                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
-                ],
-            },
-        },
-        "miniswe_sandboxed": {"unsupported_reason": "Mini-SWE does not implement compaction."},
-        "terminus_2_sandboxed": {
-            "harness_overrides": {
-                "max_turns": steps,
-                "enable_summarize": True,
-                "model_context_limit": 32768,
-                "proactive_summarization_threshold": 8000,
-            },
-            "probe_overrides": {
-                "responses": [
-                    *[
-                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
-                        for _ in range(scenario.tool_steps - 1)
-                    ],
-                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    # Harbor summarizes, asks handoff questions, then answers them.
-                    *[{"kind": "summary", "input_tokens": 500, "output_tokens": 11} for _ in range(3)],
-                    *[{"kind": "final", "input_tokens": 100, "output_tokens": 8} for _ in range(2)],
-                ],
-            },
-        },
-    }.get(harness, {})
-    return OmegaConf.create(settings)
-
-
 def _settings(harness: str, directory: Path, timeout: float, scenario: Scenario | None = None) -> DictConfig:
-    settings = _base_settings(harness, directory, timeout)
-    scenario_settings = {"context_compaction": _compaction_settings}.get(getattr(scenario, "name", None))
-    if scenario_settings is not None:
-        settings = OmegaConf.merge(settings, scenario_settings(harness, scenario))
-    return settings
+    return HARNESSES[harness].settings(directory, timeout, scenario)
 
 
 def _config(
@@ -445,10 +148,10 @@ def _config(
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-    agent_cls = getattr(module, HARNESSES[harness])
+    agent_cls = getattr(module, HARNESSES[harness].agent)
     config_cls = agent_cls.model_fields["config"].annotation
     use_agent_sessions = agent_cls.supports_agent_sessions()
-    if use_agent_sessions and harness != "simple" and sys.platform != "linux":
+    if use_agent_sessions and HARNESSES[harness].session_requires_linux and sys.platform != "linux":
         raise RuntimeError(
             "Conformance probes using agent sessions require Linux; run the probes on a Linux host or in a container"
         )
@@ -462,7 +165,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     settings = _settings(harness, directory, timeout, scenario)
     probe_module, probe_name = settings.probe.split(":")
     probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
-    probe = probe_cls(scenario, directory, harness=harness, **settings.get("probe_overrides", {}))
+    probe = probe_cls(scenario, directory, **settings.get("probe_overrides", {}))
     probe.save()
     tasks = []
     servers = []
@@ -560,22 +263,9 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                             raise RuntimeError("probe server exited during startup")
                     await asyncio.sleep(0.01)
             inputs = directory / "requests.jsonl"
-            task = scenario.task()
-            if harness == "simple":
-                task["responses_create_params"]["model"] = "conformance-model"
-                task["responses_create_params"]["tools"] = [
-                    {
-                        "type": "function",
-                        "name": "bash",
-                        "strict": False,
-                        "description": "Run a shell command.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"command": {"type": "string"}},
-                            "required": ["command"],
-                        },
-                    }
-                ]
+            task = OmegaConf.to_container(
+                OmegaConf.merge(scenario.task(), settings.get("task_overrides", {})), resolve=True
+            )
             inputs.write_text(json.dumps(task) + "\n")
             async with asyncio.timeout(timeout + 10):
                 await RolloutCollectionHelper().run_from_config(

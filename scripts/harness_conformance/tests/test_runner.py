@@ -109,7 +109,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
+        getattr(module, HARNESSES[harness].agent).model_fields["config"].annotation.model_validate(agent)
 
 
 def test_session_runtime_does_not_require_host_cli(monkeypatch):
@@ -198,7 +198,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     module = SimpleNamespace(
         TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
-    monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
+    monkeypatch.setitem(episode.HARNESSES, "codex", dataclasses.replace(HARNESSES["codex"], agent="TestAgent"))
     import_module = episode.importlib.import_module
     monkeypatch.setattr(
         episode,
@@ -419,7 +419,7 @@ def test_compaction_is_scripted_independently_of_request_text(tmp_path, compacti
                 {"kind": "final", "input_tokens": 100, "output_tokens": 8},
             ]
         }
-    probe = Probe(scenario, tmp_path, harness=harness, **settings.probe_overrides)
+    probe = Probe(scenario, tmp_path, **settings.probe_overrides)
     messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
