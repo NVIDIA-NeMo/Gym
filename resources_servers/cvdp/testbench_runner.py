@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent, observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -543,8 +543,10 @@ class TestbenchRunner:
             **spec_extra,
         )
 
+        outcome = None
+        sandbox = AsyncSandbox(self._build_sandbox_provider_config(), spec)
         try:
-            async with AsyncSandbox(self._build_sandbox_provider_config(), spec) as sandbox:
+            async with sandbox:
                 await sandbox.start()
                 input_archive = f"{transfer_dir}/cvdp-workspace.tar.gz"
                 output_archive = f"{transfer_dir}/cvdp-workspace-out.tar.gz"
@@ -569,17 +571,21 @@ class TestbenchRunner:
                     message = str(exc)
                     # The provider confirms a guest OOM from structured lifecycle evidence.
                     if isinstance(exc, NgFailureEvent) and exc.failure_kind == PROVIDER_OOM_KILLED:
-                        return 137, f"test execution exceeded sandbox memory for service '{service}': {message}"
+                        observe_failure(exc)
+                        outcome = (137, f"test execution exceeded sandbox memory for service '{service}': {message}")
+                        return outcome
                     raise
                 if result.error_type == "timeout":
-                    return -1, f"sandbox exec timed out after {self.config.container_timeout}s"
+                    outcome = (-1, f"sandbox exec timed out after {self.config.container_timeout}s")
+                    return outcome
                 if result.error_type:
                     raise CVDPInfrastructureError(
                         f"sandbox exec failed for service '{service}' ({result.error_type}): {result.stderr or ''}"
                     )
 
                 if result.return_code != 0:
-                    return result.return_code, (result.stderr or "") + (result.stdout or "")
+                    outcome = (result.return_code, (result.stderr or "") + (result.stdout or ""))
+                    return outcome
 
                 snapshot = await sandbox.exec(
                     f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} .",
@@ -592,6 +598,7 @@ class TestbenchRunner:
                 else:
                     combined = (snapshot.stderr or "") + (snapshot.stdout or "")
                     raise CVDPInfrastructureError(f"workspace snapshot failed for service '{service}': {combined}")
+                outcome = (result.return_code, (result.stderr or "") + (result.stdout or ""))
         except CVDPInfrastructureError:
             raise
         except SandboxCreateError as exc:
@@ -601,6 +608,19 @@ class TestbenchRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if outcome is not None and sandbox.teardown_confirmed is True:
+                # Remote teardown succeeded; a client-release error must not rerun
+                # a measured result (the harness may be randomized). Keep the
+                # cleanup diagnostic in the request failure report.
+                event = NgFailureEvent(
+                    boundary="sandbox",
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=f"client cleanup failed after confirmed teardown: {exc}",
+                    operation="aclose",
+                )
+                event.__cause__ = exc
+                observe_failure(event)
+                return outcome
             raise CVDPInfrastructureError(f"sandbox operation failed for service '{service}': {exc}") from exc
 
         combined = (result.stderr or "") + (result.stdout or "")

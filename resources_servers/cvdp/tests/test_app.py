@@ -22,7 +22,7 @@ import pytest
 import yaml
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent, RequestFailureLog
 from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
@@ -847,6 +847,27 @@ class TestRunServiceProvider:
         finally:
             archive.unlink(missing_ok=True)
             archive.with_name(f"{archive.name}.next").unlink(missing_ok=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("return_code", [0, 1])
+    async def test_client_release_failure_preserves_measured_result(self, tmp_path, return_code):
+        fake = _FakeProvider(SandboxExecResult(stdout="measured", stderr="", return_code=return_code))
+        fake.aclose = AsyncMock(side_effect=RuntimeError("client release failed"))
+        with RequestFailureLog.capture() as log:
+            code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+            report = log.reply_report(None)
+        assert (code, output) == (return_code, "measured")
+        assert len(fake.created) == len(fake.closed) == 1
+        assert report.events
+        assert any("client release failed" in event.failure_reason for event in report.events.values())
+        assert report.failure_id is None
+
+    @pytest.mark.asyncio
+    async def test_unconfirmed_teardown_remains_inconclusive(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="failed test", stderr="", return_code=1))
+        fake.close = AsyncMock(side_effect=RuntimeError("remote close failed"))
+        with pytest.raises(CVDPInfrastructureError, match="remote close failed"):
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
 
     @pytest.mark.asyncio
     async def test_create_exec_close_and_payload(self, tmp_path):
