@@ -555,3 +555,38 @@ def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_
 
     assert out.decision.action.value == "resubmit", out.decision.reason
     assert out.operator_verdict["action"] == "`gym eval resubmit gym-job-x gsm8k --recover --extend-attempts 1` now"
+
+
+def test_a_terminal_protocol_row_beside_missing_rows_is_recovered_not_resubmitted_fresh(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
+    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+
+    violation = PROTOCOL_VIOLATION | {
+        "_ng_failure_class": "environment_protocol_violation",
+        "_ng_failure_id": "violation-1",
+        "failure_reason": "Environment server replied to an episode request with a list",
+        "reward": 0.0,
+    }
+    # One scored row, one terminal protocol violation, two rows never run: the planner resumes the saved run.
+    job_dir = _timed_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job_dir / "artifacts" / name).unlink(missing_ok=True)
+    _run(job_dir, [[violation], [], []])
+    # The accounting the walltime test run carries (2 of 3 retries, 7200 s used), which the Store fixture overwrote.
+    (job_dir / ".gym_job_chain").write_text("100\n101\n")
+    (job_dir / ".gym_infra_retries").write_text("2\n")
+    (job_dir / ".gym_accumulated_walltime").write_text("7200\n")
+    before = _accounting(job_dir)
+
+    out = inspect_recovery(*_handle(job_dir))
+
+    assert out.decision.action.value == "resubmit", out.decision.reason
+    assert out.decision.counts.get("terminal") == 1 and out.decision.counts.get("missing") == 2
+    action = out.operator_verdict["action"]
+    assert "`gym eval submit`" not in action and "producer bug" not in action
+    assert _command(out.operator_verdict).startswith("gym eval resubmit gym-job-x")
+    assert "--recover" in action
+    assert _accounting(job_dir) == before
+    # The recovery the verdict names is the one the planner takes.
+    assert recover(*_handle(job_dir)).decision.action.value == "resubmit"

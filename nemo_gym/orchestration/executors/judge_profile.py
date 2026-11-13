@@ -202,12 +202,20 @@ def choose_judge_partition(
 _PLACEMENT_REFUSAL = re.compile(r"partition|\bqos|gres|account|node configuration", re.IGNORECASE)
 
 
+# What a scheduler that did not answer says (an unreachable controller, a timeout, a failed query); waiting helps.
+_SCHEDULER_UNAVAILABLE = re.compile(
+    r"unable to contact|connection (?:refused|reset|timed out)|timed out|socket|slurm_load|"
+    r"temporarily unavailable|scheduler unknown|unable to send|network is unreachable|no route to host",
+    re.IGNORECASE,
+)
+
+
 def placement_refusal(diagnostic: str, served: bool) -> str:
     """The ``RecoveryDecision.judge_refusal`` of a judge-only job the scheduler did not take: its partition or QOS
     (``cpu_placement``, or ``served_placement`` for a run that serves its judge on its own saved node pool), else
-    ``other``."""
+    ``other`` when the scheduler did not answer, else ``refused`` (a definite refusal of another kind)."""
     if not _PLACEMENT_REFUSAL.search(diagnostic):
-        return "other"
+        return "other" if _SCHEDULER_UNAVAILABLE.search(diagnostic) else "refused"
     return "served_placement" if served else "cpu_placement"
 
 

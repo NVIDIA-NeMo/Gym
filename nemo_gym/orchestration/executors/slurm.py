@@ -1961,7 +1961,9 @@ class SlurmExecutor(BaseExecutor):
                     config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
                 )
         except JudgeProfileUnsupported as error:
-            return stopped(str(error), "cpu_partition_unknown" if NO_CPU_PARTITION in str(error) else "other")
+            return stopped(
+                str(error), "cpu_partition_unknown" if NO_CPU_PARTITION in str(error) else "unsupported_profile"
+            )
         install = config.driver.gym_install
         ref = repin if repin is not None else (install.ref if install is not None else None)
         if install is None or ref is None or ref != installed_gym_commit() or not re.fullmatch(r"[0-9a-f]{40}", ref):

@@ -75,28 +75,33 @@ def test_a_final_model_failure_is_still_accepted():
     assert task["status"] == "SUCCESS" and verdict["state"] == "accept" and verdict["action"] == "none"
 
 
-def test_accept_names_a_run_whose_every_rollout_ended_on_a_failed_model_call():
+def test_a_run_whose_every_rollout_ended_on_a_failed_model_call_is_not_accepted():
     collected = _ready(_run(32))
     collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 32
     verdict, task, _ = _verdict(collected)
     assert task["status"] == "SUCCESS"
-    assert verdict == {
-        "state": "accept",
-        "reason": "accepted by contract; every rollout ended on a failed model call: check the served configuration",
-        "action": "read rollout quality: 32 of 32 rollouts flagged rollout_ended_on_failed_model_call",
-    }
+    assert verdict["state"] == "needs_action"
+    assert verdict["reason"].startswith("every rollout ended on a failed model call, so the score most likely")
+    assert "do not accept or report the score yet" in verdict["action"]
+    assert verdict["action"].endswith(
+        "read rollout quality (32 of 32 rollouts flagged rollout_ended_on_failed_model_call)"
+    )
 
 
-def test_accept_names_a_run_where_no_task_had_a_successful_model_call():
+def test_a_run_where_no_task_had_a_successful_model_call_is_not_accepted():
     collected = _ready(_run(8))
     collected.quality["issues"]["task_no_successful_model_calls"] = 8
     verdict, _, _ = _verdict(collected)
-    assert verdict["state"] == "accept"
-    assert (
-        verdict["reason"]
-        == "accepted by contract; no task had a successful model call: check the served configuration"
-    )
-    assert verdict["action"] == "read rollout quality: 8 of 8 tasks flagged task_no_successful_model_calls"
+    assert verdict["state"] == "needs_action"
+    assert verdict["reason"].startswith("no task had a successful model call, so the score most likely")
+    assert "8 of 8 tasks flagged task_no_successful_model_calls" in verdict["action"]
+
+
+def test_a_partly_flagged_run_is_still_accepted():
+    collected = _ready(_run(32))
+    collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 31
+    verdict, _, _ = _verdict(collected)
+    assert verdict["state"] == "accept" and verdict["action"] == "none"
 
 
 def test_a_task_level_finding_counts_tasks_not_rollouts():
@@ -117,8 +122,8 @@ def test_a_task_level_finding_counts_tasks_not_rollouts():
         "rollout_quality": {"verdicts": None, "issues": {"task_no_successful_model_calls": 4}},
     }
     verdict = operator_verdict(task, decision)
-    assert verdict["state"] == "accept"
-    assert verdict["action"] == "read rollout quality: 4 of 4 tasks flagged task_no_successful_model_calls"
+    assert verdict["state"] == "needs_action"
+    assert "read rollout quality (4 of 4 tasks flagged task_no_successful_model_calls)" in verdict["action"]
 
 
 def test_some_flagged_rollouts_are_a_signal_not_a_reason_to_change_the_verdict():

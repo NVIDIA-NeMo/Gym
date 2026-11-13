@@ -537,11 +537,17 @@ class RecoveryDecision(BaseModel):
     chain_stop_kind: str | None = Field(default=None, exclude=True)
     # Why a judge-only job was not queued, as the dispatch classified it: ``cpu_partition_unknown`` (no CPU partition
     # is named), ``cpu_placement`` (the scheduler refused the CPU partition or QOS), ``served_placement`` (it refused the
-    # saved node pool of a run that serves its judge, which no recovery option changes) or ``other`` (anything else,
-    # such as the scheduler not answering). The operator verdict offers the judge placement options only for the first two.
-    judge_refusal: Literal["cpu_partition_unknown", "cpu_placement", "served_placement", "other"] | None = Field(
-        default=None, exclude=True
-    )
+    # saved node pool of a run that serves its judge, which no recovery option changes), ``unsupported_profile`` (the
+    # saved config has no judge execution profile, decided locally before any scheduler call), ``refused`` (the
+    # scheduler or the dispatch refused it for a definite reason that is not placement, such as an invalid time limit)
+    # or ``other`` (the scheduler did not answer). The operator verdict offers the judge placement options only for
+    # the first two.
+    judge_refusal: (
+        Literal[
+            "cpu_partition_unknown", "cpu_placement", "served_placement", "unsupported_profile", "refused", "other"
+        ]
+        | None
+    ) = Field(default=None, exclude=True)
     # An option this call asked for that the run cannot take (``--extend-attempts`` or the masked rerun), and the
     # action the plan would take without it: a RESUBMIT or REVERIFY continues once the option is dropped.
     refused_option: str | None = Field(default=None, exclude=True)
@@ -6293,9 +6299,14 @@ def _verdict(state: str, reason: str, action: str) -> dict[str, str]:
     return {"state": state, "reason": reason, "action": action}
 
 
+_SHELL_QUOTED = re.compile(r"""'(?:[^']|'\\'')*'|"(?:[^"\\]|\\.)*\"""")
+
+
 def _flags(option: str) -> set[str]:
     """The flags one option spells (``--max-walltime T --walltime-reason TEXT`` is two)."""
-    return {word.lstrip("[") for word in option.split() if word.lstrip("[").startswith("--")}
+    # What a shell quotes is a value (a JSON metric key can read `--x`), never an option.
+    unquoted = _SHELL_QUOTED.sub(" ", option)
+    return {word.lstrip("[") for word in unquoted.split() if word.lstrip("[").startswith("--")}
 
 
 def _command(
@@ -6336,12 +6347,15 @@ def _choices(options: Sequence[str]) -> str:
     return chosen + commit + together
 
 
-def _stop_kind(decision: RecoveryDecision) -> str | None:
+def _stop_kind(decision: RecoveryDecision, *, from_rows: bool = True) -> str | None:
     """The typed failure with a known remedy the run stopped on: the chain guard's typed stop, else the one failure
     kind every terminal identity of the decision records (Gym's own typed stop, such as the grading quota). Read from
-    typed fields only, never from the reason text."""
+    typed fields only, never from the reason text. ``from_rows=False`` reads the chain guard's stop alone: the row
+    kind explains a STOP, and a decision that continues the saved run (RESUBMIT, REVERIFY) is not one."""
     if decision.chain_stop_kind:
         return decision.chain_stop_kind
+    if not from_rows:
+        return None
     terminal = [item for item in decision.evidence if item.state == IdentityState.TERMINAL]
     kinds = {item.failure_kind for item in terminal}
     if terminal and len(terminal) == decision.counts.get(IdentityState.TERMINAL, 0) and len(kinds) == 1:
@@ -6354,11 +6368,13 @@ def _stop_kind(decision: RecoveryDecision) -> str | None:
     return None
 
 
-def _continue_with(decision: RecoveryDecision, *options: str, drop: Sequence[str] = ()) -> str:
+def _continue_with(
+    decision: RecoveryDecision, *options: str, drop: Sequence[str] = (), kind_from_rows: bool = True
+) -> str:
     """The recovery command that continues the run, after the typed stop's fix when it stopped on one, with what in
     it is the operator's to choose. A typed stop whose own text says a recovery cannot continue (a refused resume,
     a protocol violation) names that instead."""
-    kind = _stop_kind(decision)
+    kind = _stop_kind(decision, from_rows=kind_from_rows)
     if kind == COLLECTION_RESUME_REFUSED:
         unsafe = _command(decision, *options, *_UNSAFE_RESUME, drop=drop)
         return (
@@ -6602,11 +6618,13 @@ def operator_verdict(
     if decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
         settled = expected - sum(counts.get(s, 0) for s in _OPEN_STATES)
         # A chain that stopped on a typed failure needs its remedy before the resume, or the resume stops the same way.
-        action = _continue_with(decision)
+        # The decision continues the saved run, so a terminal row's kind (it explains a STOP only) never turns the
+        # advice into a fresh submit; only the chain guard's own typed stop does.
+        action = _continue_with(decision, kind_from_rows=False)
         return _verdict(
             "needs_action",
             f"{settled} of {expected} rollouts are settled; {open_text or 'recovery work'} remain",
-            action if _stop_kind(decision) else f"{action} now",
+            action if _stop_kind(decision, from_rows=False) else f"{action} now",
         )
     if decision.action == RecoveryAction.STOP:
         return _stop_verdict(decision, expected, open_text)
@@ -6687,11 +6705,15 @@ def operator_verdict(
         return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
     if flagged := _flagged_everything(gate_task, decision, expected):
         what, count = flagged
-        # The quality warning and the acceptance stand; the delivery state is a fact beside them.
+        # The gate's status stays SUCCESS (rollout quality never changes it), but a score from rollouts that all ended
+        # on a failed model call or never had a successful model call most likely comes from a broken evaluation
+        # (serving or credentials), so it is not an acceptance. The delivery state is a fact beside it.
         return _verdict(
-            "accept",
-            f"accepted by contract; {what}: check the served configuration" + (f"; {delivery[0]}" if delivery else ""),
-            f"read rollout quality: {count}" + (f"; {delivery[1]}" if delivery else ""),
+            "needs_action",
+            f"{what}, so the score most likely does not measure the model (a broken serving or credentials setup is "
+            "the usual cause)" + (f"; {delivery[0]}" if delivery else ""),
+            f"do not accept or report the score yet: check the served configuration and the model's credentials, "
+            f"and read rollout quality ({count})" + (f"; {delivery[1]}" if delivery else ""),
         )
     omitted = gate_task.get("omitted_samples") or 0
     reason = (
@@ -6827,12 +6849,29 @@ def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> 
             "reason and have the pool's partition, QOS or account fixed on the cluster, then inspect again "
             "(completed work is kept)",
         )
-    if decision.judge_refusal == "other":
-        # Not a placement problem: the scheduler's own diagnostic is in the reason.
+    if decision.judge_refusal == "unsupported_profile":
+        # Decided locally from the saved config: no scheduler call was made, so waiting for the scheduler changes nothing.
         return _verdict(
             "needs_action",
             stopped,
-            f"the judge-only job was refused for a reason other than its placement (the reason has the scheduler's "
+            "the saved run has no judge execution profile that a recovery can start, and no recovery option adds "
+            "one: read what the reason says would allow it (completed work is kept)",
+        )
+    if decision.judge_refusal == "refused":
+        # A definite refusal, not an outage: repeating the call without a change is refused the same way.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "the judge-only job was refused for a definite reason that is not its placement (the reason has the "
+            "refusal): remove what it names, then inspect again; waiting for the scheduler does not change it "
+            "(completed work is kept)",
+        )
+    if decision.judge_refusal == "other":
+        # The scheduler did not answer: its own diagnostic is in the reason.
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"the judge-only job could not be queued because the scheduler did not answer (the reason has its "
             f"diagnostic): wait until the scheduler answers and inspect again, then {_command(decision)} (completed "
             "work is kept)",
         )

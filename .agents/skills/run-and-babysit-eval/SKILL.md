@@ -200,8 +200,10 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
   action names `gym eval submit` only where Gym's own stop text does (`environment_protocol_violation`,
   `collection_resume_refused`). An `accept` whose MLflow delivery is still pending or unverified names the export
   in its action, or reports it as unverified by configuration when the rollouts were not uploaded. Rollout quality
-  never changes the state: when it flags every rollout, an `accept` says so ("accepted by contract; every rollout
-  ended on a failed model call: check the served configuration") and its action is to read the rollout quality.
+  never changes the gate's status, but a run whose every rollout ended on a failed model call (or whose every task
+  had no successful model call) is not an `accept`: the verdict is `needs_action`, because the score most likely
+  does not measure the model (serving or credentials broken); its action is to check the served configuration and
+  read the rollout quality before accepting or reporting the score.
 
 Run accounting and rollout quality are two things to read. Run accounting (`run.artifacts.healthy` and
 `unhealthy_reasons` in `quality_summary.json`) counts expected, completed, missing and failed rollouts; a failure
@@ -247,7 +249,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | STOP on a `reverify`: `the last 2 judge-only job(s) (<ids>) ended without settling a saved answer; read their receipts and logs ...` | Nothing was queued. Read those jobs' receipts and logs under `<job dir>/reverification` (the message prints the path; in a finished run it is
 `<run dir>/<benchmark>/artifacts/reverification`), then allow exactly one more with `--recover --acknowledge-failed-judge-jobs --acknowledge-reason "<why>"`; it is journaled with the job ids it covers in `judge-job-acknowledgement-journal.jsonl`, never covers a later pair of failures, and `--inspect` names the block without writing anything. Never edit the judge-job journal. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (N above the recorded limit, 0 for none; 600 s unless the benchmark's `run` sets it). |
-| STOP typed `driver_install_failed` (the installer's error is quoted; `logs/driver-<job id>.log` has the rest) | Fix the cause (the ref, the network, the image), then `--recover`. |
+| STOP typed `driver_install_failed` (the stop omits the installer's error text, which can carry a credentialed URL; `logs/driver-<job id>.log` has it) | Fix the cause (the ref, the network, the image), then `--recover`. |
 | STOP typed `provider_credentials_rejected` (the sandbox provider answered 401 or 403) | Fix the credentials, then `--recover`. |
 | FAILED, the driver log ends `ValueError: Environment server must return an episode result or failure.` (or `InvalidRolloutResult`), the chain did not continue | A server replied in a shape the collector cannot use. It is deterministic: retrying cannot help. Fix the server or the benchmark pairing (the benchmark config names which server), optionally set `+route_failures_to_sidecar=true` to keep the other tasks' results while diagnosing, then `gym eval submit` again. Never `--recover`. |
 | STOP typed `environment_protocol_violation` (the first results of one environment server were all replies the collector cannot use) | Same: fix the server or the benchmark pairing, then `gym eval submit` again. Never `--recover`. |

@@ -365,8 +365,18 @@ def test_a_run_with_every_rollout_flagged_keeps_its_delivery_state_in_the_verdic
     out = submit.inspect_recovery("gym-job-m", "bench")
 
     verdict = out.operator_verdict
-    assert verdict["state"] == "accept" and out.gate_task["status"] == "SUCCESS"
-    assert verdict["reason"].startswith("accepted by contract; every rollout ended on a failed model call")
+    assert verdict["state"] == "needs_action" and out.gate_task["status"] == "SUCCESS"
+    assert verdict["reason"].startswith("every rollout ended on a failed model call")
     assert "MLflow delivery pending" in verdict["reason"]
-    assert verdict["action"].startswith("read rollout quality: 100 of 100 rollouts flagged")
+    assert "read rollout quality (100 of 100 rollouts flagged" in verdict["action"]
     assert ("export the results to MLflow" in verdict["action"]) is configured
+
+
+def test_a_flag_like_word_inside_a_quoted_metric_key_is_a_value_not_an_option():
+    from nemo_gym.orchestration.recovery import _flags
+
+    option = '--score-key \'["agent", "--max-walltime"]\''
+    assert _flags(option) == {"--score-key"}
+    assert _flags('--score-agent "judge --qos agent"') == {"--score-agent"}
+    assert _flags("--max-walltime HH:MM:SS --walltime-reason TEXT") == {"--max-walltime", "--walltime-reason"}
+    assert _flags("[--extend-retries N]") == {"--extend-retries"}

@@ -595,3 +595,35 @@ def test_a_judge_only_job_the_scheduler_refuses_names_the_judge_qos_not_a_fresh_
     verdict = out.operator_verdict
     assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
     assert "--judge-qos QOS" in verdict["action"] and "--judge-partition PARTITION" in verdict["action"]
+
+
+def test_a_local_unsupported_profile_is_not_told_to_wait_for_the_scheduler(tmp_path, judge_slurm_bin) -> None:
+    # A judge on the policy's own nodes has no judge-only profile: decided from the saved config, before any sbatch.
+    job_dir = _model_served_run(tmp_path, judge_pool="gpu")
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert out.decision.judge_refusal == "unsupported_profile"
+    assert not (judge_slurm_bin / "sbatch_args").exists() and _journal(job_dir) == []
+    action = out.operator_verdict["action"]
+    assert "no judge execution profile" in action and "wait until the scheduler" not in action
+    assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
+
+
+def test_a_definite_refusal_that_is_not_placement_is_not_told_to_wait_for_the_scheduler(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Invalid time limit specification' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert out.decision.judge_refusal == "refused" and "Invalid time limit" in out.unsupported
+    assert _journal(job_dir) == []
+    action = out.operator_verdict["action"]
+    assert "definite reason" in action and "wait until the scheduler answers" not in action
+    assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
