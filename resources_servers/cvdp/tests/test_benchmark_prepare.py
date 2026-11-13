@@ -155,3 +155,34 @@ def test_recipe_manifest_retains_license_and_metadata():
     manifest = load_manifest(Path(benchmark_prepare.__file__).with_name("manifest.yaml"))
     assert manifest.licensing == "LicenseRef-CVDP-Upstream"
     assert manifest.version == "0.1.0" and manifest.experimental
+
+
+@pytest.mark.parametrize("category", ["cid002", "cid003", "cid004", "cid007", "cid016"])
+@pytest.mark.parametrize("multifile", [False, True])
+def test_generated_rows_follow_owner_and_verifier_contracts(raw_task, category, multifile):
+    from nemo_gym.data import normalize_task_fields
+    from resources_servers.cvdp.app import CVDPVerifierMetadata
+    from resources_servers.cvdp.task_data import TaskData
+
+    raw_task["categories"] = [category]
+    if multifile:
+        raw_task["output"]["context"]["rtl/second.sv"] = "reference"
+    row = benchmark_prepare.convert_task(raw_task)
+    fields, conflicts = normalize_task_fields(row)
+    assert not conflicts
+    owner = TaskData.model_validate(fields)
+    runtime = CVDPVerifierMetadata.model_validate(row["verifier_metadata"])
+    assert owner.model_dump() == runtime.model_dump()
+    assert owner.task_id == row["task_id"]
+    assert owner.categories == raw_task["categories"]
+    assert owner.difficulty == raw_task["difficulty"]
+    assert owner.target_files == list(raw_task["output"]["context"])
+
+    # Both declarations must evolve together, including absent optional fields.
+    assert TaskData.model_fields.keys() == CVDPVerifierMetadata.model_fields.keys()
+    for name, field in TaskData.model_fields.items():
+        other = CVDPVerifierMetadata.model_fields[name]
+        assert field.annotation == other.annotation, name
+        assert field.is_required() == other.is_required(), name
+        if not field.is_required():
+            assert field.get_default(call_default_factory=True) == other.get_default(call_default_factory=True), name
