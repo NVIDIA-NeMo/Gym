@@ -315,13 +315,6 @@ class EnvironmentManifest(_ManifestModel):
         json_schema_extra={"uniqueItems": True},
         description="Whether the environment is meant for evaluation, training or both; unknown when absent.",
     )
-    training_allowed: BoolOrUnknown | None = Field(
-        default=None,
-        description=(
-            "Whether its tasks may be trained on without invalidating an evaluation: false for a held-out benchmark, "
-            'true for training data, or "unknown". Licence terms belong in licensing.'
-        ),
-    )
     overlaps_with: list[NonEmptyString] | None = Field(
         default=None,
         min_length=1,

@@ -523,7 +523,6 @@ CATALOG_FIELDS = (
     "protocol_of",
     "maintainers",
     "intended_use",
-    "training_allowed",
     "overlaps_with",
     "primary_metric",
     "requirements",
@@ -545,7 +544,6 @@ def test_catalog_fields_round_trip() -> None:
         setup_of="my_eval",
         maintainers=["alice-nv"],
         intended_use=["evaluation", "training"],
-        training_allowed=False,
         overlaps_with=["gpqa"],
         primary_metric="pass@1",
         requirements={"gpu": False, "network": "allowlist"},
@@ -559,13 +557,12 @@ def test_catalog_fields_round_trip() -> None:
 
 
 @pytest.mark.parametrize(("written", "stored"), [("true", True), ("no", False), ("unknown", "unknown")])
-def test_yes_or_no_fields_take_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
+def test_gpu_takes_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
     # YAML reads a bare `yes` or `no` as a boolean; "unknown" is how an author says that nobody knows.
-    raw = _manifest() | yaml.safe_load(f"training_allowed: {written}\nrequirements: {{gpu: {written}}}\n")
+    raw = _manifest() | yaml.safe_load(f"requirements: {{gpu: {written}}}\n")
 
     manifest = EnvironmentManifest.model_validate(raw)
 
-    assert manifest.training_allowed == stored
     assert manifest.requirements is not None
     assert manifest.requirements.gpu == stored
     assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
@@ -625,7 +622,6 @@ def test_manifest_cannot_link_to_itself(field: str) -> None:
         ("intended_use", ["serving"]),
         ("intended_use", ["training", "training"]),
         ("overlaps_with", ["gpqa", "gpqa"]),
-        ("training_allowed", "maybe"),
         ("requirements", {"gpu": True, "vram_gb": 80}),
         ("requirements", {"network": "sometimes"}),
         # Network access is a level, not a yes or no, and `internet` is not a field.

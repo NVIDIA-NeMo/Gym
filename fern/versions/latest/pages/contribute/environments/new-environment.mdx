@@ -358,7 +358,7 @@ The manifest is the place to read this declaration, but not every field is autho
 | --- | --- |
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
 | Relationships: optional `setup_of` and `protocol_of` | Manifest |
-| Selection metadata: optional `maintainers`, `intended_use`, `training_allowed`, `overlaps_with`, `primary_metric`, and `requirements` | Manifest |
+| Selection metadata: optional `maintainers`, `intended_use`, `overlaps_with`, `primary_metric`, and `requirements` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
 | Configuration selection: `config_path` and optional `dataset_owner` | Manifest |
@@ -418,7 +418,6 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `authors` | list of strings | Required; non-empty and unique |
 | `maintainers` | list of strings or null | Optional; GitHub logins of the current maintainers, non-empty and unique |
 | `intended_use` | list of strings or null | Optional; `evaluation`, `training`, or both; unknown when absent |
-| `training_allowed` | boolean, `unknown`, or null | Optional; whether the environment's tasks may be trained on without invalidating an evaluation: `false` for a held-out benchmark, `true` for training data. Write `unknown` when nobody knows; leaving the field out means nobody answered. Licence terms belong in `licensing` |
 | `overlaps_with` | list of strings or null | Optional; benchmarks that training on this environment would invalidate, for example because their tasks overlap with its data |
 | `primary_metric` | string or null | Optional; the key metric that is the headline score |
 | `requirements` | object or null | Optional; what a run needs beyond the model under test. `gpu` (the environment itself needs a GPU) is `true`, `false`, or `unknown`. `network` (outbound access a run needs) is `no-network`; `allowlist` (only specific services, such as a search API or a hosted judge model); `public` (the open internet, for example browsing or downloads); or `unknown`. The `network` values are the same as a Harbor task's `network_mode` |
@@ -457,7 +456,7 @@ A named config is often a variant of another workload rather than a workload of 
 
 Write a link as the `name` the target manifest declares. Validation looks for the target in the same `benchmarks/` or `environments/` tree as the manifest that links to it.
 
-A setup or protocol declares its own selection fields; it does not take them from the manifest it names, so each manifest can be read on its own. A setup runs the same task data as its target, so when both declare `training_allowed`, validation requires the same answer.
+A setup or protocol declares its own selection fields; it does not take them from the manifest it names, so each manifest can be read on its own.
 
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 
