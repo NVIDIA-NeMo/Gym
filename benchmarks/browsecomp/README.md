@@ -4,7 +4,12 @@
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
-      tavily_api_key: ???
+      # Choose one search provider: exa, tavily or ydc (You.com).
+      # Set search_provider and the matching key; the other keys can stay unset.
+      # search_provider: ydc
+      # exa_api_key: ???
+      # tavily_api_key: ???
+      # ydc_api_key: ???
       exclude_domains_file_path: ???
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:

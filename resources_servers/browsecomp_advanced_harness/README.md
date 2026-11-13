@@ -5,12 +5,16 @@ requiring multi-hop investigation through search and page-level browsing.
 
 ## Overview
 
-This resources server provides browsing tools backed by [Tavily](https://tavily.com/) or Exa:
+This resources server provides browsing tools backed by a configurable search provider: Exa, [Tavily](https://tavily.com/) or [You.com](https://you.com/docs/welcome):
 
 - **`search`** — parallel web search returning top results with content snippets
 - **`browse`** — full-page content extraction from given URLs
 - **`bash_command`** — the existing read-only pocketshell interpreter over retrieved pages, executed inside a
   resources-owned sandbox when `workspace: per_session` is enabled
+
+Select the provider with `search_provider`: `exa`, `tavily` or `ydc` ([You.com](https://you.com/docs/welcome)).
+For `ydc`, `search` calls `/v1/search` with highlights extraction and `browse` calls `/v1/contents`
+for full-page markdown.
 
 Reward is computed via an LLM judge that compares the model's final answer against the ground truth.
 
@@ -22,10 +26,33 @@ Add to your `env.yaml` (or pass via CLI):
 tavily_api_key: <YOUR_TAVILY_KEY>   # or a list of keys for rotation
 exclude_domains_file_path: /path/to/excluded_domains.json
 
+# To use You.com or Exa instead of Tavily, uncomment ONE of the blocks below. The `null` replaces the
+# exemplar config's Tavily key, so no Tavily credential is needed. Keys can be a list for rotation.
+#
+# You.com:
+# browsecomp_advanced_harness_resources_server:
+#   resources_servers:
+#     browsecomp_advanced_harness:
+#       search_provider: ydc
+#       ydc_api_key: <YOUR_YDC_KEY>
+#       tavily_api_key: null
+#
+# Exa:
+# browsecomp_advanced_harness_resources_server:
+#   resources_servers:
+#     browsecomp_advanced_harness:
+#       search_provider: exa
+#       exa_api_key: <YOUR_EXA_KEY>
+#       tavily_api_key: null
+
 judge_model_base_url: <YOUR_JUDGE_MODEL_URL>
 judge_model_api_key: ""
 judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
 ```
+
+For You.com you can instead pass `configs/browsecomp_advanced_harness_ydc.yaml` in place of
+`configs/browsecomp_advanced_harness.yaml` and set a top-level `ydc_api_key` in `env.yaml`;
+it selects `search_provider: ydc` for you.
 
 ## Workspace sandbox
 
