@@ -495,7 +495,7 @@ class EnvironmentManifest(_ManifestModel):
     )
     primary_metric: NonEmptyString | None = Field(
         default=None,
-        description="The key metric that is the environment's headline score.",
+        description="The key metric that is the environment's headline score; unknown when nobody has established it.",
     )
     requirements: ManifestRequirements | None = None
     reward: Reward
