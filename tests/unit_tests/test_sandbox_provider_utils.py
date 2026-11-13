@@ -170,7 +170,7 @@ def test_cleanup_rejects_unsafe_rmtree(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_cleanup_root_replacement_after_open_cannot_redirect_chmod(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_permission_repair: None
 ) -> None:
     staging = tmp_path / "staging"
     staging.mkdir()
