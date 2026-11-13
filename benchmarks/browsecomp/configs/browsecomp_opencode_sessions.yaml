@@ -195,7 +195,7 @@ browsecomp_opencode_environment_server:
       # plugin-log read, the export copy (300 s at most for its listing and downloads, when an overlay turns it on) and
       # the sandbox stop, and with the cleanup of the agent's and the resources server's sessions ends before the lent
       # sandbox's ttl_s. After a run that used its whole budget, counting each other step once at its configured
-      # timeout, as the config test does, it leaves the judge about 20 minutes, or 16 with the export copy on. Quicker
+      # timeout, as the config test does, it leaves the judge about 21 minutes, or 16 with the export copy on. Quicker
       # steps leave it more; OpenCode's setup (several commands, each bounded by sandbox_install_timeout_seconds),
       # stopping OpenCode once its budget runs out and the agent's close can take longer and leave it less. A judge
       # that needs longer, as its retries allow, times the episode out, a non-terminal failure that a resumed run

@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -333,6 +334,26 @@ def test_the_staged_plugins_print_every_line_verify_requires(
     assert ("search_transport=rest" in plugin_log, "search_transport=mcp" in plugin_log) == (deep, not deep)
 
 
+def test_verify_requires_a_line_from_the_search_guard_and_from_the_turn_budget() -> None:
+    """Lines every arm prints (test_the_staged_plugins_print_every_line_verify_requires runs the plugins). Without
+    them, verify would not check that the search guard and the turn budget loaded."""
+    _, config = sessions()
+
+    assert settings(config, RESOURCES)["required_plugin_markers"] == [
+        "[nemo-gym-plugin] web_guard version=2 contamination=on",
+        "[nemo-gym-plugin] tool_surface task=off",
+    ]
+
+
+def test_the_readme_gives_the_bash_off_arm_the_lines_its_plugins_print() -> None:
+    """The README's overlay for the bash-off arm restates the whole list. A line in it that the plugins do not print
+    would refuse every row of that arm."""
+    text = README.read_text().split("restates the whole list", 1)[1]
+    overlay = OmegaConf.create(textwrap.dedent(text.split("```yaml\n", 1)[1].split("```", 1)[0]))
+
+    assert list(overlay[RESOURCES].resources_servers.opencode_search.required_plugin_markers) == BASH_OFF_MARKERS
+
+
 def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
     _, config = sessions()
     pairing = settings(config, ENVIRONMENT)
@@ -397,6 +418,31 @@ def test_the_readme_gives_each_time_limit_the_presets_value() -> None:
     assert f"tries up to {JUDGE_CALL_MAX_ATTEMPTS} times" in section
     # The section says the relay preset has no episode deadline.
     assert settings(relay, RELAY_ENVIRONMENT).get("default_episode_timeout_seconds") is None
+
+
+def test_the_readme_gives_the_judge_the_time_the_deadline_leaves() -> None:
+    """After a run that used its whole budget, the time-limits section gives the judge what the episode deadline
+    leaves when each other step takes its configured bound, as test_an_episode_ends_before_its_lent_sandbox_expires
+    counts them. That share is nominal, not a ceiling: quicker steps leave the judge more."""
+    _, config = sessions()
+    pairing, agent = settings(config, ENVIRONMENT), settings(config, AGENT)
+    nominal = pairing["default_episode_timeout_seconds"] - (
+        settings(config, RESOURCES)["sandbox_config"]["ready_timeout_s"]
+        + WORKDIR_CREATE_S
+        + agent["sandbox_install_timeout_seconds"]
+        + agent["timeout"]
+        + agent["session_close_timeout_seconds"]
+        + PLUGIN_LOG_READ_S
+        + STOP_TIMEOUT_S
+    )
+    section = README.read_text().split("\n### Time limits\n", 1)[1].split("\n### ", 1)[0]
+    prose = " ".join(section.split())
+
+    assert "at most about" not in prose
+    stated = re.search(r"leaves the judge about (\d+) minutes, or about (\d+) with the export copy on", prose)
+    assert stated is not None
+    minutes = [int(value) for value in stated.groups()]
+    assert minutes == pytest.approx([nominal / 60, (nominal - EXPORT_COPY_S) / 60], abs=0.5)
 
 
 def test_the_resources_server_is_the_relay_presets_but_for_its_episode_settings() -> None:

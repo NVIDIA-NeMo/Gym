@@ -150,13 +150,16 @@ The session preset's limits, from admission to cleanup:
 | Sandbox lifetime | `sandbox_config.ttl_s: 27000` | The sandbox provider | The provider reclaims the sandbox |
 
 The episode deadline covers the seed, the run, the agent's close, and `/verify`'s plugin-log read (60 s at most) and
-sandbox stop (120 s at most). After a run that used its whole budget it leaves the judge at most about 20 minutes: a
-judge that needs longer, which its attempts allow, times the episode out. With the export copy on
-(`episode_export_copy_dir`, see [Compare the two presets](#compare-the-two-presets)), `/verify` also copies the
-exports before it stops the sandbox, for up to 300 s, which leaves the judge at most about 16 minutes. A job time limit
-shorter than the run budget ends such runs first. `ttl_s` stays above the deadline plus two cleanup steps, since
-`/verify` stops the sandbox before it calls the judge and, after a deadline, the cleanup stops it. The relay preset has
-no episode deadline: its agent's `sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
+sandbox stop (120 s at most; a stop that fails is tried once more after the judge, within the deadline). Counting each
+other step once at its configured timeout, a run that used its whole budget leaves the judge about 21 minutes, or about
+16 with the export copy on (`episode_export_copy_dir`, see [Compare the two presets](#compare-the-two-presets)), which
+`/verify` makes before it stops the sandbox, for up to 300 s. Quicker steps leave the judge more; OpenCode's setup
+(several commands, each bounded by `sandbox_install_timeout_seconds`), stopping OpenCode once its budget runs out, the
+agent's close and a sandbox stop that fails and is tried again can take longer and leave it less. A judge that needs
+more than is left, as its retries allow, times the episode out. A job time limit shorter than the run budget ends such
+runs first. `ttl_s` stays above the deadline plus two cleanup steps, since `/verify` stops the sandbox before it calls
+the judge and, after a deadline, the cleanup stops it. The relay preset has no episode deadline: its agent's
+`sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
 
 ### Row fields
 
@@ -263,6 +266,11 @@ gym eval run --no-serve <the same --config and ++ arguments> \
   and opt-in arms, and `++route_failures_to_sidecar=true` for both.
 - Pin the session preset to the OpenCode binary the relay agent installs, so both run one build.
 - Compare question by question: each row's `reward`, `mask_sample` and `failure_kind`, and the failure rows.
+- A row graded again from its saved answer carries no budget mask on either preset (see
+  `resources_servers/opencode_search/README.md`): one from `gym eval reverify`, or one whose judge failed or gave no
+  verdict and that Gym judged again at the end of the collection or when the run resumed, which names that re-judge in
+  `_ng_rejudge_operation_id`. Leave such rows out of the `mask_sample` and `failure_kind` comparison and report them on
+  their own.
 - Compare token counts by `response.usage.input_tokens` and `output_tokens`, which both presets count the same way;
   for a total, add the two on both, since the relay's `total_tokens` is OpenCode's stored total. Leave out the cached
   and reasoning details (see Token usage above).
@@ -314,9 +322,13 @@ gym eval run --no-serve --config benchmarks/browsecomp/configs/browsecomp_openco
 
 With `++uvicorn_logging_show_200_ok=true` the logs show each episode's calls in order: `/seed_session`, the agent
 session, the model calls, the agent's close, `/verify` and `/close_session`. Run the relay preset the same way, with
-`--agent opencode_sandboxed_search_agent` and `prepare.py`'s rows; it has no `/close_session`.
+`--agent opencode_sandboxed_search_agent` and `prepare.py`'s rows; it has no `/close_session`. In a run with the search
+cache on (`NEMO_GYM_EXA_CACHE_ROOT`), drop `++uvicorn_logging_show_200_ok=true` from `SMOKE`: it turns on every
+server's access log, which would record the search key that the sandbox's searches send to the Resources Server's
+`/mcp` proxy in its query string.
 
 - Nothing checks the staged plugins' bytes per episode, so check them once here: in one lent sandbox, the SHA-256
   digests of the `/tmp/nemo-gym-plugin-*.js` files equal those of the repository files `episode_sandbox_files` names.
+  Treat a mismatch as a failed smoke: fix the staging before comparing the presets.
 - To check a row of the failure table above, script the stubs to end a run that way, for example by answering a model
   call with an error status, and compare each preset's row with the table.
