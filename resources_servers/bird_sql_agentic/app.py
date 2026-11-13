@@ -31,6 +31,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.bird_sql.app import (
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
@@ -160,3 +161,5 @@ class BirdSqlAgenticResourcesServer(BirdSqlResourcesServer):
 
 if __name__ == "__main__":
     BirdSqlAgenticResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = BirdSqlAgenticResourcesServer.run_webserver()
