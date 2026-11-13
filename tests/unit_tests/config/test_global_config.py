@@ -3512,7 +3512,30 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["legacy_agent"]) == {
             "entrypoint": "app.py",
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
+            "default_episode_timeout_seconds": 600,
         }
+
+    @mark.parametrize("configured", [None, 600, 43200])
+    def test_legacy_relay_keeps_an_explicit_episode_deadline(self, configured: object) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["default_episode_timeout_seconds"] = configured
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert "default_episode_timeout_seconds" in relay
+        assert relay["default_episode_timeout_seconds"] == configured
+
+    def test_legacy_relay_leaves_an_omitted_episode_deadline_to_the_relays_default(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        del server["default_episode_timeout_seconds"]
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert "default_episode_timeout_seconds" not in relay
 
     @mark.parametrize("harness_type", sorted(nemo_gym.config.global_config.HOST_RUN_SWAP_AGENT_TYPES))
     def test_swap_to_host_run_template_keeps_legacy_relay(self, harness_type: str) -> None:

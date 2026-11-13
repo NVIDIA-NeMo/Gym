@@ -6,8 +6,9 @@ legacy_agent_environment_server:
         type: responses_api_agents
         name: ???
       # Required by BaseEnvironmentServerConfig. A relay applies none of them but the episode
-      # deadline, which is off unless set; the agent keeps its own limits.
+      # deadline, which ends a `/run` that outlives it (six hours, like the other Environment Servers). Set it to
+      # null to leave only the agent's own limits.
       max_concurrent_episodes: null
       queue_timeout_seconds: null
-      default_episode_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
       cleanup_timeout_seconds: 180
