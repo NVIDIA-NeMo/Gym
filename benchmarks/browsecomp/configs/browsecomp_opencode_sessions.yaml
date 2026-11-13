@@ -37,7 +37,8 @@ search_browsecomp_resources_server:
       # The seed creates it. opencode_agent refuses /, the working directory of the relay agent's runs.
       sandbox_workdir: /workspace
       sandbox_config:
-        # The lent sandbox lives from the seed through grading and cleanup, so above the episode deadline below.
+        # Verify stops the lent sandbox before the judge grades, and after an episode timeout the cleanup stops it, so
+        # above the episode deadline below plus that cleanup.
         ttl_s: 27000
       # The receipts plugin, then the relay agent's four plugins, unchanged and at the paths it uploads them to. The
       # receipts plugin copies the other plugins' lines to plugin_log_path.
@@ -167,8 +168,11 @@ browsecomp_opencode_environment_server:
       # Each admitted episode holds a sandbox from its seed on, so admit no more than one agent worker runs at once.
       max_concurrent_episodes: 64
       queue_timeout_seconds: 86400
-      # Covers the seed (sandbox start and OpenCode install), the run, the agent's close and the judge's retries, and
-      # ends before the lent sandbox's ttl_s.
+      # Covers the seed (sandbox start, workdir and OpenCode install), the 21600 s run, the agent's close, the
+      # plugin-log read and the sandbox stop, and with the cleanup of the agent's and the resources server's sessions
+      # ends before the lent sandbox's ttl_s. After a run that used its whole budget it leaves the judge at most about
+      # 20 minutes: a slower judge (its retries can take far longer) times the episode out, a non-terminal failure that
+      # a resumed run retries. A job time limit shorter than the run budget ends such runs first.
       default_episode_timeout_seconds: 25200
       cleanup_timeout_seconds: 600
 

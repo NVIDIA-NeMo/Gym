@@ -26,6 +26,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
 )
+from nemo_gym.server_runtime.sandbox_lending import STOP_TIMEOUT_S
 from resources_servers.opencode_search.app import SearchResourcesServer, SearchResourcesServerConfig
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig, _session_opencode_config_error
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
@@ -61,6 +62,10 @@ RUN_VARIABLES = (
     "NEMO_GYM_EXA_CACHE_LEGACY_ROOT",
     "BROWSECOMP_OPENCODE_EXPORT_DIR",
 )
+# opencode_search's bounds on its commands in a lent sandbox: creating the workdir at the seed, and reading the plugin
+# log at verify.
+WORKDIR_CREATE_S = 60
+PLUGIN_LOG_READ_S = 60
 NODE = shutil.which("node")
 
 
@@ -350,26 +355,28 @@ def test_the_staged_plugins_print_every_line_verify_requires(tmp_path: Path) -> 
 def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
     _, config = sessions()
     pairing = settings(config, ENVIRONMENT)
-    agent = OpenCodeAgentConfig.model_validate(settings(config, AGENT) | {"name": AGENT})
-    resources = SearchResourcesServerConfig.model_validate(settings(config, RESOURCES) | {"name": RESOURCES})
-    sandbox = resources.sandbox_config
+    agent = settings(config, AGENT)
+    sandbox = settings(config, RESOURCES)["sandbox_config"]
+    deadline = pairing["default_episode_timeout_seconds"]
 
     # Each admitted episode holds a sandbox; any one worker can run every admitted episode, so none waits for OpenCode.
-    assert agent.concurrency >= pairing["max_concurrent_episodes"]
-    # The judge's longest grading: every attempt runs to its timeout, with the delay between attempts.
-    judge = resources.judge_timeout_seconds + (resources.judge_max_attempts - 1) * (
-        resources.judge_retry_delay_seconds + resources.judge_retry_timeout_seconds
-    )
-    # The sandbox start, OpenCode's install and run, the agent's close and the judge, inside the episode deadline,
-    # which ends before the lent sandbox's TTL.
-    episode = (
+    assert agent["concurrency"] >= pairing["max_concurrent_episodes"]
+    # Everything before the judge, each step at its bound: the seed (the sandbox start, its workdir and OpenCode's
+    # install), the run, the agent's close, and verify's plugin-log read and sandbox stop.
+    before_judge = (
         sandbox["ready_timeout_s"]
-        + agent.sandbox_install_timeout_seconds
-        + agent.timeout
-        + agent.session_close_timeout_seconds
-        + judge
+        + WORKDIR_CREATE_S
+        + agent["sandbox_install_timeout_seconds"]
+        + agent["timeout"]
+        + agent["session_close_timeout_seconds"]
+        + PLUGIN_LOG_READ_S
+        + STOP_TIMEOUT_S
     )
-    assert episode < pairing["default_episode_timeout_seconds"] < sandbox["ttl_s"]
+    assert before_judge < deadline
+    # The judge is left out: verify stops the sandbox before it calls the judge, and a judge slower than the deadline
+    # allows times the episode out. After the deadline the Environment Server closes the agent's session and then the
+    # resources server's, which stops the sandbox, each within cleanup_timeout_seconds.
+    assert deadline + 2 * pairing["cleanup_timeout_seconds"] < sandbox["ttl_s"]
 
 
 def test_the_resources_server_is_the_relay_presets_but_for_its_episode_settings() -> None:
