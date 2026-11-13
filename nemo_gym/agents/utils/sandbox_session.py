@@ -95,7 +95,10 @@ def prefer_oom_kill_setup(path: str = "/proc/self/oom_score_adj") -> str:
     Raises oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a Guaranteed pod's -997),
     so the sandbox never becomes the node's first victim in a global OOM. Raising needs no privilege; a
     failure leaves the score unchanged. The CLI inherits the runner's score, while the supervisor and the
-    sandbox's exec daemon keep their own. The runner's stderr, the supervisor's log, records what happened.
+    sandbox's exec daemon keep their own. That steers the kernel's choice of a single victim only: where the
+    container's memory cgroup sets ``memory.oom.group=1`` (cgroup v2, as some kubelets configure it), an OOM
+    kill still ends every process in the cgroup, the supervisor and the exec daemon included. The runner's
+    stderr, the supervisor's log, records what happened.
     """
     return f"""oom_score_adj={quote(path)}
 if read -r before 2>/dev/null <"$oom_score_adj" && [[ $before =~ ^-?[0-9]+$ ]]; then

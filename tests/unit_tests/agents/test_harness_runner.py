@@ -201,6 +201,16 @@ def test_inherited_runner_names_neither_configure_the_runner_nor_reach_the_cli(t
     assert not (tmp_path / "events.jsonl").exists()
 
 
+def test_inherited_events_exclude_filters_nothing_when_unset(tmp_path: Path) -> None:
+    # The params set events but no events_exclude: an inherited value of that name must not drop any event.
+    script = 'echo \'{"type": "update"}\'; echo \'{"type": "ok"}\''
+    params = _params(tmp_path, command=["bash", "-c", script], events=str(tmp_path / "events.jsonl"))
+    result = _run(params, env=os.environ | {"events_exclude": "*"})
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert events == [{"type": "update"}, {"type": "ok"}]
+
+
 def test_events_mode_keeps_runner_descriptors_out_of_the_cli(tmp_path: Path) -> None:
     script = 'echo \'{"type": "injected"}\' >&4; echo \'{"type": "ok"}\''
     params = _params(tmp_path, command=["bash", "-c", script], events=str(tmp_path / "events.jsonl"))
