@@ -272,8 +272,10 @@ for (const hook of hooks) await hook["chat.params"]?.({ sessionID: "session", me
 const grep = {
   description: [
     "- Fast content search tool",
-    "- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.",
-    "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead",
+    "- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) " +
+      "directly. Do NOT use `grep`.",
+    "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the " +
+      "Task tool instead",
   ].join("\\n"),
 };
 for (const hook of hooks) await hook["tool.definition"]?.({ toolID: "grep" }, grep);
