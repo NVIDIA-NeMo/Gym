@@ -101,7 +101,7 @@ Conformance is a merge check from the Observability level up (Step 7). At the Ev
 - **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. The registry key is the adapter's directory name without `_agent`. The probes give the adapter its own local sandbox rather than a borrowed one. Run on Linux with a new output directory:
 
   ```bash
-  python scripts/run_harness_conformance.py --harness <registry-key> --output <new-dir>
+  python -m scripts.run_harness_conformance --harness <registry-key> --output <new-dir>
   ```
 
   Sort each failure by where it comes from, and change only that side:

@@ -415,10 +415,11 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `reward` | object | Required; `range` is two finite numbers ordered `lower <= upper` (a constant range is allowed) and `higher_is_better` is boolean |
 | `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
 | `config_path` | string | Optional; defaults to `config.yaml` beside the manifest; must be relative and stay inside the catalog tree |
+| `harbor_target` | string or null | Optional; mirrored from the config's `harbor_target`: the Harbor task folder, committed entry or `harbor:` reference the benchmark runs. Its tasks are the rows, so `datasets` is empty and `prompt_source` is `prepared` or `agent` |
 | `dataset_owner` | string or null | Optional; selects the dataset-bearing config instance when selection is ambiguous |
 | `resources_server` | string or null | Required; mirrored from config; `null` is permitted except for `custom-gym-verifier` |
 | `agent_server` | string | Required; mirrored from config |
-| `datasets` | list of objects | Required and non-empty; dataset names must be unique |
+| `datasets` | list of objects | Required and non-empty unless `harbor_target` is set, and then empty; dataset names must be unique |
 | `model_server` | string or null | Required for `custom-gym-verifier` and `custom-gym-agent-loop` |
 | `rollout_driver` | string or null | Required only for `external-rollout-driver`; Python `module:function` form |
 | `grading_mode` | string or null | Optional resources-server-specific selector |
@@ -458,7 +459,7 @@ Choose the source that matches the implemented prompting path. Changing this met
 | `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
 | `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
 
-Every profile declares `resources_server`, `agent_server`, and at least one dataset. If the workload has no resources server, profiles other than `custom-gym-verifier` may explicitly declare `resources_server: null`. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split` and at least one benchmark dataset with `prepare_script`; its prompt requirements depend on `prompt_source` above.
+Every profile declares `resources_server` and `agent_server`. Without `harbor_target`, it also declares at least one dataset. If the workload has no resources server, profiles other than `custom-gym-verifier` may explicitly declare `resources_server: null`. `rollout_driver` is valid only for `external-rollout-driver`. Every benchmark requires `canonical_split`; a benchmark without `harbor_target` additionally requires at least one benchmark dataset with `prepare_script`, and its prompt requirements depend on `prompt_source` above. A Harbor-backed manifest instead has empty `datasets` and uses `prompt_source: prepared` or `agent`.
 
 The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
 

@@ -230,7 +230,12 @@ class FalseStatementJudgeServer(SimpleResourcesServer):
             content = chat_response.choices[0].message.content if chat_response.choices else None
             return observed_text(
                 content.strip() if content else "",
-                completed=bool(chat_response.choices) and chat_response.choices[0].finish_reason == "stop",
+                completed=(
+                    bool(chat_response.choices)
+                    and chat_response.choices[0].finish_reason == "stop"
+                    and getattr(chat_response.choices[0], "native_finish_reason", None) != "repetition"
+                    and getattr(chat_response.choices[0], "stop_reason", None) != "repetition_detected"
+                ),
             )
 
         request_params = judge_params.model_copy(deep=True)
