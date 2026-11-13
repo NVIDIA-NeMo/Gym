@@ -124,10 +124,13 @@ def save_rows(a, rows):
     (a / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def setup(tmp_path, *, explicit=False, n=2):
+def setup(tmp_path, *, explicit=False, n=2, decorate=None):
     a = tmp_path / "artifacts"
     a.mkdir()
     rows = [row(i, explicit) for i in range(n)]
+    if decorate is not None:
+        for index, item in enumerate(rows):
+            decorate(index, item)
     save_rows(a, rows)
     inventory = [{k: r[k] for k in ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id") if k in r} for r in rows]
     (a / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory))
@@ -149,7 +152,7 @@ def setup(tmp_path, *, explicit=False, n=2):
     )
     write_json(a / "rollouts_aggregate_metrics.json", {"reward": 0.0})
     produced = run_health_checks(a / "rollouts.jsonl", workers=1)
-    assert produced.summary["run"]["stats"]["responses"] == {
+    assert decorate is not None or produced.summary["run"]["stats"]["responses"] == {
         "rollouts": n,
         "unknown": 0,
         "selected": n,

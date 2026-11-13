@@ -6231,7 +6231,13 @@ def rollout_quality_facts(quality: Mapping[str, Any] | None) -> dict[str, Any] |
     verdicts, issues = quality.get("verdicts"), quality.get("issues")
     verdicts = {k: v for k, v in verdicts.items() if type(v) is int} if isinstance(verdicts, dict) else None
     issues = {k: v for k, v in issues.items() if type(v) is int and v} if isinstance(issues, dict) else None
-    return {"verdicts": verdicts, "issues": issues} if verdicts is not None or issues is not None else None
+    # The producer flags one finding per failed model chain, so the issue total can exceed the rollouts it affects;
+    # the run's distinct count of rollouts that ended on a failed model call is the unit the verdict compares.
+    ended = quality.get("ended_on_failed_model_call")
+    facts: dict[str, Any] = {"verdicts": verdicts, "issues": issues}
+    if type(ended) is int:
+        facts["rollouts_ended_on_failed_model_call"] = ended
+    return facts if verdicts is not None or issues is not None else None
 
 
 UNREADABLE_ARTIFACTS_ERROR = "unreadable artifacts, read as unknown"
@@ -6398,9 +6404,11 @@ def _flagged_everything(
 ) -> tuple[str, str] | None:
     """``(what, flagged)`` when rollout quality flags every rollout or every task, else None; ``flagged`` counts in
     the unit of the check."""
-    issues = ((gate_task.get("rollout_quality") or {}).get("issues")) or {}
+    quality = gate_task.get("rollout_quality") or {}
+    issues = quality.get("issues") or {}
     tasks = len({identity[0] for identities in decision.identities.values() for identity in identities})
-    if expected and issues.get("rollout_ended_on_failed_model_call", 0) >= expected:
+    # Distinct rollouts, not findings: a rollout whose several model chains failed counts once.
+    if expected and quality.get("rollouts_ended_on_failed_model_call", 0) >= expected:
         check = "rollout_ended_on_failed_model_call"
         return "every rollout ended on a failed model call", f"{expected} of {expected} rollouts flagged {check}"
     if tasks and issues.get("task_no_successful_model_calls", 0) >= tasks:

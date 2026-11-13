@@ -78,6 +78,7 @@ def test_a_final_model_failure_is_still_accepted():
 def test_a_run_whose_every_rollout_ended_on_a_failed_model_call_is_not_accepted():
     collected = _ready(_run(32))
     collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 32
+    collected.quality["ended_on_failed_model_call"] = 32
     verdict, task, _ = _verdict(collected)
     assert task["status"] == "SUCCESS"
     assert verdict["state"] == "needs_action"
@@ -100,6 +101,7 @@ def test_a_run_where_no_task_had_a_successful_model_call_is_not_accepted():
 def test_a_partly_flagged_run_is_still_accepted():
     collected = _ready(_run(32))
     collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 31
+    collected.quality["ended_on_failed_model_call"] = 31
     verdict, _, _ = _verdict(collected)
     assert verdict["state"] == "accept" and verdict["action"] == "none"
 
@@ -129,6 +131,7 @@ def test_a_task_level_finding_counts_tasks_not_rollouts():
 def test_some_flagged_rollouts_are_a_signal_not_a_reason_to_change_the_verdict():
     collected = _ready(_run(100))
     collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 5
+    collected.quality["ended_on_failed_model_call"] = 5
     verdict, _, _ = _verdict(collected)
     assert verdict["state"] == "accept" and verdict["action"] == "none"
 
@@ -630,3 +633,63 @@ def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
         "export the results to MLflow: `gym eval resubmit GYM_JOB_ID BENCHMARK --recover` runs the export of a complete run without a "
         "receipt (no model calls)"
     )
+
+
+def _failing_auxiliary_chains(failing_rollouts):
+    """The quality the real health producer and collector report for 32 rollouts, ``failing_rollouts`` of which also
+    end on a failed call of each of two auxiliary models (two failed model chains per affected rollout)."""
+    from tests.unit_tests.orchestration.test_recovery_health_binding import collect, setup
+
+    def decorate(index, item):
+        if index >= failing_rollouts:
+            return
+        for name in ("judge_a", "judge_b"):
+            item["ng_trajectory"]["model_calls"].append(
+                {
+                    "model_call_id": f"{name}-{index}",
+                    "response_metadata": {
+                        "model_ref": {"type": "responses_api_models", "name": name},
+                        "status_code": 500,
+                        "error_category": "upstream",
+                    },
+                    "request": {"input": [{"role": "user", "content": "synthetic grading request"}]},
+                    "response": None,
+                }
+            )
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        artifacts, _ = setup(Path(tmp), n=32, decorate=decorate)
+        return collect(artifacts).quality
+
+
+def _with_producer_quality(quality):
+    collected = _ready(_run(32))
+    for key in ("issues", "ended_on_failed_model_call"):
+        collected.quality[key] = quality[key]
+    return collected
+
+
+def test_two_failed_model_chains_per_affected_rollout_do_not_reject_a_half_affected_run():
+    quality = _failing_auxiliary_chains(16)
+    # One finding per failed chain: 32 findings over 16 affected rollouts of 32.
+    assert quality["issues"]["rollout_ended_on_failed_model_call"] == 32
+    assert quality["ended_on_failed_model_call"] == 16
+
+    verdict, task, decision = _verdict(_with_producer_quality(quality))
+
+    assert decision.action == RecoveryAction.NOOP and task["status"] == "SUCCESS"
+    assert verdict["state"] == "accept" and verdict["action"] == "none", verdict
+
+
+def test_every_rollout_ending_on_failed_model_chains_is_still_rejected_with_the_rollout_count():
+    quality = _failing_auxiliary_chains(32)
+    assert quality["issues"]["rollout_ended_on_failed_model_call"] == 64
+    assert quality["ended_on_failed_model_call"] == 32
+
+    verdict, _, _ = _verdict(_with_producer_quality(quality))
+
+    assert verdict["state"] == "needs_action"
+    assert "32 of 32 rollouts flagged rollout_ended_on_failed_model_call" in verdict["action"]

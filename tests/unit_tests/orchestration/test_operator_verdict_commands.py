@@ -316,6 +316,7 @@ def _pending_export(configured, *, flagged=False):
     collected.mlflow = {"live_run_id": None, "receipt": None}
     if flagged:
         collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 100
+        collected.quality["ended_on_failed_model_call"] = 100
     return collected
 
 
