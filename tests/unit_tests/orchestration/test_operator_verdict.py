@@ -635,7 +635,7 @@ def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
     )
 
 
-def _failing_auxiliary_chains(failing_rollouts):
+def _failing_auxiliary_chains(failing_rollouts, ignored_checks=()):
     """The quality the real health producer and collector report for 32 rollouts, ``failing_rollouts`` of which also
     end on a failed call of each of two auxiliary models (two failed model chains per affected rollout)."""
     from tests.unit_tests.orchestration.test_recovery_health_binding import collect, setup
@@ -661,7 +661,7 @@ def _failing_auxiliary_chains(failing_rollouts):
     from pathlib import Path
 
     with tempfile.TemporaryDirectory() as tmp:
-        artifacts, _ = setup(Path(tmp), n=32, decorate=decorate)
+        artifacts, _ = setup(Path(tmp), n=32, decorate=decorate, ignored_checks=ignored_checks)
         return collect(artifacts).quality
 
 
@@ -693,6 +693,19 @@ def test_every_rollout_ending_on_failed_model_chains_is_still_rejected_with_the_
 
     assert verdict["state"] == "needs_action"
     assert "32 of 32 rollouts flagged rollout_ended_on_failed_model_call" in verdict["action"]
+
+
+def test_an_ignored_check_does_not_reject_a_run_whose_every_rollout_ended_on_failed_model_chains():
+    check = "rollout_ended_on_failed_model_call"
+    quality = _failing_auxiliary_chains(32, ignored_checks=[check])
+    # The producer keeps the statistic and records no finding for the ignored check.
+    assert quality["ended_on_failed_model_call"] == 32
+    assert quality["issues"].get(check, 0) == 0
+
+    verdict, task, decision = _verdict(_with_producer_quality(quality))
+
+    assert decision.action == RecoveryAction.NOOP and task["status"] == "SUCCESS"
+    assert verdict["state"] == "accept" and verdict["action"] == "none", verdict
 
 
 def test_a_collector_without_the_distinct_count_leaves_a_flagged_run_unknown_not_accepted():

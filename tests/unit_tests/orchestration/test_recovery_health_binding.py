@@ -124,7 +124,7 @@ def save_rows(a, rows):
     (a / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def setup(tmp_path, *, explicit=False, n=2, decorate=None):
+def setup(tmp_path, *, explicit=False, n=2, decorate=None, ignored_checks=()):
     a = tmp_path / "artifacts"
     a.mkdir()
     rows = [row(i, explicit) for i in range(n)]
@@ -151,7 +151,7 @@ def setup(tmp_path, *, explicit=False, n=2, decorate=None):
         },
     )
     write_json(a / "rollouts_aggregate_metrics.json", {"reward": 0.0})
-    produced = run_health_checks(a / "rollouts.jsonl", workers=1)
+    produced = run_health_checks(a / "rollouts.jsonl", workers=1, ignored_checks=ignored_checks)
     assert decorate is not None or produced.summary["run"]["stats"]["responses"] == {
         "rollouts": n,
         "unknown": 0,

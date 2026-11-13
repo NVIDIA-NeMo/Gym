@@ -6414,9 +6414,10 @@ def _flagged_everything(
     quality = gate_task.get("rollout_quality") or {}
     issues = quality.get("issues") or {}
     tasks = len({identity[0] for identities in decision.identities.values() for identity in identities})
-    # Distinct rollouts, not findings: a rollout whose several model chains failed counts once.
-    if expected and quality.get("rollouts_ended_on_failed_model_call", 0) >= expected:
-        check = "rollout_ended_on_failed_model_call"
+    # Distinct rollouts, not findings: a rollout whose several model chains failed counts once. The distinct count is
+    # a statistic the producer keeps even for an ignored check, so the check must also hold an active finding.
+    check = "rollout_ended_on_failed_model_call"
+    if expected and quality.get("rollouts_ended_on_failed_model_call", 0) >= expected and issues.get(check, 0) > 0:
         return "every rollout ended on a failed model call", f"{expected} of {expected} rollouts flagged {check}"
     if tasks and issues.get("task_no_successful_model_calls", 0) >= tasks:
         check = "task_no_successful_model_calls"
