@@ -357,6 +357,14 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
     assert client.calls[2][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
 
 
+async def test_a_request_that_skips_token_capture_activates_the_agent_without_the_training_tag() -> None:
+    environment_server, client = _environment_server(token_capture=True)
+
+    await environment_server.run_request(_request().model_copy(update={"skip_token_capture": True}))
+
+    assert client.calls[2][1] == "/ng-rollout/rollout-a2/v1/responses"
+
+
 async def test_lost_resources_seed_response_closes_caller_assigned_session() -> None:
     environment_server, client = _environment_server()
     client.fail_path = "/seed_session"
@@ -925,10 +933,15 @@ async def test_failed_agent_response_still_reaches_verification(reward: float, m
     assert result.result.response.status == "failed"
 
 
+@pytest.mark.parametrize("forward_agent_evidence", [None, False, True])
 @pytest.mark.parametrize("mask_sample", [False, True])
 @pytest.mark.parametrize("result_path", ["episode-request", "flat-adapter"])
-async def test_results_preserve_verification_and_observations(mask_sample: bool, result_path: str) -> None:
+async def test_results_preserve_verification_and_observations(
+    mask_sample: bool, result_path: str, forward_agent_evidence: bool | None
+) -> None:
     environment, client = _environment_server()
+    if forward_agent_evidence is not None:
+        environment.config.forward_agent_evidence = forward_agent_evidence
     observations = {
         "source": "hermes",
         "records": [
@@ -973,6 +986,15 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     assert result.result.ng_agent_observations == AgentObservationBundle.model_validate(observations)
     # The harness's own turns from the close reach the result in the slot rollout collection reads.
     assert result.result.ng_trajectory == TrajectoryRecord.model_validate(trajectory)
+    verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
+    if forward_agent_evidence:
+        assert verify_body["ng_trajectory"] == TrajectoryRecord.model_validate(trajectory).model_dump(mode="json")
+        assert verify_body["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
+            mode="json"
+        )
+    else:
+        assert "ng_trajectory" not in verify_body
+        assert "ng_agent_observations" not in verify_body
     if result_path != "flat-adapter":
         return
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)

@@ -1,8 +1,8 @@
-# swe_internal_v1's CI "example" data-validation config -- separate from swe_internal_v1.yaml so starting
+# swe_internal_v1's CI "example" data-validation config -- separate from swe_internal_v1_legacy_agent.yaml so starting
 # the base/golden-patch servers for golden-patch validation never needs to pull in an
 # agent+model config (mirrors the *_opencode.yaml split, same reasoning as swemer_v2).
 config_paths:
-  - resources_servers/swe_internal_v1/configs/swe_internal_v1.yaml
+  - resources_servers/swe_internal_v1/configs/swe_internal_v1_legacy_agent.yaml
 
 # CI's "example" data-validation gate (gym env test +should_validate_data=true): grades the
 # dataset's own golden patch for 5 rows via a plain simple_agent (not opencode_sandboxed_agent --
