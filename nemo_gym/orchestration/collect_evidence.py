@@ -432,26 +432,104 @@ unreadable = set()
 BIG_LINE = 16 << 20
 CHUNK = 4 << 20
 PRUNED_KEYS = (b"ng_trajectory", b"ng_agent_observations")
-# The collector reads only identities, names, statuses and counts from those values, none of them this long.
+# A string is elided only when it is longer than this and is not one the collector reads (KEPT_KEYS).
 ELIDE_ABOVE = 1024
+# Elided text is checked as JSON in pieces of about this size.
+VALIDATE = 1 << 20
+# A string the collector reads is never elided; one above this size is no identity or status, so the row fails loudly.
+KEPT_MAX = 1 << 20
+# Every key whose string value the collector projects from a pruned value (identities, statuses, kinds, names), at any
+# depth. A key not listed holds uninterpreted text (request input, tool output, conversation), which is elided.
+KEPT_KEYS = frozenset(
+    (
+        b"task_id rollout_id invocation_id parent_invocation_id status in_session verification_skipped "
+        b"error_type stop_reason model_call_id response_id model_ref type name call_id role verifier score "
+        b"verdict result_binding_sha256 operation_id kind outcome dependencies provider sandbox_id exit_code "
+        b"teardown_confirmed sandbox_observations grading_record grading_operations turn_no step_count "
+        b"tool_call_id tool_name code failure_id omitted events event_id boundary operation attempt_id "
+        b"cause_id failure_kind http_status stage final_attempt_id http_attempts transport_failures "
+        b"retry_wait_s request_elapsed_ms status_code upstream_status_code response_status error_category "
+        b"local_response_reason dialect finish_reason started_at latency_total_ms duration_ms"
+    ).split()
+)
 STRUCTURE = re.compile(rb'["{}\[\],:]')
 NESTED = re.compile(rb'["{}\[\]]')
 STRING_BODY = re.compile(rb'[^"\\]*(?:\\.[^"\\]*)*', re.S)
+HEX = frozenset(b"0123456789abcdefABCDEF")
 class Pruner:
-    # Copies one JSON object in chunks, replacing each string longer than ELIDE_ABOVE bytes inside a PRUNED_KEYS value
-    # with "<elided N bytes>". Only top-level keys are matched; any other value is copied byte for byte.
+    # Copies one JSON object in chunks, replacing each long string inside a PRUNED_KEYS value that the collector does
+    # not read with "<elided N bytes>". Only top-level keys are matched; any other value is copied byte for byte. An
+    # elided string is still checked as a JSON string, in pieces: a row is invalid exactly when it is invalid whole.
     def __init__(self):
-        self.out, self.depth, self.in_string, self.escape = [], 0, False, False
+        self.out, self.in_string, self.escape = [], False, False
         self.expect_key, self.key, self.last_key, self.target = False, None, None, False
-        self.buffer, self.size = None, 0
+        self.kinds, self.keys = [], []
+        self.mode, self.buffer, self.size, self.carry = None, None, 0, b""
+        self.invalid = False
     def body(self, data):
-        if self.buffer is not None:
+        if self.mode == "elide":
             self.size += len(data)
-            self.buffer = b"" if self.size > ELIDE_ABOVE else self.buffer + data
-        elif self.key is not None and len(self.key) < 64:
-            self.key += data
+            if self.buffer is not None:
+                self.buffer += data
+                if self.size > ELIDE_ABOVE:
+                    self.carry, self.buffer = self.buffer, None
+            else:
+                self.carry += data
+            if self.buffer is None and len(self.carry) >= VALIDATE:
+                self.check(False)
+        else:
+            if self.mode == "keep":
+                self.size += len(data)
+                if self.size > KEPT_MAX:
+                    self.invalid = True
+            if self.key is not None and len(self.key) < 64:
+                self.key += data
+    def check(self, final):
+        # Checks the text gathered so far, up to the last complete escape and UTF-8 character unless it is the end.
+        data = self.carry
+        cut = len(data)
+        if not final:
+            if (cut - len(data.rstrip(b"\\"))) % 2:
+                cut -= 1
+            else:
+                for width in range(2, 6):
+                    tail = data[cut - width:] if cut >= width else b""
+                    if tail[:2] == b"\\u" and all(byte in HEX for byte in tail[2:]):
+                        head = data[: cut - width + 1]
+                        if (len(head) - len(head.rstrip(b"\\"))) % 2:
+                            cut -= width
+                            break
+            for back in range(1, min(3, cut) + 1):
+                lead = data[cut - back]
+                if lead < 0x80:
+                    break
+                if lead >= 0xC0:
+                    if back < (2 if lead < 0xE0 else 3 if lead < 0xF0 else 4):
+                        cut -= back
+                    break
+        piece, self.carry = data[:cut], data[cut:]
+        if self.invalid or not piece:
+            return
+        try:
+            json.loads('"' + piece.decode("utf-8", "surrogatepass") + '"')
+        except ValueError:
+            self.invalid = True
+    def open_string(self, depth):
+        # How the string that starts here is handled: a top-level key is captured, a string the collector reads is
+        # copied, any other string inside a pruned value is elided when long.
+        self.mode = None
+        if self.expect_key and (depth == 1 or self.target):
+            self.key = bytearray()
+        if self.target:
+            key = None if self.expect_key else self.keys[-1]
+            self.size = 0
+            if self.expect_key or key is None or b"\\" in key or key in KEPT_KEYS:
+                self.mode = "keep"
+            else:
+                self.mode, self.buffer, self.carry = "elide", b"", b""
+        self.expect_key = False
     def feed(self, chunk):
-        pos, size, copy = 0, len(chunk), None if self.buffer is not None else 0
+        pos, size, copy = 0, len(chunk), None if self.mode == "elide" else 0
         while pos < size:
             if self.in_string:
                 if self.escape:
@@ -470,39 +548,50 @@ class Pruner:
                     continue
                 pos += 1
                 self.in_string = False
-                if self.buffer is not None:
-                    self.out.append(b'"<elided %d bytes>"' % self.size if self.size > ELIDE_ABOVE else b'"' + self.buffer + b'"')
-                    self.buffer, copy = None, pos
+                if self.mode == "elide":
+                    if self.buffer is not None:
+                        self.out.append(b'"' + self.buffer + b'"')
+                    else:
+                        self.check(True)
+                        self.out.append(b'"<elided %d bytes>"' % self.size)
+                    self.buffer, self.mode, copy = None, None, pos
                 elif self.key is not None:
                     self.last_key, self.key = bytes(self.key), None
+                    self.keys[-1] = self.last_key
+                self.mode = None
                 continue
-            found = (STRUCTURE if self.depth <= 1 else NESTED).search(chunk, pos)
+            found = (STRUCTURE if self.target or len(self.keys) <= 1 else NESTED).search(chunk, pos)
             if found is None:
                 break
             char, start, pos = found.group(), found.start(), found.end()
             if char == b'"':
                 self.in_string = True
-                if self.depth == 1 and self.expect_key:
-                    self.key, self.expect_key = bytearray(), False
-                elif self.target:
+                self.open_string(len(self.keys))
+                if self.mode == "elide":
                     if copy is not None:
                         self.out.append(chunk[copy:start])
-                    self.buffer, self.size, copy = b"", 0, None
+                    copy = None
             elif char in (b"{", b"["):
-                self.depth += 1
-                self.expect_key = self.depth == 1 and char == b"{"
+                self.keys.append(None if char == b"{" else (self.keys[-1] if self.keys else None))
+                self.kinds.append(char)
+                self.expect_key = char == b"{"
             elif char in (b"}", b"]"):
-                self.depth -= 1
-                self.target = self.target and self.depth > 0
-            elif self.depth == 1:
-                if char == b",":
-                    self.expect_key, self.target = True, False
-                elif self.last_key is not None:
+                self.keys.pop()
+                self.kinds.pop()
+                self.target = self.target and bool(self.keys)
+            elif char == b":":
+                if len(self.keys) == 1 and self.last_key is not None:
                     self.target = self.last_key in PRUNED_KEYS
+            elif char == b",":
+                if len(self.keys) == 1:
+                    self.target = False
+                self.expect_key = self.kinds[-1] == b"{"
         if copy is not None:
             self.out.append(chunk[copy:])
-    def result(self):
-        return b"".join(self.out)
+    def result(self, newline):
+        # An invalid string makes the whole row invalid; its newline decides, as for a whole row, whether it is a
+        # malformed record or a truncated last one.
+        return b"}" + (b"\n" if newline else b"") if self.invalid else b"".join(self.out)
 def lines(fh, digest):
     # Each line with its number; a line longer than BIG_LINE comes back pruned. Every byte read goes into the digest.
     number = 0
@@ -514,13 +603,15 @@ def lines(fh, digest):
         if len(line) > BIG_LINE and not line.endswith(b"\n"):
             pruner = Pruner()
             pruner.feed(line)
+            last = line
             while not line.endswith(b"\n"):
                 line = fh.readline(CHUNK)
                 if not line:
                     break
+                last = line
                 digest.update(line)
                 pruner.feed(line)
-            line = pruner.result()
+            line = pruner.result(last.endswith(b"\n"))
         yield number, line
         number += 1
 def rows(name, skip=0):
