@@ -558,6 +558,22 @@ def test_catalog_fields_round_trip() -> None:
     assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
 
 
+@pytest.mark.parametrize(("written", "stored"), [("true", True), ("no", False), ("unknown", "unknown")])
+def test_yes_or_no_fields_take_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
+    # YAML reads a bare `yes` or `no` as a boolean; "unknown" is how an author says that nobody knows.
+    raw = _manifest() | yaml.safe_load(
+        f"training_allowed: {written}\nrequirements: {{gpu: {written}, internet: {written}}}\n"
+    )
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.training_allowed == stored
+    assert manifest.requirements is not None
+    assert (manifest.requirements.gpu, manifest.requirements.internet) == (stored, stored)
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
 @pytest.mark.parametrize("backend", ["pydantic", "schema"])
 @pytest.mark.parametrize(
     ("kind", "changes", "valid"),
@@ -602,6 +618,7 @@ def test_manifest_cannot_link_to_itself(field: str) -> None:
         ("overlaps_with", ["gpqa", "gpqa"]),
         ("training_allowed", "maybe"),
         ("requirements", {"gpu": True, "vram_gb": 80}),
+        ("requirements", {"internet": "sometimes"}),
     ],
 )
 def test_catalog_fields_reject_invalid_values(field: str, value: object) -> None:
