@@ -22,13 +22,15 @@ safety corner, a faked result, a hard bargain, a compromised handoff, ...). 8 di
   the server's tokens or keys. Run it on a host with nothing else worth reading.
 - Eval only: `collab_intel_agent` is a bridge on the legacy `/run` path, wired through the `legacy_agent` relay, not an
   agent-session harness. The rollout's `response.output` is empty. The policy turns live in `collab_intel.*.messages` and in
-  `ng_trajectory`, one invocation per phase.
+  `ng_trajectory`, one invocation per phase. `ng_trajectory` is written only with `++rollout_correlation=true`.
 - License: data CC BY 4.0 (7 scenarios CC BY-NC-SA 4.0), code MIT. Evaluation only; never train on it (some scenarios
   reuse GPQA).
 
 ```bash
 python benchmarks/collab_intel/prepare.py
-COLLAB_INTEL_JUDGE_BASE_URL=http://<judge host>/v1 gym eval run --config benchmarks/collab_intel/config.yaml \
+COLLAB_INTEL_JUDGE_BASE_URL=http://<judge host>/v1 COLLAB_INTEL_JUDGE_MODEL=<judge served name> \
+gym eval run --config benchmarks/collab_intel/config.yaml \
   --split benchmark --output out/rollouts.jsonl --concurrency 16 \
-  --model-type vllm_model --model <served name> --model-url http://<policy>/v1 --model-api-key dummy
+  --model-type vllm_model --model <served name> --model-url http://<policy>/v1 --model-api-key dummy \
+  ++rollout_correlation=true
 ```
