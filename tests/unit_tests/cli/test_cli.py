@@ -2155,7 +2155,11 @@ class TestListEnvironments:
     @pytest.mark.parametrize(
         ("kind", "harbor_target", "usage"),
         [
-            ("benchmark", "terminal_bench_4", "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model"),
+            (
+                "benchmark",
+                "terminal_bench_4",
+                "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model",
+            ),
             (
                 "environment",
                 "terminal_bench_4",

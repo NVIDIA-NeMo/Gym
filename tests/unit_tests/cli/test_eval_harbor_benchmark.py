@@ -144,7 +144,9 @@ class TestHarborBenchmarkConfig:
         agent instance but, setting `harbor_target`, is a benchmark rather than a harness config."""
         overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
         preset = _benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay))
-        variant = _benchmark(tmp_path, "tb_variant", {"harbor_target": "terminal_bench_4", "config_paths": [str(preset)]})
+        variant = _benchmark(
+            tmp_path, "tb_variant", {"harbor_target": "terminal_bench_4", "config_paths": [str(preset)]}
+        )
         assert harbor_benchmark(variant).agent.benchmark_settings == {"harbor_environment_server": overlay}
 
     def test_a_target_only_an_include_sets_is_refused(self, tmp_path: Path) -> None:
