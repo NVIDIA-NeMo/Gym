@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
 from time import monotonic, time
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -68,14 +68,14 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Episode sessions under an environment server are not deprecated; only the flat /run path, which a configured
-# resources_server selects, is.
 DEPRECATION_WARNING = (
-    "DEPRECATED: miniswe_sandboxed_agent is configured for its legacy /run path (resources_server is set), which "
-    "will be removed after the environment-server migration. Run Harbor tasks on episode sessions instead "
-    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run terminal_bench_4 --agent "
-    "miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
-    "See responses_api_agents/miniswe_sandboxed_agent/README.md#harbor-episodes."
+    "DEPRECATED: miniswe_sandboxed_agent is superseded by mini_swe_agent agent sessions. "
+    "For Harbor task folders without [agent].user, use "
+    "gym eval run <tasks> --agent mini_swe_agent/mini_swe_agent_sandboxed. "
+    "Existing configurations keep working; tasks with [agent].user must keep this adapter. "
+    "Legacy /run benchmark presets, including Terminal-Bench-Science, "
+    "must stay on this adapter until their environment-server migration. "
+    "See responses_api_agents/mini_swe_agent/README.md#agent-sessions."
 )
 
 
@@ -129,7 +129,6 @@ class MiniSWEEpisodeSession(AgentSessionState):
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
-    num_workers: Literal[1] = 1
     # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
     # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
     resources_server: ResourcesServerRef | None = None
@@ -229,14 +228,22 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
 
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Episode sessions are agent sessions, which routing follows by agent_session_id.
+        if self.config.resources_server is None:
+            return None
+        return (
+            "its own /run path replays a retried run from this process's memory, "
+            "keyed by the cookie's session_id and the rollout ID, which agent session routing does not follow"
+        )
+
     def supports_task_tool_context(self) -> bool:
         """mini-SWE reads the task's MCP servers and skills directory from ``task.json`` at its first turn."""
         return True
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        if self.config.resources_server is not None:
-            _warn_deprecated_once()
+        _warn_deprecated_once()
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()

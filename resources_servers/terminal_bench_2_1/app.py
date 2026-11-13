@@ -56,7 +56,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.utils import bounded_text
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -255,8 +255,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Terminal-Bench process-local sessions require num_workers=1")
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._session_id_to_state: dict[str, _ResourcesSessionState] = {}
@@ -779,3 +777,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TerminalBench21ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TerminalBench21ResourcesServer.run_webserver()  # noqa: F401

@@ -72,6 +72,12 @@ PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
 PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
 # A provider that says it is busy is waited out on a time budget, not a count of tries.
 WAIT_OUT_ERROR_CODES = (429, 503)
+# The most of an error answer's body kept for a retry decision and on the final error: enough for the JSON error
+# ``code`` and ``type``, bounded so a provider's huge error page is not retained per attempt.
+ERROR_BODY_PREFIX_BYTES = 64 * 1024
+# OpenAI's error code for a prompt that does not fit the context window; the same value as
+# ``nemo_gym.models.token_capture.records.CONTEXT_LENGTH_EXCEEDED_ERROR_CODE``, which this lower package cannot import.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
 # 2**6 = 64 s already passes the cap, so larger exponents only risk a float overflow on very long retry runs.
@@ -181,7 +187,13 @@ def _body_read_cause(response: ClientResponse, failure: Optional[NgFailureEvent]
 
 
 async def _read_error_body(response: ClientResponse, failure: Optional[NgFailureEvent]) -> bytes:
-    """Read an error reply's body once; a failed read names the attempt that returned it as its explicit cause."""
+    """Read an error reply's complete body once.
+
+    Callers classify the complete body (a permanent-quota, invalid-key or context-overflow code can sit anywhere
+    in it), then keep only its first ``ERROR_BODY_PREFIX_BYTES`` for diagnostics and the final error, so
+    truncation never changes retry classification. A failed read names the attempt that returned it as its
+    explicit cause.
+    """
     try:
         return await response.content.read()
     except (ClientError, TimeoutError) as error:
@@ -205,6 +217,16 @@ def _decode_error_text(content: bytes | str) -> str:
     return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
 
 
+def _error_envelope(payload: object) -> Optional[dict]:
+    """The dict that holds ``error`` in an OpenAI-style error payload, or None when it has none."""
+    if not isinstance(payload, dict):
+        return None
+    if "error" not in payload and isinstance(payload.get("detail"), dict):
+        # A NeMo Gym model server returns a propagated provider error body as FastAPI's `detail`.
+        return payload["detail"]
+    return payload
+
+
 def _parsed_error_codes(content: bytes | str) -> list[str]:
     """error.code / error.type tokens from an OpenAI-style error body."""
     text = _decode_error_text(content)
@@ -212,12 +234,8 @@ def _parsed_error_codes(content: bytes | str) -> list[str]:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return []
-    if not isinstance(payload, dict):
-        return []
-    if "error" not in payload and isinstance(payload.get("detail"), dict):
-        # A NeMo Gym model server returns a propagated provider error body as FastAPI's `detail`.
-        payload = payload["detail"]
-    error = payload.get("error")
+    envelope = _error_envelope(payload)
+    error = envelope.get("error") if envelope is not None else None
     if isinstance(error, str):
         return [error]
     if not isinstance(error, dict):
@@ -225,10 +243,53 @@ def _parsed_error_codes(content: bytes | str) -> list[str]:
     return [str(error[key]) for key in ("code", "type") if error.get(key) is not None]
 
 
+def _bounded_error_body(body: bytes) -> bytes:
+    """An error body of at most ``ERROR_BODY_PREFIX_BYTES`` that still names the same error codes.
+
+    A small body is returned unchanged. An oversized JSON error is rebuilt with its ``code`` and ``type`` intact
+    and its long text cut, so the next client that reads it (a Gym model server forwards this body) classifies it
+    as the first one did. Anything else keeps its raw prefix: there is no code to preserve.
+    """
+    if len(body) <= ERROR_BODY_PREFIX_BYTES:
+        return body
+    prefix = body[:ERROR_BODY_PREFIX_BYTES]
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return prefix
+    envelope = _error_envelope(payload)
+    error = envelope.get("error") if envelope is not None else None
+    if isinstance(error, str):
+        kept: object = error[:1024]
+    elif isinstance(error, dict):
+        kept = {key: error[key] for key in ("code", "type", "param") if isinstance(error.get(key), (str, int))}
+        if isinstance(error.get("message"), str):
+            # Cut to the cap first so the loop below only trims escapes and framing, not a huge message.
+            kept["message"] = error["message"][:ERROR_BODY_PREFIX_BYTES]
+    else:
+        return prefix
+    # Cut the message until the rebuilt body fits; code/type are short strings, so this converges quickly.
+    while True:
+        rebuilt = {"error": kept}
+        if envelope is not payload:
+            rebuilt = {"detail": rebuilt}
+        encoded = json.dumps(rebuilt, ensure_ascii=False).encode("utf-8")
+        if len(encoded) <= ERROR_BODY_PREFIX_BYTES or not isinstance(kept, dict) or not kept.get("message"):
+            return encoded if len(encoded) <= ERROR_BODY_PREFIX_BYTES else prefix
+        # A character encodes to at most 4 bytes (or 6 as a JSON escape), so this never over-cuts by much.
+        overflow = len(encoded) - ERROR_BODY_PREFIX_BYTES
+        kept["message"] = kept["message"][: max(0, len(kept["message"]) - max(1, overflow // 6))]
+
+
 def _error_body_is_permanent_quota(content: bytes | str) -> bool:
     """True when a 429 body is a spent key, not a transient rate limit."""
     codes = {token.lower() for token in _parsed_error_codes(content)}
     return any(code in codes for code in PERMANENT_QUOTA_CODES)
+
+
+def _error_body_is_context_overflow(content: bytes | str) -> bool:
+    """True when an error body is a propagated context-length overflow, which no retry can fix."""
+    return CONTEXT_LENGTH_EXCEEDED_ERROR_CODE in {token.lower() for token in _parsed_error_codes(content)}
 
 
 def _error_body_is_permanent_auth(content: bytes | str) -> bool:
@@ -281,7 +342,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     internal: bool = Field(
         default=False,
-        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
+        description=(
+            "Set this to true for internal NeMo Gym servers. Their transport retries connection errors "
+            "without a try limit, and they wait out 429, 502, 503, 504 and 520 answers until "
+            "max_rate_limit_wait_seconds is spent (max_http_attempts when that is 0), like external 429/503."
+        ),
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -308,9 +373,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         default=3600.0,
         ge=0,
         description=(
-            "Total time to wait out 429 and 503 answers before failing the request, instead of "
-            "max_http_attempts tries; the request fails once the next wait would pass it. 0 keeps 429 and 503 "
-            "on the max_http_attempts count. Internal NeMo Gym servers keep retrying them without limit."
+            "Seconds one call may spend, counted from its start and including provider response time, waiting out "
+            "429 and 503 answers instead of max_http_attempts tries; the request fails once the elapsed time "
+            "plus the next wait would pass it. 0 keeps 429 and 503 "
+            "on the max_http_attempts count. Internal NeMo Gym servers wait out every 429, 502, 503, 504 and 520 "
+            "answer on this budget."
         ),
     )
 
@@ -545,8 +612,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response._ng_observe_body_failure = observe_body_failure
             if response.status in (401, 403):
                 failure = observe_http_failure(response)
-                content = await _read_error_body(response, failure)
-                if _error_body_is_permanent_auth(content):
+                body = await _read_error_body(response, failure)
+                permanent_auth = _error_body_is_permanent_auth(body)
+                content = _bounded_error_body(body)
+                del body
+                if permanent_auth:
                     observe_terminal(
                         operation_id=operation_id,
                         outcome="failed",
@@ -579,8 +649,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
             last_failure = observe_http_failure(response)
-            content = await _read_error_body(response, last_failure)
-            if response.status == 429 and _error_body_is_permanent_quota(content):
+            body = await _read_error_body(response, last_failure)
+            permanent_quota = response.status == 429 and _error_body_is_permanent_quota(body)
+            context_overflow = _error_body_is_context_overflow(body)
+            content = _bounded_error_body(body)
+            del body
+            if permanent_quota:
                 observe_terminal(
                     operation_id=operation_id,
                     outcome="failed",
@@ -589,21 +663,31 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 
+            if context_overflow:
+                # The prompt does not fit; resending it cannot succeed, whatever status a server re-emitted it with.
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=last_failure.attempt_id if last_failure else f"{operation_id}-{tries}",
+                    failure_id=last_failure.event_id if last_failure else None,
+                )
+                await _raise_exhausted(response, content, last_failure)
+
             wait = _retry_wait_seconds(tries, response)
-            # Internal NeMo Gym servers extend max tries for retryable errors unless
-            # the caller owns the complete retry schedule. A busy provider is waited
-            # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
-            # request even when max_http_attempts allows more tries, and 0 leaves 429
-            # and 503 on the max_http_attempts count.
-            if resend and self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
-                max_num_tries += 1
-            elif (
+            # One counter (``tries``) and one elapsed budget (time since the call started, response time included) cover every retryable status, so a changing
+            # status sequence never resets them. A busy provider is waited out until max_rate_limit_wait_seconds is
+            # spent: a positive budget ends the request even when max_http_attempts allows more tries, and 0 leaves
+            # the busy statuses on the max_http_attempts count. Internal NeMo Gym servers wait out every
+            # rate-limit/transient status this way; external providers only 429 and 503. Neither extends its
+            # attempt cap without that budget.
+            wait_out_codes = RATE_LIMIT_ERROR_CODES if self.internal else WAIT_OUT_ERROR_CODES
+            if (
                 resend
                 and self.max_num_tries is None
-                and response.status in WAIT_OUT_ERROR_CODES
+                and response.status in wait_out_codes
                 and self.max_rate_limit_wait_seconds > 0
             ):
-                if waited + wait > self.max_rate_limit_wait_seconds:
+                if monotonic() - request_started + wait > self.max_rate_limit_wait_seconds:
                     observe_terminal(
                         operation_id=operation_id,
                         outcome="failed",
@@ -656,13 +740,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await self._read_response_json(response)
 
-    async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
+    async def create_chat_completion(
+        self, *, _resend_after_disconnect: bool = True, _headers: Optional[Dict[str, str]] = None, **kwargs
+    ) -> Dict[str, Any]:
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
         )
         if not _resend_after_disconnect:
             request_kwargs["_resend_after_disconnect"] = False
+        if _headers:
+            request_kwargs["headers"] = _headers
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)

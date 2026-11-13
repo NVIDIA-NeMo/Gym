@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.check_suites.github_actions import COMPARE_COMMIT
 from scripts.harness_conformance.ci import changed_harnesses, report, select_harnesses
 from scripts.harness_conformance.registry import HARNESSES
 
@@ -25,11 +26,8 @@ def test_adapter_changes_select_only_that_harness(harness):
         "nemo_gym/telemetry/gym_metrics.py",
         "nemo_gym/agents/utils/sandbox_session.py",
         "nemo_gym/sandbox/local.py",
-        "nemo_gym/cli/__init__.py",
         "nemo_gym/utils/compat.py",
-        "nemo_gym/cli/utils.py",
         "nemo_gym/prompts/system.md",
-        "responses_api_agents/shared/prompts.md",
         "environment_servers/legacy_agent/app.py",
         "environment_servers/single_agent_turn/app.py",
         "environment_servers/single_agent_turn_legacy/app.py",
@@ -47,6 +45,7 @@ def test_adapter_changes_select_only_that_harness(harness):
         "uv.lock",
         ".python-version",
         ".github/workflows/harness-conformance.yml",
+        ".github/workflows/cicd-main.yml",
         "new_shared_module.py",
     ],
 )
@@ -72,6 +71,16 @@ def test_shared_or_unknown_dependencies_run_all(path):
         ["responses_api_models/vllm_model/app.py"],
         ["environment_servers/unrelated/app.py"],
         ["benchmarks/example/config.yaml"],
+        ["scripts/environment_server_compliance/rules.py"],
+        ["nemo_gym/orchestration/api.py"],
+        ["nemo_gym/cli/__init__.py", "nemo_gym/cli/utils.py"],
+        ["nemo_gym/eval/comparison/__init__.py"],
+        ["nemo_gym/environment/registry.py"],
+        ["environments/arc_agi/app.py"],
+        ["docker/Dockerfile"],
+        [".agents/skills/example/SKILL.md"],
+        [".github/workflows/unit-tests.yml"],
+        ["responses_api_agents/shared/prompts.md"],
     ],
 )
 def test_unrelated_components_do_not_expand_adapter_selection(paths):
@@ -118,6 +127,64 @@ def test_full_branch_diff_includes_earlier_commits_and_deleted_paths(tmp_path):
     git("mv", "responses_api_agents/pi_agent/README.md", "README.md")
     git("-c", "commit.gpgsign=false", "commit", "-qam", "move docs out")
     assert changed_harnesses(before_move, root=tmp_path) == ["pi"]
+
+
+def test_a_base_branch_that_only_exists_as_a_remote_tracking_ref_is_resolved(tmp_path):
+    # GitHub's checkout holds the other branches only as origin/<name>.
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI test")
+    git("config", "user.email", "ci@example.invalid")
+    (tmp_path / "README.md").write_text("docs\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "base")
+    git("update-ref", "refs/remotes/origin/release", "HEAD")
+    adapter = tmp_path / "responses_api_agents/pi_agent/app.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("new\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "adapter")
+    assert changed_harnesses("release", root=tmp_path) == ["pi"]
+
+
+def _repository_with_adapter_commit(path):
+    """A repository whose base commit has only docs and whose next commit adds the Pi adapter."""
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=path, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI test")
+    git("config", "user.email", "ci@example.invalid")
+    (path / "README.md").write_text("docs\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    adapter = path / "responses_api_agents/pi_agent/app.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("new\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "adapter")
+    return git, base
+
+
+def test_a_base_commit_is_compared_directly_so_a_rewind_selects_what_it_removed(tmp_path):
+    git, base = _repository_with_adapter_commit(tmp_path)
+    before = git("rev-parse", "HEAD")
+    assert changed_harnesses(base, root=tmp_path, compare=COMPARE_COMMIT) == ["pi"]
+    git("reset", "-q", "--hard", base)
+    assert changed_harnesses(before, root=tmp_path, compare=COMPARE_COMMIT) == ["pi"]
+    # The merge base of a rewound branch is the new head, so a branch comparison sees nothing.
+    assert changed_harnesses(before, root=tmp_path) == []
+
+
+def test_a_detached_head_is_compared_like_a_branch(tmp_path):
+    git, base = _repository_with_adapter_commit(tmp_path)
+    git("checkout", "-q", "--detach")
+    assert changed_harnesses(base, root=tmp_path) == ["pi"]
+    assert changed_harnesses(base, root=tmp_path, compare=COMPARE_COMMIT) == ["pi"]
 
 
 def test_missing_base_runs_all(tmp_path, capsys):

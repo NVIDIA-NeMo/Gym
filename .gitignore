@@ -235,6 +235,10 @@ env.yaml
 # Claude Code agent runtime artifacts
 **/.claude_node/
 
+# Install lock and install record of the Node.js toolchains that CLI agents install on first local use
+responses_api_agents/*/.*_node.lock
+responses_api_agents/*/.*_node.installed
+
 # cvdp generic agent provisioned harness deps (portable python/node + CLIs, built at runtime)
 responses_api_agents/cvdp_agent/deps/
 resources_servers/cvdp/data/gym_agentic_code_generation_no_commercial.jsonl

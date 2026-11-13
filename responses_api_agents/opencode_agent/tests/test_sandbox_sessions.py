@@ -1196,7 +1196,10 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        # An Environment Server activates a captured rollout on the tagged path; without the tag it would not capture.
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/training-token-capture/v1/responses", json={"input": "task"}
+        )
         assert result.status_code == 200, result.text
         config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
     # OpenCode can reach only the Gym provider, for its main and small model alike.
@@ -1466,7 +1469,7 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
             "input_tokens": 11 + cache,
             "output_tokens": 2 + reasoning,
             "total_tokens": 13 + cache + reasoning,
-            "input_tokens_details": {"cached_tokens": cache or None},
+            "input_tokens_details": {"cached_tokens": cache or None, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": reasoning or None},
         }
         assert [item["type"] for item in response["output"]] == [
@@ -1523,6 +1526,23 @@ def test_invalid_output_budget_rejected_before_connecting(setup, output_budget):
     assert "max_output_tokens" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
     sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("project_config", [False, True])
+def test_task_repository_project_config_follows_the_session_setting(setup, project_config):
+    agent, sandbox = setup
+    agent.config.session_project_config = project_config
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        payload = sandbox.params()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    # OpenCode reads the repository's AGENTS.md/CLAUDE.md and opencode.json only without this flag.
+    assert payload["env"].get("OPENCODE_DISABLE_PROJECT_CONFIG") == (None if project_config else "true")
+    # The rest of the isolation stays, and Gym's inline config is still passed.
+    assert payload["env"]["OPENCODE_DISABLE_AUTOUPDATE"] == "true"
+    assert "OPENCODE_CONFIG_CONTENT" in payload["env"]
 
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "length"])

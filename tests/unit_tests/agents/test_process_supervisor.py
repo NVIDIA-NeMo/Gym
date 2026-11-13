@@ -278,12 +278,28 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
 
 
 @linux_only
-def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path) -> None:
+@pytest.mark.parametrize("initial_scan_delay", [0, 2.2])
+def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_scan_delay: float) -> None:
     # The controller requests a stop with this file rather than a signal.
     stop = tmp_path / "stop.request"
-    worker = "trap 'echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    # Model a busy /proc before TERM, then require time to save after TERM. The initial scan must not
+    # consume the harness's grace period, even when it takes longer than that period.
+    supervisor = tmp_path / "supervisor.sh"
+    supervisor.write_text(
+        Path(SUPERVISOR).read_text().replace("    scan\n", f"    sleep {initial_scan_delay}\n    scan\n", 1)
+    )
+    worker = "trap 'sleep 1; echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
     process = subprocess.Popen(
-        ["bash", SUPERVISOR, "--timeout", "30", "--cleanup-timeout", "2", "--receipt", str(tmp_path / "cleanup.json")]
+        [
+            "bash",
+            str(supervisor),
+            "--timeout",
+            "30",
+            "--cleanup-timeout",
+            "2",
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+        ]
         + ["--stop-file", str(stop), "--", "bash", "-c", worker],
         cwd=tmp_path,
         stdout=subprocess.PIPE,

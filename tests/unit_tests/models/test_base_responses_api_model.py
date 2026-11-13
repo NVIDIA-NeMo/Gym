@@ -29,6 +29,7 @@ from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.model_call_sampling import model_sampling_context
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -988,6 +989,26 @@ def test_leading_rollout_prefix_round_trips_with_server_parser():
     context, rest = parse_path(client_path)
     assert context.capture_key == "task-7"
     assert rest == "/v1/chat/completions"
+
+
+def test_a_model_root_url_carries_the_sampling_segment_last():
+    with model_sampling_context("values"):
+        assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1/ng-sampling/values"
+        assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/ng-sampling/values"
+        # A run's own values win over the request's; a URL shared across rollouts carries none.
+        assert (
+            apply_rollout_prefix("http://h:1", "r1", model_sampling="run")
+            == "http://h:1/ng-rollout/r1/ng-sampling/run"
+        )
+        assert apply_rollout_prefix("http://h:1", "r1", trace_context=False) == "http://h:1/ng-rollout/r1"
+        # An explicit segment applies even to a URL shared across rollouts, such as a sidecar's null.
+        assert (
+            apply_rollout_prefix("http://h:1", "r1", trace_context=False, model_sampling="null")
+            == "http://h:1/ng-rollout/r1/ng-sampling/null"
+        )
+    # Rollout prefixes for resources servers never carry it.
+    with model_sampling_context("values"):
+        assert rollout_path_prefix("r1") == "/ng-rollout/r1"
 
 
 def test_base_agent_resolve_model_base_url(monkeypatch):

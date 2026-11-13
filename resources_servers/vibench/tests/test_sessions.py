@@ -14,10 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import PROVIDER_IO_TIMEOUT, SESSION_LOST, VERIFIER_ERROR, EpisodeId, TaskId
-from nemo_gym.core.failure_kinds import PROVIDER_REQUEST_FAILED
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.failures import sandbox_failure
+from nemo_gym.core import PROVIDER_IO_TIMEOUT, PROVIDER_REQUEST_FAILED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, TaskId
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, sandbox_failure
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,

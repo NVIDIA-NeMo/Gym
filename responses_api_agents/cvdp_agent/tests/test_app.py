@@ -12,8 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import multiprocessing
+import os
 import tarfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -30,10 +34,12 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from responses_api_agents.cvdp_agent import app as cvdp_app
 from responses_api_agents.cvdp_agent.app import (
     CVDPAgent,
     CVDPAgentConfig,
     CVDPAgentRunRequest,
+    agent_key,
     deps_build_env,
 )
 
@@ -322,6 +328,82 @@ class TestAgenticSandboxSpec:
         archive = agent._archive_deps(deps)
         with tarfile.open(archive, "r:gz") as tar:
             assert "bin/python" in tar.getnames()
+
+    def _fake_build(self, tmp_path: Path):
+        """A setup script stand-in that records each run and fills the deps prefix."""
+
+        def run(command, env, check):
+            with (tmp_path / "builds").open("a") as log:
+                log.write(f"{os.getpid()}\n")
+            # Long enough for the other worker to reach the build while this one is still in it.
+            time.sleep(0.5)
+            (Path(env["DEPS_DIR"]) / "bin").mkdir(parents=True, exist_ok=True)
+            (Path(env["DEPS_DIR"]) / "bin" / "python3").write_text("runtime")
+
+        return run
+
+    def _first_rollout_setup(self, agent: CVDPAgent, results) -> None:
+        try:
+            deps_dir = agent._provision_deps()
+            results.put(str(agent._archive_deps(deps_dir)))
+        except Exception as error:
+            results.put(repr(error))
+
+    def test_concurrent_first_rollouts_in_two_workers_build_the_runtime_once(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cvdp_app, "DEPS_ROOT", tmp_path / "deps", raising=False)
+        monkeypatch.setattr(cvdp_app.subprocess, "run", self._fake_build(tmp_path))
+        agent = self._agent()
+        context = multiprocessing.get_context("fork")
+        results = context.Queue()
+        workers = [context.Process(target=self._first_rollout_setup, args=(agent, results)) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        archives = [results.get(timeout=60) for _ in workers]
+        for worker in workers:
+            worker.join(timeout=60)
+
+        assert archives[0] == archives[1] and Path(archives[0]).is_file()
+        assert len((tmp_path / "builds").read_text().splitlines()) == 1
+
+    async def test_concurrent_sandbox_builds_build_the_archive_once(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        # Each call opens its own lock file handle, as two workers do, so the second waits for the first's build.
+        monkeypatch.setattr(cvdp_app, "DEPS_ROOT", tmp_path / "deps", raising=False)
+        builds = []
+
+        async def build(self, image, script, recipe, archive: Path) -> None:
+            builds.append(archive)
+            await asyncio.sleep(0.3)
+            archive.write_text("runtime")
+
+        monkeypatch.setattr(CVDPAgent, "_build_deps_archive_in_sandbox", build)
+        first, second = self._agent(), self._agent()
+
+        archives = await asyncio.gather(
+            first._provision_deps_in_sandbox("image"), second._provision_deps_in_sandbox("image")
+        )
+
+        assert archives[0] == archives[1] and archives[0].read_text() == "runtime"
+        assert builds == [archives[0]]
+
+    def test_an_interrupted_runtime_build_starts_from_an_empty_prefix(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cvdp_app, "DEPS_ROOT", tmp_path / "deps", raising=False)
+        monkeypatch.setattr(cvdp_app.subprocess, "run", self._fake_build(tmp_path))
+        agent = self._agent()
+        target = agent._deps_target_arch()[0]
+        # A build that stopped before it wrote its sentinel left a partial file behind.
+        partial = tmp_path / "deps" / f"{agent_key(agent.config.agent_server_module)}-{target}" / "partial"
+        partial.parent.mkdir(parents=True)
+        partial.write_text("half written")
+
+        deps_dir = agent._provision_deps()
+
+        assert not partial.exists()
+        assert (deps_dir / "bin" / "python3").is_file()
+        assert (deps_dir / ".installed").is_file()
 
     def test_deps_build_uses_private_host_state(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", "/full-home")

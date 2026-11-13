@@ -73,6 +73,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
@@ -371,3 +372,6 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SpeedBenchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SpeedBenchAgent.run_webserver()  # noqa: F401
