@@ -303,8 +303,8 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # STATELESS: a verify without the close-follows header that an Environment Server sends with an episode's verify,
     # such as gym eval reverify's, grades only its body (question, ground truth, saved response), so a saved run can be
     # re-graded under another judge or prompt without running the model again. Such a re-grade cannot reproduce a
-    # budget mask: the saved body carries no ending, and an episode's ending was read from the plugin log in its
-    # sandbox, which stopped with the episode (see README).
+    # budget mask: the body built from a saved row carries no ending, and an episode's ending was read from the plugin
+    # log in its sandbox, which stopped with the episode (see README).
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # Sandbox the agent works in. One fixed image for every row: these tasks carry no
