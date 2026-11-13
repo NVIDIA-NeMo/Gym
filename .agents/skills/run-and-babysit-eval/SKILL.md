@@ -361,10 +361,12 @@ recover(job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_
 
 A run can be healthy and still score low: that is the model or its deployment. Fix the deployment and run
 again, not the evaluation. For the evaluation itself, only `num_repeats` and the client parallelism
-(`--concurrency`) may change from the command line or a benchmark's `run`, and `num_repeats` only upward
-(the resolved config records it). A run with fewer repeats than the benchmark sets, or with `limit`, is a
-smoke (section 1): report its score as a smoke, never as the benchmark's score. A score on a named subset
-of the tasks is reported under the subset's name and version. Never change the benchmark, the judge, or
+(`--concurrency`) may change from the command line or a benchmark's `run`, and `num_repeats` only upward.
+The benchmark's own count is `num_repeats` in its `benchmarks/<name>/manifest.yaml`; `--resolve-only`
+shows only an override. A run with fewer repeats than that, or with `limit`, is a smoke (section 1):
+report its score as a smoke, never as the benchmark's score. A score on part of the tasks needs a named,
+versioned subset and is reported under its name and version; with no such subset, report no benchmark
+score. Never change the benchmark, the judge, or
 its token budgets and timeouts, which are the evaluation's identity. The model section is yours
 ([add-model-eval-config](../add-model-eval-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
@@ -467,8 +469,8 @@ still written by the next segment's guard, with its own remedy.
 - [ ] `trial_counts` and `quality_summary.json` were read: unobserved and unhealthy counts are explained.
 - [ ] Any `resumed across operational drift` settings are listed with the result.
 - [ ] Each correction of section 7 that applies is in the report with its count.
-- [ ] A score reported as the benchmark's comes from all its tasks at no fewer than its `num_repeats`; a
-  smoke or subset score is labelled as one.
+- [ ] A score reported as the benchmark's comes from all its tasks at no fewer than its `num_repeats`
+  (`manifest.yaml`); a smoke or subset score is labelled as one.
 - [ ] The run is final on its receipts: `rollouts_coverage.json` says complete, the export receipt
   `rollouts_mlflow_export_done` is current and `gate_task.mlflow_delivery.state` is `verified` (or
   `not_required`, with `mlflow_tracking_required: false` set on purpose), and `.gym_chain_incomplete` is

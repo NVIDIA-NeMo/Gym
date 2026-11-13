@@ -44,7 +44,7 @@ owner:
 | Output budget | Never the card: the benchmark's | Nothing to set; record the card's value (section 3). |
 | **From the model and the planned benchmarks** | | |
 | Reasoning parser | The model family; needed when it reasons | `--reasoning-parser` in `extra_args`, `uses_reasoning_parser` on the client (sections 2, 3). |
-| Tool-call parser | The template's tool-call format; needed when any planned benchmark uses tools (its agent sends `tools`) | `--enable-auto-tool-choice --tool-call-parser <p>` in `extra_args`. Without it, do not run a tool-using benchmark: every rollout fails. The smoke checks the tool calls (section 6). |
+| Tool-call parser | The template's tool-call format; needed when any planned benchmark uses tools: its dataset rows carry `responses_create_params.tools`, or its `benchmarks/<name>/` config runs a tool-using agent (a coding, terminal or search agent) | `--enable-auto-tool-choice --tool-call-parser <p>` in `extra_args`. Without it, do not run a tool-using benchmark: tool calls come back as plain text and score about zero (and `tool_choice: auto` without `--enable-auto-tool-choice` is rejected). The smoke checks the tool calls (section 6). |
 | Context length | The model's limit (card or `config.json`) and the planned benchmarks' longest prompt plus output budget | `--max-model-len` in `extra_args`: at least what the benchmarks need, at most the model's limit. |
 | Multimodal limits | The planned benchmarks' most images (or other media) per request | vLLM's `--limit-mm-per-prompt` in `extra_args` (check its syntax in the image's vLLM). A text-only model does not run a vision benchmark. |
 | **From whoever deploys the model** | | |
@@ -401,7 +401,8 @@ driver:
 `limit` counts tasks; the run log prints the tasks and the rows they become. It takes the first tasks of
 the input, which can all come from one part of the benchmark, so a smoke's score is never reported as the
 benchmark's. A score on part of a benchmark needs a named, versioned subset (a list of task ids, or a
-variant the benchmark ships) and is reported under that name. Bound the smoke to
+variant the benchmark ships) and is reported under that name; with no such subset, report no benchmark
+score. Bound the smoke to
 one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
 when it completes, it cancels the chain's pending follow-up and sentinel itself (see run-and-babysit-eval, section 2).
 Then follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
