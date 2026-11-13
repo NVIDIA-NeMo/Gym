@@ -486,8 +486,8 @@ def _check_auth_failure(provider: str, status: int, body: str) -> None:
 
 
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
-    """A 401/403 from the search provider means the API key is bad — every search in the
-    run would silently degrade, so kill the benchmark instead of producing a garbage score."""
+    """A 401, or a 403 that is not a content refusal, means the API key is bad: every search in
+    the run would silently degrade, so kill the benchmark instead of producing a garbage score."""
     print(
         f"[browsecomp][fatal][{provider}_invalid_api_key] HTTP {status}: search-provider API key "
         f"rejected — aborting benchmark. body={body[:300]}",
@@ -1584,6 +1584,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
+        except SearchProviderRefusal as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
+            print(f"[browsecomp][tool_fail][tavily_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
         except Exception as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(
@@ -1619,6 +1623,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         except BadRequestError as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        except SearchProviderRefusal as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
+            print(f"[browsecomp][tool_fail][tavily_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
 

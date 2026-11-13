@@ -256,6 +256,36 @@ class TestExaProvider:
         assert "Search failed: exa refused this request" in result.results_string
         app_module.os._exit.assert_not_called()
 
+    @pytest.mark.parametrize("workspace", ["none", "per_session"])
+    async def test_tavily_refused_search_reaches_the_agent_as_a_failed_search(
+        self, workspace: str, tmp_path, monkeypatch
+    ) -> None:
+        # Drives the real Tavily client, so the refusal must cross tavily-python and both search helpers.
+        kwargs = {}
+        if workspace == "per_session":
+            kwargs = {"workspace": "per_session", "workspace_root": str(tmp_path)}
+        config = TavilySearchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            search_provider="tavily",
+            tavily_api_key="test_tavily_key",  # pragma: allowlist secret
+            exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
+            **kwargs,
+        )
+        server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        body = {"detail": {"error": "Sorry, we've detected unsafe content and can't process this request."}}
+        fake_request = AsyncMock(return_value=self._http_response(403, body))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        result = await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+
+        assert "Search failed: tavily refused this request" in result.results_string
+        app_module.os._exit.assert_not_called()
+        fake_request.assert_awaited_once()
+
     # ---- dispatch ----
 
     async def test_dispatch_routes_to_exa_not_tavily(self, server: TavilySearchResourcesServer) -> None:
