@@ -41,7 +41,7 @@ CORRECT = "extracted_final_answer: Paris\nreasoning: same city\ncorrect: yes"
 WRONG = "extracted_final_answer: Lyon\nreasoning: another city\ncorrect: no"
 NO_VERDICT = "I cannot decide whether the response is right."
 
-REPOSITORY = Path(__file__).parents[3]
+REPOSITORY = Path(__file__).resolve().parents[3]
 # The receipts plugin and the four plugins opencode_sandboxed_agent ships, by path in the repository, in load order.
 PLUGINS = (
     "resources_servers/opencode_search/opencode_bundle/nemo_gym_receipts.js",
@@ -462,10 +462,14 @@ def test_a_close_whose_stop_fails_keeps_the_sandbox_for_a_retried_close(workdir,
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("seed", ["episode", "agent_run"])
-def test_verify_stops_the_sandbox_before_the_judge_runs(workdir, started, stopped, seed) -> None:
+@pytest.mark.parametrize(
+    ("seed", "lending"),
+    [("episode", True), ("agent_run", True), ("agent_run", False)],
+    ids=["episode", "agent_run", "agent_run_without_lending"],
+)
+def test_verify_stops_the_sandbox_before_the_judge_runs(workdir, started, stopped, seed, lending) -> None:
     """Grading never reads the sandbox, so it is not kept running while the verify waits on the judge."""
-    server = _server(workdir)
+    server = _server(workdir if lending else None)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
     judge = _mock_judge(server, CORRECT)
@@ -896,10 +900,14 @@ def test_the_staged_plugins_report_to_verify_through_the_plugin_log(workdir, tmp
 # Agent-run seed, kept for an agent's own /run
 # ---------------------------------------------------------------------------
 
+# The relay preset runs this server with lending off (sandbox_workdir: null); turning it on must not change this arm.
+LENDING = pytest.mark.parametrize("lending", [False, True], ids=["without_lending", "with_lending"])
 
-def test_an_agent_run_seed_replies_with_the_handle_of_the_sandbox_it_started(workdir, started) -> None:
+
+@LENDING
+def test_an_agent_run_seed_replies_with_the_handle_of_the_sandbox_it_started(workdir, started, lending) -> None:
     """The relay agent attaches to the sandbox the handle names; without it the agent starts one of its own."""
-    server = _server(workdir)
+    server = _server(workdir if lending else None)
     client = TestClient(server.setup_webserver())
 
     seeded = client.post("/seed_session", json=_row())
@@ -923,9 +931,12 @@ def test_an_agent_run_seed_replies_with_the_handle_of_the_sandbox_it_started(wor
     )
 
 
+@LENDING
 @pytest.mark.parametrize(("reason", "kind"), [("max_iteration", "agent_limit"), ("", None)])
-def test_an_agent_run_verify_grades_and_masks_a_budget_ending(workdir, started, stopped, reason, kind) -> None:
-    server = _server(workdir)
+def test_an_agent_run_verify_grades_and_masks_a_budget_ending(
+    workdir, started, stopped, lending, reason, kind
+) -> None:
+    server = _server(workdir if lending else None)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_row()).status_code == 200
     _mock_judge(server, CORRECT)
