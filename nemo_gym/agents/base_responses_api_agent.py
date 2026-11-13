@@ -115,6 +115,7 @@ from nemo_gym.server_runtime.base_resources_server import (
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
+from nemo_gym.server_runtime.sandbox_usage import fill_reply_sandbox_usage, stopped_sandbox_usage
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -950,8 +951,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 skip_token_capture_context(skips_token_capture(body)),
                 rollout_context(self.rollout_id_from_run(body)),
                 model_sampling_context(self.model_sampling_segment_for_run(body)),
+                stopped_sandbox_usage() as stopped,
             ):
-                return await run(*args, **kwargs)
+                result = await run(*args, **kwargs)
+            # The sandboxes this run created and stopped report their measured usage on the run's observations.
+            fill_reply_sandbox_usage(result, stopped)
+            return result
 
         app.post("/run")(_agent_boundary(run_with_rollout_context, app=app, operation="agent.run", stage="agent"))
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -1139,7 +1144,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise AgentSessionConflictError("Agent session is no longer available")
                 result = AgentCloseSessionResponse(agent_session_id=session_id)
             else:
-                result = await self._close_session_state(session_id, record)
+                with stopped_sandbox_usage() as stopped:
+                    result = await self._close_session_state(session_id, record)
+                # The session's own sandboxes stop during close; their usage joins the observations it returns.
+                fill_reply_sandbox_usage(result, stopped)
             if task.cancelling() > cancellations_at_entry:
                 raise asyncio.CancelledError
             record.state = None
@@ -1304,11 +1312,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         raise NotImplementedError("This agent does not implement multi-turn continuation")
 
     async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
-        await record.activations.close(timeout=self._continuation_close_timeout())
-        assert record.state is not None
-        # The adapter may release a borrowed connection after a final negative
-        # termination receipt. Preserve that receipt; release errors still raise.
-        return await self._close_agent_session_state(record.state)
+        # Collected inside this shielded, reusable task, so a retried close that joins it still gets the usage.
+        with stopped_sandbox_usage() as stopped:
+            await record.activations.close(timeout=self._continuation_close_timeout())
+            assert record.state is not None
+            # The adapter may release a borrowed connection after a final negative
+            # termination receipt. Preserve that receipt; release errors still raise.
+            result = await self._close_agent_session_state(record.state)
+        fill_reply_sandbox_usage(result, stopped)
+        return result
 
     def parse_agent_context(self, request: AgentSeedSessionRequest) -> BaseModel | None:
         """The seed's agent context as ``agent_context_model``, or None for an agent that declares no model.
