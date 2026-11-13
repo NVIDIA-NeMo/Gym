@@ -5541,3 +5541,21 @@ class TestVerifierNetwork:
         assert server._verifier_network_policy(task) is None
         spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
         assert "network_policy" not in spec.provider_options
+
+
+@pytest.mark.parametrize(
+    ("skip_token_capture", "agent_path"),
+    [
+        (False, "/ng-rollout/r1/training-token-capture/v1/responses"),
+        (True, "/ng-rollout/r1/v1/responses"),
+    ],
+)
+def test_an_episode_that_skips_token_capture_activates_the_agent_without_the_training_tag(
+    tmp_path, monkeypatch, skip_token_capture, agent_path
+):
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    server.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
+
+    request = episode(task).model_copy(update={"skip_token_capture": skip_token_capture})
+
+    assert server._agent_responses_path(request) == agent_path

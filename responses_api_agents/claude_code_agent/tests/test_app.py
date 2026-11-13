@@ -23,6 +23,7 @@ import orjson
 import pytest
 import yaml
 from fastapi import Request
+from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import SKILLS_REF_KEY_NAME
@@ -32,6 +33,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    skip_token_capture_context,
 )
 from nemo_gym.models import AnthropicConverter
 from nemo_gym.models.token_capture import TokenEntry, resolve_terminal, stamp_continuation
@@ -872,6 +874,44 @@ class TestRolloutCorrelation:
 
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/training-token-capture"
 
+    @pytest.mark.parametrize(
+        ("skip_token_capture", "base_url"),
+        [
+            (False, "http://model-server:9000/ng-rollout/val-0/training-token-capture"),
+            # The rollout keeps its prefix and drops only the training tag.
+            (True, "http://model-server:9000/ng-rollout/val-0"),
+        ],
+    )
+    def test_a_run_follows_its_rollout_setting(self, tmp_path: Path, skip_token_capture: bool, base_url: str) -> None:
+        # Through the /run route, which reads the row's setting; the agent builds the URL from its own config.
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            token_id_capture=True,
+        )
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+        agent.server_client.post = AsyncMock(return_value=FakeAioHTTPResponse({}))
+        captured: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["base_url"] = kwargs["env"].get("ANTHROPIC_BASE_URL")
+            raise RuntimeError("stop before the CLI runs")
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            TestClient(agent.setup_webserver(), raise_server_exceptions=False).post(
+                "/run",
+                json={
+                    "responses_create_params": {"input": "hi"},
+                    "_ng_rollout_id": "val-0",
+                    "_ng_skip_token_capture": skip_token_capture,
+                },
+            )
+
+        assert captured["base_url"] == base_url
+
 
 class TestExtractInstruction:
     def test_user_only(self) -> None:
@@ -1208,6 +1248,15 @@ class TestCaptureFriendlyTranscript:
         assert metadata["status"] == ("incomplete" if timeout else "completed")
         if timeout:
             assert metadata["error_type"] == "timeout"
+
+    def test_a_rollout_that_skips_capture_returns_the_evaluation_output(self, tmp_path: Path) -> None:
+        # The run captures, but this rollout skips capture: the output is the uncaptured, evaluation one.
+        with skip_token_capture_context(True):
+            response, _ = self._run_stream(self._events(), tmp_path, capture=True, timeout=False)
+
+        assert [item.type for item in response.output] == ["message"]
+        assert response.output[-1].content[0].text == "<think>\nlet me look\n</think>\n\nReading the file."
+        assert response.id != "resp_served123"
 
     def test_thinking_only_event_is_preserved(self) -> None:
         items, metadata = parse_stream_json(

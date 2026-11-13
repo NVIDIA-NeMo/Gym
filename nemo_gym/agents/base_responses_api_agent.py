@@ -65,7 +65,13 @@ from nemo_gym.config.global_config import (
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.episode_context import (
+    current_rollout_skips_token_capture,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+    skip_token_capture_context,
+    skips_token_capture,
+)
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
 from nemo_gym.core.failure_records import FailureBoundary
@@ -459,6 +465,22 @@ def _agent_boundary(
             raise agent_route_failure(error, operation=operation, stage=stage) from error
 
     return bounded
+
+
+def _without_token_capture(endpoint: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """``endpoint`` with token capture off for the model calls it makes.
+
+    It serves a rollout path without the training tag. The caller that built the path decided not to capture
+    this rollout's calls (an Environment Server, or a ``/run`` whose rollout skips capture), so the agent's
+    own ``token_id_capture`` setting does not turn it back on.
+    """
+
+    @wraps(endpoint)
+    async def without_capture(*args: Any, **kwargs: Any) -> Any:
+        with skip_token_capture_context(True):
+            return await endpoint(*args, **kwargs)
+
+    return without_capture
 
 
 class AgentSessionSetupError(Exception):
@@ -893,7 +915,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(traced_responses)
+        # Only the training-tagged twin captures: the caller that built the path decided.
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(_without_token_capture(traced_responses))
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
 
         # Traced *inside* rollout_context, not outside it. The span reads
@@ -908,7 +931,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
+            # The run's own rollout setting applies first, so its rollout id and model URLs follow it.
             with (
+                skip_token_capture_context(skips_token_capture(body)),
                 rollout_context(self.rollout_id_from_run(body)),
                 model_sampling_context(self.model_sampling_segment_for_run(body)),
             ):
@@ -1378,13 +1403,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         ``rollout_correlation`` adds the prefix without any capture, e.g. so a model server can route by rollout.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
+        A rollout that skips capture keeps its correlation and drops only the training tag.
         Partial-rollout checkpointing also needs it for this agent.
         Missing global configuration disables correlation.
         """
         return (
             self._model_call_capture_enabled()
             or self._rollout_correlation_enabled()
-            or self._token_id_capture_enabled()
+            or self._token_id_capture_configured()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
             or self._restart_only is not None
@@ -1405,7 +1431,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return bool(global_config.get(ROLLOUT_CORRELATION_KEY_NAME, False))
 
     def _token_id_capture_enabled(self) -> bool:
-        """Whether this agent explicitly opted into training-token capture."""
+        """Whether this agent captures training tokens for the request it is handling.
+
+        The agent must opt in (or the run sets ``all_agents``), and the request's rollout must not skip capture:
+        a ``/run`` with ``_ng_skip_token_capture: true``, or an activation on a rollout path without the training tag.
+        """
+        return not current_rollout_skips_token_capture() and self._token_id_capture_configured()
+
+    def _token_id_capture_configured(self) -> bool:
+        """Whether the run's configuration has this agent capture training tokens, whatever the request."""
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
@@ -1441,13 +1475,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Apply this run's capture path and sampling segment to a downstream URL path.
 
         Evaluation uses ``/ng-rollout/<id>/...``.
-        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``, unless the run's rollout skips capture
+        with ``_ng_skip_token_capture: true``.
         A run with sampling values adds ``/ng-sampling/<values>`` after the rollout prefix, or ``null`` for a role the
         framework does not train (``trained=False``).
         Calls without a rollout id or values remain unchanged.
         """
         return (
-            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
+            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._run_captures(body))}"
             f"{model_sampling_path_segment(self.model_sampling_segment_for_run(body, trained=trained))}"
             f"{url_path}"
         )
@@ -1463,9 +1498,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return apply_rollout_prefix(
             base_url,
             self.rollout_id_from_run(body),
-            token_capture=self._token_id_capture_enabled(),
+            token_capture=self._run_captures(body),
             model_sampling=self.model_sampling_segment_for_run(body, trained=trained),
         )
+
+    def _run_captures(self, body: Any) -> bool:
+        """Whether a run's model calls carry the training tag.
+
+        The run's own ``_ng_skip_token_capture`` applies even for an agent whose ``/run`` route does not set the
+        rollout's capture context.
+        """
+        return self._token_id_capture_enabled() and not skips_token_capture(body)
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
         """Carry an inbound capture path and sampling segment onto a downstream URL path.
