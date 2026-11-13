@@ -129,19 +129,12 @@ docker/ @nvidia-nemo/automation
 /scripts/ci/ @nvidia-nemo/automation
 
 # ── Suggested (advisory only, see header) ───────────────────────────────────
-# Suggestions for paths that have no enforced rule above, or that add a second
-# team to one. A path that has an enforced rule is not repeated here. Teams
-# verified to exist via the GitHub API at authoring time.
+# Suggestions for paths that no enforced rule above covers, apart from the `*`
+# fallback. Teams verified to exist via the GitHub API at authoring time.
 
 # Core-Arch + RL
-# suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/utils/decorators.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/utils/path_utils.py @nvidia-nemo/gym_core
 # suggest: /tests/ @nvidia-nemo/gym_core
 
 # Co-owned
 # suggest: /nemo_gym/__init__.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/config/config_types.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/config/global_config.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/package_info.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
-# suggest: /responses_api_agents/verifiers_agent/ @nvidia-nemo/gym_env_benchmarks @nvidia-nemo/gym_core
