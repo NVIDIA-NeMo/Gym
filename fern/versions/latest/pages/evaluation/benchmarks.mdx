@@ -172,3 +172,28 @@ Contribution checklist for adding a new benchmark to Gym.
 </Card>
 
 </Cards>
+
+
+## Experimental skill-opening benchmark
+
+The [skill-opening benchmark](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/skill_trigger)
+uses five Harbor agent profiles to measure whether successful tool results return
+skill instructions. It measures skill opening, not task completion. The canonical
+110-case selection is positive-only; separate negative controls measure unnecessary
+task-specific opening, with documented session-start meta-skill reads reported
+separately. Nine cases remain blocked by unresolved source terms, and preparation
+enforces that boundary. Missing or inconclusive evidence remains unscored and must
+be reported alongside each rate. See the linked measurement contract for release
+versions, exclusions, and the supported `gym eval run --split benchmark` workflow.
+
+The release 0.2.1 pilot includes inspected CLI fixtures for all five profiles, a
+180-attempt positive sample (133 scored, 47 unscored), and 90 separate negative
+controls (82 scored, eight unscored). The [validation tables](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/skill_trigger/README.md#release-021-validation)
+identify the exact sampled tasks, source exclusions, model/runtime, and every
+denominator. These bounded observations do not reproduce the deleted historical
+experiment or establish harness rankings.
+
+Six pilot openings are conclusively observed before later execution errors; all errors remain reported.
+The generic Harbor agent preserves failed-result bytes before invalidating resume.
+A verified opening counts even if later work times out; applying the instructions
+or completing the task is not part of the positive metric.

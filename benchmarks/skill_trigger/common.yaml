@@ -1,0 +1,50 @@
+skill_trigger_settings:
+  release: benchmarks/skill_trigger/data/release
+  manifest_sha256: UNPREPARED
+  tasks: benchmarks/skill_trigger/data/tasks
+  jobs: benchmarks/skill_trigger/data/jobs
+  harness: pi
+  model_catalog_path: UNPREPARED
+  model_catalog_sha256: UNPREPARED
+num_samples_in_parallel: 2
+count_failure_classes_as_zero: []
+count_missing_rollouts_as_zero: false
+prepare_script_args:
+  release: ${skill_trigger_settings.release}
+  manifest_sha256: ${skill_trigger_settings.manifest_sha256}
+  output: ${skill_trigger_settings.tasks}
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      harbor_unique_job_names: true
+      harbor_resolve_paths_from_gym_root: true
+      harbor_reward_key: reward
+      harbor_worker_env:
+        OPENAI_API_KEY: ${oc.env:OPENAI_API_KEY,''}
+        OPENAI_BASE_URL: ${policy_base_url}
+      job:
+        jobs_dir: ${skill_trigger_settings.jobs}
+        datasets:
+        - path: ${skill_trigger_settings.tasks}
+        n_attempts: 1
+        n_concurrent_trials: 1
+        retry:
+          max_retries: 0
+        environment:
+          type: docker
+          delete: true
+        verifier:
+          import_path: benchmarks.skill_trigger.verifier:SkillOpeningVerifier
+          kwargs:
+            release: ${skill_trigger_settings.release}
+            manifest_sha256: ${skill_trigger_settings.manifest_sha256}
+            harness: ${skill_trigger_settings.harness}
+skill_trigger_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: harbor_agent_general
