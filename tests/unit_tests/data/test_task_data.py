@@ -812,7 +812,10 @@ class TestHarborLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
 
         paths = processor._collate_samples_single_type(
-            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
 
         [prepared] = [json.loads(line) for line in paths[0].read_text().splitlines()]
