@@ -99,7 +99,7 @@ async def execute_python(client: ServerClient, cookies: Dict[str, str], code):
 
 async def end_session(client: ServerClient, cookies: Dict[str, str]):
     """
-    End the current session and clean up resources.
+    Stop the session's Python worker; the task metadata stays until verify, close or the idle sweep.
     """
     response = await client.post(server_name="newton_bench", url_path="/end_session", json={}, cookies=cookies)
     response.raise_for_status()

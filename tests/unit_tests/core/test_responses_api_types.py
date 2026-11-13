@@ -467,6 +467,64 @@ class TestNeMoGymResponse:
         assert web_search_call.model_dump(mode="json") == payload
 
 
+class TestChatCompletionFinishReasons:
+    @pytest.mark.parametrize("stop_reason", [None, 0, 11, "repetition_detected"])
+    def test_vllm_repetition_finish_reason_is_sdk_compatible(self, stop_reason: str | int | None) -> None:
+        payload = {
+            "id": "chatcmpl-repetition",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "repetition",
+                    "stop_reason": stop_reason,
+                    "message": {"role": "assistant", "content": "Retained answer."},
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        original = deepcopy(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+        saved = NeMoGymChatCompletion.model_validate_json(completion.model_dump_json(exclude_unset=True))
+
+        expected = deepcopy(original)
+        expected["choices"][0].update(finish_reason="stop", native_finish_reason="repetition")
+        assert saved.model_dump(exclude_unset=True) == expected
+        assert payload == original
+        assert type(saved.choices[0].stop_reason) is type(stop_reason)
+        sdk = ChatCompletion.model_validate_json(saved.model_dump_json(exclude_unset=True))
+        assert sdk.choices[0].finish_reason == "stop"
+        assert sdk.choices[0].native_finish_reason == "repetition"
+
+    @pytest.mark.parametrize("finish_reason", ["stop", "length", "content_filter", "tool_calls", "function_call"])
+    def test_standard_finish_reasons_are_unchanged(self, finish_reason: str) -> None:
+        payload = {
+            "index": 0,
+            "finish_reason": finish_reason,
+            "stop_reason": 0,
+            "message": {"role": "assistant", "content": "Retained answer."},
+        }
+
+        choice = NeMoGymChoice.model_validate(payload)
+
+        assert choice.model_dump(exclude_unset=True) == payload
+        assert "native_finish_reason" not in choice.model_dump()
+
+    def test_unrecognized_finish_reason_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="finish_reason"):
+            NeMoGymChoice.model_validate(
+                {
+                    "index": 0,
+                    "finish_reason": "unknown_provider_error",
+                    "stop_reason": "repetition_detected",
+                    "message": {"role": "assistant", "content": "Retained answer."},
+                }
+            )
+
+
 class TestTokenMetadataValidation:
     @pytest.mark.parametrize(
         "token_metadata",
@@ -818,13 +876,15 @@ class TestNeMoGymChatCompletionSchemas:
                 messages=[{"role": "assistant", "content": "answer", "annotations": [{"type": "url_citation"}]}]
             )
 
-    def test_assistant_reasoning_content_round_trips_between_tool_calls(self) -> None:
+    @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+    @pytest.mark.parametrize("value", ["Inspect the repository first.", None])
+    def test_assistant_reasoning_round_trips_between_tool_calls(self, field: str, value: str | None) -> None:
         payload = {
             "messages": [
                 {
                     "role": "assistant",
                     "content": "",
-                    "reasoning_content": "Inspect the repository first.",
+                    field: value,
                     "tool_calls": [
                         {
                             "id": "call-1",
@@ -838,8 +898,27 @@ class TestNeMoGymChatCompletionSchemas:
 
         params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
 
-        assert params.model_dump(mode="json", exclude_unset=True)["messages"][0]["reasoning_content"] == (
-            "Inspect the repository first."
+        assert params.model_dump(mode="json", exclude_unset=True) == payload
+
+    @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+    @pytest.mark.parametrize("value", [42, ["reasoning"], {"text": "reasoning"}])
+    def test_assistant_reasoning_rejects_non_string_values(self, field: str, value: object) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {"messages": [{"role": "assistant", "content": "", field: value}]}
+            )
+
+        assert any(error["loc"][-1] == field and error["type"] == "string_type" for error in exc_info.value.errors())
+
+    def test_assistant_reasoning_does_not_allow_unknown_fields(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {"messages": [{"role": "assistant", "reasoning": "Think first.", "unknown_assistant_field": "value"}]}
+            )
+
+        assert any(
+            error["loc"][-1] == "unknown_assistant_field" and error["type"] == "extra_forbidden"
+            for error in exc_info.value.errors()
         )
 
     def test_user_audio_and_file_content_parts_round_trip(self) -> None:

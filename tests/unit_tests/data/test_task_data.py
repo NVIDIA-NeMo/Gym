@@ -10,7 +10,7 @@ from typing import get_args
 
 import pytest
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.config.config_types import (
     EnvironmentServerInstanceConfig,
@@ -27,6 +27,8 @@ from nemo_gym.data.task_data import (
     normalize_task_fields,
     validate_jsonl_rows,
 )
+from nemo_gym.data.tasks.harbor.materialize import HarborTaskInput
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -42,6 +44,16 @@ class TestNormalizeTaskFields:
         fields, conflicts = normalize_task_fields(row)
         assert fields == {"question": "q"}
         assert conflicts == []
+
+    def test_agent_context_is_not_task_data(self):
+        """Schema projection excludes single_agent_turn's context field without promising environment support."""
+        fields, _ = normalize_task_fields(
+            {
+                "verifier_metadata": {"label": "safe"},
+                "agent_context": {"agent": {"artifacts": {"media": {"path": "figs/1"}}}},
+            }
+        )
+        assert fields == {"label": "safe"}
 
     def test_splices_verifier_metadata_contents(self):
         fields, conflicts = normalize_task_fields(
@@ -161,6 +173,22 @@ class TestTaskDataValidator:
         assert "expected_answer" in v.report.errors[0]
         assert "0/" not in v.report.summary().splitlines()[0]
 
+    def test_agent_context_inside_task_data_is_not_a_task_field(self):
+        """SingleAgentTurnTaskInput lifts context out of task_data, so schema validation skips it there."""
+        row = {
+            "responses_create_params": {"input": "q"},
+            "task_data": {
+                "question": "q",
+                "expected_answer": "a",
+                "agent_context": {"agent": {"values": {"tag": "figqa2"}}},
+            },
+        }
+        v = self._validator()
+        v.validate_row(0, row)
+
+        assert v.report.clean, v.report.summary()
+        assert SingleAgentTurnTaskInput.model_validate(row).task_data == {"question": "q", "expected_answer": "a"}
+
     def test_verifier_metadata_rows_validate_against_flat_schema(self):
         v = self._validator()
         v.validate_row(0, {"verifier_metadata": {"question": "q", "expected_answer": "a"}})
@@ -175,6 +203,16 @@ class TestTaskDataValidator:
         assert not v.report.clean
         assert v.report.unknown_keys == {"difficulty": 1}
         assert "difficulty" in v.report.summary()
+
+    @pytest.mark.parametrize("skip_token_capture", [True, False])
+    def test_the_skip_token_capture_key_is_framework_owned(self, skip_token_capture):
+        v = self._validator()
+        row = {"question": "q", "expected_answer": "a", "_ng_skip_token_capture": skip_token_capture}
+        v.validate_row(0, row)
+        assert v.report.clean and v.report.unknown_keys == {}
+        # Only that key is reserved: a typo beside it still makes the report dirty.
+        v.validate_row(1, row | {"typo": 1})
+        assert v.report.unknown_keys == {"typo": 1}
 
     def test_conflicting_duplicate_marks_report_dirty(self):
         v = self._validator()
@@ -761,6 +799,26 @@ class TestHarborLayoutThroughTheProcessor:
         assert len(paths) == 1 and json.loads(paths[0].read_text())["task_input"]["task_data"] == {
             "_ng_digest": "a" * 64
         }
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_schema_filtering_preserves_context_for_environment_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+    ) -> None:
+        """Collation must preserve unsupported context so Harbor can refuse it at its request boundary."""
+        row = self._row({"_ng_digest": "a" * 64})
+        context = {"values": {"tag": "figqa2"}}
+        container = row["task_input"]["task_data"] if nested else row["task_input"]
+        container["agent_context"] = context
+        processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
+
+        paths = processor._collate_samples_single_type(
+            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+        )
+
+        [prepared] = [json.loads(line) for line in paths[0].read_text().splitlines()]
+        assert prepared["task_input"] == row["task_input"]
+        with pytest.raises(ValidationError, match="agent_context"):
+            HarborTaskInput.model_validate(prepared["task_input"])
 
 
 class TestLegacyWrapperLayoutThroughTheProcessor:

@@ -131,7 +131,7 @@ The agent session must close successfully before verification starts. Agent clos
 </Warning>
 
 - The Environment Server orders the session calls and the final cleanup. The Resources Server implements the benchmark's sandbox lifetime policy. It decides which sandbox to reuse, when to create a verifier sandbox, and when to stop each sandbox it owns.
-- In agent and model routes, `...` stands for Gym's rollout prefix and the optional token-capture segment, `/ng-rollout/<capture_key>[/training-token-capture]`. Preserve this prefix when you forward requests.
+- In agent and model routes, `...` stands for Gym's rollout prefix and the optional token-capture segment, `/ng-rollout/<capture_key>[/training-token-capture]`. Preserve this prefix when you forward requests. The segment decides capture: an agent activated without it captures none of that activation's calls, even if the agent sets `token_id_capture`, so an Environment Server that wants a rollout captured must include it.
 - If an episode is interrupted, close joins or retries finalization. It confirms harness termination, captures the available artifacts, and then releases resources. Finish collecting output before you delete session files or stop an agent-owned sandbox.
 
 ### Sandbox lifetime policies
@@ -170,11 +170,13 @@ The Environment Server drives an agent session through three HTTP endpoints. `Si
 | `POST /v1/agent_sessions/close` | `AgentCloseSessionRequest` | `AgentCloseSessionResponse` | `_close_agent_session_state()` |
 | `POST /rollouts/<capture_key>/stop` (optional) | `RolloutStopRequest` (an optional `reason`) | `RolloutStopResponse` | `_rollout_sandbox_session()` |
 
+Implement these hooks and nothing more: the Environment Server runs the episode. The [Environment Server compliance](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/environment_server_compliance/README.md) check flags an agent that does not implement them, or that keeps parts of the earlier design in which the agent ran the whole episode itself.
+
 The stop route ends a running harness exactly as at its time limit, so the episode is still verified and graded as a timeout. It is for a caller that enforces its own budget (agent time, tokens, cost) or for an operator; cancelling the `/run` request instead discards the rollout. An agent whose harness runs in a `SandboxSession` supports it by returning that session from `_rollout_sandbox_session()` and passing its response through `report_rollout_stop()`, as Codex does; other agents answer HTTP 501. The stopped run's response keeps the timeout's `incomplete` status, which `single_agent_turn` verifies, and its metadata gains `ng_rollout_stop`, a JSON object with the caller's `reason` (or `null`). That marker tells a stop apart from a timeout or a cancellation. A stop is not a failure, so the response carries no `ng_agent_outcome` failure kind, and a rollout that was stopped and graded is an ordinary result. The caller keeps awaiting its `/run` request, which returns the graded result once verification finishes. Harness runners see the timeout path, not a cancellation: they find no `stop.request` marker. `stopped: true` means the stop was accepted; the run can still finish on its own before the stop takes effect. `stopped` is false when the run already ended or a stop was already requested. An unknown or closed rollout answers HTTP 404, and a stop that arrives while the session is still seeding takes effect when the harness would launch. Stopping a running harness writes a file its supervisor watches for, so it needs a sandbox provider whose uploads never wait for the capacity running commands hold (`SupportsSandboxIndependentUploads`): Local, and OpenSandbox with `operations.background_exec: true`. On other providers, such as Docker, Apptainer, Enroot and OpenShell, whose uploads share the command limit, and OpenSandbox in foreground mode, a stop of a running harness answers HTTP 501; a stop before launch works on every provider. With several server workers the request needs no session cookie: the worker running the rollout claims its `/rollouts/<capture_key>` path, and the others forward the stop to it. A stop applies to the rollout's current agent session. An environment that opens a new session for each turn, such as Harbor's multi-step tasks, still schedules the later turns, and a stop sent between sessions finds no open session and answers HTTP 404. A caller enforcing a budget for the whole episode must also keep the environment from starting further turns once the current one is graded.
 
 Every Environment Server that drives sessions uses these endpoints, such as `single_agent_turn` for a Resources Server task and `harbor` for a task folder, where the Environment Server creates the sandbox itself and passes it in `sandbox_access`. See [Design Agent-Environment Interactions](/main/agent-interactions).
 
-`AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, and an optional `sandbox_access`. `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
+`AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, an optional `sandbox_access`, and an optional `agent_context` (see [Agent context](#agent-context)). `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
 
 The base class in [`nemo_gym/agents/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:
 
@@ -184,7 +186,7 @@ The base class in [`nemo_gym/agents/base_responses_api_agent.py`](https://github
 - **Activation identity.** Reject an activation whose rollout path does not match the seeded `episode_id.capture_key`.
 - **Saved reply.** The first successful close's response, including its observations, is saved and returned to a retried close for the close retry window, `session_close_retry_window_seconds` (default 300). If harness termination cannot be confirmed yet, the session state is kept so that close can retry. After a final negative termination receipt, the session state is released instead; see [Harness termination](#harness-termination).
 - **Setup failure.** If seed fails and its cleanup cannot finish, raise `AgentSessionSetupError(state, error=...)`. The base class keeps the partial state for close and never activates it.
-- **Deterministic errors.** For a seed the agent cannot serve, such as an unsupported sandbox connection or an unusable required tool grant, raise `AgentSeedRejectedError(reason)` from `_seed_agent_session_state()`. The seed returns HTTP 422 with a string `detail` and binds no session, so the episode fails once with the refusal reason. Test each refusal with `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`. For a request that conflicts with the agent session, such as one for a closed session, raise `AgentSessionConflictError`, which answers HTTP 409. For other errors that a retry cannot fix, such as an invalid request, raise an `HTTPException` with a 4xx status; it keeps its explicit status. Any other, unexpected exception answers HTTP 500. The Environment Server treats 5xx responses as retryable, so a deterministic 500 seeds the episode again, including a new sandbox, on every attempt.
+- **Deterministic errors.** For a seed the agent cannot serve, such as an unsupported sandbox connection or an unusable required tool grant, raise `AgentSeedRejectedError(reason)` from `_seed_agent_session_state()`. The seed returns HTTP 422 with a string `detail` and binds no session, so the episode fails once with the refusal reason. An adapter that cannot use a lent sandbox at all refuses it this way, with a `detail` that says `does not support sandbox access`; the Environment Server compliance check flags any other failure of a seed that lends a sandbox. Test each refusal with `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`. For a request that conflicts with the agent session, such as one for a closed session, raise `AgentSessionConflictError`, which answers HTTP 409. For other errors that a retry cannot fix, such as an invalid request, raise an `HTTPException` with a 4xx status; it keeps its explicit status. Any other, unexpected exception answers HTTP 500. The Environment Server treats 5xx responses as retryable, so a deterministic 500 seeds the episode again, including a new sandbox, on every attempt.
 
 Close must return `agent_observations` even when activation failed, and the `trajectory` of the turns taken before the failure when the harness keeps one. When no observations were captured, return a bundle with an `ObservationGap` such as `observation_capture_failed`. Return `resources_cookies` only if the harness changed the Resources Server's cookie jar through tool calls. `None` or an empty jar keeps the cookies from the Resources Server's seed.
 
@@ -223,7 +225,7 @@ Follow these rules for a borrowed sandbox:
 - If correctness depends on a harness plugin or hook, make it fail closed. For example, OpenCode logs a plugin that fails to load and still exits 0, so the OpenCode adapter's task-environment plugin writes `task-environment.ready` after validating the task directory settings and initializing the hook that restores them for each shell call. The adapter refuses to return a gradable result without that receipt.
 - Install only the harness runtime. The Resources Server has already prepared the task repository and its dependencies.
 - If connection or setup fails, propagate the error. Never fall back to the host or to a different sandbox.
-- On close, remove only adapter-owned files and disconnect. The Resources Server destroys the sandbox.
+- On close, remove only adapter-owned files and disconnect. The Resources Server destroys the sandbox, and the Environment Server compliance check flags an agent that stops it.
 
 The adapter reaches the sandbox only through `AsyncSandbox`. The harness reaches Gym only through the Model Server and any granted tool endpoints. Each connection has its own protocol:
 
@@ -270,7 +272,14 @@ The current adapters support the following tool sources:
 | Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | `mcp` only. Each granted MCP server becomes a Codex `mcp_servers` entry with the same name. Required `direct_http` grants are rejected. | Responses (streaming) |
 | OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto` and `agent.build.steps`. | `mcp` only. Each granted MCP server becomes an OpenCode `remote` MCP server with the same name; a required one that does not connect fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
 | OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | `mcp` only. Each granted MCP server becomes an OpenClaw `mcp.servers` entry with the same name, probed before the run; a required one that does not connect fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
+| CrewAI | `shell`, which runs each command in the task's working directory. The crew runs in the task sandbox: the borrowed one, or an agent-owned one when none is lent. | `mcp` only. Each tool of a granted MCP server becomes a CrewAI tool under its own name; a required server that does not list its tools fails the activation. Required `direct_http` grants are rejected. | Chat Completions |
+| DeepAgents (`app.py`, `tool_profile: builtin`) | deepagents' own tools: `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `execute`, and `task` subagents. `shell_timeout_seconds` sets the default limit of each `execute` call. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Responses |
+| Cline | Cline's built-in tools (shell commands, file reads and edits); `command_permissions` restricts its shell commands. | None in agent sessions. Required grants are rejected and optional ones skipped; keep `resources_tool_transports: []`. | Chat Completions |
+| OpenHands | OpenHands' terminal (subprocess backend), file editor, task tracker, `finish` and `think`, with its default condenser. | None. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
 | mini-SWE | mini-SWE's bash tool. | `mcp` only. Each granted MCP server, and each MCP server a Harbor task declares, is reached through a task-local CLI that the bash tool calls; a required one that does not connect fails the activation before the first model call. The response carries each call after the bash call that made it, as `mcp__<server>__<tool>`. Required `direct_http` grants are rejected. | Responses |
+| Droid | Droid's built-in tools (`Read`, `Execute`, `Edit`, `Create`, `Grep`, `Glob`, `LS`, its Task subagents and others), run with `--skip-permissions-unsafe` because the task sandbox supplies isolation. | None. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions (streaming) |
+| Goose | Goose's default extensions, plus `summon` (`delegate` and `load`) unless `delegate: false`. | None in agent sessions. Required grants are rejected, so keep `resources_tool_transports: []`. | Chat Completions |
+| Kimi Code | Kimi Code's built-in tools, including `Agent` and `AgentSwarm` unless `subagents: false`. `disabled_tools` turns off the cron and web tools by default. | None in agent sessions. Required grants are rejected, so keep `resources_tool_transports: []`. | Chat Completions |
 
 When a tool belongs to the task, prefer a Resources Server tool grant over a built-in harness tool. Different agents can then share one implementation, and the adapter works across environments without benchmark-specific changes. Use built-in harness tools for behavior that belongs to the harness, such as its shell or file editor. See [Tools in Agent vs. Resources Server](/main/agent-server/integrate-existing-agents#tools-in-agent-vs-resources-server).
 
@@ -300,6 +309,75 @@ Accepting the seed or writing that configuration does not prove the harness cons
 MCP access and sandbox access are separate capabilities. A Resources Server can grant MCP tools without returning `sandbox_access`. An adapter that needs a sandbox must then use a configured agent-owned provider or reject the unsupported seed explicitly. Adding a provider does not add MCP or `direct_http` support. Close disconnects MCP clients; it stops an agent-owned sandbox and leaves a borrowed sandbox to its owner.
 
 Validate grant support with an authenticated MCP fixture and a real harness run: confirm tool discovery, an actual tool call, and the tool result reaching the model. Also test unavailable required servers (no inference or gradable answer), optional-server failure, name collisions, cleanup, and, when enforcement depends on a plugin or hook, a run where it does not load. For a sandboxed adapter, exercise both borrowed and agent-owned sandboxes when both are supported. State which transports the adapter consumes; a successful sandbox-only rollout with `resources_tool_transports: []` does not establish MCP support.
+
+### Agent context
+
+Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, keyed by participant role, because an episode can seed several agents. The Environment Server sends each role's context to that role's agent session in `AgentSeedSessionRequest.agent_context`, and keeps it out of the task data sent to the Resources Server. The initial conversation stays in `responses_create_params.input`. Do not use `responses_create_params.metadata` to carry task data to the harness.
+
+The `single_agent_turn` Environment Server has one role, `agent`:
+
+```json
+{
+  "responses_create_params": {"input": [{"role": "user", "content": "What does the figure show?"}]},
+  "verifier_metadata": {"answer": "a cat"},
+  "agent_context": {
+    "agent": {
+      "values": {"tag": "figqa2"},
+      "artifacts": {"media": {"path": "test_media/figqa2/7f3c"}}
+    }
+  }
+}
+```
+
+Each Environment Server names its roles. It refuses with HTTP 422 a row that names a role it does not have, and an Environment Server that sends no context, such as `harbor`, `nemo_user_sim` or `swe_together`, refuses the key altogether, so an episode never runs without task data it was given. The `legacy_agent` relay is the exception: it sends the whole row to the agent's `/run`, where `agent_context` is one more row field.
+
+Each role's context has two maps:
+
+- `values` holds small inline JSON fields. One role's context, including its artifact references, is limited to 64 KiB as UTF-8 JSON.
+- `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.
+- A key appears in `values` or in `artifacts`, not both.
+- An empty context counts as none: the seed then omits the key.
+
+An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` (or a subclass), optionally unioned with `None`, takes an artifact; any other field takes a value. Omit an optional artifact to use its default of `None`. Unions mixing artifact and value types are unsupported; declare separate fields instead. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
+
+- the agent declares no model and the seed carries any context,
+- the seed carries a key the model does not declare,
+- a required key is missing, a value has the wrong type, or a key is supplied through the wrong map.
+
+No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes and in `retire_agent_session` when a checkpoint retires the session instead. Retirement does not call the close hook.
+
+A `SimpleAgent` subclass resolves its context in `_new_session_state()`, which the seed and a checkpoint restore both call; context resolved only in `_seed_agent_session_state()` is lost when a restore rebuilds the session. It puts the context into the model request in `_create_session_episode()`, which creates each session activation's episode. Override `_create_session_episode()`, never `responses()`: environment validation infers `custom-gym-agent-loop` for any agent that overrides `responses()`, while the agent loop is still Simple Agent's.
+
+```python
+class FigureContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    media: AgentContextArtifact
+    tag: str
+
+
+@dataclass
+class FigureSessionState(SimpleAgentSessionState):
+    media_dir: Path | None = None
+
+
+class FigureAgent(SimpleAgent):
+    agent_context_model = FigureContext
+
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureSessionState:
+        state = super()._new_session_state(body)
+        context = self.parse_agent_context(body)
+        media_dir = resolve_agent_context_artifact(context.media, Path(self.config.media_base_dir), kind="directory")
+        # dataclasses.fields: copy Simple Agent's state and add the resolved directory.
+        inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+        return FigureSessionState(**inherited, media_dir=media_dir)
+
+    async def _create_session_episode(self, state, body, **kwargs):
+        body = add_figure_images(body, state.media_dir)  # the agent's own request builder
+        return await super()._create_session_episode(state, body, **kwargs)
+```
+
+On an agent's legacy `/run` path, `agent_context` is one more field of the row the agent receives and may forward to the Resources Server. The agent-only routing described above applies to `single_agent_turn`.
 
 ## Configure the adapter
 
@@ -825,7 +903,7 @@ These receipts coordinate lifecycle behavior. Files that the model can write are
 Use [Harness Conformance](/main/observability/harness-conformance) to validate trajectory evidence. To register a new harness and install its dependencies, follow the [runner guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/harness_conformance/README.md). Run the probes with a new output directory. This example uses Pi:
 
 ```bash
-python scripts/run_harness_conformance.py \
+python -m scripts.run_harness_conformance \
     --harness pi --output results/pi-conformance
 ```
 
@@ -860,6 +938,7 @@ Record evidence conformance and sandbox lifecycle validation separately, because
 - **Upgrades.** Compare the same harness before and after the upgrade with a fixed model, tasks, prompts, sampling parameters, limits, images, verifier, and concurrency. Compare scores and failures. Different harnesses do not need to score the same.
 - **Isolation.** Run concurrent sessions with different configurations and credentials, and check that no setting, credential, or file from one session reaches another.
 - **Scale.** Measure setup time, memory, process count, and close latency before you scale up. Validate [training support](/main/tutorials/training-tutorials/external-agent-harnesses) separately from inference.
+- **Environment Server compliance.** CI runs the non-blocking [Environment Server compliance](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/environment_server_compliance/README.md) check on every agent a PR changes and reports its findings as warnings. Run it locally with `python -m scripts.environment_server_compliance.ci check responses_api_agents/<agent>`.
 
 In the PR, include the commands, versions, evidence, limitations, tests, and pre-commit results.
 
