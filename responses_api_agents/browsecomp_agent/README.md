@@ -29,11 +29,18 @@ The sandbox path declares **Evaluation** capability. It returns an observation b
 
 A native rollout timeout retains partial output, sets `timed_out`, and scores zero without a judge call. Inside the sandbox the timeout counts from the runner's start, so its endpoint checks spend the rollout's budget and the supervisor's 30-second grace is left for startup and the receipt. Model HTTP errors retain their status in `ng_agent_outcome`; the Environment Server decides verification, failure or retry. Its default policy verifies 400/413/422, retries 408/425/429/5xx, and excludes other model failures from scoring. Read failure rows and coverage alongside accuracy: this differs from the old `/run` path, which counted some errors as zero-reward answers.
 
-Each completed response carries `stop_reason`, the reason the loop ended: `answered` (an assistant message with no
-tool calls), `max_steps`, `timeout`, or `context_full` (the model response was incomplete with reason
-`max_output_tokens`). `context_full` covers both a context overflow that the model server reports as a length-cut
-response and a response the model cut at its own output budget; a training filter that masks `context_full` masks
-both. A response built from a failed model request carries no `stop_reason`. Nothing in Gym reads the field.
+Each completed response carries `stop_reason`, the reason the loop ended:
+
+| Value | When |
+|---|---|
+| `answered` | The model returned an assistant message with no tool calls. |
+| `max_steps` | The loop reached `max_steps`. |
+| `timeout` | The rollout passed `rollout_timeout_s`. |
+| `max_output_tokens` | The model response was cut after using the whole `max_output_tokens` the request set: the model's own failure. |
+| `context_full` | The model response was cut with reason `max_output_tokens` before using that budget, or the request set none. The model server reports a context overflow this way. |
+
+A training filter can mask `context_full` and still score `max_output_tokens`. A response built from a failed model
+request carries no `stop_reason`. Nothing in Gym reads the field.
 
 Host `/v1/responses` and `/run` are disabled by default. Development-only compatibility requires `allow_host_execution: true`; `/run` also requires an explicit `resources_server`. The resources server independently requires its own host-execution opt-in if its tool sandbox is disabled. These options do not provide isolation.
 

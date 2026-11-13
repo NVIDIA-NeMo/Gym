@@ -83,7 +83,6 @@ from resources_servers.browsecomp_advanced_harness.rollout_context import (
     peek_phase_totals,
     pop_phase_totals,
     reset_rollout_id,
-    rollout_id_from_request,
     set_rollout_id,
 )
 from resources_servers.browsecomp_advanced_harness.sandbox import (
@@ -1049,7 +1048,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
     _search_cache: SearchCache = PrivateAttr()
-    _session_rollout_ids: dict[str, str] = PrivateAttr(default_factory=dict)
     _shell_sessions: dict[str, BrowsecompShellSandbox] = PrivateAttr(default_factory=dict)
     # Why the session's tool sandbox failed, if it did: /verify masks that sample instead of scoring it.
     _shell_failures: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -1255,9 +1253,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             await asyncio.to_thread(self._cleanup_workspace, sid)
         self._release_metrics(sid)
         self._shell_failures.pop(sid, None)
-        rid = self._session_rollout_ids.pop(sid, None)
-        if rid is not None:
-            pop_phase_totals(rid)
+        pop_phase_totals(sid)
 
     def _validate_shell_config(self) -> None:
         """Refuse a missing isolation boundary before creating a workspace or provider."""
@@ -1815,10 +1811,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         async with self._locks.locked(request.session[SESSION_ID_KEY]):
             self._open_session_id(request)
             sid = request.session[SESSION_ID_KEY]
-            rid = rollout_id_from_request(request)
-            if self._search_cache.enabled and self._fences.get(sid) is None:
-                rid = self._session_rollout_ids.setdefault(sid, rid)
-            token = set_rollout_id(rid)
+            token = set_rollout_id(sid)
             try:
                 return await self._search(request, body)
             finally:
@@ -1867,10 +1860,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         async with self._locks.locked(request.session[SESSION_ID_KEY]):
             self._open_session_id(request)
             sid = request.session[SESSION_ID_KEY]
-            rid = rollout_id_from_request(request)
-            if self._search_cache.enabled and self._fences.get(sid) is None:
-                rid = self._session_rollout_ids.setdefault(sid, rid)
-            token = set_rollout_id(rid)
+            token = set_rollout_id(sid)
             try:
                 return await self._browse(request, body)
             finally:
@@ -2015,10 +2005,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """
         async with self._locks.locked(request.session[SESSION_ID_KEY]):
             sid = request.session[SESSION_ID_KEY]
-            rid = rollout_id_from_request(request)
-            if self._search_cache.enabled and self._fences.get(sid) is None:
-                rid = self._session_rollout_ids.setdefault(sid, rid)
-            token = set_rollout_id(rid)
+            token = set_rollout_id(sid)
             try:
                 return await self._verify(request, body)
             finally:
@@ -2090,8 +2077,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # Verification may be retried; close owns releasing episode-session totals.
         if self._search_cache.enabled:
-            rid = self._session_rollout_ids.get(sid, rollout_id_from_request(request))
-            LOG.info("[browsecomp][phases] rid=%s t=%.3f %s", rid, time(), format_phase_totals(peek_phase_totals(rid)))
+            LOG.info("[browsecomp][phases] rid=%s t=%.3f %s", sid, time(), format_phase_totals(peek_phase_totals(sid)))
             LOG.info("[cache] %s", self._search_cache.summary_str())
 
         if sid not in self._episode_sessions:

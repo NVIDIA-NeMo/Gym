@@ -674,7 +674,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         loop_started = time.monotonic() if started_at is None else started_at
         deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
         timed_out = False
-        stop_reason = None  # why the loop ended: answered / max_steps / context_full / timeout
+        stop_reason = None  # why the loop ended: answered / max_steps / max_output_tokens / context_full / timeout
         model_response = None
 
         # --- Progress board state (ported from the reference harness) ---
@@ -907,8 +907,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
-                # The model server also returns this for a context overflow (empty, length-cut response).
-                stop_reason = "context_full"
+                # The cut is the model's own when it used the whole requested output budget. Otherwise the context
+                # window filled: the model server answers a context overflow with an empty, length-cut response.
+                output_budget = new_body.max_output_tokens
+                output_tokens = model_response.usage.output_tokens if model_response.usage else None
+                if output_budget and output_tokens is not None and output_tokens >= output_budget:
+                    stop_reason = "max_output_tokens"
+                else:
+                    stop_reason = "context_full"
                 break
 
             # --- If the model decided to answer (no tool calls), we are done ---
@@ -1221,8 +1227,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
         model_response.timed_out = timed_out
-        # For training-side filters; nothing in Gym reads it. context_full also covers a response the model
-        # cut at its own output budget, so masking it masks those model failures too (see README).
+        # For training-side filters; nothing in Gym reads it.
         model_response.stop_reason = "timeout" if timed_out else stop_reason
         if timed_out:
             model_response.status = "incomplete"

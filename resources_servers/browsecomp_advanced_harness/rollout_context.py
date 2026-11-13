@@ -8,12 +8,8 @@ no rollout key, and ONE NemoGym process serves the whole run with up to ~944
 rollouts in flight. So "how long did THIS rollout spend in search vs bash?" could
 not be answered from a driver log at all — only leg-wide totals could.
 
-A caller that mints its own rollout id can send it as the `X-Rollout-Id` header;
-no Gym component sends it today, so the session id is what keys these lines.
-The header exists because the harness's own `session_id` lives in a
-signed session cookie which the agent cannot read back, so the agent could not
-tag its own generation/tokenize lines with the same key. Requests without the
-header (eval, tests, direct curl) fall back to the session id, then to "-".
+The resources session id is the rollout id: the server binds it for each tool and
+verification request, so every line of one rollout carries the same `rid=`.
 
 A ContextVar rather than a parameter: the print sites are several frames deep
 inside helpers and inside `search_cache.py`, which has no request at all. This
@@ -29,12 +25,9 @@ from contextvars import ContextVar, Token
 from time import time
 from typing import Dict, Optional
 
-from fastapi import Request
-
 
 LOG = logging.getLogger(__name__)
 
-ROLLOUT_ID_HEADER = "X-Rollout-Id"
 UNKNOWN_ROLLOUT_ID = "-"
 
 _ROLLOUT_ID: ContextVar[str] = ContextVar("_ROLLOUT_ID", default=UNKNOWN_ROLLOUT_ID)
@@ -57,28 +50,6 @@ def reset_rollout_id(token: Token[str]) -> None:
 
 def current_rollout_id() -> str:
     return _ROLLOUT_ID.get()
-
-
-def rollout_id_from_request(request: Request) -> str:
-    """Header first, session id second, placeholder last."""
-    try:
-        headers = getattr(request, "headers", None) or {}
-    except KeyError:
-        # In-process callers may provide a minimal ASGI scope without headers.
-        headers = {}
-    rid = None
-    getter = getattr(headers, "get", None)
-    if getter is not None:
-        # Starlette lower-cases header keys; a plain dict in a test may not.
-        rid = getter(ROLLOUT_ID_HEADER.lower()) or getter(ROLLOUT_ID_HEADER)
-    if rid:
-        return rid
-    session = getattr(request, "session", None) or {}
-    try:
-        rid = session.get("session_id")
-    except AttributeError:  # pragma: no cover - defensive
-        rid = None
-    return rid or UNKNOWN_ROLLOUT_ID
 
 
 def record_phase(phase: str, dur_s: float, *, rid: Optional[str] = None) -> None:

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A cache write that fails after a paid provider call must not fail the tool call."""
+"""Cache writes: a failed write must not fail the tool call, and concurrent writers keep the prefer-exa rule."""
 
 import os
 import stat
@@ -29,6 +29,7 @@ from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,
 )
+from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
 
 
 _EXCLUDE = str(Path(__file__).with_name("dummy_exclude_domains_file.json"))
@@ -69,3 +70,64 @@ async def test_unwritable_cache_entry_dirs_do_not_fail_search_or_browse(tmp_path
             d.chmod(stat.S_IRWXU)
     assert search.results_string.count("LIVE") == 2
     assert "PAGE" in browse.results_string
+
+
+# ---- the prefer-exa rule under concurrent writers -----------------------------
+
+
+def _cache(root: Path) -> SearchCache:
+    return SearchCache(str(root))
+
+
+def _stored_provider(cache, query: str) -> str:
+    return cache.get_search_entry(query)["provider"]
+
+
+def test_tavily_write_does_not_overwrite_an_exa_entry_published_after_its_check(tmp_path, monkeypatch) -> None:
+    cache = _cache(tmp_path / "c")
+    write = cache._write
+    create_only_writes = []
+
+    def exa_publishes_first(kind, norm_key, payload, *, create_only=False):
+        # The tavily writer found the key empty; an exa writer publishes before the tavily entry lands.
+        if create_only:
+            create_only_writes.append(norm_key)
+            cache.put_search("q", [{"url": "https://e.example", "title": "E"}], provider="exa")
+        return write(kind, norm_key, payload, create_only=create_only)
+
+    monkeypatch.setattr(cache, "_write", exa_publishes_first)
+    cache.put_search("q", [{"url": "https://t.example", "title": "T"}], provider="tavily")
+    assert create_only_writes == ["q"]
+    assert _stored_provider(cache, "q") == "exa"
+    assert cache.stats()["put_errors"] == 0
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_tavily_write_creates_a_missing_entry_and_replaces_a_tavily_one(tmp_path) -> None:
+    cache = _cache(tmp_path / "c")
+    cache.put_search("q", [{"url": "https://t.example/1", "title": "T1"}], provider="tavily")
+    cache.put_search("q", [{"url": "https://t.example/2", "title": "T2"}], provider="tavily")
+    assert cache.get_search_entry("q")["results"][0]["title"] == "T2"
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_tavily_write_replaces_a_malformed_entry(tmp_path) -> None:
+    cache = _cache(tmp_path / "c")
+    cache.put_search("q", [{"url": "https://t.example/1", "title": "T1"}], provider="tavily")
+    (entry_path,) = (tmp_path / "c" / "search").rglob("*.json")
+    entry_path.write_text("{not json")
+    cache.put_search("q", [{"url": "https://t.example/2", "title": "T2"}], provider="tavily")
+    assert cache.get_search_entry("q")["results"][0]["title"] == "T2"
+
+
+def test_create_only_write_falls_back_to_replace_without_hard_links(tmp_path, monkeypatch) -> None:
+    cache = _cache(tmp_path / "c")
+
+    def no_hard_links(src, dst):
+        raise PermissionError("hard links not supported")
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+    cache.put_extract("https://t.example/p", "PAGE", provider="tavily")
+    assert cache.get_extract("https://t.example/p") == ("tavily", "PAGE")
+    assert cache.stats()["put_errors"] == 0
+    assert not list(tmp_path.rglob("*.tmp"))

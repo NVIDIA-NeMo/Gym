@@ -60,10 +60,10 @@ def _server(cache_dir=None, verbose=False) -> TavilySearchResourcesServer:
     return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def _req(rollout_id=None, session_id="test_session_id") -> MagicMock:
+def _req(session_id="test_session_id") -> MagicMock:
     m = MagicMock()
     m.session = {SESSION_ID_KEY: session_id}
-    m.headers = {"x-rollout-id": rollout_id} if rollout_id else {}
+    m.headers = {}
     return m
 
 
@@ -119,30 +119,27 @@ def test_episode_cache_totals_survive_reverify_and_release_on_close(tmp_path: Pa
     server._select_tavily_client = MagicMock(return_value=provider)
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=_seed()).is_success
-        headers = {"x-rollout-id": "training-rollout"}
-        first = client.post("/search", json={"queries": ["q1"]}, headers=headers)
-        second = client.post("/search", json={"queries": ["q1"]}, headers=headers)
+        first = client.post("/search", json={"queries": ["q1"]})
+        second = client.post("/search", json={"queries": ["q1"]})
         assert first.is_success and second.json() == first.json()
         provider.search.assert_awaited_once()
-        totals = RC.peek_phase_totals("training-rollout")
+        totals = RC.peek_phase_totals("resources-session")
         assert totals["cache_get_search_n"] == 2
         assert totals["cache_put_search_n"] == 1
         if verify:
-            # Env Server's verify does not carry the tool caller's custom header.
             first_verify = client.post("/verify", json=_verify_body("Paris"))
             second_verify = client.post("/verify", json=_verify_body("Paris"))
             assert first_verify.is_success and first_verify.json() == second_verify.json()
-            assert RC.peek_phase_totals("training-rollout") == totals
+            assert RC.peek_phase_totals("resources-session") == totals
             phase_lines = [r.message for r in caplog.records if "[browsecomp][phases]" in r.message]
             assert len(phase_lines) == 2
-            assert all("rid=training-rollout" in line and "cache_get_search=" in line for line in phase_lines)
+            assert all("rid=resources-session" in line and "cache_get_search=" in line for line in phase_lines)
             assert any("search 1/2 (50%)" in r.message for r in caplog.records)
         assert client.post("/close_session", json=_close()).is_success
-        assert RC.peek_phase_totals("training-rollout") == {}
-        assert server._session_rollout_ids == {}
+        assert RC.peek_phase_totals("resources-session") == {}
         late = client.post("/verify", json=_verify_body("Paris"))
         assert late.json()["mask_sample"] is True
-        assert server._session_rollout_ids == {}
+        assert RC.peek_phase_totals("resources-session") == {}
 
 
 async def test_search_restores_the_callers_rollout_context(tmp_path: Path) -> None:

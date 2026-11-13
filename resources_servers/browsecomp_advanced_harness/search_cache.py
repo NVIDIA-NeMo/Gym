@@ -41,9 +41,10 @@ Single key namespace across providers. Each entry is tagged with the provider
 that produced it ("tavily" | "exa"); entries written by the reference harness
 have no "provider" field and read as "tavily". Write rule: exa entries are
 preferred — a tavily write does not replace an existing exa entry unless that
-entry is a page the provider cut at its character cap. The rule is a
-check-then-write, so two processes racing on one key can still leave either
-provider's entry; both are valid entries.
+entry is a page the provider cut at its character cap. A tavily write that finds
+no entry publishes create-only (a hard link), so an exa entry written meanwhile
+stays. A tavily write that replaces an older entry can still race an exa write
+of the same key and leave the tavily entry; both are valid entries.
 
 Store-raw / format-on-read: we cache the raw provider result list (search) and
 raw page content (browse). All block-formatting + truncation stays in the
@@ -273,9 +274,13 @@ class SearchCache:
             return None  # an entry of another shape is a miss, never an empty hit
         return obj
 
-    def _write(self, kind, norm_key, payload) -> bool:
+    def _write(self, kind, norm_key, payload, *, create_only: bool = False) -> bool:
         """Publish one entry atomically. A failure is logged and counted, never raised:
-        the caller already holds the provider's result and must still return it."""
+        the caller already holds the provider's result and must still return it.
+
+        `create_only` publishes only if no entry exists yet and returns False when
+        another writer got there first. On a filesystem without hard links it falls
+        back to a plain replace."""
         _t0 = perf_counter()
         d, path = self._path(kind, norm_key)
         # A per-write random suffix: pid and thread id repeat across nodes sharing one root.
@@ -284,7 +289,18 @@ class SearchCache:
             os.makedirs(d, exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
-            os.replace(tmp, path)  # atomic publish
+            if not create_only:
+                os.replace(tmp, path)  # atomic publish
+            else:
+                try:
+                    os.link(tmp, path)  # atomic publish that fails if an entry exists
+                except FileExistsError:
+                    os.unlink(tmp)
+                    return False
+                except OSError:
+                    os.replace(tmp, path)  # no hard links on this filesystem
+                else:
+                    os.unlink(tmp)
         except (OSError, TypeError, ValueError) as error:
             self._bump("put_errors")
             LOG.warning("[cache][put_error] rid=%s kind=%s error=%r", current_rollout_id(), kind, error)
@@ -300,15 +316,21 @@ class SearchCache:
             log_line("[cache][put]", dur=_elapsed, kind=kind)
         return True
 
-    def _tavily_would_clobber_exa(self, kind, norm_key, provider):
-        """The prefer-exa write rule: a tavily write does not replace an exa entry,
-        except a browse page exa cut at its character cap (tavily's copy is fuller)."""
+    def _put(self, kind, norm_key, provider, payload) -> bool:
+        """Write one entry under the prefer-exa rule: a tavily write does not replace an
+        exa entry, except a browse page exa cut at its character cap (tavily's copy is
+        fuller). A tavily write that finds no entry publishes create-only, so an exa
+        entry written meanwhile stays. Returns whether this write published."""
         if provider != "tavily":
-            return False
+            return self._write(kind, norm_key, payload)
         existing = self._read(kind, norm_key)
-        if existing is None or existing.get("provider", "tavily") != "exa":
+        if existing is None:
+            # A malformed entry also reads as None; only a missing one is published create-only.
+            create_only = not os.path.exists(self._path(kind, norm_key)[1])
+            return self._write(kind, norm_key, payload, create_only=create_only)
+        if existing.get("provider", "tavily") == "exa" and not (kind == "browse" and _page_was_capped(existing)):
             return False
-        return not (kind == "browse" and _page_was_capped(existing))
+        return self._write(kind, norm_key, payload)
 
     def _bump(self, name):
         with self._lock:
@@ -444,10 +466,8 @@ class SearchCache:
         if not self.enabled or self.read_only:
             return
         norm = self._norm_q(query)
-        if self._tavily_would_clobber_exa("search", norm, provider):
-            return
         entry = {**(extra or {}), "query": query, "norm": norm, "provider": provider, "results": results}
-        if self._write("search", norm, entry) and self.fuzzy_threshold:
+        if self._put("search", norm, provider, entry) and self.fuzzy_threshold:
             self._index_add(norm)
 
     # ---- browse / extract -------------------------------------------------
@@ -480,12 +500,10 @@ class SearchCache:
         if not self.enabled or self.read_only:
             return
         norm = normalize_url(url)
-        if self._tavily_would_clobber_exa("browse", norm, provider):
-            return
         entry = {"url": url, "norm": norm, "provider": provider, "content": content}
         if max_characters is not None:
             entry["max_characters"] = max_characters
-        self._write("browse", norm, entry)
+        self._put("browse", norm, provider, entry)
 
     # ---- stats ------------------------------------------------------------
     def stats(self) -> dict[str, int | float]:

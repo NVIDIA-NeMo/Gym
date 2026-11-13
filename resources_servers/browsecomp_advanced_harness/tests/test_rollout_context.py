@@ -22,39 +22,11 @@ def _clean():
     RC.reset_all()
 
 
-class _Req:
-    """Minimal stand-in for a Starlette Request."""
-
-    def __init__(self, headers=None, session=None):
-        self.headers = headers or {}
-        self.session = session if session is not None else {}
-
-
 # ----------------------------------------------------------------- identity
 
 
 def test_rollout_id_defaults_to_placeholder_when_never_set():
     assert RC.current_rollout_id() == RC.UNKNOWN_ROLLOUT_ID
-
-
-def test_reads_the_agent_minted_header():
-    assert RC.rollout_id_from_request(_Req({"x-rollout-id": "r42-ab12"})) == "r42-ab12"
-
-
-def test_header_lookup_is_case_insensitive():
-    """Starlette lower-cases header keys; a raw dict in a test may not."""
-    assert RC.rollout_id_from_request(_Req({"X-Rollout-Id": "r7"})) == "r7"
-
-
-def test_falls_back_to_session_id_when_header_absent():
-    """Eval, tests and direct curl calls do not send the header; those requests
-    must still be attributable rather than collapsing to a shared '-'."""
-    req = _Req(headers={}, session={"session_id": "sess-abc"})
-    assert RC.rollout_id_from_request(req) == "sess-abc"
-
-
-def test_falls_back_to_placeholder_when_neither_present():
-    assert RC.rollout_id_from_request(_Req()) == RC.UNKNOWN_ROLLOUT_ID
 
 
 def test_set_rollout_id_is_visible_to_a_deep_helper():

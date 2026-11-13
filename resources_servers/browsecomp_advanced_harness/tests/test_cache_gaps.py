@@ -71,9 +71,8 @@ def _server(cache_dir, *, provider="tavily", ws_root=None, read_only=False) -> T
     )
 
 
-def _req(sid="test_session_id", rollout_id=None) -> Request:
-    headers = [(b"x-rollout-id", rollout_id.encode())] if rollout_id else []
-    return Request({"type": "http", "session": {SESSION_ID_KEY: sid}, "headers": headers})
+def _req(sid="test_session_id") -> Request:
+    return Request({"type": "http", "session": {SESSION_ID_KEY: sid}, "headers": []})
 
 
 def _entry_path(root, kind, norm) -> Path:
@@ -267,15 +266,13 @@ class TestRolloutContext:
         server = _server(str(tmp_path / "c"))
         server._search_cache.put_extract("https://x.example/p", "BODY", provider="tavily")
         RC.set_rollout_id("caller")
-        await server.browse(_req(rollout_id="episode"), BrowseRequest(urls=["https://x.example/p"]))
+        await server.browse(_req(sid="episode"), BrowseRequest(urls=["https://x.example/p"]))
         assert RC.current_rollout_id() == "caller"
 
     async def test_verify_restores_the_callers_rollout_context(self, tmp_path) -> None:
         server = session_server(tmp_path / "w", workspace="none", search_cache_dir=str(tmp_path / "c"))
         RC.set_rollout_id("caller")
-        await server.verify(
-            _req(rollout_id="episode"), TavilySearchVerifyRequest.model_validate(_verify_body("Paris"))
-        )
+        await server.verify(_req(sid="episode"), TavilySearchVerifyRequest.model_validate(_verify_body("Paris")))
         assert RC.current_rollout_id() == "caller"
 
     async def test_run_session_verify_logs_and_releases_its_totals(self, tmp_path, caplog) -> None:
@@ -283,12 +280,11 @@ class TestRolloutContext:
         caplog.set_level("INFO")
         server = session_server(tmp_path / "w", workspace="none", search_cache_dir=str(tmp_path / "c"))
         server._async_tavily_clients = [MagicMock(search=AsyncMock(return_value={"results": [_CLEAN]}))]
-        request = _req(sid="run-session", rollout_id="run-rollout")
+        request = _req(sid="run-session")
 
         await server.search(request, TavilySearchRequest(queries=["q"]))
-        assert RC.peek_phase_totals("run-rollout")["cache_put_search_n"] == 1
+        assert RC.peek_phase_totals("run-session")["cache_put_search_n"] == 1
         await server.verify(request, TavilySearchVerifyRequest.model_validate(_verify_body("Paris")))
 
-        assert any("[browsecomp][phases] rid=run-rollout" in r.message for r in caplog.records)
-        assert RC.peek_phase_totals("run-rollout") == {}
-        assert server._session_rollout_ids == {}
+        assert any("[browsecomp][phases] rid=run-session" in r.message for r in caplog.records)
+        assert RC.peek_phase_totals("run-session") == {}

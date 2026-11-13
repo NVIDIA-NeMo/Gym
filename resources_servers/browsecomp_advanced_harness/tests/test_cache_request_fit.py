@@ -197,8 +197,11 @@ class TestWritesAreBestEffort:
         caplog.set_level("WARNING")
         server = _server(str(tmp_path / "c"))
         server._async_tavily_clients = [MagicMock(search=AsyncMock(return_value={"results": [_result(1)]}))]
-        with patch(
-            "resources_servers.browsecomp_advanced_harness.search_cache.os.replace", side_effect=OSError(28, "full")
+        full = OSError(28, "full")
+        # A new entry publishes with os.link and falls back to os.replace; both fail on a full disk.
+        with (
+            patch("resources_servers.browsecomp_advanced_harness.search_cache.os.link", side_effect=full),
+            patch("resources_servers.browsecomp_advanced_harness.search_cache.os.replace", side_effect=full),
         ):
             out = (await server.search(_req(), TavilySearchRequest(queries=["q"]))).results_string
 

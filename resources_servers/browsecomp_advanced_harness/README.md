@@ -104,7 +104,9 @@ verbose_phase_log: false                     # log every cache get and put, not 
 ```
 
 - **It changes what the agent retrieves.** Entries are shared across runs and across providers: an Exa entry
-  answers a Tavily run and is formatted as Exa output. Keep the cache off for baselines and score comparisons.
+  answers a Tavily run and is formatted as Exa output. When both providers write one key, the Exa entry stays: a
+  Tavily write replaces it only when it is a browse page Exa cut at its character cap. Keep the cache off for
+  baselines and score comparisons.
 - **Fuzzy matching serves another query's results** when the two score above the threshold, for example a query
   about 2018 answered with the cached results for 2019. Search only; browse always matches the URL exactly.
 - **Each hit is checked against the request.** The current run's excluded domains and `max_results` apply to every
@@ -114,7 +116,8 @@ verbose_phase_log: false                     # log every cache get and put, not 
   summary at `/verify`; the tool call still returns the provider's result. Startup refuses a writable cache on a root
   this process cannot write, and a read-only cache on a root that does not exist.
 - **Diagnostics.** The server logs the `[cache]` line (this server process's running totals) and the
-  per-rollout `[browsecomp][phases]` line at `/verify`, plus sandbox start and stop lines, at INFO.
+  per-rollout `[browsecomp][phases]` line at `/verify`, plus sandbox start and stop lines, at INFO. Their `rid=` is
+  the resources session id.
   `NEMO_GYM_LOG_LEVEL=WARNING` silences them.
 - **The cache grows without bound.** Nothing evicts entries; prune the directory between experiments as needed.
 - **Fuzzy index.** With fuzzy matching on, each process appends the queries it caches to its own shard under
