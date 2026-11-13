@@ -22,11 +22,15 @@ Downloads the model and starts a vLLM server (e.g. via Ray). To use a GenRM vLLM
 `external_app.py`, which needs no Ray.
 """
 
-from responses_api_models.genrm_model.common import GenRMModelConfig, GenRMModelMixin
+from typing import Any
+
+from fastapi import Request
+
+from responses_api_models.genrm_model.common import GenRMModelConfig, append_genrm_roles
 from responses_api_models.local_vllm_model.app import LocalVLLMModel
 
 
-class GenRMModel(GenRMModelMixin, LocalVLLMModel):
+class GenRMModel(LocalVLLMModel):
     """GenRM Response API Model (local vLLM server).
 
     Specialized Response API Model for GenRM inference. Downloads the model,
@@ -37,6 +41,10 @@ class GenRMModel(GenRMModelMixin, LocalVLLMModel):
     ray_enabled = True
 
     config: GenRMModelConfig
+
+    def _preprocess_chat_completion_create_params(self, request: Request, body_dict: dict[str, Any]) -> dict[str, Any]:
+        body_dict = super()._preprocess_chat_completion_create_params(request, body_dict)
+        return append_genrm_roles(body_dict, supports_principle_role=self.config.supports_principle_role)
 
 
 if __name__ == "__main__":

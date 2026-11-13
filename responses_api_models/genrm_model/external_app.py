@@ -20,8 +20,12 @@ server without Ray: select it with `entrypoint: external_app.py`. It accepts eve
 that switches between a local launch and an external pool only needs to change `entrypoint` and `base_url`.
 """
 
+from typing import Any
+
+from fastapi import Request
+
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_models.genrm_model.common import GenRMModelConfig, GenRMModelMixin
+from responses_api_models.genrm_model.common import GenRMModelConfig, append_genrm_roles
 from responses_api_models.local_vllm_model.external_app import LocalVLLMExternalModel, LocalVLLMExternalModelConfig
 
 
@@ -31,13 +35,17 @@ class GenRMExternalModelConfig(LocalVLLMExternalModelConfig, GenRMModelConfig):
     """GenRMModelConfig for an external pool: `base_url` is required and the launch settings are optional."""
 
 
-class GenRMExternalModel(GenRMModelMixin, LocalVLLMExternalModel):
+class GenRMExternalModel(LocalVLLMExternalModel):
     """The genrm_model server for a GenRM vLLM pool that runs elsewhere."""
 
     # Gym reads this from this file's source before the server starts, so it is declared here, not inherited.
     ray_enabled = False
 
     config: GenRMExternalModelConfig
+
+    def _preprocess_chat_completion_create_params(self, request: Request, body_dict: dict[str, Any]) -> dict[str, Any]:
+        body_dict = super()._preprocess_chat_completion_create_params(request, body_dict)
+        return append_genrm_roles(body_dict, supports_principle_role=self.config.supports_principle_role)
 
 
 if __name__ == "__main__":

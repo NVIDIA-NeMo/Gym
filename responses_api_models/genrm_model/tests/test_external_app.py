@@ -26,6 +26,7 @@ from pydantic import ValidationError
 import nemo_gym.server_runtime.ray_support
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import entrypoint_ray_enabled
 from nemo_gym.server_runtime.ray_support import _connect_server_to_ray
 from responses_api_models.genrm_model.common import GenRMModelConfig
@@ -96,7 +97,7 @@ def test_config_requires_base_url() -> None:
 
 
 def test_config_carries_every_genrm_field() -> None:
-    # A field added to GenRMModelConfig reaches the external config, so GenRMModelMixin can read it from either.
+    # A field added to GenRMModelConfig reaches the external config, so both servers can read it.
     assert issubclass(GenRMExternalModelConfig, GenRMModelConfig)
     assert _config(supports_principle_role=False).supports_principle_role is False
 
@@ -134,6 +135,29 @@ def test_server_appends_genrm_roles_from_metadata(supports_principle_role: bool)
     ]
     assert "metadata" not in body
     assert body["model"] == "genrm-model"
+
+
+def test_converter_forwards_the_custom_tool_strategy() -> None:
+    assert _server(custom_tool_strategy="function_bridge").get_converter().custom_tool_strategy == "function_bridge"
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_converter_forwards_inline_tool_output_images(drop: bool) -> None:
+    # With the inherited option on, a tool output's image reaches GenRM's model as an image.
+    image = {"type": "input_image", "image_url": "https://example.com/a.png", "detail": "high"}
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": [image]}]
+    )
+
+    converted = (
+        _server(inline_tool_output_images=True)
+        .get_converter()
+        .responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=drop)
+    )
+
+    assert converted.messages[0]["content"] == [
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.png", "detail": "high"}}
+    ]
 
 
 def test_inner_vllm_config_route_reports_the_external_pool() -> None:
