@@ -10,3 +10,8 @@ mm_coding_opencode_resources:
         jsonl_fpath: environments/mm_coding_opencode/data/example.jsonl
         taskset: mm-coding:opencode
         num_repeats: 1
+# The base config declares the single-answer example rows; this entry runs only the OpenCode rows.
+mm_coding_training:
+  resources_servers:
+    mm_coding_training:
+      datasets: []

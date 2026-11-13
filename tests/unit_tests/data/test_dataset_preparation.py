@@ -1820,3 +1820,28 @@ class TestDeclaringInstanceValidation:
                 }
             )
         assert [c.name for c in out] == ["my_agent"]
+
+
+class TestCollateTypedTaskRows:
+    TASK = {
+        "task_id": {"taskset": "env:opencode", "task_id": "a:1"},
+        "task_input": {"responses_create_params": {"input": "x"}, "task_data": {"q": 1}},
+    }
+
+    def _collate(self, tmp_path, monkeypatch, rows):
+        monkeypatch.chdir(tmp_path)
+        dataset = _dataset(tmp_path, "d", rows) | {"taskset": "env:opencode"}
+        rs = _instance(
+            "env_rs", "resources_servers", {"entrypoint": "app.py", "domain": "math", "datasets": [dataset]}
+        )
+        paths = TrainDataProcessor()._collate_samples_single_type(type="example", server_instance_configs=[rs])
+        return [json.loads(line) for line in open(paths[0])]
+
+    def test_typed_rows_in_a_taskset_dataset_collate_unchanged(self, tmp_path, monkeypatch) -> None:
+        """A dataset that declares a taskset may hold prepared task rows of that taskset; collate keeps them."""
+        assert self._collate(tmp_path, monkeypatch, [self.TASK]) == [self.TASK | {"task_source": "env_rs"}]
+
+    def test_a_typed_row_of_another_taskset_is_refused(self, tmp_path, monkeypatch) -> None:
+        other = self.TASK | {"task_id": {"taskset": "other", "task_id": "a:1"}}
+        with raises(ValueError, match="differs from the dataset taskset"):
+            self._collate(tmp_path, monkeypatch, [other])
