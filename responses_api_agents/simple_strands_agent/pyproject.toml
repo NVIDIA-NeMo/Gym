@@ -31,7 +31,7 @@ override-dependencies = [
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
     "numpy==2.3.2",
-    "openai==2.44.0",
+    "openai==2.45.0",
     "pyarrow>=25.0.1",
 ]
 exclude-dependencies = [

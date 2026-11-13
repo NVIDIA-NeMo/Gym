@@ -19,12 +19,28 @@ packages=(
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1
     libpango-1.0-0 libcairo2 libasound2t64 fonts-liberation ffmpeg
 )
+# Bound network operations separately so slow mirrors can be retried without
+# killing dpkg during configuration. Refresh indexes only until successful:
+# container update hooks can otherwise clear completed and partial downloads.
+# The workflow timeout still bounds the complete installation.
+indexes_updated=false
 for attempt in 1 2 3 4; do
-    if timeout 5m sudo bash -c \
-        'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"' \
-        bash "${packages[@]}"; then
+    if [[ "$indexes_updated" == false ]]; then
+        if sudo timeout 5m apt-get update; then
+            indexes_updated=true
+        else
+            echo "Package index update attempt $attempt/4 failed"
+            continue
+        fi
+    fi
+    if sudo bash -c '
+        export DEBIAN_FRONTEND=noninteractive
+        dpkg --configure -a &&
+            timeout 5m apt-get install --download-only -y --no-install-recommends "$@" &&
+            apt-get install --no-download -y --no-install-recommends "$@"
+        ' bash "${packages[@]}"; then
         exit 0
     fi
-    echo "apt-get attempt $attempt/4 failed or timed out after 5m; retrying"
+    echo "System dependency install attempt $attempt/4 failed"
 done
 exit 1

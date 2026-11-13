@@ -83,6 +83,7 @@ KB_PATH = os.path.join(_HERE, "knowledge_base.json")
 PERSIST_WRITES = False
 
 # BANK_CHAOS_TOOLS="tool:n,..." opt-in failure injection: the first n calls to `tool` fail.
+# With num_workers > 1, each worker counts its own calls, so the first n calls in each worker fail.
 _CHAOS_CONFIG: dict[str, int] | None = None
 _CHAOS_CALLS: dict[str, int] = {}
 

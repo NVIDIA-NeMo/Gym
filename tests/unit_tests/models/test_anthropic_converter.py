@@ -22,6 +22,7 @@ two directions against drift.
 
 import json
 
+import pytest
 from anthropic.types import Message
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
@@ -624,3 +625,15 @@ class TestSharedHelperBranches:
         anthropic_body: dict = {}
         conv._copy_tool_choice({"tool_choice": "required"}, anthropic_body)
         assert anthropic_body["tool_choice"] == {"type": "any"}
+
+
+@pytest.mark.parametrize("count", [None, 0, 7])
+def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | None) -> None:
+    usage = {"input_tokens": 11, "output_tokens": 3}
+    if count is not None:
+        usage["cache_creation_input_tokens"] = count
+
+    result = _converter()._usage_to_responses_usage(usage)
+
+    assert result.input_tokens_details.cache_write_tokens == count
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11, 3, 14)

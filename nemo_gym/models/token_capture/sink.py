@@ -34,7 +34,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture.fingerprint import _tools_of, assistant_fingerprint, trailing_assistant_turn
 from nemo_gym.models.token_capture.lineage import stamp_continuation
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
@@ -61,6 +61,20 @@ from nemo_gym.models.token_capture.records import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _trailing_tool_names(items: list[dict] | None) -> list[str]:
+    """Return the tool names in a request's last model turn, for the poison log.
+
+    Names only: no arguments, IDs or content, so the log shows which call broke the match without the task data.
+    """
+    try:
+        return [
+            name for item in trailing_assistant_turn(items or []) for _call_id, name, _arguments in _tools_of(item)
+        ]
+    except Exception:  # A log line must never fail the model call.
+        return []
+
 
 if TYPE_CHECKING:
     from nemo_gym.models.token_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
@@ -334,11 +348,13 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     logger.warning(
-        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call.",
+        "Unresolved parent for model call %s of rollout %s (reason=%s, %d request items); poisoning the call. "
+        "Tool names in the last model turn: %s.",
         context.model_call_id,
         context.capture_key,
         context.parent_resolution.reason if context.parent_resolution is not None else None,
         len(context.request_items),
+        _trailing_tool_names(context.request_items),
     )
     await ledger.record_failure(
         context.capture_key,

@@ -1474,7 +1474,7 @@ class TestApp:
         actual_usage_dict = actual_responses_dict["usage"]
         expected_usage_dict = {
             "input_tokens": 101,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 202,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 303,
@@ -3626,3 +3626,97 @@ async def test_an_unreadable_selected_failure_gets_no_resend_and_no_session_repl
         )
     assert client.post.await_count == 1
     assert caught.value.headers[FailureHeader.NAME] == value, "the original report travels on unchanged"
+
+
+def test_tool_output_images_reach_the_model_in_user_messages_after_the_turn_s_tool_outputs() -> None:
+    """A tool reply's images leave its function_call_output and follow all of the turn's outputs, as user messages."""
+    server, server_client = _make_agent(False)
+    image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+    def model_reply(response_id: str, output: list[dict]) -> MagicMock:
+        return _mock_response(
+            {
+                "id": response_id,
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "output": output,
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+
+    def function_call(call_id: str, name: str) -> dict:
+        return {
+            "type": "function_call",
+            "id": f"fc_{call_id}",
+            "call_id": call_id,
+            "name": name,
+            "arguments": json.dumps({"image_index": 0}),
+            "status": "completed",
+        }
+
+    replies = {
+        # Some backends emit several calls in one turn even with parallel_tool_calls off.
+        "/v1/responses": [
+            model_reply("first", [function_call("call_1", "grayscale"), function_call("call_2", "invert")]),
+            _message_response("second"),
+        ],
+        "/grayscale": [
+            _mock_response(
+                content=json.dumps(
+                    {
+                        "ok": True,
+                        "new_image_index": 1,
+                        "tool_output_images": [{"image_url": image_url, "label": "Image 1"}],
+                    }
+                )
+            )
+        ],
+        "/invert": [_mock_response(content=json.dumps({"ok": False, "error": "no such image"}))],
+    }
+    server_client.post.side_effect = lambda *, url_path, **_: replies[url_path].pop(0)
+
+    response = TestClient(server.setup_webserver()).post(
+        "/v1/responses", json={"input": [{"role": "user", "content": "Look closer."}]}
+    )
+
+    assert response.status_code == 200, response.text
+    model_calls = [c.kwargs for c in server_client.post.call_args_list if c.kwargs["url_path"] == "/v1/responses"]
+    turn = [item.model_dump(exclude_none=True) for item in model_calls[1]["json"].input[1:]]
+    assert [(item["type"], item.get("call_id") or item.get("role")) for item in turn] == [
+        ("function_call", "call_1"),
+        ("function_call", "call_2"),
+        ("function_call_output", "call_1"),
+        ("function_call_output", "call_2"),
+        ("message", "user"),
+    ]
+    assert json.loads(turn[2]["output"]) == {"ok": True, "new_image_index": 1}
+    assert json.loads(turn[3]["output"]) == {"ok": False, "error": "no such image"}
+    assert turn[4]["content"] == [
+        {"type": "input_text", "text": "Image 1"},
+        {"type": "input_image", "image_url": image_url, "detail": "auto"},
+    ]
+    # The reply keeps the images too, so a trainer sees what the model saw.
+    assert response.json()["output"][-2]["content"][1]["image_url"] == image_url
+
+
+@pytest.mark.parametrize(
+    "tool_output",
+    ["grep: tool_output_images: No such file or directory", '{\n  "stdout": "tool_output_images"\n}'],
+)
+def test_a_tool_output_that_only_names_the_image_key_stays_unchanged(tool_output: str) -> None:
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    assert _split_tool_output_images(tool_output) == (tool_output, [])
+
+
+def test_a_tool_output_with_images_keeps_the_json_format_of_a_reply_without_images() -> None:
+    from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    rest, images = _split_tool_output_images(
+        json.dumps({"ok": False, "error": "图像 index 7", TOOL_OUTPUT_IMAGES_KEY: None})
+    )
+    assert (rest, images) == ('{"ok":false,"error":"图像 index 7"}', [])

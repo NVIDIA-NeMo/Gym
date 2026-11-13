@@ -71,7 +71,7 @@ class BaseExecutor(ABC):
 
     def installed_commit(self) -> str | None:
         """The Gym commit this launcher runs, as ``installed_gym_commit`` reports it."""
-        from nemo_gym.orchestration.jobs import installed_gym_commit
+        from nemo_gym.utils.gym_commit import installed_gym_commit
 
         return installed_gym_commit()
 

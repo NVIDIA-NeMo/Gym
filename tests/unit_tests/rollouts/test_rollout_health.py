@@ -3659,10 +3659,101 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
                 "skip_verification": None,
             },
             "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
-            "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
+            "bench_environment": {
+                "kind": "environment_servers",
+                "implementation": "bench_env",
+                "agent_server": None,
+                "resources_server": None,
+            },
         },
         "mlflow": {"configured": False, "tracking_required": None},
     }
+
+
+@pytest.mark.parametrize(
+    "bindings,agent,resources,malformed",
+    [
+        ({"agent_server": {"name": "policy"}, "resources_server": {"name": "grader"}}, "policy", "grader", False),
+        ({"assistant": {"type": "responses_api_agents", "name": "policy"}}, "policy", None, False),
+        (
+            {
+                "agent_server": {"name": "policy"},
+                "user": {"type": "responses_api_agents", "name": "user"},
+            },
+            "policy",
+            None,
+            False,
+        ),
+        (
+            {
+                "assistant": {"type": "responses_api_agents", "name": "policy"},
+                "user": {"type": "responses_api_agents", "name": "user"},
+            },
+            None,
+            None,
+            False,
+        ),
+        ({"agent_server": {"type": "resources_servers", "name": "grader"}}, None, None, True),
+        ({"agent_server": {"name": 1}}, None, None, True),
+        ({"agent_server": {"name": "${oc.env:AGENT}"}}, None, None, True),
+        (
+            {"agent_server": {"name": "policy"}, "resources_server": {"type": "responses_api_models", "name": "m"}},
+            "policy",
+            None,
+            True,
+        ),
+        ({"agent_server": None}, None, None, False),
+        (
+            {"agent_server": None, "assistant": {"type": "responses_api_agents", "name": "policy"}},
+            "policy",
+            None,
+            False,
+        ),
+        (
+            {"agent_server": {"name": "policy"}, "user": {"type": "responses_api_agents", "name": 1}},
+            "policy",
+            None,
+            True,
+        ),
+        ([], None, None, True),
+    ],
+    ids=[
+        "bound",
+        "single-agent",
+        "primary-agent",
+        "ambiguous",
+        "wrong-kind",
+        "wrong-name",
+        "unresolved",
+        "bad-resource",
+        "unset-primary",
+        "unset-primary-single-agent",
+        "bad-auxiliary-agent",
+        "bad-settings",
+    ],
+)
+def test_run_provenance_records_only_unambiguous_environment_bindings(tmp_path, bindings, agent, resources, malformed):
+    import yaml
+
+    from nemo_gym.rollouts.rollout_health import run_provenance
+
+    rollout_path = tmp_path / "rollouts.jsonl"
+    if isinstance(bindings, dict):
+        bindings = {**bindings, "prompt": "private prompt", "api_key": "private credential"}
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(
+        yaml.safe_dump({"environment": {"environment_servers": {"single_agent_turn": bindings}}})
+    )
+    provenance = run_provenance(rollout_path)
+    expected = {
+        "kind": "environment_servers",
+        "implementation": "single_agent_turn",
+        "agent_server": agent,
+        "resources_server": resources,
+    }
+    if malformed:
+        expected["bindings_malformed"] = True
+    assert provenance["servers"] == {"environment": expected}
+    assert "private" not in json.dumps(provenance)
 
 
 @pytest.mark.parametrize(("content", "state"), [(None, "absent"), ("- a list", "unreadable"), ("a: [", "unreadable")])
@@ -4141,6 +4232,35 @@ def test_missing_agent_turns_names_the_resource_limit_that_ended_the_sandbox(tmp
         "reason": "no agent turn with model activity",
         "expected_absence": "sandbox_resource_limit:storage",
     }
+
+
+@pytest.mark.parametrize(("error_type", "timed_out"), [("timeout", 1), ("UnknownError", 0), (None, 0)])
+def test_opencode_timeout_is_reported_without_changing_grade_or_verdict(
+    tmp_path: Path, error_type: str | None, timed_out: int
+) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5})
+    record.update(
+        reward=0.0,
+        opencode_failed=True,
+        opencode_finished=False,
+        opencode_export_found=True,
+        opencode_exit_code=124 if timed_out else 1,
+        opencode_error_type=error_type,
+    )
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "status": "incomplete", "model_calls": []}
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+    saved_rollout = rollout_path.read_bytes()
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    timeouts = result.summary["run"]["stats"]["timeouts"]
+    assert timeouts["timed_out"] == timed_out
+    assert timeouts["by_evidence"] == {"typed": 0, "legacy": timed_out}
+    assert timeouts["by_limit"] == ({"opencode_error_type=timeout": 1} if timed_out else {})
+    assert result.summary["run"]["verdicts"] == {"healthy": 1, "unhealthy": 0, "unobserved": 0}
+    assert rollout_path.read_bytes() == saved_rollout
 
 
 @pytest.mark.parametrize("limit", [None, {}, {"detail": "no resource"}, {"resource": ""}, "storage"])

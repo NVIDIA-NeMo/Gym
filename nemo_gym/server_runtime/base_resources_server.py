@@ -50,10 +50,12 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config.global_config import MODEL_SAMPLING_KEY_NAME
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, FailureClass, validate_failure_kind
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import observe_failure
+from nemo_gym.core.model_call_sampling import ModelCallSampling, model_call_sampling_config
 from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -72,6 +74,7 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
@@ -173,6 +176,12 @@ class BaseRunRequest(BaseModel):
     capture_rollout_id: Optional[str] = Field(
         default=None,
         alias="_ng_rollout_id",
+        exclude=True,
+    )
+    # The training framework's sampling values for this rollout's agent, which its model URLs carry.
+    model_sampling: Optional[ModelCallSampling] = Field(
+        default=None,
+        alias=MODEL_SAMPLING_KEY_NAME,
         exclude=True,
     )
 
@@ -859,6 +868,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
+        if model_call_sampling_config(getattr(self.server_client, "global_config_dict", None)) is not None:
+            app.add_middleware(CallerSamplingMiddleware)
         self.setup_resources_checkpoint(app)
 
         app.post("/aggregate_metrics")(self.aggregate_metrics)

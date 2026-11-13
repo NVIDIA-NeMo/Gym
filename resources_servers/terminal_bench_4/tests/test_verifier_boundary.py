@@ -62,7 +62,7 @@ class Sandbox:
             self.excludes = "--exclude=reward" in command
             return SandboxExecResult("", "", 0)
         if command.startswith("rm -f") and self.case == "artifact_timeout":
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(30)
         return SandboxExecResult("", "", 0)
 
     async def download(self, remote, local):
@@ -105,14 +105,29 @@ def environment(sandbox, budget):
     return env
 
 
+# Cases whose scripted sandbox stalls a verifier phase for 0.2 s, so a 25 ms budget always runs out in it.
+BUDGET_EXPIRES = {"preparation", "unknown_status", "legacy_unknown_status", "original_failure"}
+
+
+def verifier_budget(case: str) -> float:
+    """The verifier budget for ``case``: tiny only where it must run out, never where the verifier must finish."""
+    if case in BUDGET_EXPIRES:
+        return 0.025
+    if case == "artifact_timeout":
+        # Runs out during the 30 s artifact cleanup, after a second's room for the phases that must succeed.
+        return 1.0
+    return 5.0
+
+
 async def produce(tmp_path, monkeypatch, case, reward):
+    budget = verifier_budget(case)
     task = NS(
         name="task",
-        config=NS(verifier=NS(timeout_sec=0.025, env={}, user="root"), environment=NS(build_timeout_sec=0.1)),
+        config=NS(verifier=NS(timeout_sec=budget, env={}, user="root"), environment=NS(build_timeout_sec=0.1)),
     )
     legacy = case.startswith("legacy_")
     sdk = Sandbox(case.removeprefix("legacy_"), reward)
-    env = environment(sdk, 0.025)
+    env = environment(sdk, budget)
     env.task = task
     agent = NS(main=object(), closed=False, quiesce_agent=AsyncMock())
 

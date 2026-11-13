@@ -1144,6 +1144,21 @@ class TestCaptureFriendlyTranscript:
         assert items[1].content[0].text == "Reading the file."
         assert meta["terminal_response_id"] == "resp_served123"
 
+    @pytest.mark.parametrize(
+        ("fold_thinking", "capture", "expected"),
+        [(None, False, True), (None, True, False), (False, False, False), (False, True, False), (True, False, True)],
+    )
+    def test_fold_thinking_config(self, fold_thinking, capture, expected) -> None:
+        agent = _make_agent(fold_thinking=fold_thinking)
+        with patch.object(agent, "_token_id_capture_enabled", return_value=capture):
+            assert agent._fold_thinking() is expected
+
+    def test_fold_thinking_true_rejected_under_capture(self) -> None:
+        agent = _make_agent(fold_thinking=True)
+        with patch.object(agent, "_token_id_capture_enabled", return_value=True):
+            with pytest.raises(ValueError, match="incompatible"):
+                agent._fold_thinking()
+
     @pytest.mark.parametrize("capture", [False, True])
     def test_response_id_is_the_served_id_only_under_capture(self, capture: bool) -> None:
         agent = _make_agent(

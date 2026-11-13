@@ -76,6 +76,7 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SAMPLING_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -116,7 +117,9 @@ from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
+    _aggregate_entry_for_member,
     _atomic_write_json,
+    _environment_status_members,
     _read_aggregate_entries,
     disable_run_status,
 )
@@ -178,6 +181,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_rollout_completed,
     record_rollout_health,
     record_rollout_reward,
+    record_run_summary,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
@@ -512,13 +516,17 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    # A training framework's sampling values ride beside the task, which they leave unchanged.
+    if row.get(MODEL_SAMPLING_KEY_NAME) is not None:
+        body["model_sampling"] = row[MODEL_SAMPLING_KEY_NAME]
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
@@ -851,6 +859,7 @@ def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dic
         key: result[key]
         for key in (
             AGENT_REF_KEY_NAME,
+            NG_ENVIRONMENT_SERVER_KEY,
             TASK_INDEX_KEY_NAME,
             ROLLOUT_INDEX_KEY_NAME,
             NG_FAILURE_CLASS_KEY,
@@ -2740,12 +2749,18 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
-def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+def _refresh_shard_status_aggregation(
+    input_paths: List[str],
+    aggregate_metrics_fpath: Optional[Path],
+    *,
+    scored_rows: Iterable[Mapping[str, Any]] = (),
+) -> None:
     """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
     """
     entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    environment_members = _environment_status_members(scored_rows)
     for path in input_paths:
         status_fpath = batch_status_path_for(Path(path))
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
@@ -2756,7 +2771,7 @@ def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
             for agent, member in members.items():
-                entry = entries.get(agent)
+                entry, _ = _aggregate_entry_for_member(entries, agent, environment_member=agent in environment_members)
                 failed = (
                     aggregate_metrics_fpath is None
                     or artifact_error
@@ -4843,7 +4858,7 @@ executions → not run again (left to recovery)
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
         )
-        if get_exporters():
+        if get_exporters() or is_metrics_exporter_active():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
                 [],
@@ -4851,26 +4866,28 @@ executions → not run again (left to recovery)
                 persisted_success_keys,
                 histories=[store],
             )
-            export_metrics(
-                {
-                    "coverage/expected": expected_rollouts,
-                    "coverage/scored": scored_rollouts,
-                    "coverage/missing": completion["missing"],
-                    "coverage/not_scored": expected_rollouts - scored_rollouts,
-                    "coverage/measured": completion["measured"],
-                    "coverage/masked": completion["masked"],
-                    "coverage/unscored": completion["unscored"],
-                    "coverage/failed": completion["failed"],
-                    "coverage/failed_masked": completion["failed_masked"],
-                    "coverage/omitted": completion["intentionally_omitted"],
-                    "coverage/not_started": completion["not_started"],
-                    "coverage/missing_outcomes": completion["missing"],
-                    "coverage/open": completion["open"],
-                    "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
-                    **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
-                    **failure_metrics,
-                }
-            )
+            run_summary = {
+                "coverage/expected": expected_rollouts,
+                "coverage/scored": scored_rollouts,
+                "coverage/missing": completion["missing"],
+                "coverage/not_scored": expected_rollouts - scored_rollouts,
+                "coverage/measured": completion["measured"],
+                "coverage/masked": completion["masked"],
+                "coverage/unscored": completion["unscored"],
+                "coverage/failed": completion["failed"],
+                "coverage/failed_masked": completion["failed_masked"],
+                "coverage/omitted": completion["intentionally_omitted"],
+                "coverage/not_started": completion["not_started"],
+                "coverage/missing_outcomes": completion["missing"],
+                "coverage/open": completion["open"],
+                "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
+                **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                **failure_metrics,
+            }
+            if get_exporters():
+                export_metrics(run_summary)
+            # The same numbers for OTel dashboards, which read no experiment tracker.
+            record_run_summary(run_summary, run_id=store.manifest.run_id)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -5900,7 +5917,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # The shard's status members, as collection names them: the agent, or the Environment Server a row
             # is routed to.
             status_rows = []
-            for row in examples:
+            for row in dispatched:
                 status_row = _batch_status_row(row, {})
                 if AGENT_REF_KEY_NAME not in status_row:
                     status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
@@ -6366,7 +6383,7 @@ class RolloutAggregationHelper(BaseModel):
                 force=True,
             )
         else:
-            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, scored_rows=scored)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
@@ -6450,7 +6467,7 @@ class RolloutAggregationHelper(BaseModel):
                 f"{completion['open']} open (no final result). "
                 f"Details: {report_path}"
             )
-        if get_exporters():  # pragma: no cover
+        if get_exporters() or is_metrics_exporter_active():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
                 failures_fpaths,
@@ -6478,7 +6495,11 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing_outcomes"] = completion["missing"]
                 metrics["coverage/open"] = completion["open"]
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
-            export_metrics(metrics)
+            if get_exporters():
+                export_metrics(metrics)
+            # Only a single shard with attempt history has a run id of its own; a legacy shard has none.
+            single = len(input_paths) == 1 and len(histories) == 1
+            record_run_summary(metrics, run_id=histories[0].manifest.run_id if single else None)
 
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}

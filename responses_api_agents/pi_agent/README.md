@@ -160,14 +160,37 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one user message, optionally preceded by a system message. The user message
+may include images as base64 data-URI `input_image` parts. The adapter stages each image at
+`/tmp/nemo-gym-media/<sha256>.<extension>`, a path named by the image's content, and passes it to Pi as an
+`@file` argument, so the same task gives Pi the same prompt in every sandbox. Staging is part of the
+activation: it spends the agent timeout, and closing the session stops it. Staged images stay in a
+borrowed sandbox after the session ends. A session declares image input on the Gym model when the prompt
+has images or when the agent configuration sets `image_input: true`. With image input declared, Pi also sends the
+model images its tools return, such as task files it reads, and a text-only deployment rejects those requests.
+Without it, Pi replaces such an image with a note saying it was omitted. Set `image_input: true` for a vision model
+whose tasks keep their images in the sandbox, where the prompt has none.
+Images in the system message and image URLs are rejected. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
 Sandbox sessions reject unsupported request controls before execution.
 
+Pi decides how to send each attached file:
+
+- Pi adds a `<file name="<sandbox path>">` tag to the end of the prompt text for each file, and sends the
+  images after all the text, so the order of text and images in the request is not kept.
+- Pi recognizes an image from its leading bytes, not from the declared media type. Pi inlines a file it
+  does not recognize as an image, such as an animated PNG, into the prompt as text.
+- Sessions turn off Pi's image resizing (`images.autoResize` in `settings.json`), so images reach the model
+  as the environment sent them, both prompt images and images the read tool returns.
+- The `detail` field of an `input_image` part has no effect.
+
+Saved trajectories record the user prompt's text but not its images.
+
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
-reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
-smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
+reasoning tokens. Under the default `output_token_policy: fixed`, an adapter-owned Pi extension applies it as
+`max_tokens`, preserving any smaller upstream cap; under `remaining_context` the extension removes the cap
+(see [Local CLI compatibility](#local-cli-compatibility)). Limits must be positive JavaScript-safe integers. Request-level
 `max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
@@ -285,8 +308,10 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 
 ## Local CLI compatibility
 
-Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
-`auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
+`auto_compaction` and `output_token_policy` apply to local runs and sandbox sessions alike. Under
+`output_token_policy`, `fixed` caps each request at `max_output_tokens`, and `remaining_context` drops the cap
+so the model server sizes the output from the context the request leaves. The optional per-call `bash_timeout`
+is local only; sandbox sessions use `sandbox_bash_timeout_seconds`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
 `mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
 instead and reject required HTTP tool grants rather than silently ignoring them.

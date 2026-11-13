@@ -1354,13 +1354,21 @@ def _mlflow_configured(config: Mapping[str, Any]) -> bool | None:
     return all(state == "set" for state in states)
 
 
+def _provenance_reference_name(reference: object, expected_kind: str) -> str | None:
+    if not isinstance(reference, dict) or reference.get("type", expected_kind) != expected_kind:
+        return None
+    value = reference.get("name")
+    return value if isinstance(value, str) and value and "${" not in value else None
+
+
 def run_provenance(rollout_path: Path) -> dict[str, Any]:
     """Facts about how the run was configured, read from the resolved config saved beside the rollouts.
 
     Only values the config states are reported: ``route_failures_to_sidecar`` and each agent's ``skip_verification``
     are booleans when written as booleans and ``None`` otherwise, never a default. Each top-level server entry
     reports its kind (``responses_api_agents``, ``resources_servers`` or ``environment_servers``), its implementation
-    key and, for an agent, the resources server it names. No values beyond these names and flags are copied.
+    key and the agent/resources bindings used to attribute verification. No values beyond these names and flags
+    are copied.
     """
     import yaml
 
@@ -1382,12 +1390,37 @@ def run_provenance(rollout_path: Path) -> dict[str, Any]:
             if not isinstance(block, dict) or len(block) != 1:
                 continue
             [(implementation, settings)] = block.items()
+            settings_malformed = not isinstance(settings, dict)
             settings = settings if isinstance(settings, dict) else {}
             fact: dict[str, Any] = {"kind": kind, "implementation": str(implementation)}
             if kind == "responses_api_agents":
                 resources = settings.get("resources_server")
                 fact["resources_server"] = resources.get("name") if isinstance(resources, dict) else None
                 fact["skip_verification"] = _flag(settings.get("skip_verification"))
+            elif kind == "environment_servers":
+                # Match routing attribution: an explicit agent_server, otherwise the only typed agent reference.
+                # Malformed or ambiguous references prove no binding; never choose an agent from the run at large.
+                agents = [
+                    _provenance_reference_name(reference, "responses_api_agents")
+                    for reference in settings.values()
+                    if isinstance(reference, dict) and reference.get("type") == "responses_api_agents"
+                ]
+                primary = settings.get("agent_server")
+                if primary is not None:
+                    fact["agent_server"] = _provenance_reference_name(primary, "responses_api_agents")
+                else:
+                    fact["agent_server"] = agents[0] if len(agents) == 1 else None
+                resources = settings.get("resources_server")
+                fact["resources_server"] = _provenance_reference_name(resources, "resources_servers")
+                # An absent/ambiguous primary leaves an explicit row agent authoritative. A malformed declared
+                # reference must remain distinguishable so that compatibility path cannot hide a bad binding.
+                if (
+                    settings_malformed
+                    or any(agent is None for agent in agents)
+                    or (primary is not None and fact["agent_server"] is None)
+                    or (resources is not None and fact["resources_server"] is None)
+                ):
+                    fact["bindings_malformed"] = True
             servers[str(name)] = fact
     return {
         "resolved_config": "read",

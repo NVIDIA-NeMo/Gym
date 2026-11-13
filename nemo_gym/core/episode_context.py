@@ -120,6 +120,18 @@ def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
 
 
+def current_session_key() -> Optional[str]:
+    """The key an upstream router or endpoint selection uses to keep one conversation on one replica.
+
+    None outside a rollout. A session is a rollout attempt: the key is the capture key (`<rollout id>[-a<N>]`),
+    so a retry attempt gets its own session, and every agent that makes model calls inside the same attempt
+    shares one. The outbound session header and the vLLM model server's endpoint selection both read this
+    function, so they agree on what a session is. When a model call can name its agent instance, this is the
+    one place that has to learn it.
+    """
+    return _ROLLOUT_ID.get()
+
+
 def current_episode_id() -> Optional[EpisodeId]:
     """Return the logical rollout and attempt carried by the current capture key."""
     capture_key = _ROLLOUT_ID.get()
