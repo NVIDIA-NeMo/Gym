@@ -167,8 +167,8 @@ def needs_environment_server(instance: dict) -> bool:
     prime_child = agent_type == "prime_agent" and agent.get("entrypoint") == "child_app.py"
     if (agent_type in AGENT_SESSION_AGENT_TYPES or prime_child) and resources_server is None:
         return False
-    # Stirrup and Copilot run only in agent sessions and have no /run for a legacy relay to call.
-    if agent_type in ("stirrup_agent", "copilot_agent"):
+    # Stirrup, Copilot, Droid and OpenHands run only in agent sessions and have no /run for a legacy relay to call.
+    if agent_type in ("stirrup_agent", "copilot_agent", "droid_agent", "openhands_agent"):
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 

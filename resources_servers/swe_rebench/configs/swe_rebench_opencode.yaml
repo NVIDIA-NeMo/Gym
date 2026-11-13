@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Wires the opencode sandboxed agent to swe_rebench_resources_server for a training run --
-# `swe_rebench.yaml` alone only defines the resources server, which is enough for golden-patch
+# `swe_rebench_legacy_agent.yaml` alone only defines the resources server, which is enough for golden-patch
 # validation (apply_golden_patch.py talks to it directly, no agent involved) but not enough to
 # actually run an agent against the dataset. This is a separate file, not folded into
-# swe_rebench.yaml, so golden-patch validation keeps working without pulling in the agent's
+# swe_rebench_legacy_agent.yaml, so golden-patch validation keeps working without pulling in the agent's
 # (much larger) opencode/sandbox config.
 #
 # This is training data (data/swe_rebench_training.jsonl, only the 22,684 already-supported
@@ -15,7 +15,7 @@
 
 config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-  - resources_servers/swe_rebench/configs/swe_rebench.yaml
+  - resources_servers/swe_rebench/configs/swe_rebench_legacy_agent.yaml
 
 swe_rebench_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent

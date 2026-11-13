@@ -14,7 +14,7 @@ partner_if_ngc_replay_model:
         temperature: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.temperature}
         top_p: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.top_p}
         max_tokens: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_tokens}
-        max_completion_tokens: null
+        max_completion_tokens: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_tokens}
 partner_if_ngc_replay_agent:
   responses_api_agents:
     ngc_recorded_context:

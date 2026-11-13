@@ -192,7 +192,7 @@ class TestParseVerificationOutput:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -310,7 +310,7 @@ class TestServerWiring:
         assert fields["evaluation_timeout"].default == 3000
 
     def test_yaml_enables_anti_cheat_and_names_both_servers(self) -> None:
-        config = yaml.safe_load((SERVER_DIR / "configs" / "swemer_oml.yaml").read_text())
+        config = yaml.safe_load((SERVER_DIR / "configs" / "swemer_oml_legacy_agent.yaml").read_text())
         base = config["swemer_oml_resources_server"]["resources_servers"]["swemer_oml"]
         golden = config["swemer_oml_golden_patch_resources_server"]["resources_servers"]["swemer_oml"]
         assert base["apply_anti_cheating"] is True and base["is_verifying_golden_patch"] is False

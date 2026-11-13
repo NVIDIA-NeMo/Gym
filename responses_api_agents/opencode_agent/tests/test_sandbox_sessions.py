@@ -1197,7 +1197,10 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        # An Environment Server activates a captured rollout on the tagged path; without the tag it would not capture.
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/training-token-capture/v1/responses", json={"input": "task"}
+        )
         assert result.status_code == 200, result.text
         config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
     # OpenCode can reach only the Gym provider, for its main and small model alike.

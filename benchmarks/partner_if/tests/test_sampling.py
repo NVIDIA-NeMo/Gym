@@ -96,8 +96,8 @@ async def test_parent_and_explore_backend_sampling_isolated_from_cohort_override
     assert any(":delegate-" in item[2]["headers"]["x-session-id"] for item in seen)
     for _, _, request in seen:
         outbound = backend._preprocess_chat_completion_create_params(MagicMock(), copy.deepcopy(request["json"]))
-        assert (outbound["temperature"], outbound["top_p"], outbound["max_tokens"]) == (0.7, 0.95, 8192)
-        assert outbound.get("max_completion_tokens") is None
+        assert (outbound["temperature"], outbound["top_p"], outbound["max_completion_tokens"]) == (0.7, 0.95, 8192)
+        assert "max_tokens" not in outbound
     if path.endswith("config.yaml"):
         text = get_first_server_config_dict(config, "partner_if_policy_model")["sampling_overrides"]
         assert text["temperature"] == 1.0 and text["top_p"] == 0.8
