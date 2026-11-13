@@ -1855,9 +1855,12 @@ def test_a_graded_row_keeps_the_search_fields_and_echoes_its_request(workdir, se
 # Lifecycle: re-seeds, stops that fail, hang or are cancelled, and sandboxes the relay agent stopped
 # ---------------------------------------------------------------------------
 
+from collections.abc import Awaitable
+
 import anyio
 
 from nemo_gym.core import FailureHeader
+from resources_servers.opencode_search.app import SearchVerifyRequest
 
 
 async def _seed_agent_run(server: SearchResourcesServer) -> AsyncSandbox:
@@ -1866,6 +1869,43 @@ async def _seed_agent_run(server: SearchResourcesServer) -> AsyncSandbox:
         server.seed_session(SimpleNamespace(session={SESSION_ID_KEY: "run"}), SearchSeedSessionRequest()), timeout=30
     )
     return server._agent_run_sandboxes["run"]
+
+
+async def _seed_episode(server: SearchResourcesServer) -> None:
+    """Seed the episode session "session" as an Environment Server does."""
+    seed = ResourcesSeedSessionRequest.model_validate(_seed())
+    await asyncio.wait_for(server.seed_session(SimpleNamespace(session={}), seed), timeout=30)
+
+
+def _record_finished_stops(monkeypatch: pytest.MonkeyPatch) -> list[AsyncSandbox]:
+    """Make every stop await once before it stops its sandbox, as a provider's request does, and record each sandbox
+    whose stop finished. A cancellation delivered at that await cuts short a stop that is not shielded."""
+    finished: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        await anyio.sleep(0)
+        await real_stop(self)
+        finished.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    return finished
+
+
+async def _cancel_once_reached(reached: asyncio.Event, call: Awaitable[Any]) -> None:
+    """Await call, and once reached is set, cancel it as the server cancels a request whose client disconnected: at that
+    await and at every later one that is not shielded."""
+    scope = anyio.CancelScope()
+
+    async def run() -> None:
+        with scope:
+            await call
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as group:
+            group.start_soon(run)
+            await reached.wait()
+            scope.cancel()
 
 
 @LENDING
@@ -2011,3 +2051,85 @@ def test_a_verify_whose_stop_fails_keeps_its_grade_and_the_stop_is_retried(
             assert attempts == [started[0][0]] * 3 and not server.has_session_state(session_id)
     # No close follows an agent run: the shutdown stops its sandbox.
     assert attempts == [started[0][0]] * 3 and not server.has_session_state(session_id)
+
+
+async def test_a_verify_cancelled_while_it_stops_its_sandbox_still_stops_it(workdir, monkeypatch) -> None:
+    """A client that disconnects cancels its verify at every await from then on. The stop before the judge is shielded:
+    it finishes, and the server lets the sandbox go instead of holding one whose stop was cut short."""
+    server = _server(None)
+    sandbox = await _seed_agent_run(server)
+    stopping, cancelled = asyncio.Event(), asyncio.Event()
+    finished: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        stopping.set()
+        await cancelled.wait()
+        await real_stop(self)
+        finished.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    _mock_judge(server, CORRECT)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "run"}, headers={})
+    scope = anyio.CancelScope()
+
+    async def verify() -> None:
+        with scope:
+            await server.verify(request, SearchVerifyRequest.model_validate(_verify_body()))
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as group:
+            group.start_soon(verify)
+            await stopping.wait()
+            scope.cancel()
+            cancelled.set()
+
+    assert finished == [sandbox] and server._agent_run_sandboxes == {}
+
+
+async def test_a_verify_cancelled_while_it_reads_the_plugin_log_still_stops_its_sandbox(
+    workdir, tmp_path, started, monkeypatch
+) -> None:
+    """A verify cancelled before it stopped the sandbox, here while it reads the plugin log, stops it as it ends."""
+    server = _server(workdir, plugin_log_path=str(tmp_path / "plugins.log"))
+    await _seed_episode(server)
+    finished = _record_finished_stops(monkeypatch)
+    reading = asyncio.Event()
+
+    async def exec(self: AsyncSandbox, command: str, **_: Any) -> SandboxExecResult:
+        reading.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(AsyncSandbox, "exec", exec)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"}, headers=EPISODE_VERIFY)
+
+    await _cancel_once_reached(reading, server.verify(request, SearchVerifyRequest.model_validate(_verify_body())))
+
+    assert finished == [started[0][0]]
+    assert not server.has_session_state("session") and server._lent_sandboxes.get("session") is None
+
+
+@pytest.mark.parametrize(
+    "cancelled_in", ["start", "exec"], ids=["while_its_sandbox_starts", "while_it_makes_the_workdir"]
+)
+async def test_an_episode_seed_cancelled_at_an_await_stops_its_sandbox(workdir, monkeypatch, cancelled_in) -> None:
+    """A seed cancelled as its client disconnects leaves no sandbox running. LentSandboxes stops one whose start was
+    cancelled; release_session_state stops one whose workdir the seed was creating, though the seed never stored its
+    access."""
+    server = _server(workdir)
+    finished = _record_finished_stops(monkeypatch)
+    reached: list[AsyncSandbox] = []
+    entered = asyncio.Event()
+
+    async def hang(self: AsyncSandbox, *_: Any, **__: Any) -> None:
+        reached.append(self)
+        entered.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(AsyncSandbox, cancelled_in, hang)
+
+    await _cancel_once_reached(entered, _seed_episode(server))
+
+    assert len(reached) == 1 and finished == reached
+    assert not server.has_session_state("session") and server._lent_sandboxes.get("session") is None
+    assert server._sandbox_access == {}
