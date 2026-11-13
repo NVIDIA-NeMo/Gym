@@ -98,7 +98,7 @@ from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode_context import current_episode_id
 from nemo_gym.core.tool_output_images import split_tool_output_images
 from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime.mcp_contracts import (
     MCP_TOKEN_EPISODE_CLAIM,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
@@ -112,7 +112,7 @@ from nemo_gym.server_runtime.base_resources_server import (
 
 LOG = logging.getLogger(__name__)
 
-# Alias for readability; the canonical value lives in base_resources_server because the header is
+# Alias for readability; the canonical value lives in mcp_contracts because the header is
 # wire contract — claude_code_agent reads the same constant from the /seed_session metadata.
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 

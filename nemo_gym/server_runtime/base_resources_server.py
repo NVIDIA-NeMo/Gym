@@ -32,21 +32,16 @@ from pydantic import (
     Field,
     JsonValue,
     PrivateAttr,
-    SerializerFunctionWrapHandler,
     StrictBool,
     TypeAdapter,
     ValidationError,
     field_validator,
-    model_serializer,
 )
 from starlette.middleware import Middleware
 
 
 if TYPE_CHECKING:
-    from itsdangerous import URLSafeSerializer
-
-    # Type-only: importing MCPTool at runtime would be circular (mcp_auto_exposure imports this
-    # module) and would pull the mcp SDK into agent/model processes that never need it.
+    # Type-only: keep the MCP SDK out of agent/model processes that never need it.
     from nemo_gym.server_runtime.mcp_auto_exposure import MCPTool
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
@@ -64,7 +59,6 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.resources import (
@@ -75,6 +69,32 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.mcp_contracts import _MCP_TOKEN_SALT as _MCP_TOKEN_SALT
+from nemo_gym.server_runtime.mcp_contracts import (
+    MCP_TOKEN_EPISODE_CLAIM as MCP_TOKEN_EPISODE_CLAIM,
+)
+from nemo_gym.server_runtime.mcp_contracts import (
+    NEMO_GYM_MCP_METADATA_KEY as NEMO_GYM_MCP_METADATA_KEY,
+)
+from nemo_gym.server_runtime.mcp_contracts import (
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER as NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+)
+from nemo_gym.server_runtime.mcp_contracts import (
+    RESERVED_MCP_TOOL_NAMES as RESERVED_MCP_TOOL_NAMES,
+)
+from nemo_gym.server_runtime.mcp_contracts import (
+    MCPServerMetadata as MCPServerMetadata,
+)
+from nemo_gym.server_runtime.mcp_contracts import (
+    ResourcesSeedSessionResponse as ResourcesSeedSessionResponse,
+)
+from nemo_gym.server_runtime.mcp_contracts import SandboxAccess as SandboxAccess
+from nemo_gym.server_runtime.mcp_contracts import (
+    mcp_session_token_payload as mcp_session_token_payload,
+)
+from nemo_gym.server_runtime.mcp_contracts import (
+    mcp_session_token_serializer as mcp_session_token_serializer,
+)
 from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
@@ -86,34 +106,9 @@ from nemo_gym.verification.judge import judge_failsafe
 
 logger = logging.getLogger(__name__)
 
-NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
-NEMO_GYM_MCP_METADATA_KEY = "mcp"
-# The MCP session token claim that names the attempt whose seed minted the token, by its capture key.
-# Only a server with checkpointing on adds it.
-MCP_TOKEN_EPISODE_CLAIM = "episode"
-# Salt namespacing the signed MCP session token, so it can't be confused with another signer
-# that happens to share the same session-middleware secret.
-_MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
 
 # The session hooks an ``exported`` resources server must implement.
 _SESSION_HOOKS = ("export_session_states", "restore_session_states", "retire_session_state")
-
-
-def mcp_session_token_serializer(secret: str) -> "URLSafeSerializer":
-    """The signer of Gym MCP session tokens; build it once per server."""
-    from itsdangerous import URLSafeSerializer
-
-    return URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
-
-
-def mcp_session_token_payload(serializer: "URLSafeSerializer", token: str) -> Any:
-    """The payload of a Gym MCP session token whose signature verifies, or ``None`` if it does not."""
-    from itsdangerous import BadSignature
-
-    try:
-        return serializer.loads(token)
-    except BadSignature:
-        return None
 
 
 def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
@@ -135,10 +130,6 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
         return name[len(prefix) :] if name.startswith(prefix) else name
     _, sep, tool = name[len("mcp__") :].partition("__")
     return tool if sep else name
-
-
-# Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
 
 
 class ReverifyMode(str, Enum):
@@ -280,15 +271,6 @@ class BaseSeedSessionResponse(BaseModel):
     pass
 
 
-class MCPServerMetadata(BaseModel):
-    """Metadata returned from /seed_session for per-rollout Gym MCP access."""
-
-    server_name: str
-    url_path: str = "/mcp"
-    transport: str = "http"
-    headers: dict[str, str]
-
-
 class ResourcesSeedSessionRequest(BaseModel):
     """Idempotently initialize resources state under a caller-assigned identifier.
 
@@ -322,27 +304,6 @@ def reject_partial_typed_seed(value: object) -> object:
     ):
         raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
     return value
-
-
-class ResourcesSeedSessionResponse(BaseModel):
-    """Confirm resources state and return optional agent access and an initial observation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    resources_session_id: str
-    resources_tools: MCPServerMetadata | None = None
-    sandbox_access: SandboxAccess | None = None
-    # The single_agent_turn Environment Server appends this to the agent's input as one user message.
-    observation: str | None = None
-
-    # A return annotation would replace the model's serialization schema with that container schema.
-    @model_serializer(mode="wrap")
-    def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server supplies no observation field."""
-        result = handler(self)
-        if "observation" not in self.model_fields_set:
-            result.pop("observation", None)
-        return result
 
 
 VerificationInputT = TypeVar("VerificationInputT")

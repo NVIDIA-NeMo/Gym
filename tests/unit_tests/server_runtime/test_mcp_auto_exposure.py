@@ -273,6 +273,33 @@ def test_base_server_imports_mcp_auto_exposure_lazily():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_mcp_auto_exposure_import_does_not_load_server_implementations():
+    # Shared protocol definitions must not bring the resources/server implementations back in.
+    code = (
+        "import sys\n"
+        "import nemo_gym.server_runtime.mcp_auto_exposure\n"
+        "assert 'nemo_gym.server_runtime.base_resources_server' not in sys.modules\n"
+        "assert 'nemo_gym.server_runtime.base_server' not in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_shared_mcp_contracts_preserve_existing_imports():
+    from nemo_gym.server_runtime import base_resources_server, mcp_contracts
+
+    for name in (
+        "MCP_TOKEN_EPISODE_CLAIM",
+        "NEMO_GYM_MCP_METADATA_KEY",
+        "NEMO_GYM_MCP_SESSION_TOKEN_HEADER",
+        "RESERVED_MCP_TOOL_NAMES",
+        "MCPServerMetadata",
+        "ResourcesSeedSessionResponse",
+        "mcp_session_token_payload",
+        "mcp_session_token_serializer",
+    ):
+        assert getattr(base_resources_server, name) is getattr(mcp_contracts, name)
+
+
 def test_run_webserver_guards_maybe_auto_expose_behind_flag():
     """run_webserver spins up ray + config, so assert on its AST: both the lazy import and the
     maybe_auto_expose call must sit inside the expose_tools_over_mcp guard."""
