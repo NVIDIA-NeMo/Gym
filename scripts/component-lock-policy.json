@@ -87,6 +87,12 @@
       "opencv-python-headless>=4.10"
     ]
   },
+  "responses_api_agents/auto_ontology_agent": {
+    "include-dependencies": [
+      "alembic",
+      "sqlalchemy"
+    ]
+  },
   "responses_api_agents/harbor_agent": {
     "override-dependencies": [
       "pathspec"
