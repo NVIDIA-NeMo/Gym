@@ -30,7 +30,6 @@ from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Too
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import (
-    _IMAGE_TOKEN_ESTIMATE,
     DynamicMaxTokensChatCompletionsClient,
 )
 from responses_api_agents.stirrup_agent.stirrup_utils import (
@@ -382,7 +381,53 @@ def test_an_image_counts_a_fixed_token_estimate_not_its_base64_length() -> None:
     count = client._count_input_tokens([{**text, "content": [*text["content"], image]}], tools={})
 
     # 900 KB of base64 would otherwise count as 300K tokens and pin every call to the completion floor.
-    assert count == client._count_input_tokens([text], tools={}) + _IMAGE_TOKEN_ESTIMATE
+    assert count == client._count_input_tokens([text], tools={}) + 1536
+
+
+def _noisy_png(seed: int) -> bytes:
+    import io
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(seed)
+    image = Image.new("RGB", (400, 400))
+    image.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256)) for _ in range(400 * 400)])
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_two_images_budget_two_fixed_estimates_and_still_reach_the_request() -> None:
+    from stirrup.core.models import ImageContentBlock
+
+    client, fake_create = _client_with_fake_create(max_tokens=20_000, completion_token_buffer=1000)
+    images = [ImageContentBlock(data=_noisy_png(seed)) for seed in (1, 2)]
+
+    await client.generate([UserMessage(content=["frame", *images])], tools={})
+
+    sent = fake_create.await_args.kwargs
+    parts = sent["messages"][0]["content"]
+    urls = [part["image_url"]["url"] for part in parts if part["type"] == "image_url"]
+    # The request keeps both complete images, each far larger than the context window if counted per character.
+    assert [url.startswith("data:image/png;base64,") for url in urls] == [True, True]
+    assert all(len(url) > 100_000 for url in urls)
+    # The text part serializes to 66 characters (22 tokens); each image adds a fixed 1536 tokens.
+    assert sent["max_completion_tokens"] == 20_000 - (22 + 2 * 1536) - 1000
+
+
+@pytest.mark.asyncio
+async def test_image_token_estimate_is_configurable() -> None:
+    from stirrup.core.models import ImageContentBlock
+
+    client, fake_create = _client_with_fake_create(
+        max_tokens=20_000, completion_token_buffer=1000, image_token_estimate=4000
+    )
+
+    await client.generate([UserMessage(content=["frame", ImageContentBlock(data=_noisy_png(1))])], tools={})
+
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 20_000 - (22 + 4000) - 1000
 
 
 @pytest.mark.asyncio
