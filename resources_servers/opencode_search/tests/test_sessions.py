@@ -1563,3 +1563,67 @@ def test_an_episode_file_that_cannot_be_read_is_refused_at_startup(source) -> No
 def test_only_a_lending_server_needs_one_worker() -> None:
     assert _server(None).multiple_workers_unsupported_reason() is None
     assert _server("/workspace").multiple_workers_unsupported_reason() == "lent sandboxes live in one worker's memory"
+
+
+# ---------------------------------------------------------------------------
+# Grading: empty answers, failed runs, judge failures and the verify row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seeded", [False, True], ids=["without_a_seed", "episode"])
+@pytest.mark.parametrize("answer", ["", " \n\t"], ids=["empty", "whitespace"])
+@pytest.mark.parametrize(
+    ("reason", "kind"),
+    [
+        ("", None),
+        ("max_iteration", "agent_limit"),
+        ("context_window", "model_context_limit"),
+        ("agent_timed_out", "agent_timeout"),
+    ],
+    ids=["no_ending", "max_iteration", "context_window", "agent_timed_out"],
+)
+def test_an_empty_answer_is_a_graded_zero_without_a_judge_call(workdir, seeded, answer, reason, kind) -> None:
+    """No answer is a measured 0: the judge is not asked, the row counts as graded (evaluation_completed), and a budget
+    ending still masks it with its kind."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    if seeded:
+        assert client.post("/seed_session", json=_seed()).status_code == 200
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(answer, opencode_terminal_reason=reason))
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (0.0, kind is not None, kind, True)
+    row = verified.json()
+    assert (row["final_text"], row["extracted_final_answer"], row["judge_parsed"]) == ("", "", False)
+    assert (row["judge_attempts"], row["judge_time_taken"]) == (0, 0.0)
+    assert bool(row["failure_reason"]) == (kind is not None)
+    assert judge.await_count == 0
+
+
+def test_an_episode_with_an_empty_answer_keeps_its_plugin_log_mask(workdir, tmp_path) -> None:
+    """The ending read from the plugin log masks an empty answer as it masks a judged one."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL + TURN_CAP)
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(""), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (0.0, True, "agent_limit", True)
+    assert judge.await_count == 0
+
+
+def test_a_think_block_is_stripped_before_the_judge(workdir) -> None:
+    """The judge grades what follows a reasoning model's <think> block, never the block itself."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body("<think>Marseille, perhaps</think>Exact Answer: Paris"))
+
+    assert _graded(verified) == (1.0, False, None, True)
+    judge_request = judge.await_args.kwargs["json"].model_dump_json()
+    assert "Marseille" not in judge_request and "Exact Answer: Paris" in judge_request
