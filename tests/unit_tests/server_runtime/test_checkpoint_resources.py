@@ -17,7 +17,11 @@ from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
-from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
+from nemo_gym.server_runtime._checkpoint.steps import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    CHECKPOINT_RESTORE_POLICY_HEADER,
+    seed_restores_before_agent_close,
+)
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -596,6 +600,34 @@ async def test_the_seed_reply_and_status_report_the_verify_step_type(
 
     assert seed.headers["x-ng-checkpoint-verify"] == expected
     assert status["verify"] == expected
+
+
+@pytest.mark.parametrize("policy", ["any_step", "before_agent_close"])
+async def test_the_seed_reply_reports_a_restore_policy_other_than_any_step(policy: str) -> None:
+    server, client = make_server()
+    server._checkpoint.restore_policy = policy
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+
+    assert seed.status_code == 200
+    assert seed.headers.get(CHECKPOINT_RESTORE_POLICY_HEADER) == (None if policy == "any_step" else policy)
+    assert seed_restores_before_agent_close(seed.headers) is (policy == "before_agent_close")
+
+
+@pytest.mark.parametrize(
+    "headers, expected",
+    [
+        ({CHECKPOINT_RESTORE_POLICY_HEADER: "before_agent_close"}, True),
+        ({CHECKPOINT_RESTORE_POLICY_HEADER: "any_step"}, False),
+        ({CHECKPOINT_RESTORE_POLICY_HEADER: "before_agent_closed"}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+def test_only_the_before_agent_close_policy_ends_restores_at_the_agent_s_turn(
+    headers: dict[str, str] | None, expected: bool
+) -> None:
+    assert seed_restores_before_agent_close(headers) is expected
 
 
 async def test_the_seed_reply_reports_nothing_when_checkpointing_is_off() -> None:

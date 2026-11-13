@@ -398,16 +398,16 @@ class Deployment:
     # -- processes ------------------------------------------------------------------------------
 
     def start_backend(self) -> None:
-        if self.external_inference:
-            return
-        log = open(self.log_dir / "backend.log", "a")
-        self.procs["backend"] = subprocess.Popen(
-            [sys.executable, str(HERE / "fake_backend.py"), str(self.backend_port)],
-            env=os.environ | {"PYTHONPATH": _pythonpath()},
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-        self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
+        if not self.external_inference:
+            log = open(self.log_dir / "backend.log", "a")
+            self.procs["backend"] = subprocess.Popen(
+                [sys.executable, str(HERE / "fake_backend.py"), str(self.backend_port)],
+                env=os.environ | {"PYTHONPATH": _pythonpath()},
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
+        # Sandboxes are faked whatever serves inference.
         if self.uses_sandboxes:
             log = open(self.log_dir / "sandbox_backend.log", "a")
             self.procs["sandbox_backend"] = subprocess.Popen(

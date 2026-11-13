@@ -2562,7 +2562,7 @@ async def test_a_checkpoint_does_not_wait_for_a_replacement_s_re_seed() -> None:
 
 
 @pytest.mark.parametrize("policy", [None, "before_agent_close"])
-async def test_an_episode_whose_resources_fork_cannot_outlive_the_agent_restarts_once_the_agent_closed(
+async def test_an_episode_whose_resources_fork_cannot_outlive_the_agent_restarts_once_its_turn_ended(
     policy: str | None,
 ) -> None:
     from nemo_gym.server_runtime import EnvironmentParticipant
@@ -2583,8 +2583,7 @@ async def test_an_episode_whose_resources_fork_cannot_outlive_the_agent_restarts
     episode = await environment.run_request(_request())
 
     assert episode.result is not None
-    # Marked inside the agent close step, so no checkpoint records the episode past the agent's close.
-    expected = [
-        ["/seed_session", "/v1/agent_sessions", "/ng-rollout/rollout-a2/v1/responses", "/v1/agent_sessions/close"]
-    ]
+    # Marked when the agent's turn ended and before its close, so no checkpoint taken between the two exports
+    # the episode: a fork restored there has none of the agent's processes, and the closed agent starts none.
+    expected = [["/seed_session", "/v1/agent_sessions", "/ng-rollout/rollout-a2/v1/responses"]]
     assert restarts == (expected if policy else [])

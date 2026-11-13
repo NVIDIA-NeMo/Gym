@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Sandbox providers over the e2e suite's fake sandbox backend, registered as ``fake_remote`` and ``fake_remote_plain``.
+"""Sandbox providers over the e2e suite's fake sandbox backend: ``fake_remote`` and ``fake_remote_plain``.
 
 ``fake_remote`` implements the capabilities the checkpointer relies on: explicit snapshots (create, wait until ready,
 delete, list by name), create from a snapshot, and connect by descriptor, all over Gym's shared aiohttp client.
@@ -22,6 +22,7 @@ from nemo_gym.client.http_client import request
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxSnapshotInfo,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
@@ -160,10 +161,10 @@ class RemoteFakeSandboxProvider(PlainRemoteFakeSandboxProvider):
                 raise SandboxSnapshotNotFoundError(str(error)) from error
             raise
 
-    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
         listed = await self._call("GET", "/v1/snapshots")
         return [
-            {"id": item["id"], "name": item.get("name") or ""}
+            SandboxSnapshotInfo(snapshot_id=item["id"], name=item.get("name") or "")
             for item in listed["items"]
             if (item.get("name") or "").startswith(prefix)
         ]

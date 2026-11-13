@@ -141,12 +141,6 @@ if TYPE_CHECKING:
         SingleAgentTurnResult,
         SingleAgentTurnTaskInput,
     )
-    from nemo_gym.server_runtime.testing.checkpoint_conformance import (
-        FakeSandboxProvider,
-        FakeSnapshotProvider,
-        check_sandbox_session_checkpoints,
-        checkpointing_config,
-    )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
         TOOL_CALL_ID_HEADER,
@@ -198,8 +192,6 @@ _PUBLIC_API = {
     "EnvironmentParticipant": "_checkpoint.environment",
     "EpisodeRecord": "_checkpoint.environment",
     "EpisodeToolset": "episode_tools",
-    "FakeSandboxProvider": "testing.checkpoint_conformance",
-    "FakeSnapshotProvider": "testing.checkpoint_conformance",
     "GenerationCutInventory": "_checkpoint.generation_cut",
     "GenerationCutPrefixAck": "_checkpoint.generation_cut",
     "GenerationCutReceipt": "_checkpoint.generation_cut",
@@ -253,10 +245,8 @@ _PUBLIC_API = {
     "ToolSpec": "episode_tools",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
-    "check_sandbox_session_checkpoints": "testing.checkpoint_conformance",
     "checkpoint_settings": "_checkpoint.settings",
     "checkpoint_state_dir": "_checkpoint.sandbox",
-    "checkpointing_config": "testing.checkpoint_conformance",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "episode_tool": "episode_tools",

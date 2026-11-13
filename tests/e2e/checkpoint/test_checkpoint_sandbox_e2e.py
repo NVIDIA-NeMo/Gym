@@ -21,6 +21,7 @@ from test_checkpoint_e2e import (  # noqa: F401 (fixtures)
     gym_http_client,
     reward_of,
     wait_for_calls,
+    wait_until,
 )
 
 from nemo_gym.server_runtime._checkpoint import coordination
@@ -112,10 +113,11 @@ async def test_a_release_deletes_the_snapshots_of_checkpoints_no_longer_kept(dep
             await coordination.resume(participants, checkpoint_id, deadline_ts=deadline())
         before = set(deployment.sandbox_state()["snapshots"])
         failures = await coordination.release(participants, "c2", ["c2"], deadline_ts=deadline())
-        await asyncio.sleep(1)
+        # A release deletes in the background after it replies.
+        await wait_until(lambda: len(deployment.sandbox_state()["snapshots"]) == 1)
         kept = set(deployment.sandbox_state()["snapshots"])
         failures_all = await coordination.release(participants, "c2", [], deadline_ts=deadline())
-        await asyncio.sleep(1)
+        await wait_until(lambda: deployment.sandbox_state()["snapshots"] == {})
         deployment.backend("/_ctl/release", {})
         await run
 
