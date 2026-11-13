@@ -166,6 +166,42 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
     assert "ng_agent_observations" not in result
 
 
+class _StoppingClient(_Client):
+    """Reports the episode over at the first status poll and releases the agent's turn once it is stopped."""
+
+    stopped: asyncio.Event | None = None
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path == "/episode_status":
+            self.calls.append((server_name, url_path, kwargs))
+            return _Response({"done": True, "reason": "DONE"})
+        if url_path.startswith("/rollouts/"):
+            self.calls.append((server_name, url_path, kwargs))
+            self.stopped.set()
+            return _Response({"rollout_id": url_path.split("/")[2], "stopped": True})
+        if url_path.endswith("/v1/responses"):
+            await asyncio.wait_for(self.stopped.wait(), 5)
+        return await super().post(server_name, url_path, **kwargs)
+
+
+async def test_a_legacy_row_stops_the_agent_once_the_world_ends_the_episode() -> None:
+    environment_server, client = _environment_server()
+    stopping = _StoppingClient(**client.model_dump(), stopped=asyncio.Event())
+    config = environment_server.config.model_copy(update={"episode_status_poll_seconds": 0.01})
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=stopping)
+    result = await adapter.run_legacy(
+        {
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 2,
+            "instance_id": "task",
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert ("agent", "/rollouts/3-2/stop") in [(server, path) for server, path, _ in stopping.calls]
+    assert result["reward"] == 1.0
+
+
 def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     environment_server, client = _environment_server()
     client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]

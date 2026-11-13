@@ -49,6 +49,14 @@ environment_servers:
         name: tavily
 ```
 
+Some harnesses, such as Codex and OpenCode, end their turn only when the model replies without a tool call. In a live world that can end the task on its own, for example a desktop where the model reports the task done or runs out of actions, such a harness keeps acting after the episode is over. Set `episode_status_poll_seconds` to stop it. During the agent's turn, the Environment Server then calls the Resources Server's optional `POST /episode_status` at that interval. When the answer is `done: true`, it calls `POST /rollouts/{rollout_id}/stop` on the Agent Server with the reason, and the turn ends like one that reached its time limit. Verification still runs as usual. A Resources Server that does not answer that route returns 404, and polling stops for that episode. See [Episode Status for a Live World](../../fern/versions/latest/pages/environment-tutorials/resources-server-apis.mdx#episode-status-for-a-live-world).
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    episode_status_poll_seconds: 5
+```
+
 With partial-rollout checkpointing on, the agent of an episode that grants `mcp` access or any tool server holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt. An episode that grants any tool server restarts from its input after a crash instead of continuing from a checkpoint. One that grants only `mcp` access continues from a checkpoint only if its agent borrows the sandbox the Resources seed lent (`sandbox_access`) and re-binds restored sessions to new tool grants (`rebinds_tool_accesses`, as the OpenCode agent does). Otherwise it restarts from its input.
 
 A restore rebuilds a borrowed sandbox under a new ID. When the replacement attempt continues an episode whose agent had not closed yet, it first seeds the Resources and agent sessions again: the Resources Server returns the restored sandbox, and the agent re-binds its restored session to that sandbox and to the replacement attempt's tool grants, such as a new MCP session token. Seeding again is idempotent, so a checkpoint does not wait for it, and a crash during it seeds again after the next restore. An episode without a borrowed sandbox seeds nothing again.

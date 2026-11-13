@@ -141,6 +141,30 @@ agent that accepts only one user message. For example, use
 would send two user messages.
 </Note>
 
+### Episode Status for a Live World
+
+A live world whose own rules end an episode, such as a desktop task's `DONE` or action budget, can report
+that through the optional `POST /episode_status` route. Override `episode_status()` and
+`SimpleResourcesServer` registers the route; a server that does not override it answers HTTP 404:
+
+```python
+from nemo_gym.server_runtime import ResourcesEpisodeStatusRequest, ResourcesEpisodeStatusResponse
+
+async def episode_status(
+    self, request: Request, body: ResourcesEpisodeStatusRequest
+) -> ResourcesEpisodeStatusResponse:
+    episode = self.episodes[request.session[SESSION_ID_KEY]]
+    if episode.terminal_action is not None:
+        return ResourcesEpisodeStatusResponse(done=True, reason=episode.terminal_action)
+    return ResourcesEpisodeStatusResponse(done=False)
+```
+
+The session cookie names the episode, and the request body is empty. `reason` is a short label (at most 200
+characters) that the caller records. The route is never an MCP tool. A `single_agent_turn` Environment Server
+with `episode_status_poll_seconds` set polls it during the agent's turn, and once `done` is true it stops the
+agent's rollout with `POST /rollouts/{rollout_id}/stop`, so a harness that ends only when the model replies
+without a tool call does not keep acting. The episode is then verified like one that reached its time limit.
+
 ### Direct HTTP Tool-Calling Protocol
 
 The seed/verify episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:

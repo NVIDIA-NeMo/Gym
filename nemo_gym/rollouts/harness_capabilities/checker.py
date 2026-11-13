@@ -1052,6 +1052,32 @@ class Inspector:
             if type(status := _mapping(self.calls[i].get("response_metadata")).get("status_code")) is int
             and status >= 400
         }
+        # A rollout stop or timeout can end the harness after a policy reply returned but before the harness saved any
+        # of it. Its turn_interrupted gap names the invocation; then that invocation's last call, if it is the row's
+        # only call without a step and returned HTTP 200, needs no step.
+        stepless = [i for i in sorted(policy - http_errors) if refs[i] == 0]
+        cut_invocations = {
+            gap.get("invocation_id")
+            for gap in _objects(self.trajectory.get("gaps"))
+            if gap.get("code") == "turn_interrupted" and isinstance(gap.get("invocation_id"), str)
+        }
+        excused = set()
+        if (
+            len(stepless) == 1
+            and _mapping(self.calls[stepless[0]].get("response_metadata")).get("status_code") == 200
+            and len(owners[stepless[0]]) == 1
+            and owners[stepless[0]][0] in cut_invocations
+        ):
+            owned = [
+                index
+                for invocation in self.invocations
+                if invocation.get("invocation_id") == owners[stepless[0]][0]
+                for reference in _objects(invocation.get("model_calls"))
+                for index in _resolve(reference, self.calls)
+                if index in policy - http_errors
+            ]
+            if owned[-1:] == stepless:
+                excused = set(stepless)
         self.results.run(
             SemanticCheck(
                 id="steps.attempt_accounting",
@@ -1060,7 +1086,7 @@ class Inspector:
                 location="$.ng_trajectory.turns[*].model_calls",
                 reason="every policy response needs one step; HTTP errors may be unbound and auxiliary calls stay separate",
                 predicate=lambda: bool(policy)
-                and all((refs[i] == 1 for i in policy - http_errors))
+                and all((refs[i] == 1 for i in policy - http_errors - excused))
                 and all((refs[i] <= 1 for i in http_errors))
                 and (not any((refs[i] for i in helpers))),
                 available=self.available,

@@ -399,6 +399,8 @@ class OpenCodeSandboxSession(AgentSessionState):
         succeeded, and inside this step's budget, so exporting can neither fail the capture nor delay
         release. A failed export becomes an observation gap.
         """
+        if self.session.expired_before_launch:
+            return ""  # A rollout stop arrived before launch, so OpenCode never ran and left nothing to capture.
         # Leave a tenth of the budget so the capture result returns before the step's own timeout.
         export_deadline = monotonic() + timeout * 0.9
         with tempfile.TemporaryDirectory(prefix="opencode-snapshot-") as directory:
@@ -587,6 +589,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 clock_domain=self.tool_clock_domain,
                 agent_instance=self.agent_instance,
                 message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
+                interrupted=bool(self.session.cleanup and self.session.cleanup["timed_out"]),
             )
             lifecycle = json.dumps(
                 {
@@ -602,7 +605,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 separators=(",", ":"),
             )
             for gap in trajectory.gaps:
-                if gap.code == "turns_unavailable":
+                if gap.code in ("turns_unavailable", "turn_interrupted"):
                     gap.detail = (gap.detail or "") + "; capture_lifecycle=" + lifecycle
             if self.is_continuation:
                 assert self.activation_id is not None

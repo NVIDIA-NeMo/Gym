@@ -25,6 +25,7 @@ from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    RolloutStopRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
@@ -916,6 +917,114 @@ async def activate(agent, sandbox):
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(sandbox.started.wait(), 2)
     return request, seeded.agent_session_id, task
+
+
+def expire_on_request(sandbox):
+    """Make the fake supervisor honor expire.request: end a running harness as at its deadline, or never start one."""
+    sandbox.uploads_independent_of_execs = True
+    upload, create = sandbox.upload, sandbox.create
+
+    async def upload_and_expire(source, destination):
+        await upload(source, destination)
+        if destination.endswith("/expire.request"):
+            if hasattr(sandbox, "directory"):
+                sandbox.result["timed_out"] = True
+                sandbox.exited.set()
+            else:
+                sandbox.expired_before_launch = True
+
+    async def launch(**kwargs):
+        if not getattr(sandbox, "expired_before_launch", False):
+            return await create(**kwargs)
+        # The supervisor finds the request before it starts the harness: OpenCode never runs and writes nothing.
+        runner_params = next(arg for arg in shlex.split(kwargs["command"]) if arg.endswith("/params.sh"))
+        sandbox.directory = runner_params.removesuffix("/params.sh")
+        sandbox.files[f"{sandbox.directory}/cleanup.json"] = json.dumps(
+            {"return_code": None, "timed_out": True, "cleanup_confirmed": True, "error": None}
+        )
+        return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+
+    sandbox.upload = upload_and_expire
+    sandbox.launch.side_effect = launch
+
+
+async def test_rollout_stop_ends_opencode_as_a_timeout(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.return_session_trajectory = True
+    sandbox.blocked = True
+    expire_on_request(sandbox)
+    # The stop cuts OpenCode's second step while a tool runs: no step finish, a tool without output.
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["parts"] = [
+        {"type": "step-start"},
+        *export["messages"][-1]["parts"],
+        {"type": "step-finish"},
+    ]
+    export["messages"].append(
+        {
+            "info": {"role": "assistant", "time": {"created": 200}},
+            "parts": [
+                {"type": "step-start"},
+                {"type": "tool", "callID": "cut", "tool": "bash", "state": {"status": "running", "input": {}}},
+            ],
+        }
+    )
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    request, session_id, task = await activate(agent, sandbox)
+    rollout_id = seed().episode_id.capture_key
+    assert (await agent.stop_rollout(rollout_id, RolloutStopRequest(reason="episode over"))).stopped is True
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    response = await task
+    # The response of a run at its own deadline, verified as a timeout, plus the stop's marker and no failure kind.
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "episode over"}
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    assert response.output
+    # A stop expires the run; it does not cancel it.
+    sandbox.request_stop.assert_not_awaited()
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    invocation = next(record for record in closed.agent_observations.records if record.kind == "agent_invocation")
+    assert invocation.status == "incomplete" and invocation.error_type == "timeout"
+    # The cut step is interrupted evidence, not missing evidence, and its tool stays incomplete.
+    [gap] = closed.trajectory.gaps
+    assert gap.code == "turn_interrupted"
+    assert gap.invocation_id == closed.trajectory.turns[-1].invocation_id
+    # It keeps the capture receipt a missing step gets, which shows that the run timed out.
+    lifecycle = json.loads(gap.detail.split("; capture_lifecycle=", 1)[1])
+    assert lifecycle["cleanup"]["timed_out"] is True
+    cut = next(
+        record
+        for record in closed.agent_observations.records
+        if record.kind == "tool_call" and (record.native_tool_call_id or record.tool_call_id) == "cut"
+    )
+    assert (cut.status, cut.error_type) == ("incomplete", None)
+    with pytest.raises(HTTPException) as unknown:
+        await agent.stop_rollout(rollout_id)
+    assert unknown.value.status_code == 404
+
+
+async def test_rollout_stop_before_launch_never_starts_opencode(setup):
+    agent, sandbox = setup
+    expire_on_request(sandbox)
+    request = Request(
+        {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}}
+    )
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="over"))).stopped is True
+    response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    # OpenCode never ran: an empty run, verified like a timeout, with the stop's marker and no failure kind.
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "over"}
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
+    assert "--expire-file" in launch
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    invocation = next(record for record in closed.agent_observations.records if record.kind == "agent_invocation")
+    assert invocation.status == "incomplete" and invocation.error_type == "timeout"
+    # The same observation schema and agent instance as a session that ran.
+    assert closed.agent_observations.schema_version == "2.0"
+    assert invocation.agent_instance is not None and invocation.agent_instance.startswith("opencode-agent:")
 
 
 async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):

@@ -1399,6 +1399,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 failure_reason=command_failure_reason(f"OpenCode setup failed: command={command!r}", result),
             )
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, OpenCodeSandboxSession) else None
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Finalize and release the connection; retain release failures for retry."""
         assert isinstance(state, OpenCodeSandboxSession)
@@ -1720,6 +1723,42 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         fields = verification_failure_fields()
         return response.model_copy(update=fields) if fields["failure_report"] is not None else response
 
+    def _stopped_before_launch_response(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        timeout: float,
+        started: float,
+    ) -> NeMoGymResponse:
+        """A rollout stop arrived before launch, so OpenCode never ran: an empty run, verified like a timeout."""
+        invocation_id = state.invocation_prefix if state.is_continuation else state.request.episode_id.capture_key
+        if state.is_continuation and state.harness_session_id is not None:
+            invocation_id += f":{state.harness_session_id}"
+        invocation = AgentInvocation(
+            invocation_id=invocation_id,
+            activation_id=state.activation_id if state.is_continuation else None,
+            harness_session_id=state.harness_session_id if state.is_continuation else None,
+            agent_instance=state.agent_instance,
+            status="incomplete",
+            error_type="timeout",
+            stop_reason="timeout",
+            duration_ms=(monotonic() - started) * 1000,
+        )
+        # The same observation schema as a session that ran (OpenCodeSandboxSession._collect_artifacts).
+        observations = AgentObservationBundle(schema_version="2.0", source="opencode", records=[invocation])
+        trajectory = TrajectoryRecord(
+            task_id=state.request.task_id.task_id, rollout_id=state.request.episode_id.capture_key
+        )
+        if state.is_continuation:
+            state.activation_observations, state.activation_trajectory = observations, trajectory
+        else:
+            state.observations, state.trajectory = observations, trajectory
+        response = self._make_session_response(
+            state, body, timeout=timeout, outcome=OpenCodeRunOutcome(status="incomplete", error_type="timeout")
+        )
+        return self.report_rollout_stop(response, state.session)
+
     async def _session_response(
         self,
         state: OpenCodeSandboxSession,
@@ -1862,6 +1901,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             failure = exc
         except BaseException as exc:
             failure = exc
+        if failure is None and state.session.expired_before_launch:
+            return self._stopped_before_launch_response(state, body, timeout=timeout, started=started)
         observations = state.activation_observations if state.is_continuation else state.observations
         if observations is None:
             confirmed_oom = isinstance(failure, NgFailureEvent) and state.session.execution_oom is failure
@@ -2068,6 +2109,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             response = response.model_copy(
                 update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
             )
+        # A run that POST /rollouts/{rollout_id}/stop ended keeps its timeout's incomplete status and gains the marker.
+        response = self.report_rollout_stop(response, state.session)
         return self.report_outcome(response, native_result)
 
 

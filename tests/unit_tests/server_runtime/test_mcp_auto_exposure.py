@@ -51,6 +51,8 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesEpisodeStatusRequest,
+    ResourcesEpisodeStatusResponse,
     ResourcesSeedSessionResponse,
     SimpleResourcesServer,
     mcp_session_token_serializer,
@@ -249,6 +251,19 @@ def test_flag_on_mounts_mcp_and_harvests_tools():
     # typed + dict + inventory tools; the catch-all itself is not a tool
     assert {"append", "raw_step", "lookup"} <= set(tools)
     assert "{tool_name}" not in " ".join(tools)
+
+
+def test_episode_status_is_not_harvested_as_a_tool():
+    class LiveStore(Store):
+        async def episode_status(self, request: Request, body: ResourcesEpisodeStatusRequest):
+            return ResourcesEpisodeStatusResponse(done=True)
+
+    server = _server(LiveStore)
+    app = server.setup_webserver()
+    assert "/episode_status" in {getattr(r, "path", None) for r in app.routes}
+    tools = maybe_auto_expose(server, app)
+    assert "episode_status" not in set(tools)
+    assert {"append", "raw_step", "lookup"} <= set(tools)
 
 
 def test_refuses_server_that_already_mounts_mcp():

@@ -66,6 +66,7 @@ if TYPE_CHECKING:
         is_retryable_dependency_status,
     )
     from nemo_gym.server_runtime.base_resources_server import (
+        EPISODE_STATUS_PATH,
         NEMO_GYM_MCP_METADATA_KEY,
         NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
         BaseMultiRewardVerifyResponse,
@@ -77,6 +78,8 @@ if TYPE_CHECKING:
         BaseVerifyResponse,
         ResourcesCloseSessionRequest,
         ResourcesCloseSessionResponse,
+        ResourcesEpisodeStatusRequest,
+        ResourcesEpisodeStatusResponse,
         ResourcesSeedRejectedError,
         ResourcesSeedSessionRequest,
         ResourcesSeedSessionResponse,
@@ -157,6 +160,7 @@ _PUBLIC_API = {
     "CleanupHandle": "base_environment_server",
     "CommitRequest": "_checkpoint.control",
     "DirectHTTPToolAccess": "tool_access",
+    "EPISODE_STATUS_PATH": "base_resources_server",
     "EnvironmentParticipant": "_checkpoint.environment",
     "EpisodeRecord": "_checkpoint.environment",
     "GenerationCutInventory": "_checkpoint.generation_cut",
@@ -173,6 +177,8 @@ _PUBLIC_API = {
     "ParticipantControlPlane": "_checkpoint.control",
     "ResourcesCloseSessionRequest": "base_resources_server",
     "ResourcesCloseSessionResponse": "base_resources_server",
+    "ResourcesEpisodeStatusRequest": "base_resources_server",
+    "ResourcesEpisodeStatusResponse": "base_resources_server",
     "ResourcesParticipant": "_checkpoint.resources",
     "ResourcesSeedRejectedError": "base_resources_server",
     "ResourcesSeedSessionRequest": "base_resources_server",

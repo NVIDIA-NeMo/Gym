@@ -138,7 +138,12 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset(
+    {"verify", "seed_session", "close_session", "aggregate_metrics", "episode_status", "mcp"}
+)
+# Optional route of a live world that can tell when the episode is over (a desktop task's DONE or action limit), so
+# its Environment Server can stop a harness that would keep acting. A server without it answers 404.
+EPISODE_STATUS_PATH = "/episode_status"
 
 
 class ReverifyMode(str, Enum):
@@ -373,6 +378,21 @@ class ResourcesCloseSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
+
+
+class ResourcesEpisodeStatusRequest(BaseModel):
+    """Body of ``POST /episode_status``; the session cookie names the episode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ResourcesEpisodeStatusResponse(BaseModel):
+    """Whether the world has ended the episode, and why, for the caller's record (for example ``DONE``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    done: bool
+    reason: Optional[str] = Field(default=None, max_length=200)
 
 
 class ResourcesSeedRejectedError(HTTPException, ValueError):
@@ -882,6 +902,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.get("/reverify_mode")(self.get_reverify_mode)
+        if type(self).episode_status is not SimpleResourcesServer.episode_status:
+            app.post(EPISODE_STATUS_PATH)(self.episode_status)
         return app
 
     def register_protocol_routes(self, app: FastAPI) -> None:
@@ -1249,6 +1271,18 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             get_key_metrics_fn=self.get_key_metrics,
             compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
+
+    async def episode_status(
+        self, request: Request, body: ResourcesEpisodeStatusRequest
+    ) -> ResourcesEpisodeStatusResponse:
+        """Report whether the world has ended the episode of the request's session (``POST /episode_status``).
+
+        Optional. A live world whose own rules end an episode (a terminal action, an action budget) overrides it,
+        and the route is registered only then; elsewhere it answers 404. A single-agent Environment Server with
+        ``episode_status_poll_seconds`` polls it during the agent's turn and stops the agent's rollout once ``done``
+        is true. It is never an MCP tool.
+        """
+        raise NotImplementedError("This resources server does not report episode status")
 
     async def get_reverify_mode(self) -> ReverifyMode:
         return self.config.REVERIFY_MODE

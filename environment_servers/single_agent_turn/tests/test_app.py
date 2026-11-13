@@ -454,6 +454,94 @@ async def test_slow_resources_close_after_verification_keeps_result() -> None:
     assert client.calls[-1][1] == "/close_session"
 
 
+class _EpisodeStatusClient(_Client):
+    """Answers /episode_status from a script, and holds the agent's turn until its rollout is stopped."""
+
+    status_replies: list[dict | Exception] = []
+    hold_agent_turn: bool = True
+    agent_stopped: asyncio.Event | None = None
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path == "/episode_status":
+            self.calls.append((server_name, url_path, kwargs))
+            reply = self.status_replies.pop(0) if len(self.status_replies) > 1 else self.status_replies[0]
+            if isinstance(reply, Exception):
+                raise reply
+            return _Response(reply)
+        if url_path.startswith("/rollouts/"):
+            self.calls.append((server_name, url_path, kwargs))
+            self.agent_stopped.set()
+            return _Response({"rollout_id": url_path.split("/")[2], "stopped": True})
+        if url_path.endswith("/v1/responses") and self.hold_agent_turn:
+            await asyncio.wait_for(self.agent_stopped.wait(), 5)
+        return await super().post(server_name, url_path, **kwargs)
+
+
+def _polling_environment_server(
+    status_replies: list[dict | Exception], *, hold_agent_turn: bool = True
+) -> tuple[SingleAgentTurnEnvironmentServer, _EpisodeStatusClient]:
+    environment_server, client = _environment_server(client_type=_EpisodeStatusClient)
+    client.status_replies = status_replies
+    client.hold_agent_turn = hold_agent_turn
+    client.agent_stopped = asyncio.Event()
+    environment_server.config.episode_status_poll_seconds = 0.01
+    return environment_server, client
+
+
+async def test_the_agents_rollout_is_stopped_once_the_world_ends_the_episode() -> None:
+    environment_server, client = _polling_environment_server(
+        [{"done": False, "reason": None}, {"done": False, "reason": None}, {"done": True, "reason": "DONE"}]
+    )
+    result = await environment_server.run_request(_request())
+
+    paths = [path for _, path, _ in client.calls]
+    assert paths.count("/episode_status") == 3
+    stop = next(call for call in client.calls if call[1].startswith("/rollouts/"))
+    assert stop[0] == "agent" and stop[1] == "/rollouts/rollout-a2/stop"
+    assert stop[2]["json"] == {"reason": "episode over: DONE"}
+    # The status is read under the Resources session, and polling ends with the stop.
+    status_calls = [call for call in client.calls if call[1] == "/episode_status"]
+    assert all(call[0] == "resources" and call[2]["cookies"] == {"session": "cookie-value"} for call in status_calls)
+    assert all(call[2]["json"] == {} for call in status_calls)
+    assert paths.index("/rollouts/rollout-a2/stop") > max(
+        i for i, path in enumerate(paths) if path == "/episode_status"
+    )
+    # The stopped turn still closes the agent and is verified.
+    assert paths[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
+    assert result.result is not None and result.result.reward == 1.0
+
+
+async def test_a_world_without_episode_status_is_not_polled_again_and_the_agent_is_not_stopped() -> None:
+    missing = ClientResponseError(request_info=MagicMock(), history=(), status=404, message="Not Found")
+    environment_server, client = _polling_environment_server([missing], hold_agent_turn=False)
+    client.slow_path = "/ng-rollout/rollout-a2/v1/responses"
+    result = await environment_server.run_request(_request())
+
+    paths = [path for _, path, _ in client.calls]
+    assert paths.count("/episode_status") == 1
+    assert not any(path.startswith("/rollouts/") for path in paths)
+    assert result.result is not None and result.result.reward == 1.0
+
+
+async def test_an_unreadable_episode_status_is_polled_again() -> None:
+    broken = ClientResponseError(request_info=MagicMock(), history=(), status=500, message="Server Error")
+    environment_server, client = _polling_environment_server([broken, {"done": True, "reason": "action_limit"}])
+    await environment_server.run_request(_request())
+
+    paths = [path for _, path, _ in client.calls]
+    assert paths.count("/episode_status") == 2
+    stop = next(call for call in client.calls if call[1].startswith("/rollouts/"))
+    assert stop[2]["json"] == {"reason": "episode over: action_limit"}
+
+
+async def test_without_the_option_the_world_is_not_polled() -> None:
+    environment_server, client = _environment_server()
+    client.slow_path = "/ng-rollout/rollout-a2/v1/responses"
+    assert environment_server.config.episode_status_poll_seconds is None
+    await environment_server.run_request(_request())
+    assert "/episode_status" not in [path for _, path, _ in client.calls]
+
+
 async def test_every_downstream_call_carries_the_attempt_rollout_id() -> None:
     environment_server, client = _environment_server()
 

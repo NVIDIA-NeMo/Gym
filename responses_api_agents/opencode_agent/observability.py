@@ -100,6 +100,7 @@ def append_opencode_turns(
     model_ref: ModelServerRef | None = None,
     gym_reasoning: bool = False,
     normalized_call_ids: dict[str, str] | None = None,
+    interrupted: bool = False,
 ) -> None:
     """Membership comes only from persisted IDs; row order numbers turns within a session.
 
@@ -109,10 +110,28 @@ def append_opencode_turns(
     step_count counts persisted step-finish events cumulatively within the session.
     With ``gym_reasoning``, the reasoning block a Gym Model Server reply's text
     starts with becomes the turn's reasoning rather than answer text.
+    With ``interrupted`` (a timeout or a rollout stop ended the run), the last assistant
+    message of a session may lack its step finish because the stop cut that step: it is
+    reported as ``turn_interrupted``, with whatever the step had produced, rather than as
+    unavailable evidence.
     """
     messages = {row["id"]: row for row in message_rows}
+    last_assistant: dict[str, str] = {}
+    if interrupted:
+        for row in message_rows:
+            message = _object(row["data"])
+            if message.get("role") == "assistant" and message.get("summary") is not True:
+                last_assistant[row["session_id"]] = row["id"]
+    cut: dict[str, str] = {}  # session ID -> the one step a stop or timeout cut in it
     parts = defaultdict(list)
     unavailable = set()
+
+    def missing(session_id: str, message_id: str) -> None:
+        if last_assistant.get(session_id) == message_id:
+            cut[session_id] = message_id
+        else:
+            unavailable.add(message_id)
+
     for row in part_rows:
         message = messages.get(row["message_id"])
         if message is None or row["session_id"] not in (None, message["session_id"]):
@@ -151,7 +170,7 @@ def append_opencode_turns(
             )
             # A pre-stream error or missing provider steps does not establish an empty response.
             if not synthetic_parent:
-                unavailable.add(message_id)
+                missing(session_id, message_id)
             continue
         turn_counts[session_id] += 1
         step_counts[session_id] += sum(part.get("type") == "step-finish" for _, part in message_parts)
@@ -199,7 +218,7 @@ def append_opencode_turns(
             elif kind not in {"step-start", "step-finish", "snapshot", "patch", "retry", "text", "reasoning"}:
                 unavailable.add(message_id)
         if "step-finish" not in types:
-            unavailable.add(message_id)
+            missing(session_id, message_id)
             if not answer and not reasoning and not text_parts:
                 continue
         # Match the invocation's Responses shape: native text-part identity belongs to
@@ -227,13 +246,20 @@ def append_opencode_turns(
                 step_count=step_counts[session_id],
             )
         )
+    # A cut step's gap names its session's invocation: when the stop came after the model's reply returned but before
+    # OpenCode saved any of it, that invocation's last call has no turn. Both kinds keep the structural diagnostics,
+    # which can still tell a cut step from one whose persistence was lost.
+    gaps = [("turn_interrupted", session_id, {message_id}) for session_id, message_id in sorted(cut.items())]
     if unavailable:
+        gaps.append(("turns_unavailable", None, unavailable))
+    for code, invocation_id, message_ids in gaps:
         trajectory.gaps.append(
             ObservationGap(
-                code="turns_unavailable",
-                detail=",".join(sorted(unavailable))
+                code=code,
+                invocation_id=invocation_id,
+                detail=",".join(sorted(message_ids))
                 + "; native_capture_diagnostics="
-                + _native_gap_diagnostics(unavailable, message_rows, part_rows),
+                + _native_gap_diagnostics(message_ids, message_rows, part_rows),
             )
         )
 

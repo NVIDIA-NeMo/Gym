@@ -224,6 +224,48 @@ def test_unowned_or_untimed_artifact_does_not_invent_turns(tmp_path, parse, muta
     assert trajectory.gaps[0].code == "turns_unavailable"
 
 
+def _cut(*parts):
+    """A policy step a timeout or a rollout stop ended: started, never finished."""
+    return {"role": "assistant", "time": {"created": 3000}}, [{"type": "step-start"}, *parts]
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_the_step_a_stop_cuts_is_interrupted_not_missing(tmp_path, interrupted):
+    running = {"type": "tool", "tool": "desktop_step", "callID": "cut", "state": {"status": "running", "input": {}}}
+    db = _session_db(tmp_path, [_policy({"type": "text", "text": "done"}), _cut(running)])
+    trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0")
+    _parse_opencode_session(db, "fallback", trajectory, require_terminal_finish=True, interrupted=interrupted)
+    # The cut step keeps what it produced (the tool call it was running).
+    assert [turn.answer[-1]["type"] for turn in trajectory.turns] == ["message", "function_call"]
+    if interrupted:
+        [gap] = trajectory.gaps
+        assert gap.code == "turn_interrupted"
+        # It names the invocation, so the harness check can excuse that invocation's last call.
+        assert gap.invocation_id == trajectory.turns[-1].invocation_id
+        # The cut message keeps the structural diagnostics a missing step gets.
+        assert gap.detail.startswith("m1; native_capture_diagnostics=")
+        assert '"id":"m1"' in gap.detail
+    else:
+        assert [gap.code for gap in trajectory.gaps] == ["turns_unavailable"]
+
+
+def test_only_the_last_step_can_be_interrupted(tmp_path):
+    db = _session_db(
+        tmp_path,
+        [_cut({"type": "text", "text": "lost"}), _policy({"type": "text", "text": "done"}), _cut()],
+    )
+    trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0")
+    _parse_opencode_session(db, "fallback", trajectory, require_terminal_finish=True, interrupted=True)
+    # An earlier step without a finish is still missing evidence; an empty cut step is no turn.
+    assert len(trajectory.turns) == 2
+    gaps = {gap.code: gap for gap in trajectory.gaps}
+    # The empty cut step has no turn, but its gap still names the session's invocation.
+    assert gaps["turn_interrupted"].detail.startswith("m2;")
+    assert gaps["turn_interrupted"].invocation_id == trajectory.turns[-1].invocation_id
+    assert gaps["turns_unavailable"].invocation_id is None
+    assert gaps["turns_unavailable"].detail.startswith("m0;")
+
+
 def test_invalid_json_and_tool_state_are_partial_evidence(tmp_path, parse):
     db = _session_db(tmp_path, [_policy({"type": "tool", "tool": "bash", "state": "invalid"}, {"type": "patch"})])
     with sqlite3.connect(db) as con:

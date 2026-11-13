@@ -4,15 +4,16 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectorError, ConnectionTimeoutError
+from aiohttp import ClientConnectorError, ClientResponseError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, TypeAdapter, ValidationError
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
@@ -24,11 +25,12 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     OutcomeAction,
+    RolloutStopRequest,
     agent_outcome_policy,
     confirmed_policy_response_timeout,
     verification_failure_fields,
 )
-from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
+from nemo_gym.client import get_response_json, raise_boundary_failure, raise_for_status, rollout_path_prefix
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -57,6 +59,7 @@ from nemo_gym.core import (
 from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    EPISODE_STATUS_PATH,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
@@ -65,6 +68,8 @@ from nemo_gym.server_runtime import (
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ResourcesCloseSessionRequest,
+    ResourcesEpisodeStatusRequest,
+    ResourcesEpisodeStatusResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     SingleAgentTurnRequest,
@@ -144,6 +149,11 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
+    # Seconds between polls of the Resources Server's optional POST /episode_status during the agent's turn. Once the
+    # world reports the episode over, the agent's rollout is stopped (POST /rollouts/{rollout_id}/stop on the Agent
+    # Server) and verified like one that reached its time limit. For harnesses that end only when the model replies
+    # without a tool call. Unset, the agent's turn runs until the agent ends it.
+    episode_status_poll_seconds: PositiveFloat | None = None
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -640,6 +650,61 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ) from error
 
     async def _invoke_agent(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> NeMoGymResponse:
+        watcher = (
+            asyncio.create_task(self._stop_agent_when_episode_ends(request, handles))
+            if self.config.episode_status_poll_seconds is not None
+            else None
+        )
+        try:
+            return await self._invoke_agent_turn(request, handles)
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watcher
+
+    async def _stop_agent_when_episode_ends(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> None:
+        """Poll the world's episode status during the agent's turn, and stop the agent's rollout once it is over."""
+        rollout_id = request.episode_id.capture_key
+        while True:
+            await asyncio.sleep(self.config.episode_status_poll_seconds)
+            try:
+                status_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path=EPISODE_STATUS_PATH,
+                    json=ResourcesEpisodeStatusRequest().model_dump(),
+                    cookies=handles.resources_cookies,
+                )
+                await raise_for_status(status_response)
+                status = ResourcesEpisodeStatusResponse.model_validate(await get_response_json(status_response))
+            except ClientResponseError as error:
+                if error.status == 404:
+                    LOGGER.warning(
+                        "%s does not report episode status; not polling it", self.config.resources_server.name
+                    )
+                    return
+                LOGGER.warning("Episode status of rollout %s: HTTP %s", rollout_id, error.status)
+                continue
+            except Exception:
+                LOGGER.warning("Episode status of rollout %s could not be read", rollout_id, exc_info=True)
+                continue
+            if not status.done:
+                continue
+            reason = f"episode over: {status.reason}" if status.reason else "episode over"
+            try:
+                stop_response = await self.server_client.post(
+                    server_name=self.config.agent_server.name,
+                    url_path=f"/rollouts/{rollout_id}/stop",
+                    json=RolloutStopRequest(reason=reason[:200]).model_dump(),
+                )
+                await raise_for_status(stop_response)
+                LOGGER.info("Stopped rollout %s: %s", rollout_id, reason)
+            except Exception:
+                # The agent then runs until it ends on its own; the episode is graded either way.
+                LOGGER.warning("Could not stop rollout %s after the episode ended", rollout_id, exc_info=True)
+            return
+
+    async def _invoke_agent_turn(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> NeMoGymResponse:
         params = request.task.task_input.responses_create_params
         if handles.observation:
             input_items = params.input

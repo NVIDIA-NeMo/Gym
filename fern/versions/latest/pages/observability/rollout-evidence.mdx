@@ -215,6 +215,7 @@ order do not establish ownership, including for concurrent calls.
 | `model_call_reference_conflict` | References disagree about call identity or ownership |
 | `model_call_ownership_unavailable` | Ownership cannot be established |
 | `turns_unavailable` | The producer did not supply semantic turns |
+| `turn_interrupted` | A timeout or a rollout stop cut the last step of the invocation in `invocation_id`; the turn keeps what that step produced. If the harness saved nothing of the step, there is no turn, and the invocation's last call may have no step. It is not missing evidence. OpenCode adds the same capture diagnostics as for `turns_unavailable`. |
 | `trajectory_projection_failed` | Collection could not normalize the evidence |
 
 Missing evidence makes dependent health checks unobserved. Unmatched, ambiguous, or conflicting
