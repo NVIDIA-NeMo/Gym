@@ -16,6 +16,7 @@ maintainers:
 - jin-nvidia
 intended_use:
 - evaluation
+primary_metric: overall_score_length_adjusted
 requirements:
   gpu: false
   network: allowlist

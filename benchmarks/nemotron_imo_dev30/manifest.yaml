@@ -13,6 +13,7 @@ maintainers:
 - i-vainn
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-4]/score
 requirements:
   gpu: false
   network: allowlist

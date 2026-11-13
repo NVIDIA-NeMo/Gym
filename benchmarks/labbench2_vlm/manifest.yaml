@@ -14,6 +14,7 @@ maintainers:
 - azkalot1
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-3]/accuracy
 requirements:
   gpu: false
   network: allowlist

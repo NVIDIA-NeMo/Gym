@@ -13,6 +13,7 @@ maintainers:
 - anushaknvidia
 intended_use:
 - evaluation
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

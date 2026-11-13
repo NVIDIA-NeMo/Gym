@@ -16,6 +16,7 @@ maintainers:
 intended_use:
 - evaluation
 - training
+primary_metric: unknown
 requirements:
   gpu: false
   network: public

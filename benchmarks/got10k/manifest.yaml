@@ -14,6 +14,7 @@ maintainers:
 - pulkitkumar95
 intended_use:
 - evaluation
+primary_metric: visible_gt_AO
 requirements:
   gpu: false
   network: no-network

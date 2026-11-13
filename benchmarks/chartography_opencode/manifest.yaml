@@ -15,6 +15,7 @@ maintainers:
 - trintamaki
 intended_use:
 - evaluation
+primary_metric: pass@1[avg-of-10]/all_pass
 requirements:
   gpu: false
   network: allowlist

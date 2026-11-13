@@ -14,6 +14,7 @@ maintainers:
 - ericyang0
 intended_use:
 - evaluation
+primary_metric: composite/complete_accuracy
 requirements:
   gpu: false
   network: allowlist

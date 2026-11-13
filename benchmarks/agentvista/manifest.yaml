@@ -15,6 +15,7 @@ maintainers:
 - bpritam14
 intended_use:
 - evaluation
+primary_metric: agentvista/mean_score
 requirements:
   gpu: false
   network: public
