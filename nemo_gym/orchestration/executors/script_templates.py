@@ -261,6 +261,18 @@ _DECLARED_EXTRAS_FILTER = (
 )
 
 
+# A uv older than the checkout's `required-version` (a `>=X` lower bound in its pyproject.toml) is refused by `uv venv`
+# and `uv sync` with an error that never reaches the reader's report, so a private copy of the caller's uv is checked
+# against it up front. Run inside the checkout, with the private uv first on PATH.
+_UV_VERSION_CHECK = (
+    '_gym_uv_req="$(sed -n \'s/^required-version *= *"\\(>=\\)\\{0,1\\} *\\([0-9][0-9.]*\\).*/\\2/p\' pyproject.toml 2>/dev/null | head -n 1 || true)"; '
+    "_gym_uv_have=\"$(uv --version | awk '{print $2}')\"; "
+    'if [ -n "$_gym_uv_req" ] && [ "$(printf \'%s\\n%s\\n\' "$_gym_uv_req" "$_gym_uv_have" | sort -V | head -n 1)" != "$_gym_uv_req" ]; then '
+    'echo "gym: uv $_gym_uv_have on PATH is older than the $_gym_uv_req this Gym checkout requires '
+    "(required-version in pyproject.toml); update it with 'uv self update'\" >&2; exit 1; fi"
+)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -365,6 +377,7 @@ def render_driver_entrypoint(
             # venv` instead reads requires-python from pyproject.toml and auto-downloads a
             # satisfying interpreter if the container's own Python doesn't qualify. Also never
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
+            *([_UV_VERSION_CHECK] if private_uv else []),
             "uv venv --seed .venv",
             "source .venv/bin/activate",
             f'_gym_declared_extras() {{ python -c {shlex.quote(_DECLARED_EXTRAS_FILTER)} "$@"; }}',

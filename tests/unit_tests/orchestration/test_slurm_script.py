@@ -776,7 +776,13 @@ def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
 
 
 def _run_private_uv_entrypoint(
-    tmp_path: Path, *, shared_uv: str, tmpdir: Path | None = None
+    tmp_path: Path,
+    *,
+    shared_uv: str,
+    tmpdir: Path | None = None,
+    uv_version: str = "0.0.0",
+    required_version: str | None = None,
+    check: bool = True,
 ) -> tuple[str, Path, Path]:
     """Run a private-uv reader entrypoint with stub git, uv and curl; return its report, the shared uv and curl log."""
     home, tools = tmp_path / "home", tmp_path / "tools"
@@ -784,7 +790,7 @@ def _run_private_uv_entrypoint(
     tools.mkdir()
     # `uv venv` records the interpreter preference it ran with, which decides whether a Python on PATH may be used.
     fake_uv = (
-        '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; '
+        '#!/bin/bash\ncase "$1" in --version) echo "uv ' + uv_version + '";; venv) mkdir -p .venv/bin; '
         "printf 'export VIRTUAL_ENV=%q\\n' \"$PWD/.venv\" > .venv/bin/activate; "
         'printf %s "${UV_PYTHON_PREFERENCE:-unset}" > .venv/python-preference;; esac\n'
     )
@@ -795,7 +801,9 @@ def _run_private_uv_entrypoint(
     # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
     (tools / "git").write_text(
         '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
-        'printf "[project.optional-dependencies]\\nray = []\\n" > "$3/pyproject.toml"; fi\nexit 0\n'
+        'printf "[tool.uv]\\n%b[project.optional-dependencies]\\nray = []\\n" '
+        + shlex.quote(f'required-version = "{required_version}"\\n' if required_version else "")
+        + ' > "$3/pyproject.toml"; fi\nexit 0\n'
     )
     (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
@@ -820,8 +828,26 @@ def _run_private_uv_entrypoint(
         "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
     )
     env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"} | ({"TMPDIR": str(tmpdir)} if tmpdir else {})
-    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=True)
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=check)
+    if not check:
+        return result.stdout + result.stderr, shared, curl_log
     return result.stdout, shared, curl_log
+
+
+def test_a_private_uv_older_than_the_checkout_requires_fails_naming_both_versions(tmp_path: Path) -> None:
+    out, _, _ = _run_private_uv_entrypoint(
+        tmp_path, shared_uv="working", uv_version="0.11.32", required_version=">=0.13.4", check=False
+    )
+    assert "uv 0.11.32" in out and "0.13.4" in out and "older" in out
+    assert "VENV_PREFERENCE" not in out  # stopped before `uv venv` and the command
+
+
+@pytest.mark.parametrize("uv_version", ["0.13.4", "0.13.10", "1.0.0"])
+def test_a_private_uv_that_meets_the_requirement_runs_on(tmp_path: Path, uv_version: str) -> None:
+    out, _, _ = _run_private_uv_entrypoint(
+        tmp_path, shared_uv="working", uv_version=uv_version, required_version=">=0.13.4"
+    )
+    assert "VENV_PREFERENCE=only-managed" in out
 
 
 @pytest.mark.parametrize("shared_uv", ["working", "broken", "missing"])
