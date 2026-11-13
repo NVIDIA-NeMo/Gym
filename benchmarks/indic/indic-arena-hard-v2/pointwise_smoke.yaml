@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Smoke preset: a separately configured model generates and judges Indic answers.
+config_paths:
+  - benchmarks/indic/indic-arena-hard-v2/config.yaml
+
+indic_arena_hard_v2_judge_mode: pointwise
+
+# The provider adapter converts Gym Responses requests to Chat Completions.
+indic_arena_hard_v2_smoke_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.env:INDIC_ARENA_SMOKE_BASE_URL,MISSING}
+      api_key: ${oc.env:INDIC_ARENA_SMOKE_API_KEY,MISSING}
+      model: ${oc.env:INDIC_ARENA_SMOKE_MODEL,MISSING}
+      num_concurrent_requests: 2
+      extra_body:
+        max_tokens: 4096
+        temperature: 0.0
+
+indic_arena_hard_v2_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      model_server:
+        name: indic_arena_hard_v2_smoke_model
+
+indic_arena_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${oc.env:INDIC_ARENA_SMOKE_BASE_URL,MISSING}
+      openai_api_key: ${oc.env:INDIC_ARENA_SMOKE_API_KEY,MISSING}
+      openai_model: ${oc.env:INDIC_ARENA_SMOKE_MODEL,MISSING}
+      max_http_attempts: 1
+      max_concurrent_requests: 2
