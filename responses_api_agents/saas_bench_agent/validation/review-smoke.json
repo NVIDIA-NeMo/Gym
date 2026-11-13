@@ -1,0 +1,187 @@
+{
+  "observed_at": "2026-11-13T10:25:12.275516+00:00",
+  "functional_gym_revision": "1a5bbc36d982c442ec5098e384b2c8f999087556",
+  "upstream_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+  "model": "nvidia/moonshotai/kimi-k3",
+  "reasoning_effort": "high",
+  "judge_model": "gcp/google/gemini-4-argon",
+  "slurm_job_id": "2622727",
+  "scope": "One five-step pipeline smoke per harness; no full-task success, reference parity or full106 evaluation claim",
+  "cases": {
+    "opencode": {
+      "reward_profile": {
+        "mean/reward": 0.143,
+        "max/reward": 0.143,
+        "min/reward": 0.143,
+        "median/reward": 0.143,
+        "std/reward": 0.0
+      },
+      "task_id": "media_027",
+      "step_cap": 5,
+      "harness_version": "2.1.1",
+      "score": 0.143,
+      "mask_sample": false,
+      "native_verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_outcome_action": null,
+      "tool_calls": 5,
+      "tool_errors": 0,
+      "retained_screenshots": 3,
+      "native_event_count": 19,
+      "termination": "task_incomplete",
+      "verification_wall_time_seconds": 0.5422736164182425,
+      "verification_attempt_count": 1,
+      "checks": [
+        {
+          "label": "0. input_files_exist",
+          "weight": 1,
+          "passed": true
+        },
+        {
+          "label": "1. scream_content_exists",
+          "weight": 1,
+          "passed": true
+        },
+        {
+          "label": "2. scream_status_planned",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "3. scream_no_rating",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "4. cross_modal_poster_title",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "5. siyuan_doc_exists",
+          "weight": 1,
+          "passed": false
+        },
+        {
+          "label": "6. siyuan_doc_in_episode_planning",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "7. siyuan_doc_mentions_scream",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "8. siyuan_doc_length_gte50",
+          "weight": 1,
+          "passed": false
+        }
+      ]
+    },
+    "browser_use": {
+      "reward_profile": {
+        "mean/reward": 0.143,
+        "max/reward": 0.143,
+        "min/reward": 0.143,
+        "median/reward": 0.143,
+        "std/reward": 0.0
+      },
+      "task_id": "media_027",
+      "step_cap": 5,
+      "harness_version": "browser-use-0.13.7",
+      "score": 0.143,
+      "mask_sample": false,
+      "native_verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_outcome_action": null,
+      "tool_calls": 6,
+      "tool_errors": 0,
+      "retained_screenshots": 2,
+      "native_event_count": 4,
+      "termination": "task_incomplete",
+      "verification_wall_time_seconds": 0.5409601647406816,
+      "verification_attempt_count": 1,
+      "checks": [
+        {
+          "label": "0. input_files_exist",
+          "weight": 1,
+          "passed": true
+        },
+        {
+          "label": "1. scream_content_exists",
+          "weight": 1,
+          "passed": true
+        },
+        {
+          "label": "2. scream_status_planned",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "3. scream_no_rating",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "4. cross_modal_poster_title",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "5. siyuan_doc_exists",
+          "weight": 1,
+          "passed": false
+        },
+        {
+          "label": "6. siyuan_doc_in_episode_planning",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "7. siyuan_doc_mentions_scream",
+          "weight": 2,
+          "passed": false
+        },
+        {
+          "label": "8. siyuan_doc_length_gte50",
+          "weight": 1,
+          "passed": false
+        }
+      ]
+    }
+  },
+  "security_controls": {
+    "network": {
+      "passed": true,
+      "cases": [
+        {
+          "disable_host_loopback": false,
+          "connected": true
+        },
+        {
+          "disable_host_loopback": true,
+          "connected": false,
+          "error_type": "URLError"
+        }
+      ]
+    },
+    "exec_environment": {
+      "passed": true,
+      "stand_in_namespaces": true,
+      "real_subprocesses": true,
+      "cases": {
+        "env": {
+          "judge_present": false,
+          "config_present": false,
+          "visible": null
+        },
+        "cat": {
+          "judge_present": false,
+          "config_present": false,
+          "visible": "explicit-value"
+        }
+      }
+    }
+  }
+}

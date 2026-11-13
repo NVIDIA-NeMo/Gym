@@ -1,0 +1,156 @@
+[
+  {
+    "comment_id": 4557546242,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546242",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/NOTICE",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546257,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546257",
+    "path": "responses_api_agents/saas_bench_agent/browser_worker.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546322,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546322",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "documented-follow-up",
+    "evidence": "benchmark/VENDORING.md: Harness migration boundary"
+  },
+  {
+    "comment_id": 4557546330,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546330",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546340,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546340",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/saas_bench/verify_runner.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546356,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546356",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546372,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546372",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/saas_bench/verify_runner.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546383,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546383",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546393,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546393",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546403,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546403",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/saas_bench/enroot_slot.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546413,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546413",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/saas_bench/enroot_slot.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546422,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546422",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/scripts/nrt/docker_enroot_shim.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546440,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546440",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546455,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546455",
+    "path": "responses_api_agents/saas_bench_agent/app.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546470,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546470",
+    "path": "benchmarks/saas_bench_opencode/config.yaml",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546483,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546483",
+    "path": "benchmarks/saas_bench_opencode/config.yaml",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546497,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546497",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_143/verify.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546502,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546502",
+    "path": "responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_012/verify.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546508,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546508",
+    "path": "responses_api_agents/saas_bench_agent/runtime.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546521,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546521",
+    "path": ".pre-commit-config.yaml",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546533,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546533",
+    "path": "responses_api_agents/saas_bench_agent/verifier_transport.py",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  },
+  {
+    "comment_id": 4557546551,
+    "url": "https://github.com/NVIDIA-NeMo/Gym/pull/5969#discussion_r4557546551",
+    "path": "benchmarks/saas_bench_opencode/manifest.yaml",
+    "status": "fixed",
+    "evidence": "Reviewed implementation, tests and publication receipts"
+  }
+]
