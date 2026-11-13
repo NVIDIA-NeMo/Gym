@@ -167,8 +167,10 @@ async def test_full_conversation_alternates_and_ends_with_the_persona() -> None:
     assert verify["transcript"][1]["raw_response"] == persona_text("Not much.", internal="guarded")
     assert verify["response"]["output"][0]["content"][0]["text"] == "That sounds hard."
     assert verify["scenario_id"] == "s1"
-    # Usage covers the two policy calls only.
-    assert result.response.usage.input_tokens == 20
+    # Usage covers the whole conversation: two policy calls of 10 tokens and two persona calls of 99.
+    assert result.response.usage.input_tokens == 218
+    # Without model-call capture there is no trajectory record.
+    assert "ng_trajectory" not in (result.model_extra or {})
     assert result.reward == 0.75 and result.comparisons == [{"opponent": "x", "fraction": 0.75}]
 
 
@@ -267,6 +269,103 @@ async def test_retried_policy_reply_continues_the_conversation() -> None:
     await make_agent(servers).run(request(), make_body())
     assert servers.verify_body()["conversation_status"] == "persona_ended"
     assert len(servers.bodies("eqbench4_agent")) == 2
+
+
+@pytest.fixture
+def capturing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model-call capture on, for rollout r-1."""
+    monkeypatch.setattr(EQBench4Agent, "_model_call_capture_enabled", lambda self: True)
+    monkeypatch.setattr(EQBench4Agent, "rollout_id_from_run", lambda self, body: "r-1")
+
+
+def captured_body(num_turns: int = 2) -> EQBench4RunRequest:
+    return EQBench4RunRequest.model_validate(make_body(num_turns).model_dump() | {"_ng_task_index": 4})
+
+
+def turn_ids(trajectory: dict[str, Any]) -> list[tuple[str, int]]:
+    return [(turn["invocation_id"], turn["turn_no"]) for turn in trajectory["turns"]]
+
+
+async def test_capture_records_a_turn_per_model_call_owned_by_its_speaker(capturing: None) -> None:
+    policy = [model_response("Hello, what's up?"), model_response("That sounds hard.")]
+    persona = [persona_text("Not much."), persona_text("Yeah.")]
+    servers = FakeServers(policy=policy, persona=persona)
+    inbound = request()
+    result = await make_agent(servers).run(inbound, captured_body())
+
+    trajectory = result.model_extra["ng_trajectory"]
+    assert (trajectory["task_id"], trajectory["rollout_id"]) == ("4", "r-1")
+    assert turn_ids(trajectory) == [("root", 1), ("persona", 1), ("root", 2), ("persona", 2)]
+    root, persona_invocation = trajectory["invocations"]
+    assert (root["invocation_id"], root["status"]) == ("root", "completed")
+    assert [ref["response_id"] for ref in root["model_calls"]] == [reply["id"] for reply in policy]
+    assert {ref["model_ref"]["name"] for ref in root["model_calls"]} == {"policy_model"}
+    assert (persona_invocation["invocation_id"], persona_invocation["status"]) == ("persona", "completed")
+    assert {ref["model_ref"]["name"] for ref in persona_invocation["model_calls"]} == {"persona"}
+    # Each turn names exactly the call it was, and carries what that call was asked and answered.
+    first, persona_first = trajectory["turns"][:2]
+    assert first["model_calls"] == [root["model_calls"][0]] and first["resolved"] is None
+    assert [(m["role"], m["content"]) for m in first["question"]] == [
+        ("system", "sys 1"),
+        ("user", "[Presenting issue]"),
+    ]
+    assert first["answer"][0]["content"][0]["text"] == "Hello, what's up?"
+    assert persona_first["question"][0] == {"role": "system", "content": "be the persona"}
+    assert [gap["code"] for gap in trajectory["gaps"]] == ["resolution_unavailable"]
+    assert trajectory["tool_calls"] == []
+    # The record is also published for the failure report.
+    assert inbound.state.nemo_gym_agent_trajectory.turns[-1].invocation_id == "persona"
+
+
+async def test_capture_records_retried_replies_and_a_stopped_policy(capturing: None) -> None:
+    servers = FakeServers(policy=["", "Hello.", "", ""], persona=[persona_text("Go on.")])
+    result = await make_agent(servers, policy_max_attempts=2).run(request(), captured_body())
+    trajectory = result.model_extra["ng_trajectory"]
+    # Every policy call is a turn, a retried empty reply too.
+    assert turn_ids(trajectory) == [("root", 1), ("root", 2), ("persona", 1), ("root", 3), ("root", 4)]
+    root = trajectory["invocations"][0]
+    assert (root["status"], root["stop_reason"]) == ("failed", "empty_reply")
+    assert trajectory["invocations"][1]["status"] == "completed"
+
+
+async def test_capture_marks_the_speaker_whose_call_failed(capturing: None) -> None:
+    servers = FakeServers(policy=["Hi."], persona=[])
+
+    async def post(*, server_name: str, url_path: str, json: Any, **kwargs: Any) -> FakeResponse:
+        if server_name == "persona":
+            raise ConnectionError("persona endpoint down")
+        return await FakeServers.post(servers, server_name=server_name, url_path=url_path, json=json, **kwargs)
+
+    agent = make_agent(servers)
+    agent.server_client.post = post
+    inbound = request()
+    with pytest.raises(ConnectionError):
+        await agent.run(inbound, captured_body())
+    record = inbound.state.nemo_gym_agent_trajectory
+    root, persona_invocation = record.invocations
+    assert (root.status, root.error_type) == ("incomplete", None)
+    # The persona's call raised: its invocation carries the failure, though it never answered.
+    assert (persona_invocation.status, persona_invocation.error_type) == ("failed", "ConnectionError")
+    assert persona_invocation.model_calls == []
+    assert [(turn.invocation_id, turn.turn_no) for turn in record.turns] == [("root", 1)]
+
+
+async def test_a_reply_without_a_response_id_is_reported_as_a_gap(capturing: None) -> None:
+    unidentified = model_response("Hi.") | {"id": ""}
+    servers = FakeServers(policy=[unidentified], persona=[persona_text("Bye.", status="done")])
+    result = await make_agent(servers).run(request(), captured_body())
+    trajectory = result.model_extra["ng_trajectory"]
+    assert trajectory["turns"][0]["model_calls"] == []
+    assert {"code": "model_call_reference_unavailable", "invocation_id": "root", "detail": "turn:1"} in [
+        {key: gap.get(key) for key in ("code", "invocation_id", "detail")} for gap in trajectory["gaps"]
+    ]
+
+
+async def test_a_persona_failure_leaves_the_policy_invocation_incomplete(capturing: None) -> None:
+    servers = FakeServers(policy=["Hi."], persona=["<dialogue>no monologue</dialogue>"])
+    result = await make_agent(servers, persona_max_attempts=1).run(request(), captured_body())
+    root, persona_invocation = result.model_extra["ng_trajectory"]["invocations"]
+    assert (root["status"], persona_invocation["status"]) == ("incomplete", "failed")
 
 
 @pytest.mark.parametrize(

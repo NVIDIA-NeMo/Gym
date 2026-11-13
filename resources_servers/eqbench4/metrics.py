@@ -25,7 +25,10 @@ _STOP_ADVICE = {
     "context_limit": "serve the policy with a longer context window",
     "output_budget": "raise max_output_tokens or lower the policy's reasoning effort",
     "content_filter": "check the provider's content filter",
-    "empty_reply": "inspect the policy's replies in the rollouts",
+    "empty_reply": (
+        "inspect the policy's replies in the rollouts; a server reasoning parser hides the whole reply as reasoning "
+        "when the model does not close </think>"
+    ),
 }
 
 
