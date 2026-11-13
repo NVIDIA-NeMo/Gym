@@ -12,9 +12,7 @@ from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 CONFIGS = PARENT_DIR / "resources_servers" / "vibench" / "configs"
 
 
-def _server_config(
-    server_name: str, config_path: str = "resources_servers/vibench/configs/vibench_sessions.yaml"
-) -> dict:
+def _server_config(server_name: str, config_path: str = "resources_servers/vibench/configs/vibench.yaml") -> dict:
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
@@ -51,8 +49,8 @@ def test_the_docker_overlay_gives_only_the_model_server_the_host_address():
     assert docker["absolute_ip_server_types"] == ["responses_api_models"]
 
 
-def test_the_default_config_still_runs_vibench_agent_against_this_server():
-    config_path = "resources_servers/vibench/configs/vibench.yaml"
+def test_the_legacy_agent_config_still_runs_vibench_agent_against_this_server():
+    config_path = "resources_servers/vibench/configs/vibench_legacy_agent.yaml"
     agent = _server_config("vibench_opencode_agent", config_path)
     resources = _server_config("vibench_resources_server", config_path)
     environment = _server_config("vibench_opencode_environment_server", config_path)

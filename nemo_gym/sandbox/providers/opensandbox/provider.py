@@ -84,7 +84,7 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.utils.exception_inspection import error_to_http_status
+from nemo_gym.utils.exception_inspection import error_to_http_status, explicit_causes
 
 
 LOGGER = logging.getLogger(__name__)
@@ -339,6 +339,43 @@ def _is_request_timeout(exception: BaseException) -> bool:
             return True
         current = current.__cause__
     return False
+
+
+def _request_was_not_sent(exception: BaseException) -> bool:
+    """Whether the transport failed before the request left the client, so sending it again cannot run it twice.
+
+    The innermost transport error in the cause chain decides, as in the SWE-bench Pro patch capture. The SDK wraps
+    its client's error, and Gym's aiohttp transport re-raises every aiohttp connection error as
+    ``httpx.ConnectError``, a reset after the request was written included; the aiohttp error underneath says
+    whether the connection ever opened. httpx raises ``ConnectError`` and ``ConnectTimeout`` only while it opens a
+    connection, and ``PoolTimeout`` while it waits for one.
+    """
+    import socket
+
+    import httpx
+
+    unsent: tuple[type[BaseException], ...] = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+        ConnectionRefusedError,
+        socket.gaierror,
+    )
+    sent: tuple[type[BaseException], ...] = (httpx.TransportError,)
+    try:
+        import aiohttp
+
+        unsent += (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError)
+        sent += (aiohttp.ClientError,)
+    except ModuleNotFoundError:
+        pass
+    not_sent = False
+    for link in explicit_causes(exception):
+        if isinstance(link, unsent):
+            not_sent = True
+        elif isinstance(link, sent):
+            not_sent = False
+    return not_sent
 
 
 def _is_retryable_create_error(
@@ -1622,10 +1659,12 @@ class OpenSandboxProvider:
         timeout_s: float | None,
         retries: int,
     ) -> Any:
-        """Submit once: neither a 502 nor a timeout proves non-delivery.
+        """Submit once unless the request never left the client.
 
-        Command retry settings cannot override this safety constraint. The provider
-        has no idempotency key or authoritative non-delivery receipt.
+        Neither a 502 nor a timeout proves non-delivery, and command retry settings cannot
+        override that: the provider has no idempotency key or authoritative non-delivery
+        receipt. A connection that never opened is that receipt, so such a failure, and only
+        such a failure, is sent again within ``operations.retries``.
         """
         renewal = self._renewals.get(sandbox_id)
         if renewal is not None and renewal.done() and not renewal.cancelled():
@@ -1638,14 +1677,15 @@ class OpenSandboxProvider:
                     failure_kind=PROVIDER_UNAVAILABLE,
                     reason="Sandbox lifetime renewal failed before command submission",
                 ) from error
-        try:
-            return await self._await_sdk_call(
-                operation_factory(), operation=operation, sandbox_id=sandbox_id, timeout_s=timeout_s
-            )
-        except Exception as error:
-            if isinstance(error, NgFailureEvent):
-                raise
-            raise opensandbox_failure(operation=operation, sandbox_id=sandbox_id, cause=error) from error
+        return await self._await_sdk_operation(
+            operation_factory,
+            operation=operation,
+            sandbox_id=sandbox_id,
+            timeout_s=timeout_s,
+            retries=self._operations.retries,
+            is_retryable=_request_was_not_sent,
+            replay_safe=True,
+        )
 
     async def _run_setup_commands(self, handle: SandboxHandle) -> None:
         for command in self._setup.commands:
@@ -2449,8 +2489,13 @@ class OpenSandboxProvider:
                     if _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
                         # The lifecycle API exposes a workload reason without a container identity.
                         # Keep OOMKilled as evidence, but do not attribute a possible sidecar OOM.
+                        # Keep the control plane's own report as bounded evidence: it is what tells a reader
+                        # whether the workload hit its limit or was evicted. It never changes the failure kind.
+                        report = getattr(status, "message", None)
+                        detail = f", message={report[:256]!r}" if isinstance(report, str) and report else ""
                         terminal_notice = _SandboxDeathNotice(
-                            f"Sandbox is unavailable; lifecycle status: state={state!r}, reason={str(reason)[:256]!r}",
+                            f"Sandbox is unavailable; lifecycle status: state={state!r}, "
+                            f"reason={str(reason)[:256]!r}{detail}",
                             failure_kind=PROVIDER_UNAVAILABLE,
                             provider_status_reason=reason if isinstance(reason, str) else None,
                         )

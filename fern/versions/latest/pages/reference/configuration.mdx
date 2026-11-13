@@ -177,6 +177,36 @@ When metrics export is active at client construction, Gym uses `QueueTimedTCPCon
 connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
 without collecting these metrics.
 
+### HTTP Timeouts and Retries Between Servers
+
+Two settings bound how long one call from a Gym server to another waits on an unreachable peer.
+
+```yaml
+global_aiohttp_sock_connect_timeout_seconds: 60
+global_aiohttp_internal_retry_budget_seconds: 600
+```
+
+`global_aiohttp_sock_connect_timeout_seconds` (default `60`) limits one TCP handshake. It does not
+count the wait for a free connection-pool slot, so a request queued behind a busy pool is not cut
+short. Total and read time stay unlimited unless the caller passes its own timeout, because a model
+generation or a `/run` episode can run for hours. A handshake that times out counts as a connection
+that was never made: the request cannot have been delivered, so it is retried like a refused
+connection, within the caller's limits and even where a dropped connection is not resent.
+
+`global_aiohttp_internal_retry_budget_seconds` (default `600`) is the retry budget of a call between
+Gym servers whose caller sets none of `_max_num_tries`, `_max_connection_retries` or a connection
+retry window. Such a call retries quietly through a peer that is restarting, and past the budget it
+raises the last error. Two clocks make up the budget:
+
+- **Connection errors.** The window opens at the first connection error and closes when the server
+  answers, so it bounds an unbroken run of failures. After the first connection error, the window
+  also bounds each attempt's wait for a free pool slot, not only the handshake.
+- **Other errors**, such as a timeout or a DNS failure. The cap is the time since the call started.
+
+A call that sets its own limit uses that limit and not the budget. Set the budget to `0` to retry
+without a time limit, as before. Model connection retries are separate: `connection_retry_timeout_s`
+on a model client stays unset by default.
+
 ### Listen Backlog
 
 `uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them
