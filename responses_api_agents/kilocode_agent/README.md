@@ -4,7 +4,9 @@ Runs the [Kilo Code](https://kilo.ai) CLI (`kilo run`). Kilo Code is a fork of O
 agent mirrors the `opencode_agent`: Kilo runs its own tools internally, and its JSON event stream
 (`--format json`) is parsed into Gym format and verified by the resources server.
 
-Minimal, meant to be extended, and currently eval-only: token IDs and logprobs are not wired up.
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Quick start
 
@@ -209,9 +211,11 @@ is destroyed at close, so verifiers that inspect the repository need a Resources
 
 ### Requests and results
 
-Requests carry one text user message, optionally preceded by a system/developer message. Other
-request fields, model overrides, `repo_dir`, `extra_args` and `env` are rejected. Identical
-activation retries join the running task; session close owns cancellation.
+Requests carry one text user message, optionally preceded by a system/developer message. Request
+`metadata` may carry only the task's `agent_timeout_sec`, which shortens the sandbox run to
+min(`timeout`, `agent_timeout_sec`). Other request fields, metadata keys, model overrides,
+`repo_dir`, `extra_args` and `env` are rejected. Identical activation retries join the running
+task; session close owns cancellation.
 
 CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero (local runs
 mark them `failed` instead; see Quick start). A killed run
@@ -220,5 +224,5 @@ call completes: Kilo retries an unreachable model server without reporting it, s
 with the end of Kilo's log instead. Observations come from a snapshot of Kilo's
 SQLite database, taken on the agent server after the run (root and child sessions, tool calls with timing and bash exit status, usage),
 annotated with the root outcome and a sandbox record; if the snapshot is unavailable, a coverage gap
-is reported. The response metadata records the sandbox runner's hostname and PID and the Kilo
-version. Token IDs and logprobs are not available.
+is reported. The response metadata records the sandbox runner's hostname and PID, the Kilo
+version and the applied `agent_timeout_sec`.

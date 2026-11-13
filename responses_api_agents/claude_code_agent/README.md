@@ -113,6 +113,7 @@ claude_code_agent:
       claude_code_version: null
       thinking: null
       max_thinking_tokens: null
+      fold_thinking: null
       bare: true
       mcp_config: null
       settings: null
@@ -130,6 +131,7 @@ claude_code_agent:
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
+- `fold_thinking`: whether thinking is folded into the assistant message text as `<think>...</think>`. `null` (default) folds it unless training-token capture is on. `false` returns the capture-style transcript without capture: thinking as separate `reasoning` items, so the final message holds only the answer (useful when a judge grades the final message). `true` is rejected under capture
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
@@ -208,7 +210,8 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
   attribute the parent transcript without assigning its reward to a subagent's captured chain.
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
-  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
+  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted, unless
+  `fold_thinking: false` selects the capture-style transcript.
 - `turns_used` counts assistant messages, not tool calls.
 - Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
   command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it

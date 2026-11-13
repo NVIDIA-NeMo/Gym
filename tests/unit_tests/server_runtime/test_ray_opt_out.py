@@ -15,10 +15,10 @@ import nemo_gym.server_runtime.base_server
 import nemo_gym.server_runtime.ray_support
 from nemo_gym import PARENT_DIR
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
-from nemo_gym.orchestration.server_supervisor import _ray_server_names
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_class_flag
 from nemo_gym.server_runtime.ray_support import _connect_server_to_ray, _declared_ray_enabled, entrypoint_ray_enabled
+from nemo_gym.server_runtime.supervisor.server_supervisor import _ray_server_names
 
 
 WITH_CLUSTER = OmegaConf.create({"ray_head_node_address": "10.0.0.1:6379"})
@@ -52,6 +52,8 @@ INHERITED_RAY_DECLARATIONS = {
     ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
+    # Serves agent sessions only and refuses /run; app.py keeps Ray for the SWE-Gym /run path.
+    ("responses_api_agents/mini_swe_agent/sessions_app.py", "MiniSWESessionsAgent"): False,
 }
 
 
@@ -362,7 +364,7 @@ def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch, entrypoint)
     def unexpected_ray_check():
         pytest.fail("sandbox-only server must not check or initialize Ray")
 
-    monkeypatch.setattr("nemo_gym.orchestration.server_supervisor.ray_is_installed", unexpected_ray_check)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_supervisor.ray_is_installed", unexpected_ray_check)
     monkeypatch.setattr("nemo_gym.server_runtime.ray_support.initialize_ray", unexpected_ray_check)
     server = SimpleNamespace(
         top_level_path="code_gen",

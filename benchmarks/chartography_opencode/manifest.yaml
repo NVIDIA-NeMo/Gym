@@ -1,0 +1,31 @@
+name: chartography_opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: Chartography professional chart reading with tools, solved by OpenCode in a sandbox with a Python
+  image toolkit and graded by the benchmark's own LLM judge; the headline metric is the all-pass rate over ten
+  runs per task.
+modality: multimodal
+licensing: CC-BY-4.0
+authors:
+- Tuomas Rintamaki
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: chartography
+agent_server: opencode_agent
+datasets:
+- name: chartography_opencode
+  type: benchmark
+  jsonl_fpath: benchmarks/chartography_opencode/data/chartography_opencode_benchmark.jsonl
+  prepare_script: benchmarks/chartography_opencode/prepare.py
+  num_repeats: 10
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -40,7 +40,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -59,6 +59,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -155,10 +156,6 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        # Session state lives in this process, so a second worker would serve tool calls
-        # for browsers it does not hold.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("interactive_browser keeps browsers in-process and requires num_workers=1")
         self._session_id_to_state = {}
         # Episode sessions, which an Environment Server seeded under its own resources_session_id.
         self._episode_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
@@ -361,7 +358,11 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     # ----- reward -------------------------------------------------------- #
     def _verify_response(
-        self, body: BrowserVerifyRequest, reward: float, failure_reason: Optional[str] = None
+        self,
+        body: BrowserVerifyRequest,
+        reward: float,
+        failure_reason: Optional[str] = None,
+        failure_kind: Optional[str] = None,
     ) -> BaseVerifyResponse:
         """Build the response without letting a request field collide with a response one.
 
@@ -373,6 +374,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             **{k: v for k, v in body.model_dump().items() if k not in _RESPONSE_OWNED_FIELDS},
             reward=reward,
             failure_reason=failure_reason,
+            failure_kind=failure_kind,
         )
 
     async def verify(self, request: Request, body: BrowserVerifyRequest) -> BaseVerifyResponse:
@@ -387,17 +389,18 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
                 **lost_session_verification("browser session not found at verify"),
             )
 
-        reward, failure_reason = 0.0, None
+        reward, failure_reason, failure_kind = 0.0, None, None
         try:
             reward = await self._score(st)
         except _ScoringUnavailable as exc:
             # The browser died before it could be read. The rollout itself may have been
             # fine; what failed is the measurement. Raising here would abort the whole
             # collection run, because only JudgeError is converted to a routed row.
-            failure_reason = str(exc)
+            # The kind names the failed measurement; the row stays unmasked, as it was.
+            failure_reason, failure_kind = str(exc), VERIFIER_ERROR
         finally:
             await self._release(session_id)
-        return self._verify_response(body, reward=reward, failure_reason=failure_reason)
+        return self._verify_response(body, reward=reward, failure_reason=failure_reason, failure_kind=failure_kind)
 
     async def _score(self, st: _SessionState) -> float:
         gt = st.gt or {}
@@ -433,3 +436,6 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     InteractiveBrowserResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = InteractiveBrowserResourcesServer.run_webserver()  # noqa: F401

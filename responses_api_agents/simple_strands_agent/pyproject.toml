@@ -6,7 +6,7 @@ name = "gym-responses-api-agents-simple-strands-agent"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev]",
+    "nemo-gym[dev,sandbox]",
     "simple-strands-agent @ git+https://github.com/strands-labs/benchmark-harnesses.git@fd9395b672b670ddb6b90de19723327f007b0655#subdirectory=simple-strands-agent",
 ]
 
@@ -31,7 +31,7 @@ override-dependencies = [
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
     "numpy==2.3.2",
-    "openai==2.44.0",
+    "openai==2.45.0",
     "pyarrow>=25.0.1",
 ]
 exclude-dependencies = [

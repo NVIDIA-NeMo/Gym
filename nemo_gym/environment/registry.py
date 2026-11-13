@@ -340,6 +340,33 @@ def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
     return tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
 
 
+# The outputs of the legacy five-example server contract. A server that has either one stays on that contract.
+LEGACY_SERVER_OUTPUTS = ("example_metrics.json", "example_rollouts.jsonl")
+
+
+def manifest_workloads_for_server(
+    server_name: str, server_dir: Path, catalog: Iterable[EnvironmentCatalogEntry] | None = None
+) -> tuple[EnvironmentCatalogEntry, ...]:
+    """The manifest workloads whose verifier fixtures validate a resources server, or none when it keeps the legacy
+    five-example contract.
+
+    A resources server that only manifest workloads use carries committed verifier fixtures instead of the legacy
+    ``data/example_metrics.json`` and ``data/example_rollouts.jsonl``. It is validated through every manifest workload
+    that names it (each has its own reward contract) when at least one does and the server has neither legacy output.
+    Either output keeps the server on the legacy contract, so a partly migrated server is still checked as before.
+
+    ``catalog`` defaults to the discovered catalog; ``server_dir`` is the server's directory, holding its ``data/``.
+    """
+    workloads = tuple(
+        entry
+        for entry in (discover_environment_catalog() if catalog is None else catalog)
+        if entry.manifest_path is not None and entry.resources_server == server_name
+    )
+    if any((Path(server_dir) / "data" / name).exists() for name in LEGACY_SERVER_OUTPUTS):
+        return ()
+    return workloads
+
+
 def resolve_catalog_entry(
     name: str,
     kind: CatalogKind | str | None = None,

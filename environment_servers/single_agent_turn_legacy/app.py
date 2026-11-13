@@ -24,6 +24,8 @@ from nemo_gym.core import (
     EpisodeId,
     FailureReportRow,
     maybe_rollout_id_from_run_body,
+    model_sampling_from_run_body,
+    skips_token_capture,
 )
 from nemo_gym.data import materialize_task
 from nemo_gym.server_runtime import (
@@ -96,6 +98,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return SingleAgentTurnRequest(
             episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
+            model_sampling=model_sampling_from_run_body(row),
+            skip_token_capture=skips_token_capture(row),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:

@@ -248,6 +248,7 @@ class TestApp:
         server_client_post_mock.assert_called_once_with(
             server_name="tool_agent",
             url_path="/v1/responses",
+            headers={},
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[],
             ),
@@ -346,6 +347,7 @@ class TestApp:
             call(
                 server_name="tool_agent",
                 url_path="/v1/responses",
+                headers={},
                 json=NeMoGymResponseCreateParamsNonStreaming(
                     input=[
                         NeMoGymEasyInputMessage(
@@ -524,6 +526,7 @@ class TestApp:
         server_client_post_mock.assert_called_once_with(
             server_name="tool_agent",
             url_path="/v1/responses",
+            headers={},
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[
                     NeMoGymEasyInputMessage(

@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OpenHands borrows SandboxAccess from the Environment Server. The run configuration
+# binds the independent benchmark and agent; this config selects only the harness and model.
+openhands_agent:
+  responses_api_agents:
+    openhands_agent:
+      entrypoint: app.py
+      resources_server: null
+      # Every model call, including the condenser's summaries, goes through this Gym model server.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      num_workers: 1
+      concurrency: 8
+      # Seconds per activation. Raise it for long-horizon benchmarks.
+      timeout: 1800
+      # OpenHands' own step limit; reaching it ends the run as incomplete, with its work graded.
+      max_iterations: 500
+      condenser: true
+      # OpenHands SDK LLM settings (see SUPPORTED_LLM_SETTINGS in app.py). Keep sampling on the model server.
+      llm_settings:
+        # OpenHands otherwise sends reasoning_effort: high to models it believes support it.
+        reasoning_effort: null
+        # Per model call, in seconds. OpenHands sends each call once; the model server retries transient failures.
+        timeout: 600
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host
+      # The first seed for each sandbox glibc level builds the runtime on this host with uv, which takes minutes.
+      sandbox_install_timeout_seconds: 1200
+      session_close_timeout_seconds: 60

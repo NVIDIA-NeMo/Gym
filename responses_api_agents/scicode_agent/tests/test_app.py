@@ -172,6 +172,35 @@ def test_prefilled_steps_present():
     assert set(PREFILLED_STEPS_CODE.keys()) == {("13", 5), ("62", 0), ("76", 2)}
 
 
+# SHA-256 of the official SciCode unscored-step files for 13.6 and 62.1 (the same files SciCode-Verified pins).
+_OFFICIAL_PREFILL_SHA256 = {
+    ("13", 5): "795a2b57c2d9bb12ca4eaf16d6b8e1f202015a89a886628858abf42a1b18a94e",  # pragma: allowlist secret
+    ("62", 0): "bc9931d88a7d5950091b72a996a25b8be6c936fd136b01005e22c3d45b0008a2",  # pragma: allowlist secret
+}
+
+
+def test_class_prefilled_steps_are_the_official_files():
+    import hashlib
+
+    for key, expected in _OFFICIAL_PREFILL_SHA256.items():
+        assert hashlib.sha256(PREFILLED_STEPS_CODE[key].encode("utf-8")).hexdigest() == expected
+
+
+def test_class_prefilled_steps_define_the_classes_later_steps_use():
+    # Later steps of problems 13 and 62 instantiate these classes, so the cumulative program must define them.
+    import numpy as np
+
+    maxwell = {"np": np, "zeros": np.zeros}
+    exec(PREFILLED_STEPS_CODE[("13", 5)], maxwell)
+    assert maxwell["Maxwell"](50, 2).E_x.shape == (50, 50, 50)
+
+    dmrg = {"np": np}
+    exec(PREFILLED_STEPS_CODE[("62", 0)], dmrg)
+    block = dmrg["Block"](1, 2, {"H": np.eye(2)})
+    assert (block.length, block.basis_size) == (1, 2)
+    assert dmrg["EnlargedBlock"].__name__ == "EnlargedBlock"
+
+
 # ----------------------------
 # agent
 # ----------------------------
@@ -286,6 +315,25 @@ class TestApp:
 
         assert model_calls == 1  # only the non-prefilled step is generated
         assert set(captured["verify"]["solutions"].keys()) == {"62.2"}
+
+    @pytest.mark.asyncio
+    async def test_run_puts_the_prefilled_classes_into_later_step_programs(self):
+        agent = _agent()
+        captured = {}
+
+        def _post(server_name, url_path, json, cookies):
+            if url_path == "/v1/responses":
+                return _Resp(_model_json("def block_initial(model_d):\n    return Block(1, model_d, {})"))
+            captured["verify"] = json
+            return _Resp({"reward": 0.0})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            await agent.run(_FakeRequest(), _run_request(problem_id="62", n_steps=2))
+
+        program = captured["verify"]["solutions"]["62.2"]
+        assert "class Block:" in program and "class EnlargedBlock:" in program
+        assert program.index("class Block:") < program.index("return Block(1, model_d, {})")
 
     @pytest.mark.asyncio
     async def test_run_uses_row_prefill_before_legacy_fallback(self):
@@ -483,10 +531,21 @@ class TestTokenAccounting:
     async def test_usage_sent_to_verifier_sums_all_steps_and_details(self):
         row = await _collect_usage([_usage(100), _usage(300, input_tokens=20)])
         assert row["token_usage_version"] == TOKEN_USAGE_VERSION
-        assert row["response"]["usage"] == _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
+        expected_usage = _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
+        expected_usage["input_tokens_details"]["cache_write_tokens"] = None
+        assert row["response"]["usage"] == expected_usage
         assert [{k: s[k] for k in ("step_number", "status", "usage")} for s in row["step_usage"]] == [
-            {"step_number": "1.1", "status": "generated", "usage": _usage(100)},
-            {"step_number": "1.2", "status": "generated", "usage": _usage(300, input_tokens=20)},
+            {
+                "step_number": "1.1",
+                "status": "generated",
+                "usage": _usage(100) | {"input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": None}},
+            },
+            {
+                "step_number": "1.2",
+                "status": "generated",
+                "usage": _usage(300, input_tokens=20)
+                | {"input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": None}},
+            },
         ]
         assert row["response"]["output"][0]["content"][0]["text"] == "```python\nx = 1\n```"
 
@@ -526,7 +585,9 @@ class TestTokenAccounting:
         ]
         assert row["response"]["usage"]["output_tokens"] == 100
         for i in (0, 2, 3):
-            assert row["step_usage"][i]["usage"] == _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
+            expected_usage = _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
+            expected_usage["input_tokens_details"]["cache_write_tokens"] = 0
+            assert row["step_usage"][i]["usage"] == expected_usage
         result = _aggregate([row])
         metrics = result.key_metrics
         assert metrics["mean/output_tokens_per_problem"] == 100
