@@ -336,7 +336,7 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
       Automatic compaction starts after a call whose tokens reach ``context_window`` minus this buffer; unset, the
       buffer is the smaller of 20000 and ``max_output_tokens``. It moves only that trigger, and the seed refuses a
       buffer of ``context_window`` or more, which would compact after every call. ``compaction.prune`` stays
-      refused: it rewrites old tool output, so later calls stop extending the earlier calls' prefix.
+      refused: it rewrites earlier tool output, so later calls stop extending the earlier calls' prefix.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.

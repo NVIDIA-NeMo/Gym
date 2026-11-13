@@ -190,7 +190,7 @@ to the scored call; a run that fills the context then ends with a context-limit 
 `compaction.reserved` (a positive integer) is the token buffer OpenCode keeps below `context_window`:
 automatic compaction starts after a call whose tokens reach `context_window` minus this buffer. Unset,
 the buffer is the smaller of 20000 and `max_output_tokens`. It moves only that trigger;
-`compaction.prune`, which rewrites old tool output, stays refused. A session refuses a buffer of
+`compaction.prune`, which rewrites earlier tool output, stays refused. A session refuses a buffer of
 `context_window` or more, which would compact after every call.
 `agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
 prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
