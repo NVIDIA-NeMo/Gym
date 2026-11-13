@@ -10,7 +10,7 @@ import json
 import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
 from pydantic import (
@@ -405,6 +405,39 @@ def tool_parent_cycles(tools: Iterable[ToolCallObservation]) -> set[tuple[str | 
     return cyclic
 
 
+class SandboxUsageMeasurement(ObservationModel):
+    """Measured CPU and memory of one sandbox from one accounting source, over the samples its owner took.
+
+    ``scope`` says what the numbers cover: ``container`` is the sandbox's own cgroup; ``process_tree`` is the
+    live processes in its namespaces, whose CPU is a lower bound of the container's (no CPU of processes that
+    exited between samples) and whose memory is the sum of per-process RSS (no page cache or kernel memory, but a
+    shared page counted once per process, so not a bound of the container's memory); ``shared_step`` is a cgroup
+    the sandbox shares with Gym and sibling sandboxes, whose ``cpu_usage_usec_delta`` covers all of them while
+    this sandbox lived. A ``sampled_lower_bound`` kind is the largest value of that quantity observed, so its true
+    peak may be higher.
+    """
+
+    source: str = Field(
+        description="Accounting read: cgroup_v2; procfs_pidns / procfs_mntns / procfs_pidns_mntns for the "
+        "namespaces that selected the process tree; exec_rusage for the CPU of completed execs."
+    )
+    scope: Literal["container", "process_tree", "shared_step"]
+    clock: str = Field(description="Clock of the sample times, such as gym_host (Unix time on the Gym host).")
+    first_sampled_at: float
+    last_sampled_at: float
+    sample_count: int = Field(ge=1)
+    cpu_usage_usec_total: Optional[int] = Field(default=None, ge=0)
+    cpu_usage_usec_delta: Optional[int] = Field(default=None, ge=0)
+    cpu_kind: Optional[Literal["counter", "sampled_lower_bound"]] = None
+    memory_peak_bytes: Optional[int] = Field(default=None, ge=0)
+    peak_kind: Optional[Literal["counter", "sampled_lower_bound"]] = None
+    memory_current_bytes: Optional[int] = Field(default=None, ge=0)
+    memory_anon_bytes: Optional[int] = Field(default=None, ge=0)
+    memory_file_bytes: Optional[int] = Field(default=None, ge=0)
+    includes_page_cache: Optional[bool] = None
+    process_count: Optional[int] = Field(default=None, ge=0)
+
+
 class SandboxObservation(ObservationModel):
     """Outcome and lifetime resource usage reported by a sandbox-owning harness."""
 
@@ -429,6 +462,13 @@ class SandboxObservation(ObservationModel):
         description="Measured sandbox high-water mark, never its configured memory limit.",
     )
     resource_usage_source: Optional[str] = None
+    resource_usage: Optional[list[SandboxUsageMeasurement]] = Field(
+        default=None,
+        # Left out of dumps when unmeasured, so records stay readable by schemas that predate the field.
+        exclude_if=lambda value: value is None,
+        description="Measured usage by scope, recorded only by the sandbox's creator; cpu_time_s and "
+        "peak_memory_mib repeat its container-scope counters.",
+    )
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     failure_id: Optional[str] = Field(
@@ -447,6 +487,30 @@ class SandboxObservation(ObservationModel):
     cleanup_errors: list[str] = Field(
         default_factory=list, description="Every failed close or client release, in order; kept after a retry."
     )
+
+
+def resource_usage_fields(summaries: Iterable[Any]) -> dict[str, Any]:
+    """The ``SandboxObservation`` usage fields for a sandbox's measured usage summaries, or none.
+
+    Each summary carries ``SandboxUsageMeasurement``'s fields (a dataclass or a mapping). ``cpu_time_s``,
+    ``peak_memory_mib`` and ``resource_usage_source`` come only from a container-scope counter: a process-tree
+    lower bound or a shared cgroup's total is never reported as the sandbox's own.
+    """
+    measurements = [
+        SandboxUsageMeasurement.model_validate(asdict(summary) if is_dataclass(summary) else summary)
+        for summary in summaries
+    ]
+    if not measurements:
+        return {}
+    fields: dict[str, Any] = {"resource_usage": measurements}
+    container = next((item for item in measurements if item.scope == "container"), None)
+    if container is not None:
+        fields["resource_usage_source"] = f"{container.source}:{container.scope}"
+        if container.cpu_kind == "counter" and container.cpu_usage_usec_total is not None:
+            fields["cpu_time_s"] = container.cpu_usage_usec_total / 1_000_000
+        if container.peak_kind == "counter" and container.memory_peak_bytes is not None:
+            fields["peak_memory_mib"] = container.memory_peak_bytes / 2**20
+    return fields
 
 
 class ContextCompactionObservation(ObservationModel):

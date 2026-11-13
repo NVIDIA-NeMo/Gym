@@ -33,6 +33,7 @@ from nemo_gym.server_runtime._checkpoint.participant_workers import install_serv
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
 from nemo_gym.server_runtime.base_server import SimpleServer
+from nemo_gym.server_runtime.sandbox_usage import fill_reply_sandbox_usage, stopped_sandbox_usage
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
@@ -367,7 +368,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         deadline: asyncio.Timeout | None = None
         # Every downstream call of this episode, including final cleanup, carries its attempt-qualified
         # rollout id, so Resources and Model Server calls stay correlated with the rollout.
-        with rollout_context(request.episode_id.capture_key):
+        # The sandboxes this episode creates and stops, cleanup included, report their usage on its observations.
+        with rollout_context(request.episode_id.capture_key), stopped_sandbox_usage() as stopped:
             try:
                 try:
                     deadline = asyncio.timeout(await self.episode_timeout_seconds(request))
@@ -432,6 +434,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 update={"failure_report": (response.failure_report or FailureReport()).merged(cleanup.failure_report)}
             )
         self.validate_response_identity(request, response)
+        fill_reply_sandbox_usage(response, stopped)
         return response
 
     def setup_environment_checkpoint(self, app: FastAPI) -> None:

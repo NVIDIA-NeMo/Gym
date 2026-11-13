@@ -352,9 +352,21 @@ A sandbox started through `AsyncSandbox.start()` records its measured CPU and me
 measurement, one every `NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS` (default 5; 0 disables periodic samples).
 `NEMO_GYM_SANDBOX_USAGE=0` disables sampling. A sandbox rebuilt with `connect()` records nothing; its creator does.
 
-After `stop()`, `sandbox.resource_usage` holds one summary per measured scope, and the `gym.sandbox.stop` span
-reports it as `nemo.gym.sandbox.usage.<scope>.<source>.<field>` attributes next to `nemo.gym.sandbox.id` and the
-rollout id, for every sandbox whatever stopped it.
+Servers need no code for it. After `stop()`, `sandbox.resource_usage` holds one summary per measured scope, and
+`stop()` reports it in three places:
+
+- the `gym.sandbox.stop` span, as `nemo.gym.sandbox.usage.<scope>.<source>.<field>` attributes next to
+  `nemo.gym.sandbox.id` and the rollout id, for every sandbox whatever stopped it;
+- the `sandbox_observations` of the verification running when it stopped, as a `SandboxObservation` with
+  `role="agent"` for a sandbox lent to an agent through `serialize()` and `role="verifier"` otherwise. A record
+  the server makes for the same sandbox replaces it and keeps the usage;
+- the agent `/run` or agent-session close, or the Environment Server episode, that stopped it: every
+  `SandboxObservation` with that `sandbox_id` in the agent observations it returns, whether built before or after
+  the stop. An Environment Server that lends its sandbox to the agent (Harbor tasks) fills the agent's record.
+
+A sandbox stopped outside all of these, such as by a resources-session close or shutdown, is reported only on its
+span.
+Each sandbox's usage is recorded once, by the creator that stopped it.
 
 | Provider | Source | Scope |
 | --- | --- | --- |
@@ -363,6 +375,7 @@ rollout id, for every sandbox whatever stopped it.
 Other providers, including OpenSandbox, report no usage yet.
 
 - `container` values are kernel counters for the sandbox's own cgroup; memory includes page cache.
+  `SandboxObservation.cpu_time_s` and `peak_memory_mib` repeat them.
 
 ## Image Rewrites
 

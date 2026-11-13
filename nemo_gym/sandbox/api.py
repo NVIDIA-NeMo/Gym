@@ -512,6 +512,8 @@ class AsyncSandbox:
         self._resource_sampler: ResourceSampler | None = None
         self._resource_attributes: dict[str, Any] = {}
         self._usage_tracker: SandboxUsageTracker | None = None
+        # Set once serialize() handed out a descriptor: another component may have borrowed this sandbox.
+        self._lent = False
         # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
         # was counted by the process that started it and must not be subtracted here.
         self._counted_active = False
@@ -562,6 +564,11 @@ class AsyncSandbox:
         ``SupportsSandboxUsage``. Final once ``stop()`` has taken the sample before close.
         """
         return self._usage_tracker.summaries() if self._usage_tracker is not None else ()
+
+    @property
+    def lent(self) -> bool:
+        """Whether ``serialize()`` handed out a descriptor, so another component may have run in this sandbox."""
+        return self._lent
 
     @property
     def uploads_independent_of_execs(self) -> bool:
@@ -951,6 +958,7 @@ class AsyncSandbox:
             name = getattr(provider, "name", type(provider).__name__)
             raise RuntimeError(f"provider {name!r} does not support serialize()/connect()")
         descriptor = await provider.serialize_handle(self._require_handle(), scope=scope)
+        self._lent = True
         # Carry the working directory so a reattached sandbox lands in the same
         # place, even for providers whose descriptor does not include it (the
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
