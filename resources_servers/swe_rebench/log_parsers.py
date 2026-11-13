@@ -38,9 +38,9 @@ from typing import Callable
 
 
 UPSTREAM_REPO = "https://github.com/SWE-rebench/SWE-rebench-V2.git"
-# Pinned so a parser change upstream cannot silently move scores between runs. Bump
-# deliberately, and re-baseline when you do. c71902a8 (2026-03-12) is the tree the swe_agents
-# harness graded with.
+# Pinned so a parser change upstream cannot silently move scores between runs.
+# Bump it deliberately, and re-baseline when you do.
+# c71902a8 (2026-03-12) is the tree the swe_agents harness graded with.
 UPSTREAM_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"  # pragma: allowlist secret
 
 # Upstream has moved this file between releases; accept both layouts rather than pinning one.
@@ -52,10 +52,10 @@ _MODULE: ModuleType | None = None
 def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
     """Clone once across concurrent workers, using a mkdir lock.
 
-    ``gym env start`` may bring several server workers up at once, and an unsynchronised clone
-    into a shared path yields a half-written tree that imports with a confusing error. The tree
-    is built in a private staging directory and published with one rename, so a parser file under
-    ``destination`` always belongs to a complete checkout of ``UPSTREAM_COMMIT``.
+    ``gym env start`` may bring several server workers up at once.
+    An unsynchronised clone into a shared path would yield a half-written tree that imports with a confusing error.
+    The tree is built in a private staging directory and published with one rename.
+    A parser file under ``destination`` therefore always belongs to a complete checkout of ``UPSTREAM_COMMIT``.
     """
     if _parser_path(destination) is not None:
         return

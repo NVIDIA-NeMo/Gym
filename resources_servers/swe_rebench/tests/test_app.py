@@ -589,8 +589,10 @@ class TestMavenMirror:
 
 
 class TestLogParserPin:
-    """Graded results must not move when SWE-rebench-V2 changes upstream, and a parser cache
-    filled from another commit must not stand in for the pinned one."""
+    """Graded results must not move when SWE-rebench-V2 changes upstream.
+
+    A parser cache filled from another commit must not stand in for the pinned one.
+    """
 
     @staticmethod
     def _fake_git(calls: list, fail_on: str | None = None, on_call=None):
@@ -604,8 +606,9 @@ class TestLogParserPin:
             if command == "init":
                 Path(args[-1]).mkdir(parents=True)
             elif command in ("clone", "checkout"):
-                # Nothing calls `git clone` now; a clone here lands main's parsers in place, so the
-                # visibility test fails for code that clones into the destination before the pin.
+                # Nothing in log_parsers calls `git clone`.
+                # A clone here puts main's parsers in the destination before the pin is fetched.
+                # The visibility test relies on this to fail for code that clones into place.
                 root = Path(args[-1]) if command == "clone" else Path(cwd)
                 parser = root / "lib" / "agent" / "log_parsers.py"
                 parser.parent.mkdir(parents=True, exist_ok=True)
@@ -634,8 +637,10 @@ class TestLogParserPin:
         assert set(module.NAME_TO_PARSER) == {"checkout"}
 
     def test_the_tree_is_visible_only_once_the_pin_is_checked_out(self, monkeypatch, tmp_path) -> None:
-        """A worker waiting on the clone lock returns as soon as a parser file exists, so one must
-        never appear under the destination before the pinned checkout is complete."""
+        """A worker waiting on the clone lock returns as soon as a parser file exists.
+
+        No parser file may appear under the destination before the pinned checkout is complete.
+        """
         from resources_servers.swe_rebench import log_parsers
 
         destination = tmp_path / log_parsers._repo_dir_name()
