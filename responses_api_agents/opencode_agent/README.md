@@ -364,8 +364,12 @@ capture is on, then `task_environment.mjs`), in the given order, in every activa
 Seed checks that each path is a regular file and returns 422 otherwise. Their correctness
 is the owner's responsibility: OpenCode logs a plugin that fails to load and continues,
 so a plugin that matters must fail closed through its own receipt, as
-`task_environment.mjs` does with `task-environment.ready`. The adapter's environment is
-fixed, so plugins should read their settings from files beside them (`import.meta.url`).
+`task_environment.mjs` does with `task-environment.ready`. A session refuses the adapter's
+`env` setting, but OpenCode and its plugins run with the sandbox's environment, which its
+owner sets (`sandbox_config.env`, or `opencode_search`'s `episode_sandbox_env`); a variable
+the adapter sets itself, such as `HOME`, an XDG directory or `OPENCODE_CONFIG_CONTENT`,
+takes the adapter's value. An owner that cannot set the environment can put a plugin's
+settings in files beside it (`import.meta.url`).
 
 ### Pinned offline runtime bundle
 
