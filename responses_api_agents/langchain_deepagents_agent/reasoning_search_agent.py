@@ -12,46 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Concrete langchain_deepagents_agent instance: a TavilySearch-based deepagents graph wired in-tree, so
-model calls go through Gym's own model_server. Reused across both the reasoning_gym and tavily_search
-combo configs (see claude_code_agent/simple_agent for the repo-wide precedent of one agent class serving
-many resources servers via config, not langgraph_agent's subclasses, which just haven't been pointed at a
-second resources server yet).
-"""
+"""Compatibility names for the Tavily search profile; bundled configs use app.py."""
 
-from typing import Optional
-
-from deepagents import create_deep_agent
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_tavily import TavilySearch
+from typing import Literal
 
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent, DeepAgentsAgentConfig
 
 
 class ReasoningSearchDeepAgentConfig(DeepAgentsAgentConfig):
+    """Preserve the existing search config for callers importing its public class."""
+
+    tool_profile: Literal["tavily_search"] = "tavily_search"
     tavily_api_key: str
-    max_search_results: int = 5
-    system_prompt: Optional[str] = None
-    # Required, no default: without it, deepagents' SummarizationMiddleware falls back to a hardcoded,
-    # model-agnostic threshold (170k tokens, keep last 6 messages) unrelated to the real model.
-    max_input_tokens: int
 
 
 class ReasoningSearchDeepAgent(DeepAgentsAgent):
-    config: ReasoningSearchDeepAgentConfig
+    """Compatibility subclass using the shared in-process implementation."""
 
-    def build_agent(self, model: BaseChatModel):
-        # BaseChatModel.profile is a plain, already-inherited field (langchain_core) — deepagents reads
-        # model.profile["max_input_tokens"] when computing its summarization trigger/keep thresholds.
-        model.profile = {"max_input_tokens": self.config.max_input_tokens}
-        return create_deep_agent(
-            model=model,
-            tools=[
-                TavilySearch(max_results=self.config.max_search_results, tavily_api_key=self.config.tavily_api_key)
-            ],
-            system_prompt=self.config.system_prompt,
-        )
+    config: ReasoningSearchDeepAgentConfig
 
 
 if __name__ == "__main__":
