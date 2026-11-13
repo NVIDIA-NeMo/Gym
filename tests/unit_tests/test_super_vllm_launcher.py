@@ -696,6 +696,14 @@ run_service() {
 vllm() {
     printf '%s\0' "$CUDA_VISIBLE_DEVICES" "$VLLM_NIXL_SIDE_CHANNEL_HOST" \
         "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@" > "$TEST_STATE_DIR/engine-$CUDA_VISIBLE_DEVICES.args"
+    if [[ -n "${VLLM_RPC_BASE_PATH:-}" ]]; then
+        # A child must inherit a writable directory, with no other engine's lookup endpoint.
+        bash -c '
+            set -eu
+            mkdir "$VLLM_RPC_BASE_PATH/lookup-test"
+            printf "%s" "$VLLM_RPC_BASE_PATH"
+        ' > "$TEST_STATE_DIR/engine-$CUDA_VISIBLE_DEVICES.rpc"
+    fi
     run_service "engine-$CUDA_VISIBLE_DEVICES"
 }
 vllm-router() {
@@ -717,9 +725,16 @@ sleep() { "$TEST_SLEEP" 0.01; }
 """
             status, stdout, stderr = self.run_shell(stubs + command, env=env)
             recorded = {p.stem: p.read_text().rstrip("\0").split("\0") for p in root.glob("*.args")}
+            rpc_paths = {p.stem: Path(p.read_text()) for p in root.glob("*.rpc")}
+            if engines_per_node > 1:
+                self.assertEqual(set(rpc_paths), {name for name in recorded if name.startswith("engine-")})
+                self.assertEqual(len(set(rpc_paths.values())), len(rpc_paths))
+            for path in rpc_paths.values():
+                self.assertFalse(path.exists(), f"Leaked engine RPC directory: {path}")
+                self.assertFalse(path.parent.exists(), f"Leaked launcher RPC directory: {path.parent}")
             return status, stdout, stderr, recorded
 
-    def test_independent_engines_have_distinct_gpus_ports_and_router_endpoints(self) -> None:
+    def test_independent_engines_have_distinct_gpus_ports_rpc_paths_and_router_endpoints(self) -> None:
         for engines_per_node in (2, 4):
             gpu_groups = (
                 ("GPU-d,GPU-b", "GPU-a,GPU-c") if engines_per_node == 2 else ("GPU-d", "GPU-b", "GPU-a", "GPU-c")

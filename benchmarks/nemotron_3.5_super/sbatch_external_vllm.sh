@@ -941,6 +941,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
 else
     router_pid=""
     worker_pids=()
+    worker_rpc_dir=""
 
     cleanup_vllm() {
         local status=\$? child_pid
@@ -954,6 +955,9 @@ else
         if (( \${#child_pids[@]} )); then
             kill "\${child_pids[@]}" 2>/dev/null || true
             wait "\${child_pids[@]}" 2>/dev/null || true
+        fi
+        if [[ -n "\$worker_rpc_dir" ]]; then
+            rm -rf -- "\$worker_rpc_dir"
         fi
         cleanup_worker_services
         exit "\$status"
@@ -1008,7 +1012,11 @@ else
             (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
             ensure_nsys || return 1
         fi
+        # Independent DP=1 engines otherwise share Mooncake's rank-0 lookup socket.
+        # Keep the path short for Unix sockets and unique across concurrent launches.
+        worker_rpc_dir=\$(mktemp -d /tmp/vllm-rpc.XXXXXX)
         for (( engine_index = 0; engine_index < \$engines_per_node; engine_index++ )); do
+            mkdir "\$worker_rpc_dir/\$engine_index"
             per_engine_args=()
             if [[ -n "\$dwdp_config" ]]; then
                 # Each independent process owns a distinct shard in a same-host group.
@@ -1032,6 +1040,7 @@ print(json.dumps(config))
             gpu_mask=\${gpu_mask%,}
             echo "Starting TP\$tensor_parallel_size engine \$engine_index on GPUs \$gpu_mask, port \$worker_port"
             CUDA_VISIBLE_DEVICES="\$gpu_mask" \
+            VLLM_RPC_BASE_PATH="\$worker_rpc_dir/\$engine_index" \
             VLLM_NIXL_SIDE_CHANNEL_HOST="\$this_node_hostname" \
             VLLM_NIXL_SIDE_CHANNEL_PORT=\$(( nixl_base_port + engine_index )) \
             "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${engine_args[@]}" \${per_engine_args[@]+"\${per_engine_args[@]}"} \
