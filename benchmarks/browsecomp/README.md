@@ -65,7 +65,7 @@ and grades the final answer with an LLM judge:
 | Preset | Agent | How an episode runs |
 | --- | --- | --- |
 | `configs/browsecomp_opencode.yaml` | `opencode_sandboxed_search_agent`, the deprecated `opencode_sandboxed_agent` | A `legacy_agent` relay calls the agent's own `/run`, which seeds the Resources Server, runs OpenCode in the sandbox it gets back, and calls `/verify` |
-| `configs/browsecomp_opencode_sessions.yaml` | `browsecomp_opencode_agent`, an `opencode_agent` | `single_agent_turn_legacy` seeds the Resources Server, which starts the sandbox, stages the OpenCode plugins in it and lends it to the agent's session. After the session closes, `/verify` reads how the run ended from the plugins' log, and `/close_session` releases the sandbox |
+| `configs/browsecomp_opencode_sessions.yaml` | `browsecomp_opencode_agent`, an `opencode_agent` | `single_agent_turn_legacy` seeds the Resources Server, which starts the sandbox, stages the OpenCode plugins in it and lends it to the agent's session. After the session closes, `/verify` reads how the run ended from the plugins' log and stops the sandbox before grading; `/close_session` then fences the session, and releases the sandbox if verify did not run |
 
 The session preset repeats the relay preset's settings where `opencode_agent` has them: OpenCode 1.17.11 with its
 stock system prompt and thinking on; the same questions and user turn (`prepare_opencode.py` writes them without the

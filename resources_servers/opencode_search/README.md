@@ -96,8 +96,8 @@ Supported harnesses, each in the `allowed_agents` of the config that pairs it:
   `configs/opencode_search_example.yaml`) declare a `legacy_agent` relay in front of it.
 
 The episode seed lends its sandbox to any session harness that accepts `sandbox_access`; the harness brings
-its tools. With lending on, the server runs with one worker (`num_workers: 1`): several workers are not
-tested with lent sandboxes.
+its tools. With lending on, the server refuses `num_workers` above 1: lent sandboxes live in one worker's
+memory, and several workers are not tested with them.
 
 ### What differs from the relay
 
@@ -115,8 +115,8 @@ model sees differently. On this server's side:
   run whose output lacks the sentinel's line with 500.
 * **Working directory.** The lent sandbox's is `sandbox_workdir`, which the seed creates; the agent-run
   sandbox keeps the image's.
-* **Close.** An episode session ends with `/close_session`, which releases its sandbox and fences the ID,
-  and a verify after it is masked as `session_lost`. The relay sends no close.
+* **Close.** An episode session ends with `/close_session`, which fences the ID and releases the sandbox if
+  verify did not stop it, and a verify after it is masked as `session_lost`. The relay sends no close.
 
 The web-search cache proxy (`POST /mcp`, registered only when the cache is configured in
 `configs/opencode_search.yaml`) is not part of a session: it reads no session cookie and keeps no

@@ -14,8 +14,8 @@
 # - the OpenCode 1.17.11 binary and ripgrep 15.1.0, files already inside the sandbox (for example on a mounted cache),
 #   through BROWSECOMP_OPENCODE_EXECUTABLE_PATH, BROWSECOMP_OPENCODE_EXECUTABLE_SHA256,
 #   BROWSECOMP_OPENCODE_RIPGREP_PATH and BROWSECOMP_OPENCODE_RIPGREP_SHA256;
-# - the web-search key, from an overlay that is never committed:
-#   ++search_browsecomp_resources_server.resources_servers.opencode_search.episode_sandbox_env.EXA_API_KEY=<key>
+# - the web-search key, in an overlay file that is never committed (see benchmarks/browsecomp/README.md), at
+#   search_browsecomp_resources_server.resources_servers.opencode_search.episode_sandbox_env.EXA_API_KEY.
 # The judge and the pins have no defaults, so the config does not compose without them.
 config_paths:
 - resources_servers/opencode_search/configs/opencode_search.yaml
@@ -73,8 +73,8 @@ search_browsecomp_resources_server:
       - "[nemo-gym-plugin] web_guard version=2 contamination=on"
       - "[nemo-gym-plugin] tool_surface task=off"
 
-# A new instance name: opencode_sandboxed_search_agent names the relay preset's agent, and overlays written for it set
-# fields this agent does not have. Select this one with --agent browsecomp_opencode_agent.
+# An instance name of its own: opencode_sandboxed_search_agent names the relay preset's agent, and overlays written for
+# it set fields this agent does not have. Select this one with --agent browsecomp_opencode_agent.
 browsecomp_opencode_agent:
   _inherit_from: opencode_agent
   responses_api_agents:
