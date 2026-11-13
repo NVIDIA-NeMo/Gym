@@ -129,7 +129,9 @@ whatever export the run left, unless its `/run` fails:
 A relay cell that reads "Graded" assumes an export the relay agent can convert. A relay `/run` that answers 500 becomes
 a failures-sidecar row (`agent_run_error`, which a resume retries) only with `++route_failures_to_sidecar=true`;
 without it, the first one ends the run. A session-preset failure is a failure row either way. Run both presets with
-`++route_failures_to_sidecar=true` and compare the failure rows by `failure_kind`.
+`++route_failures_to_sidecar=true` and compare the failure rows by `failure_kind`. When the Resources Server names a
+kind for a `/verify` that failed, such as `opencode_search:plugins_not_loaded`, the session row carries it in its
+`_ng_failure_events`, as the cause of the failed episode.
 
 ### Time limits
 
