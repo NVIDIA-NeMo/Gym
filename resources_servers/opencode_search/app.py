@@ -317,10 +317,10 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # opencode_agent's rules apply: an absolute directory other than / and /tmp, outside its storage.
     sandbox_workdir: Optional[str] = None
 
-    # What an episode seed gives the harness in the lent sandbox, besides the workdir. Each file maps an absolute sandbox
-    # path, outside sandbox_workdir and opencode_agent's storage, to its source: a file in the Gym root, named relative
-    # to it and read once at startup. Its directory must already exist in the image, since a provider need not create
-    # it: stage under /tmp.
+    # What an episode seed gives the harness in the lent sandbox, besides the workdir. Each file maps an absolute
+    # sandbox path, outside sandbox_workdir and opencode_agent's storage, to its source: a file in the Gym root, named
+    # relative to it and read once at startup. Its directory must already exist in the image, since a provider need not
+    # create it: stage under /tmp.
     episode_sandbox_files: Dict[str, str] = Field(default_factory=dict)
     # Environment of the lent sandbox, over sandbox_config.env. An empty value sets nothing, so a config can name a
     # setting it leaves off. Secrets come from an overlay, never from a config file. The search key is one EXA_API_KEY:
@@ -329,8 +329,8 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # another address.
     episode_sandbox_env: Dict[str, str] = Field(default_factory=dict)
     # Where the receipts plugin (opencode_bundle/nemo_gym_receipts.js) copies the OpenCode plugins' lines in the lent
-    # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, masks a run
-    # that ended on its budget as the relay does, and refuses one whose plugins did not load. It lies outside
+    # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, masks a
+    # run that ended on its budget as the relay does, and refuses one whose plugins did not load. It lies outside
     # sandbox_workdir, where the model's tools could change it. None reads nothing and refuses nothing, for a harness
     # that brings no such plugins.
     plugin_log_path: Optional[str] = None
@@ -572,8 +572,8 @@ class _ExportCopy:
     status: Literal["copied", "absent", "oversize", "failed"]
     # The directory on this host the files are copied to. It exists only when they were.
     dir: str
-    # The regular files listed in episode_export_dir, by name, with their sizes in bytes, and their total. A failed copy
-    # reports none.
+    # The regular files listed in episode_export_dir, by name, with their sizes in bytes, and their total. A failed
+    # copy reports none.
     files: Dict[str, int] = field(default_factory=dict)
     bytes: int = 0
     # Why the files were not copied; empty when they were.
@@ -1237,14 +1237,14 @@ class SearchResourcesServer(SimpleResourcesServer):
         )
 
     def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: _PluginLog) -> None:
-        """Put the ending and plugin receipts from an episode's plugin log on its verify body, where the relay agent puts
-        them, so every reply built from the body carries them, judge_failsafe's included. The ending comes from the
-        whole log, of which the body carries at most _PLUGIN_LOG_ROW_CHARS characters.
+        """Put the ending and plugin receipts from an episode's plugin log on its verify body, where the relay agent
+        puts them, so every reply built from the body carries them, judge_failsafe's included. The ending comes from
+        the whole log, of which the body carries at most _PLUGIN_LOG_ROW_CHARS characters.
 
         A log without the sentinel or a required marker means the run did not have the plugins it was configured with,
-        and its answer is not graded. The refusal is terminal (422): the log was read, and it would read the same again.
-        Its detail names the missing lines and gives whether the file existed, its size in bytes and both ends of it,
-        with line breaks escaped; its failure report names PLUGINS_NOT_LOADED.
+        and its answer is not graded. The refusal is terminal (422): the log was read, and it would read the same
+        again. Its detail names the missing lines and gives whether the file existed, its size in bytes and both ends
+        of it, with line breaks escaped; its failure report names PLUGINS_NOT_LOADED.
         """
         text = plugin_log.text
         missing = [marker for marker in (_PLUGIN_SENTINEL, *self.config.required_plugin_markers) if marker not in text]
@@ -1346,8 +1346,8 @@ class SearchResourcesServer(SimpleResourcesServer):
         return _ExportCopy("copied", str(target), files, total)
 
     async def _list_exports(self, sandbox: AsyncSandbox) -> Optional[Dict[str, int]]:
-        """The regular files directly in episode_export_dir, by name, with their sizes in bytes; None when the directory
-        does not exist. Raises when the listing fails.
+        """The regular files directly in episode_export_dir, by name, with their sizes in bytes; None when the
+        directory does not exist. Raises when the listing fails.
 
         One command, from / as the plugin log read. It lists no link, no directory and no name outside the plain names
         of _EXPORT_LISTING_ENTRY, read in the C locale, so a file the model's tools left there with another name is not
