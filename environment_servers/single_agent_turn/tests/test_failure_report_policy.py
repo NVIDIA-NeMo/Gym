@@ -102,8 +102,10 @@ async def test_unproven_timeout_never_counts_as_zero_or_verifies(damage):
     "case,retryable",
     [
         ("connector", True),
+        ("handshake_timeout", True),
         ("upload_only", False),
         ("wrong_type", False),
+        ("read_timeout", False),
         ("unknown_upload", False),
         ("after_upload", False),
         ("earlier_uploaded", False),
@@ -125,6 +127,10 @@ async def test_only_proven_unconnected_selected_operation_retains_retry(case, re
     events = {"selected": event}
     if case == "upload_only":
         event.pop("foreign_error")
+    elif case == "handshake_timeout":
+        event["foreign_error"]["exception_type"] = "aiohttp.client_exceptions.ConnectionTimeoutError"
+    elif case == "read_timeout":
+        event["foreign_error"]["exception_type"] = "aiohttp.client_exceptions.SocketTimeoutError"
     elif case == "wrong_type":
         event["foreign_error"]["exception_type"] = "TimeoutError"
     elif case == "unknown_upload":

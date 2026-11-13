@@ -104,7 +104,23 @@ def test_an_agent_infrastructure_failure_stays_one_whatever_its_verifier_did(tmp
     assert verified["_ng_failure_class"] == "infrastructure_error"
     assert verified["_ng_failure_type"] == "AgentInfrastructureError"
     assert verified["infrastructure_error"] == "AgentInfrastructureError"
-    assert verified["failure_kind"] is None
+    assert verified["failure_kind"] == "infrastructure_error"
+
+
+def test_a_sidecar_setup_failure_has_a_kind_recovery_can_retry(tmp_path):
+    """A task environment that failed to start (here a Compose service) is routed to the failures sidecar; without a
+    kind, recovery stops the run instead of retrying the rollout."""
+    verified = _verified(
+        tmp_path,
+        {"exception_info": {"exception_type": "RuntimeError"}},
+        AgentTermination(
+            reason="infrastructure_error", detail="RuntimeError: Compose service 'loadgen' unhealthy: exit status 1"
+        ),
+    )
+
+    assert verified["_ng_failure_class"] == "infrastructure_error"
+    assert verified["mask_sample"] is False
+    assert verified["failure_kind"] == "infrastructure_error"
 
 
 @pytest.mark.parametrize("exception_type", ["TimeoutError", "RuntimeError", "VerifierStatusUnknownError"])
