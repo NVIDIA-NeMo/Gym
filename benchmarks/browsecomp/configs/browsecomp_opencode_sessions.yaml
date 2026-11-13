@@ -46,11 +46,16 @@ search_browsecomp_resources_server:
       # The receipts plugin, then the relay agent's four plugins, unchanged and at the paths it uploads them to. The
       # receipts plugin copies the other plugins' lines to plugin_log_path.
       episode_sandbox_files:
-        /tmp/nemo-gym-plugin-nemo_gym_receipts.js: resources_servers/opencode_search/opencode_bundle/nemo_gym_receipts.js
-        /tmp/nemo-gym-plugin-nemo_gym_sentinel.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_sentinel.js
-        /tmp/nemo-gym-plugin-nemo_gym_turn_budget.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_turn_budget.js
-        /tmp/nemo-gym-plugin-nemo_gym_web_guard.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_web_guard.js
-        /tmp/nemo-gym-plugin-nemo_gym_tool_surface.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_tool_surface.js
+        /tmp/nemo-gym-plugin-nemo_gym_receipts.js:
+          resources_servers/opencode_search/opencode_bundle/nemo_gym_receipts.js
+        /tmp/nemo-gym-plugin-nemo_gym_sentinel.js:
+          responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_sentinel.js
+        /tmp/nemo-gym-plugin-nemo_gym_turn_budget.js:
+          responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_turn_budget.js
+        /tmp/nemo-gym-plugin-nemo_gym_web_guard.js:
+          responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_web_guard.js
+        /tmp/nemo-gym-plugin-nemo_gym_tool_surface.js:
+          responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_tool_surface.js
       # The relay agent's opencode_env in browsecomp_opencode.yaml, as the lent sandbox's environment, since
       # opencode_agent takes none of its own. An empty value sets nothing. The config test keeps the two equal.
       episode_sandbox_env:
@@ -58,8 +63,16 @@ search_browsecomp_resources_server:
         OPENCODE_ENABLE_EXA: "true"
         # The search backend, named rather than left to OpenCode.
         OPENCODE_WEBSEARCH_PROVIDER: "exa"
-        # Read by nemo_gym_web_guard.js, which drops search and fetch results from these domains.
-        OPENCODE_WEBSEARCH_EXCLUDE_DOMAINS: "ad-italia.it:ad-magazin.de:admagazine.fr:allure.com:architecturaldigest.com:arstechnica.com:bonappetit.com:cntraveler.com:cntraveller.com:cntraveller.de:epicurious.com:glamour.com:glamour.de:glamour.es:glamourmagazine.co.uk:gq-magazine.co.uk:gq.com:gqitalia.it:gqmagazine.fr:johansens.com:lacucinaitaliana.com:newyorker.com:nyt.com:nytimes.com:nytimescooking.com:pitchfork.com:revistaad.es:revistagq.com:revistavanityfair.es:self.com:tatler.com:teenvogue.com:theathletic.com:them.us:vanityfair.com:vanityfair.fr:vanityfair.it:vogue.co.uk:vogue.com:vogue.de:vogue.fr:vogue.it:voguebusiness.com:wirecutter.com:wired.com:wired.it:worldofinteriors.com"
+        # Read by nemo_gym_web_guard.js, which drops search and fetch results from these domains. One string: YAML
+        # drops each escaped line break with the indentation after it.
+        OPENCODE_WEBSEARCH_EXCLUDE_DOMAINS: "\
+          ad-italia.it:ad-magazin.de:admagazine.fr:allure.com:architecturaldigest.com:arstechnica.com:bonappetit.com:\
+          cntraveler.com:cntraveller.com:cntraveller.de:epicurious.com:glamour.com:glamour.de:glamour.es:\
+          glamourmagazine.co.uk:gq-magazine.co.uk:gq.com:gqitalia.it:gqmagazine.fr:johansens.com:lacucinaitaliana.com:\
+          newyorker.com:nyt.com:nytimes.com:nytimescooking.com:pitchfork.com:revistaad.es:revistagq.com:\
+          revistavanityfair.es:self.com:tatler.com:teenvogue.com:theathletic.com:them.us:vanityfair.com:vanityfair.fr:\
+          vanityfair.it:vogue.co.uk:vogue.com:vogue.de:vogue.fr:vogue.it:voguebusiness.com:wirecutter.com:wired.com:\
+          wired.it:worldofinteriors.com"
         # Read by nemo_gym_turn_budget.js: after this many model calls, a request offers no tools.
         NEMO_GYM_MAX_TURNS: "400"
         # Read by nemo_gym_turn_budget.js, which removes the task tool from every request.
