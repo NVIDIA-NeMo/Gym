@@ -11,6 +11,8 @@ Findings are warnings in the PR and are summarized in the check run **Environmen
 | A1 | An agent that defines `run()`. |
 | A2 | An agent that does not implement session seed and close. |
 | A3 | An agent that overrides `aggregate_metrics`. |
+| A4 | An agent whose seed fails when it is lent a sandbox, other than by refusing it with a 422 that says `does not support sandbox access`. |
+| A5 | An agent that stops a borrowed sandbox when its session closes. |
 
 ## Run locally
 
@@ -27,6 +29,7 @@ This installs the agent's venv the way Gym does for its tests and prints one war
 | `engine.py` | Rule types and evaluation. Standard library only. |
 | `rules.py` | The rules. |
 | `component.py` | The agent's default config, entry point and server classes. |
+| `probe.py` | Seeds and closes a session on a sandbox lent to the agent, for A4 and A5. |
 | `inspection.py` | Runs in the agent's venv and writes the findings. |
 | `ci.py` | Selects the changed agents and checks one. |
 | `checks.py` | Publishes the check run. |
