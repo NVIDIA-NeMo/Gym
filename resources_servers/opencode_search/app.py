@@ -68,10 +68,12 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     PROVIDER_IO_TIMEOUT,
     PROVIDER_REQUEST_FAILED,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -105,7 +107,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
     reject_partial_typed_seed,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, reachable_host
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint, reachable_host
 from nemo_gym.verification import JudgeError, call_judge
 
 # The grader the apptainer comparators were scored with. NOT the longer
@@ -142,6 +144,11 @@ _PLUGIN_MARKER = "[nemo-gym-plugin] "
 _PLUGIN_SENTINEL = "[nemo-gym-plugin] loaded sentinel"
 # The variable the receipts plugin (opencode_bundle/nemo_gym_receipts.js) takes the plugin log's path from.
 _PLUGIN_LOG_ENV = "NEMO_GYM_PLUGIN_LOG"
+# The failure kind of an episode's verify refused because its plugin log lacks a line it must hold.
+PLUGINS_NOT_LOADED = "opencode_search:plugins_not_loaded"
+# How many characters of each end of the plugin log a refusal shows: an Environment Server keeps 2,000 characters of
+# a refused reply in the row's failure_reason, so both ends fit with the rest of the detail.
+_PLUGIN_LOG_SLICE_CHARS = 600
 # The most of the plugin log a verify response carries. A run within its turn budget writes a few short lines per
 # model call, far less than this; a longer log keeps its two ends.
 _PLUGIN_LOG_ROW_CHARS = 1 << 20
@@ -1129,15 +1136,28 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         A log without the sentinel or a required marker means the run did not have the plugins it was configured with,
         and its answer is not graded. The refusal is terminal (422): the log was read, and it would read the same again.
+        Its detail names the missing lines and gives whether the file existed, its size in bytes and both ends of it,
+        with line breaks escaped; its failure report names PLUGINS_NOT_LOADED.
         """
         text = plugin_log.text
         missing = [marker for marker in (_PLUGIN_SENTINEL, *self.config.required_plugin_markers) if marker not in text]
         if missing:
+            reason = f"The harness's OpenCode plugins did not load as configured: the plugin log lacks {missing}"
+            observe_failure(
+                NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=PLUGINS_NOT_LOADED,
+                    failure_reason=bounded_text(reason, 2000),
+                    operation="verify.plugin_log",
+                    stage="verification",
+                )
+            )
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"The harness's OpenCode plugins did not load as configured: the plugin log lacks {missing}. "
-                    f"Refusing to grade a run that ran without them. log_chars={len(text)} head={text[:800]!r}"
+                    f"{reason}. Refusing to grade a run that ran without them. exists={plugin_log.exists} "
+                    f"log_bytes={plugin_log.size} head={text[:_PLUGIN_LOG_SLICE_CHARS]!r} "
+                    f"tail={text[-_PLUGIN_LOG_SLICE_CHARS:]!r}"
                 ),
             )
         body.opencode_terminal_reason = terminal_reason_from_plugin_log(text)

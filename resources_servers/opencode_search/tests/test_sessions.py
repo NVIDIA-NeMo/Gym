@@ -39,6 +39,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.verification import JudgeError
 from resources_servers.opencode_search.app import (
     _PLUGIN_LOG_ROW_CHARS,
+    PLUGINS_NOT_LOADED,
     SearchResourcesServer,
     SearchResourcesServerConfig,
     SearchSeedSessionRequest,
@@ -777,6 +778,8 @@ def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stop
     ("log_text", "markers", "missing"),
     [
         (None, [], ["[nemo-gym-plugin] loaded sentinel"]),
+        # An empty log is refused like a missing one; the detail tells them apart.
+        ("", [], ["[nemo-gym-plugin] loaded sentinel"]),
         # The receipts plugin's own load line does not stand in for the sentinel.
         ("[nemo-gym-plugin] loaded receipts version=1\n", [], ["[nemo-gym-plugin] loaded sentinel"]),
         (
@@ -785,7 +788,7 @@ def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stop
             ["tool_surface task=off bash=off"],
         ),
     ],
-    ids=["no_log", "receipts_only", "required_marker"],
+    ids=["no_log", "empty_log", "receipts_only", "required_marker"],
 )
 def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
     workdir, tmp_path, started, stopped, log_text, markers, missing
@@ -800,10 +803,35 @@ def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
 
     # 422, which an Environment Server does not retry: the log was read, and it says the run lacked its plugins.
     assert refused.status_code == 422, refused.text
-    assert f"lacks {missing!r}" in refused.json()["detail"]
+    detail = refused.json()["detail"]
+    assert f"lacks {missing!r}" in detail
+    # Whether the file existed, its size in bytes, and its two ends with line breaks escaped: here the whole log.
+    text = log_text or ""
+    assert f"exists={log_text is not None} log_bytes={len(text.encode())} head={text!r} tail={text!r}" in detail
     assert judge.await_count == 0 and stopped == [started[0][0]]
     # The log it read is kept, so a retry is refused the same way.
-    assert client.post("/verify", json=_verify_body()).status_code == 422
+    assert client.post("/verify", json=_verify_body()).json()["detail"] == detail
+
+
+def test_a_refusal_shows_the_two_ends_of_a_long_plugin_log_within_what_the_environment_server_keeps(
+    workdir, tmp_path
+) -> None:
+    """An Environment Server keeps the first 2,000 characters of a refused reply, after its status line, as the row's
+    failure_reason: the detail ends within them, with the end of the log."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log, required_plugin_markers=["tool_surface task=off bash=off"])
+    calls = "".join(f"[nemo-gym-plugin] [exa-mcp] tool=web_search_exa ms={call} bytes=1\n" for call in range(1000))
+    log.write_text(SENTINEL + calls + TURN_CAP)
+    _mock_judge(server, CORRECT)
+
+    refused = client.post("/verify", json=_verify_body())
+
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    # The head starts at the log's first line and the tail ends at its last, line breaks escaped.
+    assert f"head={SENTINEL!r}"[:-1] in detail and detail.endswith(f"{TURN_CAP!r}"[1:])
+    # With room for the status line before it.
+    assert len(refused.text) <= 1800
 
 
 # A read of SENTINEL + TURN_CAP cut short at the end of a base64 group, as a provider that caps a command's output
@@ -845,6 +873,8 @@ def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
 @pytest.mark.parametrize(
     ("read", "status", "kind"),
     [
+        # No plugin wrote a log.
+        (None, 422, PLUGINS_NOT_LOADED),
         (
             SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
             500,
@@ -859,9 +889,9 @@ def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
         # A provider's own failure keeps its kind.
         (sandbox_failure(operation="exec", failure_kind=PROVIDER_UNAVAILABLE), 500, PROVIDER_UNAVAILABLE),
     ],
-    ids=["error_type", "exit_code", "cut_short", "provider_failure"],
+    ids=["plugins_not_loaded", "error_type", "exit_code", "cut_short", "provider_failure"],
 )
-def test_a_plugin_log_that_cannot_be_read_names_its_failure_kind(
+def test_a_plugin_log_that_is_refused_or_cannot_be_read_names_its_failure_kind(
     workdir, tmp_path, monkeypatch, read, status, kind
 ) -> None:
     """An Environment Server records an episode whose verify did not grade by the kinds the reply's failure report
@@ -872,8 +902,9 @@ def test_a_plugin_log_that_cannot_be_read_names_its_failure_kind(
     server.setup_exception_middleware(app)
     client = TestClient(app, raise_server_exceptions=False)
     assert client.post("/seed_session", json=_seed()).status_code == 200
-    mocked = AsyncMock(side_effect=read) if isinstance(read, Exception) else AsyncMock(return_value=read)
-    monkeypatch.setattr(AsyncSandbox, "exec", mocked)
+    if read is not None:
+        mocked = AsyncMock(side_effect=read) if isinstance(read, Exception) else AsyncMock(return_value=read)
+        monkeypatch.setattr(AsyncSandbox, "exec", mocked)
     _mock_judge(server, CORRECT)
 
     verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
