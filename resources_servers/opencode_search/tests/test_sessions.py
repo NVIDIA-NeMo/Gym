@@ -62,6 +62,9 @@ PLUGINS = (
 )
 SENTINEL = "[nemo-gym-plugin] loaded sentinel version=1 plugins=\n"
 TURN_CAP = "[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400\n"
+# A web search as nemo_gym_web_guard.js reports it. The plugin writes the query as JSON, which keeps a character outside
+# ASCII as it is, so a log that holds this line is longer in bytes than in characters.
+MULTIBYTE_SEARCH = '[nemo-gym-plugin] [exa-mcp] tool=web_search_exa ms=5 bytes=1 query="café"\n'
 # What an Environment Server sends with an episode's verify: the session's close follows it.
 EPISODE_VERIFY = {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
 NODE = shutil.which("node")
@@ -747,15 +750,18 @@ def test_the_ending_is_read_from_the_turn_budget_plugins_lines(lines, reason) ->
             "",
             None,
         ),
+        # The read checks the bytes it returns against the file's size in bytes, so a log longer in bytes than in
+        # characters is read whole, its ending with it.
+        (MULTIBYTE_SEARCH + TURN_CAP, "max_iteration", "agent_limit"),
     ],
-    ids=["max_iteration", "context_window", "recovered"],
+    ids=["max_iteration", "context_window", "recovered", "multibyte_search"],
 )
 def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stops(
     workdir, tmp_path, started, stopped, monkeypatch, lines, reason, kind
 ) -> None:
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
-    log.write_text(SENTINEL + lines)
+    log.write_text(SENTINEL + lines, encoding="utf-8")
     execs = _record_execs(monkeypatch, stopped)
     _mock_judge(server, CORRECT)
 
@@ -787,8 +793,10 @@ def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stop
             ["tool_surface task=off bash=off", "loaded sentinel"],
             ["tool_surface task=off bash=off"],
         ),
+        # Longer in bytes than in characters: log_bytes counts bytes.
+        (MULTIBYTE_SEARCH, [], ["[nemo-gym-plugin] loaded sentinel"]),
     ],
-    ids=["no_log", "empty_log", "receipts_only", "required_marker"],
+    ids=["no_log", "empty_log", "receipts_only", "required_marker", "multibyte_log"],
 )
 def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
     workdir, tmp_path, started, stopped, log_text, markers, missing
@@ -796,7 +804,7 @@ def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log, required_plugin_markers=markers)
     if log_text is not None:
-        log.write_text(log_text)
+        log.write_text(log_text, encoding="utf-8")
     judge = _mock_judge(server, CORRECT)
 
     refused = client.post("/verify", json=_verify_body())
