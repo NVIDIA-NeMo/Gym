@@ -1046,7 +1046,7 @@ def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
             if line.startswith(f"__GYM_READER_{name}:"):
                 facts[name] = line.split(":", 1)[1].strip()
     rc = int(facts["RC"]) if facts.get("RC", "").isdigit() else None
-    if rc == 0 or (rc is None and sum(line.startswith("__GYM_MANAGED:") for line in output.splitlines()) == 1):
+    if rc == 0 or (rc is None and sum(line.startswith("__GYM_MANAGED:") for line in output.split("\n")) == 1):
         return None, False
     bound, _, size = facts.get("BOUND", "").partition(" ")
     gb = int(size) / 2**30 if size.isdigit() else None
@@ -1060,7 +1060,8 @@ def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
         cause = f"killed (SIGKILL; OOM or external kill) after {elapsed_s:.0f} s, below {scope}, exit code 137"
     else:
         cause = f"exited {rc if rc is not None else 'without an exit code'} after {elapsed_s:.0f} s ({scope})"
-    stderr = facts.get("ERR", "")
+    # Progress output separates its updates with "\r", which would overwrite the reason on a terminal.
+    stderr = facts.get("ERR", "").replace("\r", " ")
     if len(stderr) > 400:
         stderr = "..." + stderr[-400:]
     return f"remote Store reader unavailable: {cause}" + (f"; stderr: {stderr}" if stderr else ""), timed_out
@@ -1137,10 +1138,10 @@ def _remote_managed_evidence(
                 failed = {"managed_selection": None, "managed_reader_error": failure + retried}
                 # The wrapper reports the exit code of a reader that crashed, timed out or was killed; output
                 # without one is a malformed answer, refused like any other.
-                crashed = any(line.startswith("__GYM_READER_RC:") for line in output.splitlines())
+                crashed = any(line.startswith("__GYM_READER_RC:") for line in output.split("\n"))
                 return collected.model_copy(update=failed | {"managed_reader_unavailable": crashed} | placement)
         lines = [
-            line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
+            line.removeprefix("__GYM_MANAGED:") for line in output.split("\n") if line.startswith("__GYM_MANAGED:")
         ]
         if len(lines) != 1:
             raise ValueError("remote Store reader returned no unique projection")

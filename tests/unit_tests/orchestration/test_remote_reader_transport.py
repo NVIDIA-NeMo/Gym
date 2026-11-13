@@ -115,6 +115,8 @@ def test_the_stderr_tail_survives_carriage_returns_from_progress_output():
     output = f"__GYM_READER_BOUND:2\n__GYM_READER_RC:2\n__GYM_READER_ERR:{err}\n"
     message, _ = slurm._reader_failure(output, 1.0)
     assert message.endswith("does not match")
+    assert "\r" not in message
+    assert "Updating files:  83% Updating files: 100% error:" in message
     assert "Required uv version" in message
 
 
