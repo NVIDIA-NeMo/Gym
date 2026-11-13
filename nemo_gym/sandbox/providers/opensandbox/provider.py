@@ -760,6 +760,12 @@ class OpenSandboxCreateConfig:
     # Refresh a created sandbox's TTL while this provider owns its handle.
     # This does not change task/command timeouts or renew borrowed handles.
     renew_interval_s: float | None = None
+    # Stagger creates across this provider: at least ``min_interval_s`` between two create STARTS, and at most
+    # ``max_in_flight`` creates in flight at once (0 = no cap). A create blocks until the pod is Running, minutes
+    # under load, so spacing alone still floods the scheduler with N pending pods; the cap bounds that. Waiting for
+    # a slot does not count against the create budget: the request has not touched the cluster yet.
+    min_interval_s: float = 0.0
+    max_in_flight: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome_policy, OpenSandboxCreateOutcomePolicy):
@@ -784,6 +790,10 @@ class OpenSandboxCreateConfig:
             raise ValueError("create.connect_attempt_timeout_s must be > 0")
         if self.connect_poll_s <= 0:
             raise ValueError("create.connect_poll_s must be > 0")
+        if not math.isfinite(self.min_interval_s) or self.min_interval_s < 0:
+            raise ValueError("create.min_interval_s must be finite and >= 0")
+        if isinstance(self.max_in_flight, bool) or not isinstance(self.max_in_flight, int) or self.max_in_flight < 0:
+            raise ValueError("create.max_in_flight must be an integer >= 0")
 
 
 @dataclass(frozen=True)
@@ -1061,6 +1071,10 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
+        # Create staggering (create.min_interval_s / create.max_in_flight); see OpenSandboxCreateConfig.
+        self._create_spacing = asyncio.Lock()
+        self._last_create_start: float | None = None
+        self._create_slots = asyncio.Semaphore(self._create.max_in_flight) if self._create.max_in_flight else None
 
     def uploads_independent_of_execs(self) -> bool:
         """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
@@ -2264,7 +2278,24 @@ class OpenSandboxProvider:
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
         spec = replace(spec, metadata={**self._attribution.metadata(), **spec.metadata})
-        return await self._create_with_retries(_normalize_spec(spec))
+        if self._create_slots is None:
+            await self._space_create_start()
+            return await self._create_with_retries(_normalize_spec(spec))
+        async with self._create_slots:
+            await self._space_create_start()
+            return await self._create_with_retries(_normalize_spec(spec))
+
+    async def _space_create_start(self) -> None:
+        """Hold until ``create.min_interval_s`` has passed since the previous create started here."""
+        if self._create.min_interval_s <= 0:
+            return
+        async with self._create_spacing:
+            loop = asyncio.get_running_loop()
+            if self._last_create_start is not None:
+                wait = self._last_create_start + self._create.min_interval_s - loop.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            self._last_create_start = loop.time()
 
     async def resource_sample(self, handle: SandboxHandle) -> dict[str, str | int | float | bool]:
         """Read execd's existing snapshot; preserve its timestamp and measurement names."""
