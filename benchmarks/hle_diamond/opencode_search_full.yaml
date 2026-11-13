@@ -2,11 +2,11 @@
 # migration. Agent sessions accept prompt images, but no session preset covers the image questions yet;
 # opencode_search.yaml runs opencode_agent on the 728 text-only questions.
 # OpenCode preset with Tavily search on all 1000 HLE-Diamond questions, image questions included:
-# opencode_full_legacy_agent.yaml's sandboxed agent and dataset with opencode_search_legacy_agent.yaml's tools, note
+# opencode_full.yaml's sandboxed agent and dataset with opencode_search_legacy_agent.yaml's tools, note
 # and network policy. Declares no dataset of its own, so like the other search presets it is selectable with
 # --benchmark but not listed.
 config_paths:
-- benchmarks/hle_diamond/opencode_full_legacy_agent.yaml
+- benchmarks/hle_diamond/opencode_full.yaml
 tavily:
   resources_servers:
     tavily_search:

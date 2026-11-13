@@ -27,7 +27,7 @@ from omegaconf import OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
 import benchmarks.hle_diamond.prepare as prepare_module
-import benchmarks.hle_diamond.prepare_opencode as prepare_opencode_module
+import benchmarks.hle_diamond.prepare_opencode_legacy as prepare_opencode_legacy_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
@@ -213,9 +213,9 @@ class TestPrepare:
         assert "Wrote 4 problems" in capsys.readouterr().out
 
     def test_opencode_prompt_keeps_every_row_in_one_user_turn_with_the_image_block(self, prepared_env, capsys):
-        """The OpenCode adapter forwards only the user turn, so the full set for opencode_full_legacy_agent.yaml
+        """The OpenCode adapter forwards only the user turn, so the full set for opencode_full.yaml
         folds the instruction after the question (prompts/opencode.yaml) and carries the image in that same turn."""
-        output = prepare_opencode_module.prepare()
+        output = prepare_opencode_legacy_module.prepare()
 
         assert output == prepare_module.OUTPUT_OPENCODE_FPATH
         rows = _read_rows(output)
@@ -242,11 +242,11 @@ class TestPrepare:
         assert "Wrote 4 problems" in written and "(1 with an image)" in written
         assert prepare_module.OUTPUT_FPATH.exists() is False  # the default file is not touched
 
-        assert [row["uuid"] for row in _read_rows(prepare_opencode_module.main(["--limit", "1"]))] == [
+        assert [row["uuid"] for row in _read_rows(prepare_opencode_legacy_module.main(["--limit", "1"]))] == [
             "q-reasoning-text"
         ]
         with pytest.raises(SystemExit):
-            prepare_opencode_module.main(["--prompt", "opencode"])
+            prepare_opencode_legacy_module.main(["--prompt", "opencode"])
         assert "unrecognized arguments: --prompt" in capsys.readouterr().err
 
     def test_text_only_drops_image_rows_and_keeps_raw_fields(self, prepared_env):
@@ -415,14 +415,14 @@ LISTED_BENCHMARKS = {
         "hle_diamond_opencode_reference_agent",
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
-    "hle_diamond/opencode_full_legacy_agent": ("hle_diamond_opencode_full", "hle_diamond_opencode_full_agent", None),
+    "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_full_agent", None),
 }
 FULL_OPENCODE_DATASET = {
     "name": "hle_diamond_opencode_full",
     "type": "benchmark",
     "jsonl_fpath": "benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl",
     "prompt_config": None,
-    "prepare_script": "benchmarks/hle_diamond/prepare_opencode.py",
+    "prepare_script": "benchmarks/hle_diamond/prepare_opencode_legacy.py",
     "num_repeats": 1,
 }
 JUDGE_SERVER = "hle_diamond_equivalence_llm_judge_resources_server"
@@ -481,12 +481,12 @@ class TestConfigs:
 
     @pytest.mark.parametrize(
         ("config_file", "with_search"),
-        [("opencode_full_legacy_agent.yaml", False), ("opencode_search_full_legacy_agent.yaml", True)],
+        [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)],
     )
     def test_full_presets_swap_only_the_dataset_of_the_opencode_agent(self, config_file, with_search):
         """The 1000-row variants keep opencode_sandboxed_agent (no session preset covers the image questions yet)
         with the relay presets' effort, tools and network policy over the OpenCode-prompted full set with no
-        rollout-time prompt; only opencode_full_legacy_agent declares the dataset."""
+        rollout-time prompt; only opencode_full declares the dataset."""
         resolved = _resolve(config_file)
         agent = get_first_server_config_dict(resolved, FULL_AGENT)
 
@@ -500,7 +500,7 @@ class TestConfigs:
             assert "Tavily" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
             tavily = get_first_server_config_dict(resolved, "tavily")
             assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
-            # opencode_search_full_legacy_agent restates the session preset's Tavily server and note; keep the
+            # opencode_search_full restates the session preset's Tavily server and note; keep the
             # copies equal.
             search = _resolve("opencode_search.yaml")
 
@@ -535,8 +535,8 @@ class TestConfigs:
             "text.yaml",
             "opencode.yaml",
             "opencode_search.yaml",
-            "opencode_full_legacy_agent.yaml",
-            "opencode_search_full_legacy_agent.yaml",
+            "opencode_full.yaml",
+            "opencode_search_full.yaml",
             "pi.yaml",
             "pi_search.yaml",
             "opencode_legacy_agent.yaml",
@@ -803,8 +803,8 @@ class TestLocalDockerOverride:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
-            ("opencode_full_legacy_agent.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
-            ("opencode_search_full_legacy_agent.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
+            ("opencode_full.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
+            ("opencode_search_full.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
         ],
@@ -839,7 +839,7 @@ class TestLocalDockerOverride:
         assert opencode["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
         assert opencode["opencode_config"] == preset["opencode_config"]
 
-        full, preset = agents("opencode_search_full_legacy_agent.yaml", FULL_AGENT)
+        full, preset = agents("opencode_search_full.yaml", FULL_AGENT)
         note = full["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
         assert "NOT restricted" in note and "disabled" not in note
         assert full["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
@@ -871,7 +871,7 @@ class TestLocalDockerOverride:
             "opencode_legacy_agent.yaml",
             "pi_legacy_agent.yaml",
             "opencode_reference_legacy_agent.yaml",
-            "opencode_full_legacy_agent.yaml",
+            "opencode_full.yaml",
         }
 
 

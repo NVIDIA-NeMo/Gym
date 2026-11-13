@@ -19,7 +19,7 @@ all 1000 questions, image questions included, are materialized with
 ``prompts/opencode.yaml`` (the HLE instruction folded after the question into the single
 user message the harness forwards) and written to
 ``benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl`` for
-``opencode_full_legacy_agent.yaml`` and ``opencode_search_full_legacy_agent.yaml``.
+``opencode_full.yaml`` and ``opencode_search_full.yaml``.
 """
 
 import argparse

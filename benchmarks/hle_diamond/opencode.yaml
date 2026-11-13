@@ -3,7 +3,7 @@
 # (the judge has none to lend), with the shared settings of benchmarks/hle/opencode.yaml in
 # responses_api_agents/opencode_agent/configs/profiles/offline_science.yaml, and the HLE judge grades the final answer.
 # opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the deprecated legacy_agent relay, and
-# opencode_full_legacy_agent.yaml runs all 1000 questions, images included, on it. The two harnesses are configured
+# opencode_full.yaml runs all 1000 questions, images included, on it. The two harnesses are configured
 # differently, so do not compare their scores as the same measurement; the README lists what differs.
 config_paths:
 - benchmarks/hle_diamond/config.yaml

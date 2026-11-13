@@ -2,7 +2,7 @@
 # COMPARISON INFRASTRUCTURE ONLY. NOT A BENCHMARK. EGRESS UNRESTRICTED. LABEL EVERY RESULT.
 # ============================================================================================
 # Composable override that runs the hle_diamond sandboxed presets (opencode, opencode_search,
-# opencode_full_legacy_agent, opencode_search_full_legacy_agent, pi, pi_search, and opencode_reference behind
+# opencode_full, opencode_search_full, pi, pi_search, and opencode_reference behind
 # the acknowledgement below) on the LOCAL Docker sandbox provider instead of OpenSandbox, for smoke
 # tests and pilots on a workstation. It declares no dataset, so it is not discovered by `gym list benchmarks`.
 # The text *_legacy_agent presets keep the session presets' agent names on the deprecated relay agents, so

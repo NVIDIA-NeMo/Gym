@@ -2,7 +2,7 @@
 # migration. Use opencode.yaml instead, which runs opencode_agent through single_agent_turn_legacy.
 # The two harnesses are configured differently, so do not compare their scores as the same measurement.
 # OpenCode sandboxed preset on the 728 text-only HLE-Diamond questions, mirroring the HLE OpenCode relay preset.
-# opencode_full_legacy_agent.yaml runs the same agent on all 1000 questions, images attached through `opencode run -f`.
+# opencode_full.yaml runs the same agent on all 1000 questions, images attached through `opencode run -f`.
 config_paths:
 - benchmarks/hle_diamond/config.yaml
 - responses_api_agents/opencode_sandboxed_agent/configs/benchmark.yaml
