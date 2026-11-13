@@ -119,8 +119,9 @@ Apply the checks for the areas the diff touches.
   and `requirements.network`. New or modified metadata must not leave scaffold
   `TODO` values. For an existing manifest, review the affected declarations
   without requiring unrelated metadata backfilling. A setup or protocol
-  declares its own selection fields. Check new or changed
-  `training_allowed` declarations against the data's licence and terms, not a guess.
+  declares its own selection fields. Check that new or changed
+  `training_allowed` declarations mark held-out benchmark data `false`; licence
+  terms belong in `licensing`.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not
