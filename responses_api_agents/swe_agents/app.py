@@ -70,6 +70,7 @@ from nemo_gym.core import (
     PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
 )
 from nemo_gym.models import ChatCompletionsConverter
@@ -78,6 +79,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
 )
 from nemo_gym.telemetry import Profiler
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
@@ -3865,7 +3867,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
-            install_openhands_capture_overlay=token_capture_enabled,
+            # The overlay points OpenHands at the per-run URL, which it otherwise ignores: needed whenever that URL
+            # carries what the model server requires, the capture prefix or the rollout's sampling segment.
+            install_openhands_capture_overlay=token_capture_enabled or current_model_sampling_segment() is not None,
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
@@ -4132,3 +4136,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SWEBenchWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchWrapper.run_webserver()  # noqa: F401

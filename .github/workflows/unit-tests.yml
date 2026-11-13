@@ -78,6 +78,7 @@ jobs:
             nemo_gym/agents/base_responses_api_agent.py
             nemo_gym/server_runtime/base_resources_server.py
             nemo_gym/server_runtime/mcp_auto_exposure.py
+            resources_servers/interactive_browser/**
             tests/e2e/session_routing/**
 
   # Balance files across four jobs, each running four pytest workers.
@@ -316,7 +317,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_session_routing_e2e == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -331,6 +332,14 @@ jobs:
           key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-
+
+      # The two-worker interactive_browser test runs the server from its own virtual environment,
+      # with a headless Chromium, and skips without them. `gym env test` builds and keeps that environment.
+      - name: Prepare interactive_browser
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          gym env test --resources-server interactive_browser
+          resources_servers/interactive_browser/.venv/bin/python -m playwright install --with-deps chromium
 
       - name: Multi-worker session routing end-to-end test
         env:

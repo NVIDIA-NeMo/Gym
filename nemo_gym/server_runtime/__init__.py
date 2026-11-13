@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
+        seed_rebinds_tool_accesses,
         seed_restarts,
         seed_verify_step_type,
     )
@@ -104,6 +105,7 @@ if TYPE_CHECKING:
         maybe_auto_expose,
     )
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
+    from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
     from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
@@ -165,6 +167,7 @@ _PUBLIC_API = {
     "MCPTool": "mcp_auto_exposure",
     "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
+    "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",
@@ -216,6 +219,7 @@ _PUBLIC_API = {
     "observe_verifier": "verifier_observability",
     "observe_verifier_sandbox": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
+    "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",

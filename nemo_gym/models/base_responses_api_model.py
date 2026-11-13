@@ -39,6 +39,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.model_call_sampling import model_call_sampling_config
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -99,6 +100,7 @@ from nemo_gym.models.token_capture.sink import (
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
@@ -452,6 +454,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/embeddings")(self.embeddings)
 
         self.setup_policy_checkpoint(app, capture_ledger)
+        # Added after policy admission and capture, so it runs before them and they see the values the provider receives.
+        sampling_config = model_call_sampling_config(self.server_client.global_config_dict)
+        app.add_middleware(
+            ModelSamplingMiddleware,
+            required=sampling_config is not None and self.config.name in sampling_config.required_model_servers,
+        )
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
@@ -527,7 +535,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
             app.router.lifespan_context = lifespan_with_coordinator
             gate = link.gate
-        # Outermost of this app's middleware: a refused call must not register capture intent.
+        # Outside capture: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
         app.state.nemo_gym_policy_gate = gate
 

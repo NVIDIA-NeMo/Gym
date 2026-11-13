@@ -165,8 +165,8 @@ def needs_environment_server(instance: dict) -> bool:
     # An omitted binding can inherit Resources and must still migrate.
     if agent_type in AGENT_SESSION_AGENT_TYPES and resources_server is None:
         return False
-    # Stirrup and Copilot run only in agent sessions and have no /run for a legacy relay to call.
-    if agent_type in ("stirrup_agent", "copilot_agent"):
+    # Stirrup, Copilot, Droid and OpenHands run only in agent sessions and have no /run for a legacy relay to call.
+    if agent_type in ("stirrup_agent", "copilot_agent", "droid_agent", "openhands_agent"):
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 
@@ -643,7 +643,8 @@ def split_servers(
                 refused.append(
                     f"{name} in a run of {display(path)} would merge a {RELAY} server with {inherited}, "
                     f"which switches; keep the name there and replace its definition with a complete {RELAY} server, "
-                    f"deleting _inherit_from and single_agent_turn_legacy, as benchmarks/hle/opencode.yaml does"
+                    f"deleting _inherit_from and single_agent_turn_legacy, "
+                    f"as benchmarks/hle/opencode_legacy_agent.yaml does"
                 )
                 continue
             for declaration in switching:

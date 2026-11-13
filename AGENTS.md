@@ -46,6 +46,8 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
   must comment `/ok to test <full 40-character commit SHA>` on the PR (get it with `git rev-parse HEAD`; a short SHA
   is not enough). After the head changes, the new full SHA needs a new comment. If CI checks are missing, check this
   first. That comment authorizes CI to run contributor code, so never post it yourself unless the user explicitly asks.
+  The same approval also triggers suggested reviewers (`# suggest:` lines in `.github/CODEOWNERS`): they are requested
+  only after the `pull-request/<n>` mirror is pushed, so a PR with no suggested reviewers may just be waiting on it.
   Details: [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration-ci).
 - Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
   applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
@@ -185,7 +187,7 @@ gym env start \
     --model-type vllm_model
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
-# First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
+# First run is slow. Use skip_venv_if_present to reuse a .venv that has the .nemo-gym-setup-complete marker.
 gym env test --resources-server example_single_tool_call
 
 # Run all server tests (slow: one venv per server, so it needs an explicit opt-in)
