@@ -802,9 +802,10 @@ async def test_a_failed_metrics_read_releases_its_pool_connection(monkeypatch):
 
     app = web.Application()
     app.router.add_get("/metrics", metrics)
-    async with TestServer(app) as server, aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=1, limit_per_host=1)
-    ) as session:
+    async with (
+        TestServer(app) as server,
+        aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1, limit_per_host=1)) as session,
+    ):
         monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
         monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
         url = str(server.make_url("/metrics"))
