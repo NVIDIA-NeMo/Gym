@@ -85,12 +85,6 @@ same model and judge in the same time window, shows they agree. What still diffe
 - **Truncation-file path.** When a tool result is too long, OpenCode saves it to a file and names that file in its
   notice to the model. The file lies in `opencode_agent`'s private OpenCode directories, so the path reads differently;
   the rest of the notice is the same.
-- **Failure accounting.** A run that fails, for example when OpenCode exits with an error, follows the Environment
-  Server's outcome policy: it is retried or reported in the failures sidecar, where the relay graded what the run
-  produced. A run that failed at the context window is graded on both. A `/verify` that cannot read the plugin log
-  answers 500, so the episode fails and a resumed run retries it; a log that lacks a required line is refused with 422
-  and not graded. Run both presets with `++route_failures_to_sidecar=true` and compare the failure rows by
-  `failure_kind`.
 - **Web-search key.** One key for every row, from the lent sandbox's environment. The relay agent picks a key for each
   row from a pool (`EXA_API_KEYS`), which is the same while the pool holds one key.
 - **Process context the model does not see.** `opencode_agent` runs OpenCode with private HOME and XDG directories,
@@ -99,6 +93,36 @@ same model and judge in the same time window, shows they agree. What still diffe
 - **Artifacts.** The relay agent saves OpenCode's export on the host and puts OpenCode's output in each row
   (`opencode_results_fpath`, `opencode_run_stdout`, `opencode_run_stderr`). The session preset's rows carry the agent's
   trajectory and observations and the plugin log (`opencode_plugin_log`) instead.
+
+### Failure accounting
+
+A session-preset run that fails follows the Environment Server's outcome policy (`agent_outcome_policy`: the defaults
+in `nemo_gym/agents/agent_outcome.py`, plus `model_context_limit: verify` from the preset). The relay agent grades
+whatever export the run left, unless its `/run` fails:
+
+| Case | Relay preset | Session preset |
+| --- | --- | --- |
+| The last model call fails with 400, 413 or 422 | Graded | Graded |
+| The last model call fails with 408, 425, 429 or 5xx, or with a connection error OpenCode marks retryable | Graded | A non-terminal failure row, which `gym eval run --resume` retries |
+| The last model call fails with any other 4xx | Graded | A terminal failure row, not scored and not retried |
+| The run reaches the turn cap and then answers | Graded and masked (`max_iteration`) | The same |
+| The context window ends the run | Graded and masked (`context_window`) | The same |
+| The turn-budget plugin aborts the run after its grace calls | Graded and masked (`max_iteration`) | The agent answers 502: a non-terminal failure row |
+| OpenCode exits non-zero but leaves an intact export | Graded | The agent answers 502: a non-terminal failure row |
+| OpenCode leaves no usable export, for example after a crash | The agent's `/run` answers 500: a failure row | The agent answers 5xx: a non-terminal failure row |
+| The export holds an assistant part type the relay agent does not convert (any but text, reasoning, tool, step-start, step-finish and patch), such as `retry` | The agent's `/run` answers 500: a failure row | Graded without that part |
+| The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | `/verify` answers 422 when any required line is missing: a terminal failure row |
+| `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500: a non-terminal failure row |
+| The run budget runs out | Graded, not masked | The same |
+| The episode outlives `default_episode_timeout_seconds` | No episode deadline | A non-terminal failure row ("Episode timed out") |
+| The judge gives no verdict in any attempt | Masked, `judge_unparseable` (a run that ended on its budget keeps that kind) | The same |
+| The judge never answers | A `judge_failed` failures-sidecar row | The same |
+| `judge_max_consecutive_failures` rollouts in a row get no verdict | `/verify` answers 500 for that rollout and each later one without a verdict, until a verdict resets the count, so the agent's `/run` answers 500: a failure row | The same `/verify` 500: a non-terminal failure row |
+
+A relay cell that reads "Graded" assumes an export the relay agent can convert. A relay `/run` that answers 500 becomes
+a failures-sidecar row (`agent_run_error`, which a resume retries) only with `++route_failures_to_sidecar=true`;
+without it, the first one ends the run. A session-preset failure is a failure row either way. Run both presets with
+`++route_failures_to_sidecar=true` and compare the failure rows by `failure_kind`.
 
 ### Run the session preset
 
