@@ -98,13 +98,16 @@ def observe_programmatic_grading(calculate: Callable[[], T]) -> T:
     return result
 
 
-async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]]) -> T:
+async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]], *, judge_optional: bool = False) -> T:
     """Execute a reviewed async LLM-judge grading once and record its actual result in the active invocation.
 
     The judge replies parsed by ``call_judge`` during ``calculate`` become the operation's dependencies. It completes
     only when every judge reply was identified and accounted for, at least one accepted verdict was parsed, and
     the result binds. Rejected, retried replies remain dependencies but cannot substitute for accepted verdicts.
     Errors propagate unchanged.
+
+    ``judge_optional`` is for a grading that asks the judge only for some tasks: when ``calculate`` made no judge
+    call at all, no operation is recorded, so ``observe_verifier`` records the grade as the verifier's own.
     """
     invocation = _active_verifier.get()
     operation = GradingOperationObservation(operation_id=f"grade-{uuid4().hex}", kind="llm_judge", dependencies=[])
@@ -122,6 +125,11 @@ async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]]) -> T:
     finally:
         _judge_grading.reset(token)
         operation.dependencies = list(grading.dependencies)
+    if judge_optional and invocation is not None and not grading.dependencies and not grading.unidentified_calls:
+        invocation.grading_operations.remove(operation)
+        if not invocation.grading_operations:
+            invocation.grading_operations = None
+        return result
     if invocation is None:
         return result  # No invocation records this operation, so its result is not hashed.
     try:
