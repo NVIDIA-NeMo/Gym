@@ -264,7 +264,8 @@ async def _run_postgres(conn: Any, db_id: str, sql: str, timeout_s: float) -> Op
 
     A prepared statement cannot hold more than one command, so ``COMMIT; ...`` cannot leave the read-only
     transaction. The server's ``statement_timeout`` raises ``TimeoutError``; any other error caused by the query
-    returns ``None``. Connection and server failures raise, so they are not scored as the model's mistake.
+    returns ``None``, including a result psycopg cannot convert (``'infinity'::date`` has no Python date). Connection
+    and server failures raise, so they are not scored as the model's mistake.
 
     The transaction always rolls back: the connection goes back to the pool and serves other rollouts, so nothing the
     query sets (``SET TimeZone``, ``set_config(..., false)``) may outlive it.
@@ -289,7 +290,13 @@ async def _run_postgres(conn: Any, db_id: str, sql: str, timeout_s: float) -> Op
     except psycopg.errors.QueryCanceled:
         raise TimeoutError(f"PostgreSQL query exceeded {timeout_s}s") from None
     except psycopg.Error as e:
-        if e.sqlstate is None or e.sqlstate[:2] in _POSTGRES_INFRA_SQLSTATE_CLASSES:
+        # psycopg's own errors carry no SQLSTATE: a lost or closed connection raises, and anything else (a DataError
+        # for a value it cannot convert) is the query's. Server errors raise only for the infrastructure classes,
+        # since OperationalError also covers query faults such as 54001 statement_too_complex.
+        if e.sqlstate is None:
+            if isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+                raise
+        elif e.sqlstate[:2] in _POSTGRES_INFRA_SQLSTATE_CLASSES:
             raise
         return None
     except asyncio.CancelledError:

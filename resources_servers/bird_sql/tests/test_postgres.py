@@ -133,6 +133,50 @@ def test_missing_psycopg_pool_fails_at_startup_not_on_every_grade(tmp_path, monk
         BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+class _ConnRaising:
+    """Stands in for a pooled connection whose query raises ``error``."""
+
+    connection = None  # psycopg.sql takes the encoding from it
+    closed = False
+
+    def __init__(self, error):
+        self.error = error
+
+    def transaction(self, force_rollback):
+        return contextlib.nullcontext()
+
+    async def execute(self, *_args, **_kwargs):
+        raise self.error
+
+
+@requires_psycopg
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "is_query_fault"),
+    [
+        ("DataError", True),  # a result psycopg cannot convert, e.g. 'infinity'::date
+        ("OperationalError", False),  # the connection was lost
+        ("InterfaceError", False),  # the connection is closed
+        ("errors.StatementTooComplex", True),  # a server error (SQLSTATE 54001) the query caused
+        ("errors.AdminShutdown", False),  # a server error (SQLSTATE 57P01) the query did not cause
+    ],
+)
+async def test_errors_are_split_into_query_faults_and_grader_failures(error, is_query_fault):
+    # psycopg raises the first three itself, without a SQLSTATE; the server sends the last two with one.
+    import operator
+
+    import psycopg
+
+    from resources_servers.bird_sql.eval_utils import _run_postgres
+
+    conn = _ConnRaising(operator.attrgetter(error)(psycopg)("message"))
+    if is_query_fault:
+        assert await _run_postgres(conn, DB_ID, "SELECT 1", 1.0) is None
+    else:
+        with pytest.raises(type(conn.error)):
+            await _run_postgres(conn, DB_ID, "SELECT 1", 1.0)
+
+
 class _PostgresEnv:
     dev_dir: Path
 
@@ -346,6 +390,12 @@ class TestExecuteAndComparePostgres:
         assert gold is not None
 
     @pytest.mark.asyncio
+    async def test_a_result_psycopg_cannot_convert_is_a_pred_error(self, postgres_env):
+        # The server returns 'infinity', but psycopg has no Python date for it: a DataError with no SQLSTATE.
+        match, _gold, pred, err = await self._compare(postgres_env, "SELECT 1", "SELECT 'infinity'::date")
+        assert (match, pred, err) == (False, None, "pred_sql_error")
+
+    @pytest.mark.asyncio
     async def test_gold_error(self, postgres_env):
         assert await self._compare(postgres_env, "SELEC", "SELECT x FROM t") == (False, None, None, "gold_sql_error")
 
@@ -495,6 +545,22 @@ class TestPooling:
                 " AND pid <> pg_backend_pid()"
             ).fetchone()[0]
         assert running == 0
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_connection_raises(self, postgres_env):
+        # A connection lost mid-query is the grader's failure, not the model's: it raises instead of scoring.
+        import psycopg
+
+        async with _reader_pool(1) as pool:
+            pid = (await self._run(pool, "SELECT pg_backend_pid()"))[0][0]
+
+            async def terminate():
+                await asyncio.sleep(0.3)
+                async with await psycopg.AsyncConnection.connect(ADMIN_DSN, autocommit=True) as admin:
+                    await admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
+            with pytest.raises(psycopg.OperationalError):
+                await asyncio.gather(self._run(pool, "SELECT 1 FROM pg_sleep(5)"), terminate())
 
     @pytest.mark.asyncio
     async def test_verify_keeps_one_pool_per_server(self, postgres_env, tmp_path, monkeypatch):
