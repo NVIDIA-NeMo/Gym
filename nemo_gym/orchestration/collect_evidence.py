@@ -438,6 +438,9 @@ ELIDE_ABOVE = 1024
 VALIDATE = 1 << 20
 # A string the collector reads is never elided; one above this size is no identity or status, so the row fails loudly.
 KEPT_MAX = 1 << 20
+# A key is read up to this many bytes: a name the collector reads is at most 21 characters, 126 bytes with every one
+# escaped, so a longer key matches none of them.
+KEY_MAX = 256
 # The places in a pruned value whose string the collector projects (identities, statuses, kinds, names), as the keys
 # from the row down to the string, list levels left out. A string anywhere else is uninterpreted payload (request
 # input, tool output, conversation, even under a field that shares a name with one of these) and is elided when long.
@@ -488,6 +491,15 @@ KEPT_PATHS = kept_paths()
 STRUCTURE = re.compile(rb'["{}\[\],:]')
 NESTED = re.compile(rb'["{}\[\]]')
 HEX = frozenset(b"0123456789abcdefABCDEF")
+def unescaped(key):
+    # A key as the parsed row names it, so that "invocation_id" written with escapes is the same key. One that is not
+    # a valid string (the row fails when it is parsed) or is cut at KEY_MAX matches no path.
+    if b"\\" not in key:
+        return key
+    try:
+        return json.loads(b'"' + key + b'"').encode()
+    except ValueError:
+        return b"\0"
 class Pruner:
     # Copies one JSON object in chunks, replacing each long string inside a PRUNED_KEYS value that the collector does
     # not read with "<elided N bytes>". Only top-level keys are matched; any other value is copied byte for byte. An
@@ -514,7 +526,7 @@ class Pruner:
                 self.size += len(data)
                 if self.size > KEPT_MAX:
                     self.invalid = True
-            if self.key is not None and len(self.key) < 64:
+            if self.key is not None and len(self.key) < KEY_MAX:
                 self.key += data
     def check(self, final):
         # Checks the text gathered so far, up to the last complete escape and UTF-8 character unless it is the end.
@@ -547,10 +559,9 @@ class Pruner:
         except ValueError:
             self.invalid = True
     def kept(self):
-        # Whether the string that starts here sits where the collector reads it. A key with an escape cannot be
-        # compared byte for byte, so its string is kept.
+        # Whether the string that starts here sits where the collector reads it.
         path = [key for key, kind in zip(self.keys, self.kinds) if kind == b"{"]
-        if any(key is None or b"\\" in key for key in path):
+        if any(key is None for key in path):
             return True
         for index in range(2, len(path)):
             if path[index - 1] == b"events" and path[index - 2] == b"failure_report":
@@ -608,7 +619,7 @@ class Pruner:
                         self.out.append(b'"<elided %d bytes>"' % self.size)
                     self.buffer, self.mode, copy = None, None, pos
                 elif self.key is not None:
-                    self.last_key, self.key = bytes(self.key), None
+                    self.last_key, self.key = unescaped(bytes(self.key)), None
                     self.keys[-1] = self.last_key
                 self.mode = None
                 continue
@@ -628,8 +639,10 @@ class Pruner:
                 self.kinds.append(char)
                 self.expect_key = char == b"{"
             elif char in (b"}", b"]"):
-                self.keys.pop()
-                self.kinds.pop()
+                # An extra closer in a corrupt row has nothing to close: the parse of the row rejects it.
+                if self.keys:
+                    self.keys.pop()
+                    self.kinds.pop()
                 self.target = self.target and bool(self.keys)
             elif char == b":":
                 if len(self.keys) == 1 and self.last_key is not None:

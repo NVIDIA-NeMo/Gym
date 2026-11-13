@@ -297,3 +297,52 @@ def test_a_payload_field_named_like_an_identity_is_not_capped_when_pruning_is_tr
 def test_an_identity_above_the_cap_still_fails_loudly(tmp_path: Path) -> None:
     _write_rows(tmp_path, [_trajectory("a", b"y" * 10), _trajectory("t" * (2 * MIB), b"z" * 3000)])
     assert _run(tmp_path, script=_script(PRUNED)).returncode != 0
+
+
+def _tool_call_trajectory(output: Any) -> bytes:
+    """A trajectory whose one tool call holds ``output``, serialized with ``orjson`` as ``RolloutStore`` writes it."""
+    import orjson
+
+    from nemo_gym.trajectory.trajectory_record import TrajectoryToolCall
+
+    call = TrajectoryToolCall(
+        invocation_id="i0", tool_call_id="tc0", tool_name="read", status="completed", output=output
+    )
+    assert TrajectoryToolCall.model_validate(call.model_dump(mode="json")).output == output
+    trajectory = json.loads(_trajectory("a", b"y"))
+    trajectory["tool_calls"] = [call.model_dump(mode="json")]
+    return orjson.dumps(trajectory)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["C:\\work\\file.py", 'say "hi"', "tab\there", "\u00e9\u4e2d", "task_id\\u0000"],
+)
+def test_a_payload_under_an_escaped_key_is_pruned_not_capped(tmp_path: Path, key: str) -> None:
+    # A tool output may hold any key, one that needs an escape in JSON included: the 2 MiB string under it is payload.
+    output = {key: {"payload": "x" * (2 * MIB)}}
+    _write_rows(tmp_path, [_tool_call_trajectory(output), _trajectory("b", b"z")])
+    whole = _collect(tmp_path, script=_script(WHOLE))
+    pruned = _collect(tmp_path, script=_script(PRUNED))
+    assert pruned == whole
+
+
+def test_an_identity_written_with_escapes_is_still_kept_when_pruning(tmp_path: Path) -> None:
+    # \u0069 is "i": the key "invocation_id" written with escapes is the same key, so its long string is still capped.
+    trajectory = _trajectory("a", b"y").replace(
+        b'"invocations": []', b'"invocations": [{"\\u0069nvocation_id": "%s"}]' % (b"t" * (2 * MIB))
+    )
+    _write_rows(tmp_path, [trajectory, _trajectory("b", b"z")])
+    assert _run(tmp_path, script=_script(PRUNED)).returncode != 0
+
+
+def test_an_extra_closing_brace_in_a_corrupt_last_row_is_ignored_like_any_incomplete_tail(tmp_path: Path) -> None:
+    _write_rows(tmp_path, [_trajectory("a", b"y" * 10)])
+    path = tmp_path / "artifacts" / "rollouts.jsonl"
+    with path.open("ab") as out:
+        out.write(
+            b'{"_ng_task_index": 1, "_ng_rollout_index": 0, "ng_trajectory": {"x": "' + b"x" * (17 * MIB) + b'"}}}'
+        )
+    for swap in (WHOLE, PRUNED):
+        collected = _collect(tmp_path, script=_script(swap))
+        assert [row["_ng_task_index"] for row in collected["results"]] == [0]
