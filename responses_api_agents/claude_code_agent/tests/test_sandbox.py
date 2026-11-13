@@ -52,7 +52,9 @@ def result(stdout="", *, code=0):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("borrowed", [True, False])
 async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch, borrowed):
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     constructor = MagicMock(return_value=remote)
     constructor.connect = AsyncMock(return_value=remote)
     monkeypatch.setattr(app, "AsyncSandbox", constructor)
@@ -67,6 +69,7 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
     assert install.await_args.kwargs["version"] == "2.1.108"
     assert install.await_args.kwargs["runtime"] == state.runtime
     assert state.runtime == "/tmp/nemo-gym-claude-runtime-2.1.108"
+    assert state.sandbox_id == "sandbox-actual"
     assert state.runtime not in state.session.session_dir
     assert len(remote.upload.await_args_list) == 2
     assert state.session.owns_sandbox is not borrowed
@@ -79,7 +82,9 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("network_access", ["inherit", "model_only"])
 async def test_owned_sandbox_egress_allows_only_the_model_endpoint(monkeypatch, network_access):
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
     monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
@@ -115,7 +120,9 @@ async def test_owned_sandbox_egress_allows_only_the_model_endpoint(monkeypatch, 
     ],
 )
 async def test_model_only_allows_the_endpoint_the_cli_calls(monkeypatch, settings, allowed):
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
     monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
@@ -143,7 +150,9 @@ async def test_model_only_allows_the_endpoint_the_cli_calls(monkeypatch, setting
     ids=["uppercase", "userinfo", "ipv6_literal"],
 )
 async def test_model_only_allows_the_host_however_the_url_writes_it(monkeypatch, base_url, allowed):
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
     monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
@@ -161,7 +170,9 @@ async def test_model_only_allows_the_host_however_the_url_writes_it(monkeypatch,
 @pytest.mark.asyncio
 async def test_inherit_keeps_a_loopback_model_endpoint_working(monkeypatch):
     # A local Gym model server must keep working by default: inherit adds no policy and refuses nothing.
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="local", aclose=AsyncMock()))
     monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
@@ -252,7 +263,7 @@ async def test_bad_workdir_rejected_before_connect(monkeypatch, workdir):
 
 @pytest.mark.asyncio
 async def test_seed_passes_trusted_binary_checksum_to_installer(monkeypatch):
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock())
+    remote = SimpleNamespace(sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock())
     monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
     monkeypatch.setattr(app, "create_provider", lambda config: object())
     checksum = "a" * 64
@@ -310,6 +321,7 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
+        sandbox_id="sandbox-actual",
         session=SimpleNamespace(
             session_dir="/tmp/session",
             workdir="/app",
@@ -337,6 +349,8 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     assert response.usage.total_tokens == 12
     assert response.metadata is None  # no adapter-specific runtime policy fields
     assert "model_call_ownership_unavailable" in [gap.code for gap in state.observations.gaps]
+
+    assert next(r for r in state.observations.records if r.kind == "sandbox").sandbox_id == "sandbox-actual"
 
 
 @pytest.mark.asyncio
@@ -749,7 +763,9 @@ def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
 async def test_close_distinguishes_borrowed_release_from_confirmed_termination(confirmed):
     from nemo_gym.agents import SandboxSession, harness_termination_failure
 
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), disconnect=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), disconnect=AsyncMock()
+    )
     session = SandboxSession(sandbox=remote, session_dir="/tmp/session", workdir="/app", harness="Claude Code")
     session.launch_started = True
     receipt = {

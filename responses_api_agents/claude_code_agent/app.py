@@ -74,13 +74,13 @@ from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, B
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
-    ContextCompactionObservation,
     ObservationGap,
     SandboxObservation,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
+    captured_claude_code_usage,
     extract_claude_code_observations,
 )
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
@@ -129,6 +129,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
     disallowed_tools: Optional[str] = None
+    tools: Optional[str] = None
+    session_name: Optional[str] = None
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
@@ -141,7 +143,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
     bare: bool = True
     mcp_config: Optional[str] = None
-    settings: Optional[str] = None
+    settings: str | dict[str, Any] | None = None
 
     # Used only when an episode does not supply a borrowed SandboxAccess.
     sandbox_provider: str | None = None
@@ -242,8 +244,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
 
-        The base settings disable telemetry/attribution. When ``config.settings`` points at a
-        JSON file, its contents are layered on top: top-level keys override, and the ``env`` block
+        The base settings disable telemetry/attribution. ``config.settings`` accepts a JSON file
+        path or an inline mapping: top-level keys override, and the ``env`` block
         is shallow-merged so the telemetry defaults are preserved unless explicitly overridden.
         """
         settings: dict[str, Any] = {
@@ -254,7 +256,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             }
         }
         if self.config.settings:
-            user_settings = json.loads(Path(self.config.settings).expanduser().read_text())
+            user_settings = self.config.settings
+            if isinstance(user_settings, str):
+                user_settings = json.loads(Path(user_settings).expanduser().read_text())
             user_env = user_settings.get("env") or {}
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
         return settings
@@ -325,6 +329,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--allowedTools", self.config.allowed_tools]
         if self.config.disallowed_tools:
             cmd += ["--disallowedTools", self.config.disallowed_tools]
+        if self.config.tools is not None:
+            cmd += ["--tools", self.config.tools]
+        if self.config.session_name:
+            cmd += ["--name", self.config.session_name]
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:
@@ -693,6 +701,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     local_source=self.config.sandbox_local_executable_path,
                     expected=self.config.sandbox_executable_sha256,
                 )
+            state.sandbox_id = sandbox.sandbox_id
             return state
         except BaseException as error:
             try:
@@ -835,8 +844,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
-        state.observations = await self._associate_compaction_calls(
-            state.observations, rollout_id=state.request.episode_id.capture_key
+        response = self._response_from_output(body, items, model, run_metadata, status=status)
+        state.observations = await self._reconcile_captured_calls(
+            state.observations, rollout_id=state.request.episode_id.capture_key, response=response
         )
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
@@ -845,6 +855,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations.records.append(
                 SandboxObservation(
                     role="agent",
+                    sandbox_id=state.sandbox_id,
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
                     outcome=(
                         "timeout"
@@ -861,7 +872,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        return response
 
     async def responses(
         self,
@@ -888,18 +899,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
-    async def _associate_compaction_calls(
-        self, observations: AgentObservationBundle, *, rollout_id: str | None
+    async def _reconcile_captured_calls(
+        self, observations: AgentObservationBundle, *, rollout_id: str | None, response: NeMoGymResponse | None = None
     ) -> AgentObservationBundle:
-        """Resolve Claude's hidden helpers before handing its bundle to the collector."""
-        if (
-            rollout_id is None
-            or self.config.model_server is None
-            or not any(
-                isinstance(record, ContextCompactionObservation) and not record.model_calls
-                for record in observations.records
-            )
-        ):
+        """Resolve hidden helpers and reconcile usage against the invocation's captured calls."""
+        if rollout_id is None or self.config.model_server is None:
             return observations
         try:
             capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
@@ -910,9 +914,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             calls, _ = await asyncio.to_thread(
                 read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
             )
-            return associate_claude_code_compaction_calls(
-                observations, [call for call in calls if call.model_ref == self.config.model_server]
-            )
+            calls = [call for call in calls if call.model_ref == self.config.model_server]
+            observations = associate_claude_code_compaction_calls(observations, calls)
+            if response is not None:
+                usage = captured_claude_code_usage(observations, calls)
+                if usage is not None:
+                    response.usage = usage
+                else:
+                    observations.gaps.append(ObservationGap(code="model_usage_reconciliation_unavailable"))
+            return observations
         except Exception:
             LOG.warning("Could not associate Claude Code compaction calls for rollout %s.", rollout_id, exc_info=True)
             observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
@@ -960,7 +970,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
-        observations = await self._associate_compaction_calls(observations, rollout_id=rollout_id)
+        observations = await self._reconcile_captured_calls(observations, rollout_id=rollout_id, response=response)
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from nemo_gym.rollouts.harness_capabilities.cli import digest_file, inspect_bundle, json_rows, main
     from nemo_gym.rollouts.harness_capabilities.compaction import inspect_compaction
     from nemo_gym.rollouts.harness_capabilities.health import inspect_health
-    from nemo_gym.rollouts.harness_capabilities.results import gate_passes, render_matrices
+    from nemo_gym.rollouts.harness_capabilities.results import Results, gate_passes, render_matrices
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -35,6 +35,7 @@ _PUBLIC_API = {
     "EvidenceScope": "checker",
     "NAMES": "checker",
     "PriorityTier": "checks",
+    "Results": "results",
     "digest_file": "cli",
     "gate_passes": "results",
     "inspect_behavior": "behavior",
