@@ -83,9 +83,13 @@ def test_server_does_not_join_ray_even_when_the_run_has_a_cluster(monkeypatch: p
     initialize_ray.assert_not_called()
 
 
-def test_config_requires_base_url() -> None:
+@pytest.mark.parametrize("base_url", ["", "  ", [], [""], ["http://judge-pool:8000/v1", " "]])
+def test_config_requires_a_nonempty_base_url(base_url: str | list[str]) -> None:
     with pytest.raises(ValidationError, match="needs `base_url`"):
-        _config(base_url=[])
+        _config(base_url=base_url)
+
+
+def test_config_rejects_a_missing_base_url() -> None:
     with pytest.raises(ValidationError, match="base_url"):
         LocalVLLMExternalModelConfig(
             host="127.0.0.1",

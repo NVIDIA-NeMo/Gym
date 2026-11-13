@@ -77,7 +77,19 @@ judge_model:
       uses_reasoning_parser: false
 ```
 
+`external_app.py` also supports `num_workers > 1`, which `app.py` does not.
+For a busy judge, spreading request forwarding across workers can matter more than skipping Ray.
+
 `app.py` still accepts `base_url` and skips the local launch, but it joins Ray regardless, because Gym decides whether a server uses Ray from its entrypoint before reading the config.
+A config only changes when it selects `external_app.py`.
+If a launcher injects `base_url`, have it set the entrypoint in the same place:
+
+```bash
+++judge_model.responses_api_models.local_vllm_model.base_url=http://judge-pool:8000/v1 \
+++judge_model.responses_api_models.local_vllm_model.entrypoint=external_app.py
+```
+
+Keep `entrypoint: app.py` on the launcher's local-launch path, where vLLM still starts on Ray.
 
 ### `vllm_serve_kwargs`
 

@@ -45,7 +45,9 @@ class LocalVLLMExternalModelConfig(LocalVLLMModelConfig):
     @field_validator("base_url")
     @classmethod
     def _require_base_url(cls, base_url: str | list[str]) -> str | list[str]:
-        if not base_url:
+        # A launcher that interpolates an unset variable can produce `[""]`, which has no endpoint to serve.
+        urls = [base_url] if isinstance(base_url, str) else base_url
+        if not urls or not all(url.strip() for url in urls):
             raise ValueError(
                 "external_app.py serves an external vLLM endpoint and needs `base_url`. "
                 "To launch vLLM locally, use `entrypoint: app.py`."
