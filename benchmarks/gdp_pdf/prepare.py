@@ -300,8 +300,13 @@ def build_gym_row(
     *,
     criteria: Optional[list[dict]] = None,
 ) -> dict:
-    """Convert one upstream parquet row into a Gym JSONL row."""
-    return {
+    """Convert one upstream parquet row into a Gym JSONL row.
+
+    A row rendered for gdp_pdf_agent (a non-empty ``document_manifest_relpath``) also carries the ``agent_context``
+    its agent session receives. A row prepared without rendering (the OpenCode sandbox reads ``source_pdf``) has
+    none: its agent declares no agent context, so a session would refuse one.
+    """
+    gym_row = {
         "responses_create_params": {
             "input": [
                 {
@@ -323,9 +328,11 @@ def build_gym_row(
             "source_pdf": source_pdf_relpath,
             "criteria": extract_criteria(row) if criteria is None else criteria,
         },
-        # What an agent session receives: the same manifest gdp_pdf_agent's run() reads from verifier_metadata.
-        "agent_context": _agent_context(document_manifest_relpath),
     }
+    if document_manifest_relpath:
+        # What an agent session receives: the same manifest gdp_pdf_agent's run() reads from verifier_metadata.
+        gym_row["agent_context"] = _agent_context(document_manifest_relpath)
+    return gym_row
 
 
 def _agent_context(document_manifest_relpath: str) -> dict:
@@ -525,6 +532,17 @@ def write_example(rows: list[dict], output_dir: Path) -> Path:
 # actually invokes. Stages into resources_servers/gdp_pdf/data/ (matching the
 # agent's documents_base_dir), then copies the result into this benchmark's data/.
 # ---------------------------------------------------------------------------
+
+
+def is_prepared_data_current(fpath: Path) -> bool:
+    """Whether every cached row carries the ``agent_context`` the shipped agent sessions require.
+
+    Rows prepared before the key existed are refused with HTTP 422 at every session, so they are prepared again.
+    """
+    try:
+        return all("agent_context" in row for row in _read_jsonl(Path(fpath)))
+    except (OSError, ValueError):
+        return False
 
 
 def prepare(limit: Optional[int] = None, hf_token: Optional[str] = None) -> Path:

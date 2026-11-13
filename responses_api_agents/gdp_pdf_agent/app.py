@@ -45,6 +45,7 @@ Server verifies the answer.
 """
 
 import base64
+import errno
 import io
 import json
 import math
@@ -98,7 +99,9 @@ _MAX_PAGES_PER_IMAGE = 4
 
 class GdpPdfAgentConfig(SimpleAgentConfig):
     documents_base_dir: str = Field(
-        description="Base directory for resolving verifier_metadata.document_manifest, relative to the Gym root.",
+        description="Base directory for resolving the document manifest (verifier_metadata.document_manifest on "
+        "/run, the agent_context artifact in a session), relative to the Gym root. A session refuses a manifest "
+        "that resolves outside it through a symlink, so name the real directory.",
     )
     dpi: int = Field(
         default=BASE_DPI,
@@ -392,6 +395,30 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
     return manifest
 
 
+# Errors the manifest path itself causes, which a retry meets again (the set resolve_agent_context_artifact refuses).
+_MANIFEST_PATH_ERRNOS = frozenset(
+    {errno.EACCES, errno.EPERM, errno.ENAMETOOLONG, errno.ELOOP, errno.ENOTDIR, errno.ENOENT, errno.EISDIR}
+)
+
+
+def _unusable_page(
+    manifest: dict[str, Any],
+    manifest_dir: Path,
+    *,
+    include_text: bool,
+    include_images: bool,
+    max_pages: Optional[int],
+) -> Optional[str]:
+    """Why a loaded manifest cannot be delivered, or None: a page whose text or page image the delivery would read
+    is missing, so every attempt would fail the same way."""
+    for page in manifest["pages"][:max_pages]:
+        if include_text and not isinstance(page.get("text"), str):
+            return f"page {page['page_number']} has no extracted text"
+        if include_images and not (isinstance(page.get("image"), str) and (manifest_dir / page["image"]).is_file()):
+            return f"page {page['page_number']} names no page image file under {manifest_dir}"
+    return None
+
+
 def _manifest_text_blocks(manifest: dict[str, Any], *, max_pages: Optional[int]) -> tuple[list[dict[str, Any]], int]:
     """Extracted text doesn't change across retry attempts (unlike page images, which get resized
     smaller on a DPI backoff), so this only needs to run once per row. Returns ``(content_blocks,
@@ -601,12 +628,29 @@ class GdpPdfAgent(SimpleAgent):
             context.document_manifest, self._documents_base_dir(), kind="file"
         )
         try:
-            source_dpi = int(_load_manifest(manifest_path).get("source_dpi", self.config.dpi))
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            # Every retry would read the same file, so a manifest that cannot be read or parsed refuses the seed.
+            manifest = _load_manifest(manifest_path)
+            source_dpi = int(manifest.get("source_dpi", self.config.dpi))
+            problem = _unusable_page(
+                manifest,
+                manifest_path.parent,
+                include_text=self.config.include_text,
+                include_images=self.config.include_images,
+                max_pages=self.config.max_pages,
+            )
+        except OSError as error:
+            # A storage error (EIO, ESTALE) may pass, so it fails the seed as a transient error; only an error the
+            # path itself causes refuses it, as resolve_agent_context_artifact does.
+            if error.errno not in _MANIFEST_PATH_ERRNOS:
+                raise
+            raise AgentSeedRejectedError(f"document manifest {manifest_path} cannot be read: {error}") from None
+        except (ValueError, KeyError, TypeError) as error:
+            # Every retry would parse the same file, so a malformed manifest refuses the seed.
             raise AgentSeedRejectedError(
                 f"document manifest {manifest_path} cannot be read: {type(error).__name__}: {error}"
             ) from None
+        if problem is not None:
+            # Every activation would fail on the same page, so refuse the seed instead of answering without it.
+            raise AgentSeedRejectedError(f"document manifest {manifest_path}: {problem}")
         if source_dpi != self.config.dpi:
             raise AgentSeedRejectedError(
                 f"{manifest_path} was rendered at {source_dpi} DPI, but this agent's starting dpi is "
@@ -670,7 +714,10 @@ class GdpPdfAgent(SimpleAgent):
         An input-limit rejection that no smaller delivery fixes returns an empty failed response, which the
         Environment Server verifies as a zero attempt, as run() scores it. Any other model error stays the
         classified failure Simple Agent returns, for the Environment Server's outcome policy; so does an empty-body
-        server error that persists through every smaller delivery, since it may be an outage rather than a limit.
+        server error on the last, text-only attempt, since it may be an outage rather than a limit.
+
+        Every attempt passes the same checkpoint activation to ``create_episode``. That is safe because this agent
+        runs no tools and so never commits a boundary past step 0: a restore restarts the backoff at full DPI.
         """
         manifest = _load_manifest(manifest_path)
         prompt_blocks = _prompt_blocks({"responses_create_params": params.model_dump(exclude_unset=True)})
@@ -709,6 +756,10 @@ class GdpPdfAgent(SimpleAgent):
             | {"rejected_attempts": delivery.attempts, "pages_truncated": pages_truncated}
             | delivery.adaptation_counts()
         )
+        if terminal_limit and self.config.mask_failed_attempts:
+            # The Environment Server returns a session's row, so gdp_pdf's verify() applies this mark as run() would:
+            # mask_sample and failure_kind for an attempt whose input never fit.
+            record |= {"mask_failed_attempt": True, "failure_kind": _failure_kind(terminal_limit)}
         model_response = model_response.model_copy(
             update={
                 "metadata": {**(model_response.metadata or {}), DOCUMENT_DELIVERY_METADATA_KEY: json.dumps(record)}

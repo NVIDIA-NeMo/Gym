@@ -64,11 +64,13 @@ Rows are lightweight — no base64 in the JSONL:
       "implicitness": "Explicit", "subjectiveness": "Objective", "failure_mode": "Binary"}]}}
 ```
 
-Each row also carries
+Each row prepared for `gdp_pdf_agent` also carries
 `"agent_context": {"agent": {"artifacts": {"document_manifest": {"path": <document_manifest>}}}}`, the manifest
 the `agent` role's session receives (see `responses_api_agents/gdp_pdf_agent/README.md`). The shipped
 configs run the agent in an agent session (`single_agent_turn_legacy`), so a row without this key is refused
-with HTTP 422. Data prepared before the key existed lacks it: run `gym eval prepare --benchmark gdp_pdf` again.
+with HTTP 422. Data prepared before the key existed lacks it: `gym eval prepare --benchmark gdp_pdf` prepares it
+again, even with `use_cached_prepared_benchmarks=true`. Rows from `prepare_opencode.py` carry no `agent_context`:
+the OpenCode sandbox reads `source_pdf`, and its agent takes no agent context.
 
 `verifier_metadata.prompt` is stored explicitly so `verify()` does not have to dig the prompt back
 out of the content blocks after the agent has rewritten them. The OpenCode sandbox uses

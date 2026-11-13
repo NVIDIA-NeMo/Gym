@@ -16,6 +16,7 @@
 page compositing."""
 
 import base64
+import errno
 import io
 import json
 import random
@@ -314,6 +315,36 @@ class TestAgentSessions:
         assert AGENT_OUTCOME_METADATA_KEY not in response["metadata"]
         delivery = json.loads(response["metadata"][DOCUMENT_DELIVERY_METADATA_KEY])
         assert (delivery["limit"], delivery["text_only_fallback"]) == ("payload", True)
+        assert "mask_failed_attempt" not in delivery
+
+    @pytest.mark.parametrize(
+        ("error", "failure_kind"),
+        [
+            (_model_error(400, "This model's maximum context length is 8192 tokens"), "model_context_limit"),
+            (_model_error(413, "Payload Too Large"), "model_request_error"),
+        ],
+        ids=["context", "payload"],
+    )
+    def test_mask_failed_attempts_marks_a_document_that_never_fits(
+        self, tmp_path: Path, error: MagicMock, failure_kind: str
+    ) -> None:
+        """The Environment Server returns a session's row, so the mark goes in the delivery record for verify()."""
+        response, _, _ = _session_run(tmp_path, lambda **kwargs: error, mask_failed_attempts=True)
+
+        assert (response["status"], response["output"]) == ("failed", [])
+        delivery = json.loads(response["metadata"][DOCUMENT_DELIVERY_METADATA_KEY])
+        assert (delivery["mask_failed_attempt"], delivery["failure_kind"]) == (True, failure_kind)
+
+    def test_mask_failed_attempts_leaves_a_delivered_answer_unmarked(self, tmp_path: Path) -> None:
+        response, _, _ = _session_run(
+            tmp_path,
+            [_model_error(400, "This model's maximum context length is 8192 tokens"), _model_reply()],
+            mask_failed_attempts=True,
+        )
+
+        delivery = json.loads(response["metadata"][DOCUMENT_DELIVERY_METADATA_KEY])
+        assert response["status"] == "completed" and delivery["limit"] is None
+        assert "mask_failed_attempt" not in delivery
 
     def test_another_model_error_stays_a_classified_failure(self, tmp_path: Path) -> None:
         response, _, requests = _session_run(tmp_path, [_model_error(500, "upstream exploded")], max_model_retries=0)
@@ -365,6 +396,50 @@ class TestAgentSessions:
         assert seeded.status_code == 422
         assert seeded.json()["detail"].startswith(f"document manifest {tmp_path.resolve() / manifest} cannot be read")
         assert detail in seeded.json()["detail"]
+
+    @pytest.mark.parametrize(
+        ("break_page", "overrides", "detail"),
+        [
+            ("text", {}, "page 2 has no extracted text"),
+            ("image", {}, "page 2 names no page image file under"),
+            ("image", {"include_images": False}, None),
+            ("image", {"max_pages": 1}, None),
+        ],
+        ids=["no-text", "image-missing", "image-missing-text-only", "image-missing-past-max-pages"],
+    )
+    def test_a_page_the_delivery_cannot_read_refuses_the_seed(
+        self, tmp_path: Path, break_page: str, overrides: dict, detail: str | None
+    ) -> None:
+        """A page every activation would fail on refuses the seed; a page the delivery never reads does not."""
+        agent, manifest, _ = _image_agent(tmp_path, **overrides)
+        agent.server_client.global_config_dict = {}
+        if break_page == "text":
+            document = json.loads((tmp_path / manifest).read_text(encoding="utf-8"))
+            del document["pages"][1]["text"]
+            (tmp_path / manifest).write_text(json.dumps(document), encoding="utf-8")
+        else:
+            (tmp_path / manifest).with_name("page_2.png").unlink()
+
+        seeded = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=_seed(manifest))
+
+        if detail is None:
+            assert seeded.status_code == 200
+        else:
+            assert seeded.status_code == 422
+            assert detail in seeded.json()["detail"]
+
+    def test_a_storage_error_reading_the_manifest_is_not_a_refusal(self, tmp_path: Path) -> None:
+        """An I/O error on shared storage may pass, so the seed fails as a retryable error, not a terminal 422."""
+        agent, manifest, _ = _image_agent(tmp_path)
+        agent.server_client.global_config_dict = {}
+        storage_error = OSError(errno.EIO, "Input/output error")
+
+        with patch("responses_api_agents.gdp_pdf_agent.app._load_manifest", side_effect=storage_error):
+            seeded = TestClient(agent.setup_webserver(), raise_server_exceptions=False).post(
+                "/v1/agent_sessions", json=_seed(manifest)
+            )
+
+        assert seeded.status_code == 500
 
     def test_an_empty_body_server_error_backs_off_like_a_payload_limit(self, tmp_path: Path) -> None:
         """vLLM answers an oversized multi-image prompt with an empty 500, which Gym's model server relays."""

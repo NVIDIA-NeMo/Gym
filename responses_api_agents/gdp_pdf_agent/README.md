@@ -64,9 +64,9 @@ problem, the agent reacts and retries:
   reduce DPI and regenerate while images are part of the payload.
 - **Auth/rate-limit errors** (401/403/429) are systemic, not per-document, so they propagate
   instead of being retried — every other row would fail identically.
-- **Any other exception** (an unclassified HTTP error, or a non-HTTP exception like an upstream
-  library assertion) is treated as a terminal, per-document failure: the row scores 0 (an empty
-  answer earns no rubric credit) instead of crashing the whole evaluation run.
+- **Any other model error** (an unclassified HTTP error such as a 5xx with a body, or a transport
+  failure) is not a limit of the document: `run()` raises its typed model failure, so the row is
+  masked and collection retries it within its budget, instead of scoring it 0.
 
 When compositing is active, the agent adds a `document_delivery` notice to the model input stating
 how many labeled pages each image may contain. If the four-pages-per-image ceiling cannot fit every
@@ -80,7 +80,8 @@ for a model failure. Two counts summarize the rejected attempts: `input_limit_re
 the endpoint rejected for their input size, each answered by a smaller delivery) and
 `output_truncation_regenerations` (nonzero only with `regenerate_on_incomplete_output`). The row
 also carries them as `agent_adaptations`, which the run's failure facts sum per run under
-`failures.agent_adaptations`. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
+`failures.agent_adaptations`. In an agent session, gdp_pdf's `verify()` writes both fields from the response's
+metadata (see [Agent sessions](#agent-sessions)). `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
 as a `multimodal_history_redacted` gap on the trajectory.
 
 ## Failed attempts in training
@@ -92,7 +93,9 @@ zero says nothing about an answer, so set `mask_failed_attempts: true`: such att
 `mask_sample: true` and a `failure_kind` (`model_context_limit` for a context limit,
 `model_request_error` for an image-count or payload limit), and the trainer leaves them out of the
 loss. A failed policy call or `/verify` is masked in either mode, and rows whose judge call failed
-are already masked by `judge_failsafe`.
+are already masked by `judge_failsafe`. In an agent session the Environment Server returns the row, so the agent
+marks the attempt in its delivery record and gdp_pdf's `verify()` sets the same `mask_sample`, `failure_kind` and
+`failure_reason`.
 
 ## Agent sessions
 
@@ -110,16 +113,18 @@ and runs the same backoff:
 - In a session, Simple Agent returns a model HTTP error as a failed response instead of raising it. The agent
   reads the input limit from that response and retries with a smaller delivery, all within the one activation.
 - A document that does not fit even as text returns an empty failed response without an outcome, which the
-  Environment Server verifies as a zero attempt, as `run()` scores it.
+  Environment Server verifies as a zero attempt, as `run()` scores it. gdp_pdf's `verify()` reads the delivery
+  record and adds the row's `failure_reason`, and with `mask_failed_attempts` its `mask_sample` and `failure_kind`.
 - Any other model error (a 5xx that is not an empty-body crash, 401, 403, 429) stays the
-  `model_request_error` failure Simple Agent reports. The Environment Server's outcome policy decides what
-  happens to it; `run()` instead scored most of these as a zero attempt or failed the run.
+  `model_request_error` failure Simple Agent reports, for the Environment Server's outcome policy to decide;
+  `run()` raises the same typed failure.
 - An empty-body 5xx is taken for an oversized request and backed off like one, since that is how vLLM fails
   under an oversized multi-image prompt (Gym's model server relays the empty body). If it persists through
   text only, it may be an outage rather than a limit, so the session returns the last `model_request_error`
   failure for the outcome policy instead of the zero attempt `run()` scores.
 - The delivery record goes into the response's `document_delivery` metadata as a JSON string, with
-  `pages_truncated` in it. A session's result has no top-level `document_delivery` or `agent_adaptations`.
+  `pages_truncated` in it. gdp_pdf's `verify()` copies it to the row's `document_delivery` and its counts to
+  `agent_adaptations`, so a session's row carries the fields a `/run` row does.
 - Verification and its failures belong to the Environment Server, including `skip_verification`.
 
 ## Text-only models
