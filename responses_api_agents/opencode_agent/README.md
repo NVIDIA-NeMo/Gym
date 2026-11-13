@@ -428,7 +428,8 @@ an assistant message like any other, so when a run ends on a compaction, a verif
 the last assistant text gets the summary instead of an answer. With
 `exclude_compaction_summaries: true`, the output leaves out each assistant message that
 OpenCode marks `summary: true` or that its `compaction` agent wrote. The compaction record in
-the observations keeps the summary text either way.
+the observations keeps the summary text either way. The response usage counts the summary calls
+whatever the setting.
 
 ### Session exports
 
