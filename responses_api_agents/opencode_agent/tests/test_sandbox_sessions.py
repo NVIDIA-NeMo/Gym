@@ -1233,6 +1233,8 @@ def test_either_marker_identifies_a_compaction_summary(setup, marker):
         ({"compaction": {"reserved": 8000.5}}, "compaction.reserved must be a positive integer"),
         ({"compaction": {"reserved": "8000"}}, "compaction.reserved must be a positive integer"),
         ({"compaction": {"reserved": True}}, "compaction.reserved must be a positive integer"),
+        # The whole context window (32000 here): OpenCode would compact after every call.
+        ({"compaction": {"reserved": 32000}}, "compaction.reserved must be below context_window"),
         ({"agent": {"plan": {"steps": 4}}}, "agent supports only build"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),

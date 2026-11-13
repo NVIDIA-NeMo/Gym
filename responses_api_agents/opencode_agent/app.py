@@ -334,8 +334,9 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
       context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
     - ``compaction.reserved`` (a positive integer): the token buffer OpenCode keeps below ``context_window``.
       Automatic compaction starts after a call whose tokens reach ``context_window`` minus this buffer; unset, the
-      buffer is the smaller of 20000 and ``max_output_tokens``. It moves only that trigger. ``compaction.prune``
-      stays refused: it rewrites old tool output, so later calls stop extending the earlier calls' prefix.
+      buffer is the smaller of 20000 and ``max_output_tokens``. It moves only that trigger, and the seed refuses a
+      buffer of ``context_window`` or more, which would compact after every call. ``compaction.prune`` stays
+      refused: it rewrites old tool output, so later calls stop extending the earlier calls' prefix.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
@@ -1081,6 +1082,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config_error = _session_opencode_config_error(self.config.opencode_config)
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
+        # The allowlist made a set compaction.reserved a positive integer. OpenCode compacts after a call that reaches
+        # context_window minus it, so a buffer of the whole window compacts after every call until the budget ends.
+        if self.config.opencode_config.get("compaction", {}).get("reserved", 0) >= self.config.context_window:
+            raise HTTPException(422, "OpenCode sandbox config: compaction.reserved must be below context_window")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
