@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: agentvista
-version: 4.0.0
+version: 5.0.0
 experimental: true
 kind: benchmark
 integration_profile: external-agent-loop
@@ -15,7 +15,7 @@ reward:
   range: [0.0, 1.0]
   higher_is_better: true
 determinism: stochastic
-resources_server: null
+resources_server: agentvista_resources
 agent_server: agentvista_agent
 model_server: policy_model
 datasets:

@@ -209,7 +209,7 @@ def run(config: dict) -> dict:
             "AGENTVISTA_VISIT_API_ENDPOINT",
             "AGENTVISTA_VISIT_MODEL_NAME",
         ):
-            if not os.environ.get(key):
+            if not (config.get("defer_verification") and key.startswith("VERIFIER_")) and not os.environ.get(key):
                 raise ValueError(f"Missing tool environment variable: {key}")
         workspace = output / "workspace"
         workspace.mkdir(exist_ok=True)
@@ -313,6 +313,10 @@ def run(config: dict) -> dict:
             raise RuntimeError(f"OpenCode termination: {health['termination']}; inspect native artifacts")
         # A model's empty answer or used actor deadline is judged; infrastructure loss stays unscored.
         result["failure_kind"] = "agentvista:verifier"
+        if config.get("defer_verification"):
+            result.pop("failure_kind", None)
+            result.update(verification_pending=True, judge_responses=texts)
+            return result
         verdict = score(task["question"], task["record"].get("solution"), texts)
         health["task_success"] = verdict["reward"] == 1
         result.pop("failure_kind", None)

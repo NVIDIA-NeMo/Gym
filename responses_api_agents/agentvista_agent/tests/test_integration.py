@@ -12,12 +12,39 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
+from resources_servers.agentvista.app import AgentVistaResources, AgentVistaResourcesConfig
 from responses_api_agents.agentvista_agent.app import (
     AgentVistaAgent,
     AgentVistaConfig,
     AgentVistaRunRequest,
 )
 from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
+from responses_api_agents.agentvista_agent.runtime.results import (
+    AgentVistaResults,
+    AgentVistaVerifyRequest,
+    policy_response,
+)
+
+
+def formatted(agent, body, result):
+    response = policy_response(body, result, agent.config.model_name)
+    verify = AgentVistaVerifyRequest(**body.model_dump(), response=response)
+    return AgentVistaResults.format_result(agent, verify, result)
+
+
+def metrics_owner(agent):
+    config = AgentVistaResourcesConfig(
+        host="127.0.0.1",
+        port=1235,
+        entrypoint="app.py",
+        name="agentvista_resources",
+        source_root=agent.config.source_root,
+        dataset=agent.config.dataset,
+        image_folder=agent.config.image_folder,
+        output_root=agent.config.output_root,
+        harness=agent.config.harness,
+    )
+    return AgentVistaResources(config=config, server_client=agent.server_client)
 
 
 @pytest.fixture
@@ -77,13 +104,13 @@ def result(masked=False):
 
 
 def test_real_gym_tool_transcript_and_measured_zero(agent):
-    response = agent._response(request(), result())
+    response = formatted(agent, request(), result())
     assert response.reward == 0 and response.mask_sample is False
     assert response.response.output[0].type == "function_call"
     assert response.response.output[1].call_id == "one"
     assert response.response.usage is None
     assert response.reward_kind == "llm_judged" and response.deterministically_verified is False
-    assert agent._response(request(), result(True)).mask_sample is True
+    assert formatted(agent, request(), result(True)).mask_sample is True
 
 
 @pytest.mark.asyncio
@@ -96,12 +123,14 @@ async def test_judge_evidence_and_counted_zero_rows_are_retained(agent):
         "analysis": "Score: 1",
         "model": "fixture-judge",
     }
-    response = agent._response(request(), value)
+    response = formatted(agent, request(), value)
     assert response.verifier_diagnostics == value["verify"]
     assert response.judge_response == "Score: 1"
     # The collector's counted failures retain task fields but have no verifier-produced fields.
     zero = {"reward": 0.0, "mask_sample": False, "verifier_metadata": {"category_id": "test"}}
-    metrics = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[response.model_dump(), zero]))
+    metrics = await metrics_owner(agent).aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[response.model_dump(), zero])
+    )
     assert metrics.agent_metrics["agentvista/num_scored"] == 2
     assert metrics.agent_metrics["agentvista/mean_score"] == 0.5
     assert metrics.agent_metrics["agentvista/pass_rate"] == 0.5
@@ -120,10 +149,12 @@ async def test_budget_exhaustion_keeps_judged_zero_and_explicit_metrics(agent):
         "execution_healthy": True,
         "task_success": False,
     }
-    response = agent._response(request(), value)
+    response = formatted(agent, request(), value)
     assert not response.mask_sample and response.reward == 0
     assert response.response.status == "incomplete"
-    metrics = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[response.model_dump()]))
+    metrics = await metrics_owner(agent).aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[response.model_dump()])
+    )
     assert metrics.agent_metrics["agentvista/num_scored"] == 1
     assert metrics.agent_metrics["agentvista/num_masked"] == 0
     assert metrics.agent_metrics["agentvista/output_budget_exhausted"] == 1
@@ -146,16 +177,16 @@ async def test_cached_rollout_retry_does_not_rerun_actor(agent):
     ).hexdigest()
     (output / "binding.json").write_text(json.dumps({"fingerprint": fingerprint}))
     (output / "result.json").write_text(json.dumps(result()))
-    first, second = await asyncio.gather(agent.run(body), agent.run(body))
-    assert first.reward == second.reward == 0 and first.mask_sample is False
+    first, second = await asyncio.gather(agent._execute(body), agent._execute(body))
+    assert first["verify"]["reward"] == second["verify"]["reward"] == 0 and first["mask_sample"] is False
     with pytest.raises(Exception, match="different request"):
-        await agent.run(request(task="other"))
+        await agent._execute(request(task="other"))
 
 
 @pytest.mark.asyncio
 async def test_missing_rollout_identity_rejected(agent):
     with pytest.raises(Exception, match="_ng_rollout_id"):
-        await agent.run(request().model_copy(update={"capture_rollout_id": None}))
+        await agent._execute(request().model_copy(update={"capture_rollout_id": None}))
 
 
 @pytest.mark.asyncio
@@ -169,10 +200,10 @@ async def test_episode_output_stays_in_mounted_path(agent, monkeypatch, tmp_path
 
     async def episode(self, body, output, fingerprint, rollout_id):
         observed.append(output)
-        return self._response(body, result())
+        return result()
 
     monkeypatch.setattr(AgentVistaAgent, "_episode", episode)
-    await agent.run(request())
+    await agent._execute(request())
     assert observed == [mounted / "episodes" / hashlib.sha256(b"repeat-0").hexdigest()]
 
 

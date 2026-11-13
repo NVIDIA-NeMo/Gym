@@ -106,8 +106,9 @@ Both runtime-image builders install Bubblewrap; rebuild older images before usin
 harness version **4.0.0**. Do not combine historical unsandboxed scores with this
 version. See the [agent README](../../responses_api_agents/agentvista_agent/README.md)
 for the namespace tests, runtime requirements and shared-kernel limitations.
-Training remains unsupported. The resources-server/session migration with stock
-`opencode_agent` remains a separate architectural follow-up.
+Training remains unsupported. Sessions and separate verification are implemented
+in version 5; generalizing the native tools to stock `opencode_agent` remains
+a separate follow-up.
 
 ## Run evaluation
 
@@ -137,8 +138,8 @@ output-token ceiling, including budgets above its built-in 32,000-token default.
 
 The default loop now uses the published run command's 30 turns and 100 images,
 65,536 context tokens and 8,192 output tokens. OpenCode defaults to 150 steps and
-5,400 seconds of actor time, with its own history/compaction. The legacy relay
-has no queue-wide deadline; the worker's episode timeout starts after acquiring
+5,400 seconds of actor time, with its own history/compaction. The Environment Server
+seeds, activates, closes and verifies each episode. The worker’s timeout starts after acquiring
 an active slot. OpenCode must list all four original MCP tools before a result
 can be scored. Input image attachments are not silently resized by OpenCode.
 
@@ -169,3 +170,13 @@ checkout and worker dependencies, the additional fixtures exercise real original
 tools, Jupyter and the pinned CLI against local fake policy/judge endpoints.
 `smoke.sh` provides bounded real-provider checks with explicitly supplied endpoint
 and model settings. No training adapter or training qualification is included.
+
+## Version 5: session-based evaluation
+
+Both includes use Gym's `single_agent_turn_legacy` Environment Server, the
+AgentVista session adapter, and the dedicated `agentvista_resources` verifier.
+The Environment Server owns episode order and cleanup. Only the verifier calls
+the original answer judge and aggregates scores. Re-run preparation when moving
+from version 4 so each row has the task's agent seed context. Factory's agent
+selector and the two harness configuration names are unchanged. Existing frozen
+cluster campaigns retain their pinned code/configuration.

@@ -52,7 +52,7 @@ def inventory(dataset: str | Path, image_folder: str | Path, selector: str = "al
 
 
 def dataset_rows(tasks: dict) -> list[dict]:
-    return [
+    rows = [
         {
             "responses_create_params": {"input": [{"role": "user", "content": task["question"]}]},
             "verifier_metadata": {
@@ -64,3 +64,7 @@ def dataset_rows(tasks: dict) -> list[dict]:
         }
         for task_id, task in tasks.items()
     ]
+
+    for row in rows:
+        row["agent_context"] = {"agent": {"values": {"verifier_metadata": dict(row["verifier_metadata"])}}}
+    return rows

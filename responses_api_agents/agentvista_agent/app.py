@@ -10,30 +10,35 @@ import json
 import os
 import signal
 import sys
-import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-from uuid import uuid4
 
-from fastapi import HTTPException
-from pydantic import ConfigDict, Field, PrivateAttr
+from fastapi import HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     maybe_rollout_id_from_run_body,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 
 
 class AgentVistaConfig(BaseResponsesAPIAgentConfig):
+    resources_server: None = None
     source_root: str
     dataset: str
     image_folder: str
@@ -64,19 +69,15 @@ class AgentVistaRunRequest(BaseRunRequest):
     verifier_metadata: dict[str, str]
 
 
-class AgentVistaVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-    task_id: str
-    category_id: str
-    artifacts: str
-    verify_status: str
-    trajectory: list[dict] = Field(default_factory=list)
-    native_trajectory: list[dict] = Field(default_factory=list)
-    execution_health: dict = Field(default_factory=dict)
-    harness_version: str | None = None
-    verifier_diagnostics: dict = Field(default_factory=dict)
-    judge_response: str | None = None
-    execution_error: str | None = None
+class AgentVistaContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verifier_metadata: dict[str, str] = Field(default_factory=dict)
+
+
+@dataclass
+class AgentVistaSession(AgentSessionState):
+    context: AgentVistaContext
+    activation: asyncio.Task | None = None
 
 
 class AgentVistaAgent(SimpleResponsesAPIAgent):
@@ -90,16 +91,71 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         self._semaphore = asyncio.Semaphore(self.config.concurrency)
-        source = Path(self.config.source_root).resolve(strict=True)
-        if not (source / "infer.py").is_file():
-            raise ValueError(f"Missing upstream AgentVista source at {source}")
-        # The AgentVista checkout stays outside Gym's temporary checkout/venv.
-        sys.path.insert(0, str(source))
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-        raise HTTPException(400, "Use /run with prepared AgentVista verifier_metadata")
+    agent_context_model = AgentVistaContext
 
-    async def run(self, body: AgentVistaRunRequest) -> AgentVistaVerifyResponse:
+    def multiple_workers_unsupported_reason(self) -> str:
+        return "AgentVista worker admission and in-flight episode bindings are process-local; use one server worker"
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentVistaSession:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError(
+                "AgentVista does not support sandbox access; its code tool owns a namespace sandbox"
+            )
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("AgentVista does not support required external tool grants")
+        context = self.parse_agent_context(body)
+        if context is None:
+            raise AgentSeedRejectedError("AgentVista requires verifier_metadata in agent_context")
+        required = {"task_id", "source_sha256", "category_id", "harness_version"}
+        if not required.issubset(context.verifier_metadata):
+            raise AgentSeedRejectedError("AgentVista task context is incomplete; prepare the dataset again")
+        return AgentVistaSession(request=body, context=context)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        assert isinstance(state, AgentVistaSession)
+        if state.activation is not None and not state.activation.done():
+            state.activation.cancel()
+            try:
+                await state.activation
+            except asyncio.CancelledError:
+                pass
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            cleanup_confirmed=True,
+            agent_observations=AgentObservationBundle(
+                source="agentvista",
+                gaps=[
+                    ObservationGap(
+                        code="observation_capture_failed",
+                        detail="Native events are retained in the result; typed tool/model joins are unavailable",
+                    )
+                ],
+            ),
+        )
+
+    async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            raise HTTPException(409, "Seed an AgentVista agent session before activation")
+        state = self._require_agent_session(session_id)
+        assert isinstance(state, AgentVistaSession)
+        legacy = AgentVistaRunRequest(
+            responses_create_params=body,
+            verifier_metadata=state.context.verifier_metadata,
+            _ng_rollout_id=state.request.episode_id.capture_key,
+        )
+        if state.activation is not None and not state.activation.done():
+            raise HTTPException(409, "AgentVista session already has an active activation")
+        state.activation = asyncio.create_task(self._execute(legacy))
+        result = await state.activation
+        # The worker has no judge credentials and never assigns a measured reward.
+        # The Resources Server receives the evidence, applies the original judge, and aggregates scores.
+        from responses_api_agents.agentvista_agent.runtime.results import policy_response
+
+        return policy_response(legacy, result, self.config.model_name)
+
+    async def _execute(self, body: AgentVistaRunRequest) -> dict:
         # Capture IDs distinguish repeats and make HTTP retries idempotent.
         rollout_id = maybe_rollout_id_from_run_body(body)
         if not rollout_id:
@@ -138,7 +194,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                 self._inflight.pop(identity, None)
                 self._fingerprints.pop(identity, None)
 
-    async def _episode(self, body, output: Path, fingerprint: str, rollout_id: str) -> AgentVistaVerifyResponse:
+    async def _episode(self, body, output: Path, fingerprint: str, rollout_id: str) -> dict:
         async with self._semaphore:
             output.mkdir(parents=True, exist_ok=True)
             # A persisted binding prevents retries from silently changing the task.
@@ -155,7 +211,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                         409,
                         "Incomplete episode requires inspection; use a new rollout ID to retry",
                     )
-                return self._response(body, json.loads(result_path.read_text()))
+                return json.loads(result_path.read_text())
             config = self.config.model_dump()
             # Row sampling controls from the public CLI override the configured defaults.
             sampling = body.responses_create_params
@@ -168,6 +224,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                 if value is not None:
                     config[target] = value
             config.update(
+                defer_verification=True,
                 output=str(output),
                 code_sandbox_python=self.config.code_sandbox_python or sys.executable,
                 task_id=body.verifier_metadata["task_id"],
@@ -177,7 +234,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
             )
             config_path = output / "worker.json"
             config_path.write_text(json.dumps(config, indent=2))
-            env = dict(os.environ)
+            env = {key: value for key, value in os.environ.items() if not key.startswith("VERIFIER_")}
             gym_root = str(Path(__file__).resolve().parents[2])
             env["PYTHONPATH"] = gym_root + os.pathsep + str(Path(self.config.source_root).resolve())
             env["AGENTVISTA_ROOT"] = str(Path(self.config.source_root).resolve())
@@ -226,117 +283,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
             result_path = output / "result.json"
             if not result_path.is_file():
                 raise HTTPException(500, f"Worker exited without result; inspect {output}")
-            return self._response(body, json.loads(result_path.read_text()))
-
-    def _response(self, body: AgentVistaRunRequest, result: dict) -> AgentVistaVerifyResponse:
-        from responses_api_agents.agentvista_agent.runtime.transcript import response_items
-
-        masked = result.get("mask_sample", True)
-        reward = 0.0 if masked else result["verify"]["reward"]
-        # Earlier episodes may have a projected trajectory plus native events.
-        # Always expose the original OpenCode events, without browser-use fields.
-        native = result.get("native_trajectory", result.get("trajectory", []))
-        items = result.get("response_items") or response_items(native)
-        if not items:
-            items = [
-                {
-                    "id": "msg_" + uuid4().hex,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": result.get("agent_output", ""),
-                            "annotations": [],
-                        }
-                    ],
-                }
-            ]
-        response = NeMoGymResponse.model_validate(
-            {
-                "id": "resp_" + uuid4().hex,
-                "created_at": int(time.time()),
-                "model": self.config.model_name,
-                "object": "response",
-                "status": "incomplete"
-                if result.get("execution_health", {}).get("termination")
-                in {
-                    "malformed_tool_call",
-                    "model_protocol_error",
-                    "timeout",
-                    "native_error",
-                    "output_budget_exhausted",
-                }
-                else "completed",
-                "output": items,
-                "parallel_tool_calls": body.responses_create_params.parallel_tool_calls,
-                "tool_choice": body.responses_create_params.tool_choice,
-                "tools": body.responses_create_params.tools,
-            }
-        )
-        return AgentVistaVerifyResponse.model_validate(
-            {
-                **body.model_dump(),
-                "response": response,
-                "reward": reward,
-                "harness": self.config.harness,
-                "mask_sample": masked,
-                "failure_kind": result.get("failure_kind"),
-                "failure_reason": result.get("error") or result.get("execution_error"),
-                "execution_error": result.get("execution_error"),
-                "task_id": body.verifier_metadata["task_id"],
-                "category_id": body.verifier_metadata["category_id"],
-                "artifacts": result["artifacts"],
-                "verify_status": result.get("verify", {}).get("status", "ERROR"),
-                "trajectory": native,
-                "native_trajectory": native,
-                "execution_health": result.get("execution_health", {}),
-                "harness_version": result.get("harness_version"),
-                "source_provenance": result.get("source_provenance", {}),
-                "verifier_diagnostics": result.get("verify", {}),
-                "judge_response": result.get("verify", {}).get("analysis"),
-                "task_success": result.get("task_success"),
-                "reward_kind": "llm_judged",
-                "deterministically_verified": False,
-            }
-        )
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        rows = body.verify_responses
-        valid = [r for r in rows if not r.get("mask_sample", False)]
-        metrics = {
-            "agentvista/num_scored": len(valid),
-            "agentvista/num_masked": len(rows) - len(valid),
-            "agentvista/num_verifier_errors": sum(r.get("failure_kind") == "agentvista:verifier" for r in rows),
-        }
-        health = [r["execution_health"] for r in rows if r.get("execution_health")]
-        metrics["agentvista/num_execution_health_unobserved"] = len(rows) - len(health)
-        if health:
-            metrics["agentvista/tool_calls"] = sum(h["tool_calls"] for h in health)
-            metrics["agentvista/tool_errors"] = sum(h["tool_errors"] for h in health)
-            metrics["agentvista/execution_healthy_rate"] = sum(h["execution_healthy"] for h in health) / len(health)
-            metrics["agentvista/malformed_terminations"] = sum(
-                h["termination"] in {"malformed_tool_call", "model_protocol_error"} for h in health
-            )
-            metrics["agentvista/incomplete_tasks"] = sum(h.get("task_success") is False for h in health)
-            metrics["agentvista/output_budget_exhausted"] = sum(
-                h["termination"] == "output_budget_exhausted" for h in health
-            )
-        if valid:
-            metrics["agentvista/mean_score"] = sum(r["reward"] for r in valid) / len(valid)
-            metrics["agentvista/pass_rate"] = sum(r.get("verify_status") == "PASS" for r in valid) / len(valid)
-            domains = [
-                (r.get("verifier_metadata") or {}).get("category_id", r.get("category_id", "agentvista"))
-                for r in valid
-            ]
-            for domain in sorted(set(domains)):
-                subset = [r for r, row_domain in zip(valid, domains, strict=True) if row_domain == domain]
-                metrics[f"agentvista/{domain}/mean_score"] = sum(r["reward"] for r in subset) / len(subset)
-        return AggregateMetrics(
-            agent_metrics=metrics,
-            key_metrics={k: v for k, v in metrics.items() if k in {"agentvista/mean_score", "agentvista/pass_rate"}},
-        )
+            return json.loads(result_path.read_text())
 
 
 if __name__ == "__main__":

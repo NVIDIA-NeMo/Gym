@@ -34,11 +34,27 @@ agentvista_agent:
           prompt_config: null
           prepare_script: benchmarks/agentvista/prepare.py
           num_repeats: 1
+agentvista_resources:
+  resources_servers:
+    agentvista:
+      entrypoint: app.py
+      source_root: ${oc.env:AGENTVISTA_ROOT}
+      dataset: ${oc.env:AGENTVISTA_DATASET}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES}
+      output_root: ${agentvista_output_root}
+      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON}
+      harness: ${oc.select:agentvista_harness,opencode}
+      domain: agent
+      verified: false
+      description: Original AgentVista answer judge and metrics
 agentvista_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: agentvista_agent
+      resources_server:
+        type: resources_servers
+        name: agentvista_resources
       default_episode_timeout_seconds: null

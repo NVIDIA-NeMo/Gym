@@ -73,8 +73,11 @@ def run(config: dict) -> dict:
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         result["failure_kind"] = "agentvista:setup"
+        if config.get("defer_verification"):
+            # Upstream gates its terminal score callback on these two values. No credentials or calls are needed.
+            os.environ.update(VERIFIER_API_KEY="deferred", VERIFIER_END_POINT="deferred")
         for key in ("VERIFIER_API_KEY", "VERIFIER_END_POINT", "VERIFIER_MODEL_NAME"):
-            if not os.environ.get(key):
+            if not config.get("defer_verification") and not os.environ.get(key):
                 raise ValueError(f"Missing judge environment variable: {key}")
         source = Path(config["source_root"]).resolve(strict=True)
         result["source_provenance"] = verify_source(source)
@@ -137,7 +140,11 @@ def run(config: dict) -> dict:
         def strict_score(prompt: str, predict_str_list: list, ground_truth: str, extra_info: dict) -> tuple:
             # The original judge swallows provider errors as zero; keep those unscored.
             try:
-                verdict = score(prompt, ground_truth, predict_str_list)
+                if config.get("defer_verification"):
+                    result["judge_responses"] = list(predict_str_list)
+                    verdict = {"reward": None, "analysis": "Deferred to Resources Server", "status": "PENDING"}
+                else:
+                    verdict = score(prompt, ground_truth, predict_str_list)
                 verdicts.append(verdict)
                 return verdict["reward"], verdict["analysis"]
             except Exception as exc:
@@ -172,6 +179,10 @@ def run(config: dict) -> dict:
         if judge_errors or len(verdicts) != 1:
             result["failure_kind"] = "agentvista:verifier"
             raise RuntimeError("Original answer judge did not complete: " + "; ".join(judge_errors))
+        if config.get("defer_verification"):
+            result.pop("failure_kind", None)
+            result["verification_pending"] = True
+            return result
         verdict = verdicts[0]
         result.pop("failure_kind", None)
         result.update(

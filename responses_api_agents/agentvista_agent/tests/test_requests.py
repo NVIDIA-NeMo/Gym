@@ -56,7 +56,7 @@ async def test_missing_rollout_identity_never_starts_worker(tmp_path: Path) -> N
         }
     )
     with pytest.raises(HTTPException, match="_ng_rollout_id"):
-        await agent.run(body)
+        await agent._execute(body)
     assert not (tmp_path / "output").exists()
 
 
@@ -114,10 +114,13 @@ async def test_selected_worker_receives_gym_endpoint_and_isolated_storage(
             "verifier_metadata": {"task_id": "fixture", "source_sha256": "source", "category_id": "test"},
         }
     )
-    response = await agent.run(body)
+    response = await agent._execute(body)
+    worker_config = json.loads(Path(started[0][0][-1]).read_text())
     expected = "default_worker" if harness == "default" else "worker"
     assert started[0][0][-2] == "responses_api_agents.agentvista_agent.runtime." + expected
-    assert response.harness == harness and response.reward == 0 and not response.mask_sample
+    assert response["verify"]["reward"] == 0 and not response["mask_sample"]
+    assert worker_config["defer_verification"] is True
+    assert not any(key.startswith("VERIFIER_") for key in started[0][1]["env"])
 
 
 @pytest.mark.parametrize("harness", ["default", "opencode"])

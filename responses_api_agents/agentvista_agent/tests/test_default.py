@@ -15,7 +15,7 @@ from responses_api_agents.agentvista_agent.runtime.default_worker import run
 
 
 @pytest.mark.parametrize("tool_name", ["web_search", "code_interpreter"])
-@pytest.mark.parametrize("judge", ["0", "1", "provider-error"])
+@pytest.mark.parametrize("judge", ["0", "1", "provider-error", "deferred"])
 def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatch, judge: str, tool_name: str) -> None:
     source = os.environ.get("AGENTVISTA_ROOT")
     if not source:
@@ -106,6 +106,7 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
     mounted = tmp_path / "mounted"
     mounted.symlink_to(persistent, target_is_directory=True)
     config = {
+        "defer_verification": judge == "deferred",
         "output": str(mounted / "episode"),
         "source_root": source,
         "dataset": str(dataset),
@@ -122,7 +123,11 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
     assert len(calls) == 2, result
     assert result["native_trajectory"] and result["harness"] == "default"
     assert result["agent_output"] == "42"
-    if judge == "provider-error":
+    if judge == "deferred":
+        assert result["verification_pending"] is True and result["mask_sample"] is True
+        assert result["judge_responses"][-1].endswith("<answer>42</answer>")
+        assert result["verify"]["status"] == "ERROR"
+    elif judge == "provider-error":
         assert result["mask_sample"] and result["verify"]["status"] == "ERROR"
     else:
         assert not result["mask_sample"], result

@@ -9,8 +9,8 @@ The Python code tool in **both harnesses** runs in a mandatory Linux namespace
 sandbox. NeMo Gym's `AsyncSandbox` supervises a fixed Bubblewrap launcher; its
 `local` provider alone provides no isolation. Bubblewrap creates the isolated
 filesystem, process and network namespaces and clears the environment. There is
-no host execution fallback. The adapter remains evaluation-only; training and
-the resources-server/session migration are separate work.
+no host execution fallback. The adapter remains evaluation-only. Session lifecycle and verification run through
+Gym’s Environment and Resources Servers.
 
 The sandbox contains read-only Python runtime/libraries and three hash-verified
 upstream tool modules, a temporary writable workspace, and one socket channel.
@@ -50,12 +50,14 @@ vulnerabilities. Resource admission remains the deployment's responsibility.
 | `mcp_timeout_ms`, `agent_timeout`, `episode_timeout` | Tool, actor and active-slot worker deadlines |
 
 The benchmark configs are `agentvista_default` and `agentvista_opencode`.
-The legacy relay has no queue-wide deadline; the worker deadline begins after
-slot admission. Responses carry source/task bindings, native trajectories,
+Gym’s `single_agent_turn_legacy` Environment Server adapts flat evaluation rows,
+seeds an agent session, activates it once, closes it, and calls the AgentVista
+Resources Server to judge the retained native predictions. The worker deadline
+begins after slot admission. Responses carry source/task bindings, native trajectories,
 execution-health metadata, extracted predictions and original judge diagnostics.
 Empty model answers and actor deadlines with retained output are judged.
 Infrastructure failures, an unavailable tool server, and judge outages stay
-unscored. Scores from older harness versions must not be combined with version 4 (sandboxed code tools).
+unscored. Scores from older harness versions must not be combined with version 5 (agent sessions and separate verification).
 
 Install server dependencies with:
 
@@ -95,3 +97,30 @@ Python environment and `AGENTVISTA_SANDBOX_PYTHON` pointing to the Gym-installed
 interpreter when invoking workers directly (the Agent Server sets this in worker
 configuration automatically). No benchmark prompts, task answers or judge rules
 are changed.
+
+## Session contract (version 5)
+
+The agent implements seed, activation and close; it does not own `/run` or score
+aggregation. Activate `/v1/responses` only with a seeded session. Prepared rows
+carry hash-bound task identity in `agent_context.agent.values.verifier_metadata`.
+Re-prepare older rows; version 4 rows are refused. Both benchmark configs now use
+`single_agent_turn_legacy` for the flat-row API and `resources_servers/agentvista`
+for verification and aggregation. Eval Factory's `--agent agentvista_agent`
+selection and both harness names remain the same.
+
+The native worker returns terminal judge inputs without calling the judge. Gym
+removes `VERIFIER_*` credentials from its environment; the original loop's
+terminal scoring callback records the exact assistant response list instead.
+The Resources Server runs the unchanged judge separately with the original
+question/reference and checks the task/image binding again. Standalone workers
+retain their direct judging mode for compatibility; Gym always enables deferred
+verification. Provider errors remain masked, and a measured wrong answer remains
+an unmasked zero. The Resources Server never accepts a worker-assigned reward.
+
+The adapter refuses borrowed task sandboxes and required external tool grants
+with a terminal 422: its native tools and mandatory code namespace sandbox are
+benchmark-specific. It supports one server worker because admission and retry
+bindings live in that process. Close cancels an active worker before acknowledging
+cleanup and returns an explicit observation gap: native transcripts are preserved,
+but typed tool/model joins and complete usage are unavailable. Training,
+checkpoint continuation, and arbitrary benchmark pairings are unsupported.
