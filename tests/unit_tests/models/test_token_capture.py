@@ -1098,7 +1098,7 @@ def test_parent_resolution_modes(mode):
 
 @pytest.mark.parametrize("staging,backend", [(False, "vllm_worker"), (True, "megatron_worker")])
 def test_source_history_requires_external_vllm_staging(staging, backend):
-    with pytest.raises(ValueError, match="source_history requires external vLLM staging"):
+    with pytest.raises(ValueError, match="source_history requires external vLLM or Dynamo staging"):
         TokenCaptureConfig.model_validate(
             _block(
                 external_staging=staging,
