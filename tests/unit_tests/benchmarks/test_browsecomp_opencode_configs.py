@@ -136,11 +136,19 @@ def test_each_episode_runs_opencode_agent_in_the_sandbox_the_resources_server_le
     assert (pairing["resources_server"]["name"], pairing["agent_server"]["name"]) == (RESOURCES, AGENT)
     # OpenCode works with its own tools in the sandbox; the resources server grants none.
     assert pairing["resources_tool_transports"] == []
+    # Every episode is verified, with no tool servers on either side.
+    assert not {"tool_servers", "skip_verification", "skip_verification_reward"} & pairing.keys()
+    assert not {"tool_servers", "skip_verification"} & settings(config, AGENT).keys()
+    # A run reported as a failed response of kind model_context_limit is graded; opencode_agent reports one that hit
+    # the context window as an incomplete response, which the default policy grades anyway.
+    assert pairing["agent_outcome_policy"] == {"by_failure_kind": {"model_context_limit": "verify"}}
     assert list(config[AGENT].responses_api_agents) == ["opencode_agent"]
     assert settings(config, AGENT)["resources_server"]["name"] == RESOURCES
-    # Single-harness on purpose: OpenCode plugins shape the tool surface, and the server serves no tools of its own.
+    # Single-harness on purpose: OpenCode plugins shape the tool surface, and the server serves no tools of its own,
+    # over MCP either.
     assert list(config[RESOURCES].resources_servers) == ["opencode_search"]
     assert settings(config, RESOURCES)["allowed_agents"] == ["opencode_agent"]
+    assert not settings(config, RESOURCES).get("expose_tools_over_mcp", False)
 
 
 @pytest.mark.parametrize(

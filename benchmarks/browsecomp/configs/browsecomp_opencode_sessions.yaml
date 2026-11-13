@@ -158,8 +158,9 @@ browsecomp_opencode_environment_server:
         name: browsecomp_opencode_agent
       # OpenCode works with its own tools in the lent sandbox; the resources server serves none.
       resources_tool_transports: []
-      # Grade a run that failed at the context window, as the relay does; the plugin log then masks it as
-      # context_window. The default policy would leave it ungraded.
+      # Harmless and not needed with opencode_agent: it reports a run that hit the context window as an incomplete
+      # response, which the default policy already grades, and the plugin log then masks it as context_window. Kept so
+      # a run reported as a failed response of kind model_context_limit is graded too, as on the relay.
       agent_outcome_policy:
         by_failure_kind:
           model_context_limit: verify
