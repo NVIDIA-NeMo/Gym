@@ -18,21 +18,30 @@ Reward is 1.0 for a `correct: yes` verdict, else 0.0. Three cases are deliberate
 | case | outcome |
 | --- | --- |
 | agent produced no answer | reward 0.0, no judge call spent |
-| judge answered but the verdict could not be parsed | retried; a parse that never succeeds is masked (`mask_sample`, `failure_kind: judge_unparseable`), not a measured zero |
+| judge answered but the verdict could not be parsed | retried; a parse that never succeeds is masked (`mask_sample`, `failure_kind: judge_unparseable` unless the run ended on its budget), not a measured zero |
 | judge never answered (endpoint down) | `JudgeError` → `judge_failsafe` → failures sidecar, not a fabricated zero |
 
 The verdict parser takes the LAST `correct: yes|no` match: reasoning judges echo the rubric inside
 their think block, and a first-match parse grades the echo. A reply that echoes the template instead
 of grading counts as unparsed.
 
+Both judge failures count toward `judge_max_consecutive_failures`: after that many rollouts in a row
+without a verdict, verify answers 500 and the run stops, rather than masking every remaining row.
+
 Every verify response carries `evaluation_completed`: true when grading reached a result (a verdict, or
 an empty answer), false when the judge gave no verdict or never answered and when the session was
 lost. A rollout that ended on its budget keeps its judged reward and is masked, with the ending's
-`failure_kind`. The ending (`max_iteration`, `context_window`, `agent_timed_out`) arrives as
+`failure_kind`; when the judge gave it no verdict, it keeps that kind, with `judge_parsed` and
+`evaluation_completed` false. The ending (`max_iteration`, `context_window`, `agent_timed_out`) arrives as
 `opencode_terminal_reason` in the verify body, which `opencode_sandboxed_agent` sends; on an episode
 session with `plugin_log_path` set, verify reads it (`max_iteration`, `context_window`) from the plugin
 log instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality scores; the
 reward stays on each row.
+
+A verify that grades a saved answer again (`gym eval reverify`, which `REVERIFY_MODE: STATELESS` allows,
+or recovery re-judging a row whose judge failed) cannot mask a budget ending, on either pairing: its
+body carries no `opencode_terminal_reason`, and an episode's ending was only in its sandbox's plugin
+log. A row that ended on its budget comes back from such a verify graded and unmasked.
 
 ## Sessions
 

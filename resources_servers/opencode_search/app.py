@@ -314,8 +314,9 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_max_attempts: int = 4
     judge_retry_delay_seconds: float = 30.0
     judge_retry_timeout_seconds: float = 120.0
-    # Abort the run after this many rollouts in a row fail to grade. Guards the silent-starvation
-    # mode where a dead judge masks every sample and the run burns its wall producing nothing.
+    # Abort the run after this many rollouts in a row fail to grade: the judge never answered, or never gave a
+    # parseable verdict (verify masks that row). Guards the silent-starvation mode where a dead judge masks every
+    # sample and the run burns its wall producing nothing.
     # Counted per ROLLOUT, not per attempt, so one transient burst cannot trip it. 0 disables.
     # With num_workers > 1, each worker counts the rollouts it graded, so each worker aborts on its own.
     judge_max_consecutive_failures: int = 25
@@ -645,7 +646,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         Two failure modes are deliberately kept distinct: a judge that answered but could not be
         parsed returns judge_parsed False, which verify masks as inconclusive, while a judge that
         never answered is infrastructure noise and raises JudgeError so judge_failsafe routes the
-        row to the failures sidecar.
+        row to the failures sidecar. Both count toward judge_max_consecutive_failures.
         """
         answer = re.sub(r"<think>.*?</think>", "", final_text or "", flags=re.DOTALL).strip()
 
@@ -668,8 +669,8 @@ class SearchResourcesServer(SimpleResourcesServer):
         started = time()
         last_error: Optional[str] = None
         # Did the judge ever actually reply? A judge that answers but cannot be parsed leaves a
-        # masked row in the rollouts (judge_unparseable, see verify); only a judge we could never
-        # reach is infrastructure noise worth routing to the failures sidecar.
+        # masked row in the rollouts (see verify); only a judge we could never reach is
+        # infrastructure noise worth routing to the failures sidecar.
         had_response = False
         for attempt in range(self.config.judge_max_attempts):
             try:
@@ -703,6 +704,17 @@ class SearchResourcesServer(SimpleResourcesServer):
             if attempt + 1 < self.config.judge_max_attempts:
                 await asyncio.sleep(max(0.0, self.config.judge_retry_delay_seconds))
 
+        # The rollout went ungraded either way. A verdict that never parsed leaves the quality metrics as quietly as a
+        # judge that never answered, since verify masks it, so both count toward the breaker.
+        self._judge_consecutive_failures += 1
+        outcome = "gave no parseable verdict in" if had_response else "unreachable after"
+        print(
+            f"[search] judge {outcome} {self.config.judge_max_attempts} attempts; "
+            f"last: {last_error} [{self._judge_consecutive_failures} consecutive]",
+            flush=True,
+        )
+        self._maybe_abort_on_judge_failures()
+
         if had_response:
             # The judge talked to us every time and we could never read a verdict out of it. There
             # is no grade to report: verify masks the row as inconclusive, so a regrade can revisit it.
@@ -716,13 +728,6 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         # Never got a reply at all: the endpoint is down or unreachable. Raising sends the row to
         # the failures sidecar rather than recording a fabricated zero.
-        self._judge_consecutive_failures += 1
-        print(
-            f"[search] judge unreachable after {self.config.judge_max_attempts} attempts; "
-            f"last: {last_error} [{self._judge_consecutive_failures} consecutive]",
-            flush=True,
-        )
-        self._maybe_abort_on_judge_failures()
         raise JudgeError(
             f"judge unreachable after {self.config.judge_max_attempts} attempts; last error: {last_error}"
         )
@@ -732,7 +737,7 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         Ported from the legacy stack (the legacy stack's swe_agents/app.py).
         Without it a dead grader is indistinguishable from a model that answers nothing: every row
-        routes to the failures sidecar, the headline metric is computed over whatever survived,
+        is masked or routes to the failures sidecar, the headline metric is computed over whatever survived,
         and the run burns its whole wall clock producing a number from a handful of samples.
         """
         limit = self.config.judge_max_consecutive_failures
@@ -1008,8 +1013,10 @@ class SearchResourcesServer(SimpleResourcesServer):
             # inconclusive there.
             body.evaluation_completed = False
             raise
-        if not result["judge_parsed"]:
-            # Without a verdict the reward measures nothing, so this outranks a masked ending's kind.
+        if not result["judge_parsed"] and not masked:
+            # Without a verdict the reward measures nothing. A budget ending keeps its own kind, and judge_parsed and
+            # evaluation_completed record the missing verdict: recovery re-judges a judge_unparseable row from its
+            # saved answer, with no ending to mask it again.
             masked, failure_kind = True, JUDGE_UNPARSEABLE
             failure_reason = f"The judge gave no parseable verdict in {result['judge_attempts']} attempt(s)"
 

@@ -534,14 +534,17 @@ def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(wo
     assert _graded(retried) == (1.0, False, None, True)
 
 
-def test_a_judge_without_a_verdict_outranks_a_budget_ending(workdir) -> None:
+def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir) -> None:
+    """Recovery re-judges a judge_unparseable row from a payload that carries no ending, which would grade a capped
+    run unmasked; agent_limit keeps it masked, as when the judge gave a verdict."""
     server = _server(workdir)
     client = TestClient(server.setup_webserver())
     _mock_judge(server, NO_VERDICT)
 
     verified = client.post("/verify", json=_verify_body(opencode_terminal_reason="max_iteration"))
 
-    assert _graded(verified) == (0.0, True, "judge_unparseable", False)
+    assert _graded(verified) == (0.0, True, "agent_limit", False)
+    assert verified.json()["judge_parsed"] is False
 
 
 def test_a_judge_that_never_answers_sends_the_row_to_the_failures_sidecar(workdir) -> None:
@@ -558,6 +561,25 @@ def test_a_judge_that_never_answers_sends_the_row_to_the_failures_sidecar(workdi
     # Nothing was graded, so an identical retry asks the judge again.
     _mock_judge(server, CORRECT)
     assert _graded(client.post("/verify", json=_verify_body())) == (1.0, False, None, True)
+
+
+def test_judge_replies_without_a_verdict_trip_the_dead_judge_breaker(workdir) -> None:
+    """Such a row is masked, so it leaves the quality metrics as quietly as an unreachable judge's: the run stops after
+    judge_max_consecutive_failures of them in a row, and a verdict starts the count again."""
+    server = _server(workdir, judge_max_consecutive_failures=2)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    def verify(judge_reply: str) -> Any:
+        _mock_judge(server, judge_reply)
+        client.cookies.clear()
+        return client.post("/verify", json=_verify_body())
+
+    assert _graded(verify(NO_VERDICT)) == (0.0, True, "judge_unparseable", False)
+    assert _graded(verify(CORRECT)) == (1.0, False, None, True)
+    assert _graded(verify(NO_VERDICT)) == (0.0, True, "judge_unparseable", False)
+    tripped = verify(NO_VERDICT)
+
+    assert tripped.status_code == 500, tripped.text
 
 
 def test_a_verify_without_a_seed_is_graded(workdir) -> None:
