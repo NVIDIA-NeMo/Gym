@@ -1220,7 +1220,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
         model_response.timed_out = timed_out
-        # RL mask rules key on this field (e.g. env.mask_sample_rules: field response.stop_reason).
+        # For training-side filters; nothing in Gym reads it. context_full also covers a response the model
+        # cut at its own output budget, so masking it masks those model failures too (see README).
         model_response.stop_reason = "timeout" if timed_out else stop_reason
         if timed_out:
             model_response.status = "incomplete"

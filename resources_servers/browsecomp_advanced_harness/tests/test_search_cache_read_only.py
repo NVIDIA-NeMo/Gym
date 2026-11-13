@@ -164,6 +164,7 @@ class TestReadOnlyServerWiring:
     def req(self) -> MagicMock:
         m = MagicMock()
         m.session = {SESSION_ID_KEY: "test_session_id"}
+        m.headers = {}
         return m
 
     def test_config_defaults_to_writable(self, tmp_path) -> None:

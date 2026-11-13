@@ -178,10 +178,11 @@ class BrowsecompSandboxSession(AgentSessionState):
             raise
         finally:
             if not self._stop_logged:
-                lifetime = time.monotonic() - self.started_at if self.started_at is not None else -1.0
+                # No start time for a borrowed sandbox or a start that failed.
+                lifetime = f"{time.monotonic() - self.started_at:.3f}" if self.started_at is not None else "unknown"
                 event = "sandbox_stop" if self.session.owns_sandbox else "sandbox_disconnect"
                 LOG.info(
-                    "[browsecomp][%s] role=agent session=%s provider=%s id=%s status=%s lifetime_s=%.3f",
+                    "[browsecomp][%s] role=agent session=%s provider=%s id=%s status=%s lifetime_s=%s",
                     event,
                     self.request.agent_session_id,
                     provider,

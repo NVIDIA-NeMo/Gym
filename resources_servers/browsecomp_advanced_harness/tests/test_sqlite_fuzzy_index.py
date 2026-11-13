@@ -55,11 +55,8 @@ from pathlib import Path
 
 import pytest
 
-
-pytest.importorskip("rapidfuzz")
-
-from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache  # noqa: E402
-from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (  # noqa: E402
+from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
+from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
     SqliteFuzzyIndex,
     build_master_db,
     master_db_path,
@@ -120,10 +117,10 @@ class TestLookupSemantics:
         assert idx.lookup("completely different topic entirely") is None
 
     def test_near_neighbour_rejected_by_rescore(self, master):
-        """FTS5 returns `chemistry` as a candidate; rapidfuzz must reject it."""
+        """FTS5 offers both near-neighbours; rapidfuzz keeps the chemistry row, never physics."""
         idx = SqliteFuzzyIndex(master, threshold=0.8)
-        assert idx.lookup("who won the 1997 nobel prize in chemistry which year") != (
-            "who won the 1997 nobel prize in physics"
+        assert idx.lookup("who won the 1997 nobel prize in chemistry which year") == (
+            "who won the 1997 nobel prize in chemistry"
         )
 
     def test_best_match_wins_not_first_candidate(self, master):

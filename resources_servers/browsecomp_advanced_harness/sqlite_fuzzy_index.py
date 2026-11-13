@@ -31,7 +31,7 @@ rapidfuzz still does the scoring:
 Match QUALITY is therefore unchanged -- same scorer, same threshold, same
 token-order insensitivity. The only new failure mode is RECALL: FTS5 may not
 surface a candidate the full scan would have found. That costs one live provider
-call, never a wrong answer. `bench/parity_recall.py` measures it.
+call, never a wrong answer.
 
 Two properties are load-bearing on Lustre:
 
@@ -56,12 +56,8 @@ import threading
 from collections.abc import Iterable
 from os import PathLike
 
-
-try:
-    from rapidfuzz import fuzz as _rf_fuzz
-    from rapidfuzz import process as _rf_process
-except ImportError:  # fuzzy matching becomes unavailable; exact lookups unaffected
-    _rf_fuzz = _rf_process = None
+from rapidfuzz import fuzz as _rf_fuzz
+from rapidfuzz import process as _rf_process
 
 
 INDEX_DIR = "index"
@@ -70,7 +66,7 @@ MASTER_DB = "master.db"
 # Trigram FTS5 rejects terms shorter than 3 characters.
 _MIN_TERM = {"trigram": 3, "unicode61": 2}
 
-# Both defaults are measured, not guessed. bench/parity_recall.py over the live
+# Both defaults are measured, not guessed: a recall benchmark (not shipped here) over a live
 # 1,892,440-norm index, 1000 perturbed real queries, threshold 0.8:
 #
 #   tokenizer  limit   recall    p50       p90       speedup
@@ -161,8 +157,6 @@ class SqliteFuzzyIndex:
         candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
         tokenizer: str = DEFAULT_TOKENIZER,
     ) -> None:
-        if _rf_process is None:
-            raise ImportError("fuzzy matching requested but rapidfuzz is not installed")
         self.root = str(root)
         self.threshold = threshold
         self.candidate_limit = candidate_limit
@@ -206,7 +200,9 @@ class SqliteFuzzyIndex:
         corpus and discriminate nothing.
         """
         min_len = _MIN_TERM.get(self.tokenizer, 3)
-        return sorted({t for t in norm.split() if len(t) >= min_len}, key=len, reverse=True)
+        # Ties break alphabetically: set order follows PYTHONHASHSEED, and worker
+        # processes must pick the same terms for the same query.
+        return sorted({t for t in norm.split() if len(t) >= min_len}, key=lambda t: (-len(t), t))
 
     @staticmethod
     def _stages(terms):
@@ -244,7 +240,7 @@ class SqliteFuzzyIndex:
                     "SELECT norm FROM norms WHERE norms MATCH ? ORDER BY rank LIMIT ?", (expr, self.candidate_limit)
                 ).fetchall()
             except sqlite3.Error:
-                return []  # malformed expression or corrupt page -> treat as no candidates
+                continue  # malformed expression or corrupt page -> try the next, wider stage
             if rows:
                 return [r[0] for r in rows]
         return []

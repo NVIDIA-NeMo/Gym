@@ -8,8 +8,9 @@ no rollout key, and ONE NemoGym process serves the whole run with up to ~944
 rollouts in flight. So "how long did THIS rollout spend in search vs bash?" could
 not be answered from a driver log at all — only leg-wide totals could.
 
-The rollout id is minted by the AGENT and arrives as the `X-Rollout-Id` header.
-It is not derived from the harness's own `session_id` because that lives in a
+A caller that mints its own rollout id can send it as the `X-Rollout-Id` header;
+no Gym component sends it today, so the session id is what keys these lines.
+The header exists because the harness's own `session_id` lives in a
 signed session cookie which the agent cannot read back, so the agent could not
 tag its own generation/tokenize lines with the same key. Requests without the
 header (eval, tests, direct curl) fall back to the session id, then to "-".
@@ -38,8 +39,8 @@ UNKNOWN_ROLLOUT_ID = "-"
 
 _ROLLOUT_ID: ContextVar[str] = ContextVar("_ROLLOUT_ID", default=UNKNOWN_ROLLOUT_ID)
 
-# rid -> {"<phase>_s": seconds, "<phase>_n": count}. Emitted once per rollout on
-# the `[browsecomp][phases]` line at /verify, then popped — see pop_phase_totals.
+# rid -> {"<phase>_s": seconds, "<phase>_n": count}. Logged on the
+# `[browsecomp][phases]` line at /verify and popped when the session is released.
 _TOTALS: Dict[str, Dict[str, float]] = {}
 _LOCK = threading.Lock()
 
@@ -87,9 +88,8 @@ def record_phase(phase: str, dur_s: float, *, rid: Optional[str] = None) -> None
     always-on product (one summary line per rollout) and the per-call lines are
     the expensive optional detail.
 
-    `rid` is KEYWORD-ONLY on purpose: the agent's twin helper takes rid FIRST
-    (it has no ContextVar to default to), and calling this one in that order
-    silently passed a phase name where a duration belonged.
+    `rid` is keyword-only so a positional call cannot pass a phase name where a
+    duration belongs.
     """
     rid = rid or current_rollout_id()
     if rid == UNKNOWN_ROLLOUT_ID:
@@ -108,7 +108,7 @@ def peek_phase_totals(rid: str) -> Dict[str, float]:
 
 
 def pop_phase_totals(rid: str) -> Dict[str, float]:
-    """Read and drop. Called at /verify, which is the end of a rollout."""
+    """Read and drop. Called when the resources session is released."""
     with _LOCK:
         return _TOTALS.pop(rid, {})
 

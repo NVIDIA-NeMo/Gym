@@ -159,10 +159,11 @@ class BrowsecompShellSandbox:
             raise
         finally:
             if not self._stop_logged:
-                lifetime = monotonic() - self.started_at if self.started_at is not None else -1.0
+                # No start time when the start itself failed.
+                lifetime = f"{monotonic() - self.started_at:.3f}" if self.started_at is not None else "unknown"
                 LOG.info(
                     "[browsecomp][sandbox_stop] role=resources session=%s provider=%s id=%s "
-                    "status=%s lifetime_s=%.3f bash_calls=%d pages=%d",
+                    "status=%s lifetime_s=%s bash_calls=%d pages=%d",
                     self.resources_session_id,
                     provider,
                     sandbox_id,

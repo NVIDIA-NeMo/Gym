@@ -15,7 +15,7 @@
 """Tests for the shared flat-file search/browse cache.
 
 Two layers:
-1. SearchCache unit tests — key normalization, provider tagging (legacy entries
+1. SearchCache unit tests — key normalization, provider tagging (entries
    without a provider field read as "tavily"), the prefer-exa write rule,
    corrupt-file-is-a-miss, disabled no-op.
 2. Server wiring tests — a miss calls the provider once and stores the raw
@@ -62,7 +62,7 @@ class TestSearchCacheUnit:
         cache = SearchCache(str(tmp_path))
         assert cache.get_search("never seen") is None
 
-    def test_legacy_entry_without_provider_reads_as_tavily(self, tmp_path) -> None:
+    def test_entry_without_provider_reads_as_tavily(self, tmp_path) -> None:
         # Entries migrated from the reference harness have no "provider" field.
         cache = SearchCache(str(tmp_path))
         norm = normalize_query("Old Query")
@@ -225,6 +225,7 @@ class TestSearchCacheWiring:
     def _req(self) -> MagicMock:
         m = MagicMock()
         m.session = {SESSION_ID_KEY: "test_session_id"}
+        m.headers = {}
         return m
 
     @fixture

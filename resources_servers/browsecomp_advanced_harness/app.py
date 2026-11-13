@@ -175,17 +175,18 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # startup rather than 400-ing every live query mid-run.
     exa_search_type: str = "auto"
     # Shared flat-file search/browse cache (network layer only: raw provider
-    # responses in, format-on-read out — a hit is byte-identical to a miss).
-    # None/"" disables. A relative path resolves against this server's dir.
+    # responses in, format-on-read out). Entries are shared across providers and
+    # runs, so enabling it changes what the agent retrieves; keep it off for
+    # baselines. None/"" disables. A relative path resolves against this server's dir.
     search_cache_dir: Optional[str] = None
     # SEARCH-only fuzzy matching over the cache's norms index: on an exact miss,
-    # the best token_sort_ratio match >= this 0-1 threshold is served (serve-only;
-    # never re-written under the new key). None = exact only. Browse stays exact.
-    search_cache_fuzzy_threshold: Optional[float] = None
+    # the best token_sort_ratio match >= this (0, 1] threshold is served (serve-only;
+    # never re-written under the new key). It can serve another query's results.
+    # None = exact only. Browse stays exact. Requires search_cache_dir.
+    search_cache_fuzzy_threshold: Optional[float] = Field(default=None, gt=0, le=1, allow_inf_nan=False)
     # Serve from search_cache_dir but never write to it. Set this when the root
-    # belongs to another user: it is world-readable but not world-writable, and
-    # the write path would otherwise report a SUCCESSFUL search to the model as
-    # "Search failed: [Errno 13] Permission denied". See SearchCache.read_only.
+    # belongs to another user: it is world-readable but not world-writable, and a
+    # writable cache on it is refused at startup. Requires search_cache_dir.
     search_cache_read_only: bool = False
 
     @model_validator(mode="after")
@@ -200,6 +201,10 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError(
                 f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
             )
+        if not self.search_cache_dir and (
+            self.search_cache_fuzzy_threshold is not None or self.search_cache_read_only
+        ):
+            raise ValueError("search_cache_fuzzy_threshold and search_cache_read_only require search_cache_dir")
         return self
 
 
@@ -1467,35 +1472,76 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     # ---- shared flat-file cache plumbing ----------------------------------
     # Lustre metadata ops can stall for tens of ms; keep them off the event loop.
 
-    async def _cache_get_search(self, query: str) -> Optional[tuple]:
+    # Cache writes never raise: SearchCache logs and counts a failed write, and the
+    # caller returns the provider's result either way.
+
+    async def _cache_get_search(self, query: str, accept: Optional[Any] = None) -> Optional[dict]:
         if not self._search_cache.enabled:
             return None
-        return await asyncio.to_thread(self._search_cache.get_search, query)
+        return await asyncio.to_thread(self._search_cache.get_search_entry, query, accept=accept)
 
-    async def _cache_put_search(self, query: str, results: List[dict], provider: str) -> None:
+    async def _cache_put_search(
+        self, query: str, results: List[dict], provider: str, extra: Optional[dict] = None
+    ) -> None:
         # Empties are never cached so a transient provider failure can't poison the cache.
         if self._search_cache.enabled and results:
-            await asyncio.to_thread(self._search_cache.put_search, query, results, provider)
+            await asyncio.to_thread(self._search_cache.put_search, query, results, provider, extra=extra)
 
-    async def _cache_get_extract(self, url: str) -> Optional[tuple]:
+    async def _cache_get_extract(self, url: str, min_characters: Optional[int] = None) -> Optional[tuple]:
         if not self._search_cache.enabled:
             return None
-        return await asyncio.to_thread(self._search_cache.get_extract, url)
+        return await asyncio.to_thread(self._search_cache.get_extract, url, min_characters=min_characters)
 
-    async def _cache_put_extract(self, url: str, content: str, provider: str) -> None:
+    async def _cache_put_extract(
+        self, url: str, content: str, provider: str, max_characters: Optional[int] = None
+    ) -> None:
         if self._search_cache.enabled and content:
-            await asyncio.to_thread(self._search_cache.put_extract, url, content, provider)
+            await asyncio.to_thread(
+                self._search_cache.put_extract, url, content, provider, max_characters=max_characters
+            )
+
+    def _exa_entry_fits(self, entry: dict, write_pages: bool) -> bool:
+        """Whether a cached entry can answer this exa request as a live call would.
+
+        Entries from the other provider are shared by design and always fit. An exa
+        entry must come from the same search type (deep types add summaries and a
+        synthesis) and carry page text when this request writes pages. Entries
+        without a recorded search type were written by the reference harness and
+        fit only a non-deep request."""
+        if entry.get("provider", "tavily") != "exa":
+            return True
+        request = entry.get("exa_request")
+        search_type = request.get("search_type") if isinstance(request, dict) else None
+        if search_type is None:
+            if self.config.exa_search_type in _EXA_DEEP_TYPES:
+                return False
+        elif search_type != self.config.exa_search_type:
+            return False
+        return not write_pages or any(isinstance(r, dict) and r.get("text") for r in entry["results"])
 
     def _format_search_hit(
-        self, provider: str, query: str, result_list: List[dict], max_length: int, page_writer: Optional["_PageWriter"]
+        self, entry: dict, query: str, max_length: int, page_writer: Optional["_PageWriter"]
     ) -> str:
-        """Format a cached search entry per its STORED provider — a hit must be
-        byte-identical to the miss that produced it, whatever today's config is.
-        Exa entries are formatted inline (highlights; pages only if the entry holds full
-        text); tavily entries follow the workspace mode (disk pages in terminal mode,
-        inline otherwise)."""
+        """Format a cached search entry per its STORED provider. Exa entries are
+        formatted inline (highlights; pages only if the entry holds full text); tavily
+        entries follow the workspace mode (disk pages in terminal mode, inline otherwise).
+
+        The entry may have been written by a run with another exclude list or a larger
+        max_results, so both are applied here as the live request would apply them."""
+        provider = entry.get("provider", "tavily")
+        stored = [r for r in entry["results"] if isinstance(r, dict)]
+        result_list = [r for r in stored if not self._is_url_excluded(str(r.get("url") or ""))]
+        if len(result_list) < len(stored):
+            print(
+                f"[browsecomp][cache_excluded] provider={provider} dropped={len(stored) - len(result_list)}",
+                flush=True,
+            )
+        result_list = result_list[: self.config.max_results]
         if provider == "exa":
-            return self._format_exa_search(query, {"results": result_list}, max_length, page_writer)[0]
+            response: dict = {"results": result_list}
+            if entry.get("output") is not None:
+                response["output"] = entry["output"]
+            return self._format_exa_search(query, response, max_length, page_writer)[0]
         if page_writer is not None:
             return self._format_tavily_search_disk(query, result_list, page_writer, max_length)
         return self._postprocess_search_results(query, {"results": result_list}, max_length)
@@ -1513,13 +1559,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if len(query) > 400:
             return "Query is too long"
 
-        cached = await self._cache_get_search(query)
-        if cached is not None:
-            provider, result_list = cached
-            self._record_call(metrics, "search", provider, "cache_hit", time())
-            return self._format_search_hit(provider, query, result_list, max_length, page_writer)
-
         write_pages = self.config.exa_search_writes_pages and page_writer is not None
+        cached = await self._cache_get_search(query, lambda entry: self._exa_entry_fits(entry, write_pages))
+        if cached is not None:
+            self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
+            return self._format_search_hit(cached, query, max_length, page_writer)
+
         client = self._select_exa_client()
         call_start = time()
         try:
@@ -1534,7 +1579,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
-        await self._cache_put_search(query, results.get("results", []) or [], "exa")
+        extra = {"exa_request": {"search_type": self.config.exa_search_type, "include_text": write_pages}}
+        if results.get("output") is not None:
+            extra["output"] = results["output"]  # the deep-search synthesis behind [Deep Answer]
+        await self._cache_put_search(query, results.get("results", []) or [], "exa", extra)
         results_string, n_offered, returned = self._format_exa_search(query, results, max_length, page_writer)
         # Recorded AFTER the block is built so the yield counters are real. Nothing awaits
         # in between, so the retry contextvar _record_call reads is still this call's.
@@ -1562,7 +1610,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self, query: str, results: dict, max_length: int, page_writer: Optional["_PageWriter"]
     ) -> tuple[str, int, int]:
         """Format one exa result set. Returns (results_string, num offered, num returned).
-        Shared by the live path and a cache hit, so a hit is byte-identical to its miss."""
+        Shared by the live path and a cache hit, so a hit is formatted as its miss was."""
         write_pages = self.config.exa_search_writes_pages and page_writer is not None
         # Contamination guard. Filtering at each formatting site rather than at the
         # provider call is deliberate: a result reaches the model by exactly four
@@ -1623,9 +1671,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         cached = await self._cache_get_search(query)
         if cached is not None:
-            provider, result_list = cached
-            self._record_call(metrics, "search", provider, "cache_hit", time())
-            return self._format_search_hit(provider, query, result_list, max_length, None)
+            self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
+            return self._format_search_hit(cached, query, max_length, None)
 
         client = self._select_tavily_client()
         print(f"[tavily_call_begin function=search query={query[:80]!r}]", flush=True)
@@ -1667,9 +1714,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         (disk mode) formatting exactly."""
         cached = await self._cache_get_search(query)
         if cached is not None:
-            provider, result_list = cached
-            self._record_call(metrics, "search", provider, "cache_hit", time())
-            return self._format_search_hit(provider, query, result_list, max_per_query, page_writer)
+            self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
+            return self._format_search_hit(cached, query, max_per_query, page_writer)
 
         client = self._select_tavily_client()
         call_start = time()
@@ -1805,14 +1851,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # cache: serve hits from the shared flat-file cache, send ONLY the
         # missed URLs to the provider. Hits keep input order and come first.
+        # Exa cuts each page to max_per_url_length, so a page stored under a smaller
+        # cap misses, and an exa run cuts a longer hit to what its miss would return.
         cached_entries: List[dict] = []
         fetch_urls = urls
         if self._search_cache.enabled:
             fetch_urls = []
             for u in urls:
-                hit = await self._cache_get_extract(u)
+                hit = await self._cache_get_extract(u, min_characters=max_per_url_length)
                 if hit is not None:
                     hit_provider, content = hit
+                    if self.config.search_provider == "exa":
+                        content = content[:max_per_url_length]
                     self._record_call(metrics, "browse", hit_provider, "cache_hit", time())
                     cached_entries.append({"url": u, "raw_content": content})
                 else:
@@ -1861,9 +1911,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
             result_list = results.get("results", [])
 
+        capped_at = max_per_url_length if self.config.search_provider == "exa" else None
         for fetched in result_list:
             await self._cache_put_extract(
-                fetched.get("url", "") or "", fetched.get("raw_content", "") or "", self.config.search_provider
+                fetched.get("url", "") or "",
+                fetched.get("raw_content", "") or "",
+                self.config.search_provider,
+                capped_at,
             )
         result_list = cached_entries + result_list
 

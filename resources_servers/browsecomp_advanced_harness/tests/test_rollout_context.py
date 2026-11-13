@@ -8,6 +8,8 @@ Everything here exists so a `[tavily_call]`/`[bash]`/`[cache]` line printed deep
 inside a helper can name the rollout that caused it.
 """
 
+import time
+
 import pytest
 
 from resources_servers.browsecomp_advanced_harness import rollout_context as RC
@@ -123,5 +125,7 @@ def test_log_line_includes_rollout_id_and_absolute_time(caplog):
 
 def test_log_line_defaults_time_to_now(caplog):
     caplog.set_level("INFO")
+    before = time.time()
     RC.log_line("[x]")
-    assert "t=" in caplog.text
+    stamped = float(caplog.records[-1].message.split(" t=", 1)[1].split()[0])
+    assert before - 1 <= stamped <= time.time() + 1

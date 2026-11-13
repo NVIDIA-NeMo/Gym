@@ -34,17 +34,26 @@ on the flat-file side: this process's new norms go to its own append-only .txt
 shard, which build_cache_index.py merges into the master offline.
 
 Layout (under <root>):
-    search/<ab>/<cd>/<sha256(norm_query)>.json -> {"query","norm","provider","results":[...]}
-    browse/<ab>/<cd>/<sha256(norm_url)>.json   -> {"url","norm","provider","content": "..."}
+    search/<ab>/<cd>/<sha256(norm_query)>.json -> {"query","norm","provider","results":[...], ...extra}
+    browse/<ab>/<cd>/<sha256(norm_url)>.json   -> {"url","norm","provider","content": "...", "max_characters"?}
 
 Single key namespace across providers. Each entry is tagged with the provider
-that produced it ("tavily" | "exa"); legacy entries migrated from the reference
-harness have no "provider" field and read as "tavily". Write rule: exa entries are
-preferred — a tavily write never clobbers an existing exa entry.
+that produced it ("tavily" | "exa"); entries written by the reference harness
+have no "provider" field and read as "tavily". Write rule: exa entries are
+preferred — a tavily write does not replace an existing exa entry unless that
+entry is a page the provider cut at its character cap. The rule is a
+check-then-write, so two processes racing on one key can still leave either
+provider's entry; both are valid entries.
 
 Store-raw / format-on-read: we cache the raw provider result list (search) and
 raw page content (browse). All block-formatting + truncation stays in the
-caller, so a cache HIT produces byte-identical output to a MISS.
+caller. The caller decides whether a stored entry fits the request (see the
+`accept` argument of get_search_entry and `min_characters` of get_extract);
+an entry that does not fit, or that is malformed, reads as a miss.
+
+The cache is best-effort: a failed write (no space, quota, permission, stale
+handle) is logged and counted, and the caller still returns the provider's
+result.
 
 Invariant: only provider responses enter the cache, never model-authored text —
 otherwise a rollout could plant answers for its GRPO siblings.
@@ -56,7 +65,8 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
 from os import PathLike
 from time import perf_counter, time
 from typing import Literal
@@ -79,6 +89,7 @@ from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
 LOG = logging.getLogger(__name__)
 CacheProvider = Literal["tavily", "exa"]
 SearchResults = list[dict[str, JsonValue]]
+SearchEntry = dict[str, JsonValue]
 
 _WS_RE = re.compile(r"\s+")
 
@@ -105,6 +116,12 @@ def normalize_url(url: str | None) -> str:
     return u
 
 
+def _page_was_capped(entry: SearchEntry) -> bool:
+    """True when a stored page filled the provider's character cap, so the page may go on."""
+    cap = entry.get("max_characters")
+    return isinstance(cap, int) and len(entry["content"]) >= cap
+
+
 class SearchCache:
     """Content-addressed flat-file cache. Pass root=None/"" to disable (no-op)."""
 
@@ -129,13 +146,15 @@ class SearchCache:
 
         read_only: serve from this root, never write to it. For pointing a run
         at a cache root owned by someone else -- entries are 0644 and dirs 0755,
-        so reads work and writes do not. Not merely tidiness: `_write` does not
-        catch OSError, and its call site in `_search_one_to_disk` sits OUTSIDE
-        that function's try/except, so an unwritable root turns a search that
-        SUCCEEDED into "Search failed: [Errno 13] Permission denied" for the
-        model -- after the provider call was already paid for. Reads are
-        untouched, including fuzzy: the FTS5 master is already opened
-        mode=ro&immutable=1, and fuzzy has always been serve-only."""
+        so reads work and writes do not. A writable cache on such a root is
+        refused here at startup; without that check every write would fail and
+        be logged. Reads are untouched, including fuzzy: the FTS5 master is
+        already opened mode=ro&immutable=1, and fuzzy has always been serve-only.
+
+        Raises ValueError for a fuzzy_threshold outside (0, 1], a read-only root
+        that does not exist, or a writable root this process cannot write."""
+        if fuzzy_threshold is not None and not 0 < fuzzy_threshold <= 1:
+            raise ValueError(f"fuzzy_threshold must be in (0, 1] or None, got {fuzzy_threshold!r}")
         self.root = str(root) if root else None
         self.enabled = bool(self.root)
         self.read_only = bool(read_only)
@@ -161,14 +180,25 @@ class SearchCache:
             "browse_get_s": 0.0,
             "browse_get_max_s": 0.0,
             "browse_get_slow": 0,
+            "put_errors": 0,
         }
         self._fuzzy_index = None
         self._shard_path = None
         # Read-only creates nothing: the dirs we need are the ones already
         # there, and makedirs is the first call that fails on a foreign root.
+        if self.enabled and self.read_only and not os.path.isdir(self.root):
+            raise ValueError(f"read-only search cache root {self.root!r} does not exist")
         if self.enabled and not self.read_only:
             os.makedirs(os.path.join(self.root, "search"), exist_ok=True)
             os.makedirs(os.path.join(self.root, "browse"), exist_ok=True)
+            unwritable = [
+                d for d in ("search", "browse") if not os.access(os.path.join(self.root, d), os.W_OK | os.X_OK)
+            ]
+            if unwritable:
+                raise ValueError(
+                    f"search cache root {self.root!r} is not writable ({', '.join(unwritable)}); "
+                    "set search_cache_read_only to serve from it without writing"
+                )
         if self.enabled and self.fuzzy_threshold:
             index_dir = os.path.join(self.root, INDEX_DIR)
             if not self.read_only:
@@ -231,35 +261,54 @@ class SearchCache:
         return d, os.path.join(d, h + ".json")
 
     def _read(self, kind, norm_key):
+        """The stored entry, or None when it is missing, unreadable or malformed."""
         _, path = self._path(kind, norm_key)
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return None
-        except (json.JSONDecodeError, OSError):
-            return None  # corrupt/unreadable -> treat as miss
+                obj = json.load(f)
+        except (OSError, ValueError):
+            return None  # missing, unreadable, invalid UTF-8 or invalid JSON -> miss
+        value_key, value_type = ("results", list) if kind == "search" else ("content", str)
+        if not isinstance(obj, dict) or not isinstance(obj.get(value_key), value_type):
+            return None  # an entry of another shape is a miss, never an empty hit
+        return obj
 
-    def _write(self, kind, norm_key, payload):
+    def _write(self, kind, norm_key, payload) -> bool:
+        """Publish one entry atomically. A failure is logged and counted, never raised:
+        the caller already holds the provider's result and must still return it."""
         _t0 = perf_counter()
         d, path = self._path(kind, norm_key)
-        os.makedirs(d, exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp, path)  # atomic publish
+        # A per-write random suffix: pid and thread id repeat across nodes sharing one root.
+        tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, path)  # atomic publish
+        except (OSError, TypeError, ValueError) as error:
+            self._bump("put_errors")
+            LOG.warning("[cache][put_error] rid=%s kind=%s error=%r", current_rollout_id(), kind, error)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return False
         # A lustre write sitting on the rollout's critical path, previously silent.
         _elapsed = perf_counter() - _t0
         record_phase(f"cache_put_{kind}", _elapsed)
         if self.verbose_phase_log:
             log_line("[cache][put]", dur=_elapsed, kind=kind)
+        return True
 
     def _tavily_would_clobber_exa(self, kind, norm_key, provider):
-        """The prefer-exa write rule: a tavily write never replaces an exa entry."""
+        """The prefer-exa write rule: a tavily write does not replace an exa entry,
+        except a browse page exa cut at its character cap (tavily's copy is fuller)."""
         if provider != "tavily":
             return False
         existing = self._read(kind, norm_key)
-        return existing is not None and existing.get("provider", "tavily") == "exa"
+        if existing is None or existing.get("provider", "tavily") != "exa":
+            return False
+        return not (kind == "browse" and _page_was_capped(existing))
 
     def _bump(self, name):
         with self._lock:
@@ -283,14 +332,14 @@ class SearchCache:
     def _norm_q(self, query):
         return normalize_query(query) if self.normalize_queries else (query or "").strip()
 
-    def _fuzzy_lookup(self, norm):
+    def _fuzzy_lookup(self, norm, accept=None):
         """Best token_sort_ratio-equivalent match over the norms index, or None.
         Word-order insensitive (query + candidates compared in token-sorted
         form); the 0-1 threshold maps onto rapidfuzz's 0-100 score.
 
         Candidate generation moved to FTS5 (sqlite_fuzzy_index.py); the scorer
         and threshold are unchanged, so a candidate that reaches rapidfuzz here
-        is judged exactly as the old full scan judged it."""
+        is judged exactly as the reference harness's full scan judged it."""
         # Two clocks on purpose. perf_counter measures the DURATION (monotonic,
         # immune to wall-clock steps); time() stamps the START so the line can be
         # drawn as the span [t, t+dur]. Emitting a perf_counter value as `t=` is
@@ -301,8 +350,8 @@ class SearchCache:
         matched_norm = self._fuzzy_index.lookup(norm)
         _elapsed = perf_counter() - _t0
         # Fuzzy is the path that once starved a training run, so its cost is recorded on
-        # every lookup -- including the misses, which the old hit-only print
-        # could never show.
+        # every lookup -- including the misses, which a hit-only print could
+        # never show.
         record_phase("cache_fuzzy", _elapsed)
 
         obj = None if matched_norm is None else self._read("search", matched_norm)
@@ -310,6 +359,8 @@ class SearchCache:
             status = "miss"
         elif obj is None:
             status = "stale"  # index entry survived, the entry itself did not
+        elif accept is not None and not accept(obj):
+            obj, status = None, "unfit"  # stored for a request of another shape
         else:
             status = "hit"
 
@@ -328,25 +379,42 @@ class SearchCache:
         )
         return obj
 
-    def get_search(self, query: str) -> tuple[CacheProvider, SearchResults] | None:
-        """Return (provider, raw result list), or None on miss/disabled."""
+    def get_search_entry(
+        self, query: str, *, accept: Callable[[SearchEntry], bool] | None = None
+    ) -> SearchEntry | None:
+        """Return the stored entry for this query, or None on miss/disabled.
+
+        `accept` lets the caller refuse an entry stored for a request of another shape
+        (for example another exa search type); a refused entry is a miss.
+
+        Fuzzy matching serves a DIFFERENT query's results when the two score at or
+        above the threshold (for example a query about 2018 can be served the cached
+        results for 2019), shown under the agent's own query. It changes what the
+        agent retrieves; leave it off where retrieval must match a live run."""
         if not self.enabled:
             return None
         _t0 = perf_counter()
         try:
             norm = self._norm_q(query)
             obj = self._read("search", norm)
+            if obj is not None and accept is not None and not accept(obj):
+                obj = None
             if obj is None and self.fuzzy_threshold:
-                obj = self._fuzzy_lookup(norm)
+                obj = self._fuzzy_lookup(norm, accept)
                 if obj is not None:
                     self._bump("search_fuzzy_hits")
             if obj is None:
                 self._bump("search_misses")
                 return None
             self._bump("search_hits")
-            return obj.get("provider", "tavily"), obj.get("results", [])
+            return obj
         finally:
             self._time_add("search", perf_counter() - _t0)
+
+    def get_search(self, query: str) -> tuple[CacheProvider, SearchResults] | None:
+        """Return (provider, raw result list), or None on miss/disabled."""
+        obj = self.get_search_entry(query)
+        return None if obj is None else (obj.get("provider", "tavily"), obj["results"])
 
     def _index_add(self, norm):
         """Record a newly cached norm: in-memory + this process's append shard.
@@ -362,39 +430,62 @@ class SearchCache:
             except OSError:
                 pass  # index is best-effort; the entry itself is already cached
 
-    def put_search(self, query: str, results: SearchResults, provider: CacheProvider) -> None:
+    def put_search(
+        self,
+        query: str,
+        results: SearchResults,
+        provider: CacheProvider,
+        *,
+        extra: dict[str, JsonValue] | None = None,
+    ) -> None:
+        """Store one provider result list. `extra` holds further response fields the
+        caller formats from (exa's deep-search `output`) and the request shape it
+        checks on read; it cannot replace the fixed fields."""
         if not self.enabled or self.read_only:
             return
         norm = self._norm_q(query)
         if self._tavily_would_clobber_exa("search", norm, provider):
             return
-        self._write("search", norm, {"query": query, "norm": norm, "provider": provider, "results": results})
-        if self.fuzzy_threshold:
+        entry = {**(extra or {}), "query": query, "norm": norm, "provider": provider, "results": results}
+        if self._write("search", norm, entry) and self.fuzzy_threshold:
             self._index_add(norm)
 
     # ---- browse / extract -------------------------------------------------
-    def get_extract(self, url: str) -> tuple[CacheProvider, str] | None:
-        """Return (provider, page content), or None on miss/disabled."""
+    def get_extract(self, url: str, *, min_characters: int | None = None) -> tuple[CacheProvider, str] | None:
+        """Return (provider, page content), or None on miss/disabled.
+
+        `min_characters`: the page length the caller would request from a provider
+        that caps pages (exa's maxCharacters). A page stored under a smaller cap
+        that it filled is a miss, so a short copy never stands in for a longer fetch."""
         if not self.enabled:
             return None
         _t0 = perf_counter()
         try:
             obj = self._read("browse", normalize_url(url))
+            if obj is not None and min_characters is not None and _page_was_capped(obj):
+                if obj["max_characters"] < min_characters:
+                    obj = None
             if obj is None:
                 self._bump("browse_misses")
                 return None
             self._bump("browse_hits")
-            return obj.get("provider", "tavily"), obj.get("content", "")
+            return obj.get("provider", "tavily"), obj["content"]
         finally:
             self._time_add("browse", perf_counter() - _t0)
 
-    def put_extract(self, url: str, content: str, provider: CacheProvider) -> None:
+    def put_extract(
+        self, url: str, content: str, provider: CacheProvider, *, max_characters: int | None = None
+    ) -> None:
+        """Store one page. `max_characters` is the cap the provider applied, if any."""
         if not self.enabled or self.read_only:
             return
         norm = normalize_url(url)
         if self._tavily_would_clobber_exa("browse", norm, provider):
             return
-        self._write("browse", norm, {"url": url, "norm": norm, "provider": provider, "content": content})
+        entry = {"url": url, "norm": norm, "provider": provider, "content": content}
+        if max_characters is not None:
+            entry["max_characters"] = max_characters
+        self._write("browse", norm, entry)
 
     # ---- stats ------------------------------------------------------------
     def stats(self) -> dict[str, int | float]:
@@ -429,7 +520,12 @@ class SearchCache:
                 f" ({r['search_get_slow']} >0.5s), browse avg {b_avg:.0f}ms"
                 f" max {r['browse_get_max_s']:.2f}s ({r['browse_get_slow']} >0.5s)"
             )
+        errors = f" | put errors {r['put_errors']}" if r["put_errors"] else ""
         return (
-            "cache: search {search_hits}/{search_total} ({search_hit_pct:.0f}%)" + fuzzy + ", "
-            "browse {browse_hits}/{browse_total} ({browse_hit_pct:.0f}%)"
-        ).format(**r) + lat
+            (
+                "cache: search {search_hits}/{search_total} ({search_hit_pct:.0f}%)" + fuzzy + ", "
+                "browse {browse_hits}/{browse_total} ({browse_hit_pct:.0f}%)"
+            ).format(**r)
+            + lat
+            + errors
+        )

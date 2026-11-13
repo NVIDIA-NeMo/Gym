@@ -132,7 +132,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("cache_root")
     parser.add_argument("--workers", type=int, default=32)
-    parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER, choices=["trigram", "unicode61"])
     parser.add_argument(
         "--from-text-index",
         action="store_true",
@@ -140,12 +139,13 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.from_text_index:
-        n = build_master_from_text_index(args.cache_root, tokenizer=args.tokenizer)
-        print(f"wrote {n} norms -> {master_db_path(args.cache_root)} (fts5 {args.tokenizer}, from text index)")
+        # The server queries the index with DEFAULT_TOKENIZER, so the index is built with it too.
+        n = build_master_from_text_index(args.cache_root)
+        print(f"wrote {n} norms -> {master_db_path(args.cache_root)} (fts5 {DEFAULT_TOKENIZER}, from text index)")
         return 0
-    n = build_index(args.cache_root, workers=args.workers, tokenizer=args.tokenizer)
+    n = build_index(args.cache_root, workers=args.workers)
     print(f"wrote {n} norms -> {os.path.join(args.cache_root, INDEX_DIR, INDEX_BASE)}")
-    print(f"wrote {n} norms -> {master_db_path(args.cache_root)} (fts5 {args.tokenizer})")
+    print(f"wrote {n} norms -> {master_db_path(args.cache_root)} (fts5 {DEFAULT_TOKENIZER})")
     return 0
 
 
