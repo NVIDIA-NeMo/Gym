@@ -1180,7 +1180,14 @@ def compacted_events() -> str:
     """events() with an automatic compaction before the final answer, in the message shapes OpenCode 1.17.11 saves."""
     prompt, answer = json.loads(events())["messages"]
     summary = {
-        "info": {"role": "assistant", "summary": True, "mode": "compaction", "agent": "compaction", "finish": "stop"},
+        "info": {
+            "role": "assistant",
+            "summary": True,
+            "mode": "compaction",
+            "agent": "compaction",
+            "finish": "stop",
+            "tokens": {"input": 100, "output": 20, "reasoning": 5, "cache": {"read": 7, "write": 0}},
+        },
         "parts": [{"type": "text", "text": "Summary of the work so far"}],
     }
     return json.dumps({"messages": [prompt, _compaction(), summary, _CONTINUE, answer]})
@@ -1201,6 +1208,11 @@ def test_exclude_compaction_summaries_leaves_them_out_of_the_output(setup, exclu
     ]
     answer = [("reasoning", None), ("function_call", None), ("function_call_output", None), ("message", "Fixed")]
     assert output == (answer if exclude else [("message", "Summary of the work so far"), *answer])
+    # Either way, usage counts the summary call (107 input, 25 output tokens) and the answer's (13, 3).
+    usage = result.json()["usage"]
+    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (120, 28, 148)
+    assert usage["input_tokens_details"]["cached_tokens"] == 7 + 3
+    assert usage["output_tokens_details"]["reasoning_tokens"] == 5 + 1
 
 
 @pytest.mark.parametrize("marker", [{"summary": True}, {"agent": "compaction"}])
