@@ -125,6 +125,8 @@ def _config(
         agent["timeout"] = timeout
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
+    if harness == "crewai":
+        agent["timeout"] = timeout
     if harness == "openclaw":
         agent["timeout"] = math.ceil(timeout)
         if not use_agent_sessions:

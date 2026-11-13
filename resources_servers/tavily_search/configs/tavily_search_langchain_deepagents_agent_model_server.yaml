@@ -33,7 +33,8 @@ judge_model:
 tavily_search_langchain_deepagents_agent_model_server:
   responses_api_agents:
     langchain_deepagents_agent:
-      entrypoint: reasoning_search_agent.py
+      entrypoint: app.py
+      tool_profile: tavily_search
       resources_server:
         type: resources_servers
         name: tavily_search_resources_server
@@ -52,8 +53,13 @@ tavily_search_langchain_deepagents_agent_model_server:
 
 tavily_search_langchain_deepagents_agent_model_server_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: tavily_search_resources_server
       agent_server:
         type: responses_api_agents
         name: tavily_search_langchain_deepagents_agent_model_server
+      # The deepagents graph runs its own tools and never calls Resources tools, so no grant is sent.
+      resources_tool_transports: []
