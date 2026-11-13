@@ -317,13 +317,19 @@ class EnvironmentManifest(_ManifestModel):
     )
     training_allowed: BoolOrUnknown | None = Field(
         default=None,
-        description='Whether its data may be used for training: true, false or "unknown".',
+        description=(
+            "Whether its tasks may be trained on without invalidating an evaluation: false for a held-out benchmark, "
+            'true for training data, or "unknown". Licence terms belong in licensing.'
+        ),
     )
     overlaps_with: list[NonEmptyString] | None = Field(
         default=None,
         min_length=1,
         json_schema_extra={"uniqueItems": True},
-        description="Benchmarks whose tasks overlap with this environment's data, so training on it affects them.",
+        description=(
+            "Benchmarks that training on this environment would invalidate, for example because their tasks overlap "
+            "with its data."
+        ),
     )
     primary_metric: NonEmptyString | None = Field(
         default=None,
