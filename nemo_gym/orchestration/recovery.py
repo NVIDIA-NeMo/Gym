@@ -6718,6 +6718,19 @@ def operator_verdict(
         )
     if status != "SUCCESS" or (gate_task.get("evaluation_health") or {}).get("status") != "PASS":
         return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
+    quality_facts = gate_task.get("rollout_quality") or {}
+    findings = (quality_facts.get("issues") or {}).get("rollout_ended_on_failed_model_call", 0)
+    if expected and findings >= expected and "rollouts_ended_on_failed_model_call" not in quality_facts:
+        # One finding per failed model chain can exceed the rollouts it affects, and this collector reports no distinct
+        # count: whether every rollout ended on a failed model call is unknown, and neither accepting nor rejecting
+        # the score would rest on evidence.
+        return _verdict(
+            "unknown",
+            f"unverified: the collector has no distinct affected-rollout count, and {findings} rollout_ended_on_failed_"
+            f"model_call findings could cover all {expected} rollouts or fewer",
+            "none: report the run as unverified and do not present it as verified; re-collect the evidence with a "
+            "current runtime, then inspect again",
+        )
     if flagged := _flagged_everything(gate_task, decision, expected):
         what, count = flagged
         # The gate's status stays SUCCESS (rollout quality never changes it), but a score from rollouts that all ended

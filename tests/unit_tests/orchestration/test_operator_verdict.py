@@ -693,3 +693,24 @@ def test_every_rollout_ending_on_failed_model_chains_is_still_rejected_with_the_
 
     assert verdict["state"] == "needs_action"
     assert "32 of 32 rollouts flagged rollout_ended_on_failed_model_call" in verdict["action"]
+
+
+def test_a_collector_without_the_distinct_count_leaves_a_flagged_run_unknown_not_accepted():
+    collected = _ready(_run(32))
+    collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 32
+    collected.quality.pop("ended_on_failed_model_call", None)
+
+    verdict, task, _ = _verdict(collected)
+
+    assert task["status"] == "SUCCESS"
+    assert verdict["state"] == "unknown", verdict
+    assert "no distinct affected-rollout count" in verdict["reason"]
+    assert "re-collect the evidence with a current runtime" in verdict["action"]
+
+
+def test_a_collector_without_the_distinct_count_does_not_hold_back_a_run_with_few_findings():
+    collected = _ready(_run(32))
+    collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 5
+    collected.quality.pop("ended_on_failed_model_call", None)
+    verdict, _, _ = _verdict(collected)
+    assert verdict["state"] == "accept" and verdict["action"] == "none"
