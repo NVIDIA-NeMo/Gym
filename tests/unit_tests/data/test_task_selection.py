@@ -4,7 +4,7 @@
 import pytest
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.data.task_selection import row_task_id, select_tasks
+from nemo_gym.data.task_selection import row_task_id, select_task_rows, select_tasks, task_ids_digest
 
 
 def _row(task_id: str, prompt: str = "solve it", **extra: object) -> dict:
@@ -59,3 +59,24 @@ class TestSelectTasks:
         rows = [_row("a", prompt="x"), _row("a", prompt="y"), _row("b")]
 
         assert select_tasks(rows, ["b"]) == [2]
+
+
+class TestSelectTaskRows:
+    def test_keeps_every_copy_of_each_selected_task_in_input_order(self) -> None:
+        # A prepared benchmark writes its repeat count as copies of each row: a subset keeps that count.
+        rows = [_row("a"), _row("a"), _row("b"), _row("b"), _row("c"), _row("c")]
+
+        assert select_task_rows(rows, ["c", "a"]) == [0, 1, 4, 5]
+
+    def test_an_id_the_input_does_not_hold_is_an_error(self) -> None:
+        with pytest.raises(ConfigError, match="No input rows for task ids \\['z'\\]"):
+            select_task_rows([_row("a")], ["a", "z"])
+
+    def test_rows_without_an_id_cannot_be_selected(self) -> None:
+        with pytest.raises(ConfigError, match="tasks can only be selected by an id stored in the row"):
+            select_task_rows([_row("a"), {"question": "q"}], ["a"])
+
+
+def test_the_digest_depends_only_on_the_set_of_ids() -> None:
+    assert task_ids_digest(["b", "a", "a"]) == task_ids_digest(["a", "b"])
+    assert task_ids_digest(["a"]) != task_ids_digest(["a", "b"])

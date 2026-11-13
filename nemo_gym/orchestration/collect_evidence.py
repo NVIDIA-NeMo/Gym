@@ -841,6 +841,21 @@ try:
         coverage_scored = [report["scored"], report["expected"]]
 except (OSError, ValueError, AttributeError):
     pass
+task_selection = None
+try:
+    # The subset a run selected by task id (task_ids or task_ids_fpath): its source, counts and digest, not the ids.
+    selection = json.load(open(os.path.join(a, "rollouts_task_selection.json")))
+    if (isinstance(selection.get("source"), str) and isinstance(selection.get("task_ids_sha256"), str)
+            and all(type(selection.get(k)) is int and selection[k] >= 0 for k in ("tasks", "rows"))):
+        task_selection = {"source": selection["source"][:512], "tasks": selection["tasks"], "rows": selection["rows"],
+                          "task_ids_sha256": selection["task_ids_sha256"][:64]}
+    else:
+        task_selection = {"source": None, "tasks": None, "rows": None, "task_ids_sha256": None}
+except FileNotFoundError:
+    pass
+except (OSError, ValueError, AttributeError):
+    # A selection record that cannot be read still says the run was a subset.
+    task_selection = {"source": None, "tasks": None, "rows": None, "task_ids_sha256": None}
 collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
                   "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
                   "infra_retries_state": "unknown" if unknown_accounting else num(".gym_infra_retries")[1],
@@ -849,7 +864,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
                   "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
-                  "benchmark_metric_coverage": benchmark_metric_coverage}
+                  "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):

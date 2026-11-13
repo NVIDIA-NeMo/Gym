@@ -3,6 +3,7 @@
 
 """Select input rows by the task id each row carries."""
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 
@@ -37,6 +38,25 @@ def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str
     _require_task_ids_in_input(task_ids, first_row_of_task)
     _require_repeated_rows_to_be_identical(rows, first_row_of_task, set(task_ids))
     return sorted(first_row_of_task[task_id] for task_id in set(task_ids))
+
+
+def select_task_rows(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str]) -> list[int]:
+    """Indices of every row of the selected tasks, in input order, chosen like ``select_tasks``.
+
+    Unlike ``select_tasks``, each selected task keeps every copy the input holds: a prepared benchmark writes its own
+    repeat count as copies of each row, and a run of part of the benchmark keeps that count. Rows are selected only
+    by an id stored in the row, never by position, and an id the input does not hold is an error.
+    """
+    _require_task_id_in_every_row(rows)
+    _require_task_ids_in_input(task_ids, _first_row_of_each_task(rows))
+    selected = set(task_ids)
+    _require_repeated_rows_to_be_identical(rows, _first_row_of_each_task(rows), selected)
+    return [index for index, row in enumerate(rows) if row_task_id(row) in selected]
+
+
+def task_ids_digest(task_ids: Sequence[str]) -> str:
+    """The sha256 of the selected ids, sorted and unique, one per line: the same set always gives the same digest."""
+    return hashlib.sha256("\n".join(sorted(set(task_ids))).encode()).hexdigest()
 
 
 def _require_task_id_in_every_row(rows: Sequence[Mapping[str, JsonValue]]) -> None:

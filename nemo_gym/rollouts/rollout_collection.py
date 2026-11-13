@@ -205,6 +205,7 @@ from nemo_gym.utils.path_utils import (
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
+    task_selection_path_for,
 )
 from nemo_gym.utils.tqdm import tqdm
 
@@ -227,7 +228,7 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.data.task_selection import select_tasks
+from nemo_gym.data.task_selection import select_task_rows, select_tasks, task_ids_digest
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -550,6 +551,47 @@ def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -
         if row_str in tasks or len(tasks) < limit:
             tasks.add(row_str)
             yield line_no, row_str
+
+
+def _select_task_rows(
+    raw_rows: List[Tuple[int, str, Dict]], config: "RolloutCollectionConfig"
+) -> List[Tuple[int, str, Dict]]:
+    """The rows of the tasks ``task_ids`` or ``task_ids_fpath`` selects, and the record of that selection.
+
+    The record, ``rollouts_task_selection.json`` beside the output, holds the source of the list, the ids, their
+    digest and the counts; a run without a selection removes a record an earlier run left there.
+    """
+    record_path = task_selection_path_for(Path(config.output_jsonl_fpath))
+    if config.task_ids is None and config.task_ids_fpath is None:
+        record_path.unlink(missing_ok=True)
+        return raw_rows
+    if config.task_ids_fpath is not None:
+        ids_path = _resolve_under_cwd_or_install(config.task_ids_fpath)
+        if not ids_path.exists():
+            raise ConfigPathNotFoundError(f"Task id file not found: '{config.task_ids_fpath}' (task_ids_fpath).")
+        task_ids = [line.strip() for line in ids_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not task_ids:
+            raise ConfigError(f"Task id file '{config.task_ids_fpath}' lists no task ids.")
+        source = config.task_ids_fpath
+    else:
+        task_ids = [str(task_id) for task_id in config.task_ids]
+        source = "task_ids"
+    selected = [raw_rows[index] for index in select_task_rows([row for _, _, row in raw_rows], task_ids)]
+    unique_ids = sorted(set(task_ids))
+    record = {
+        "source": source,
+        "tasks": len(unique_ids),
+        "rows": len(selected),
+        "task_ids_sha256": task_ids_digest(unique_ids),
+        "task_ids": unique_ids,
+    }
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"Selecting {record['tasks']} tasks ({record['rows']} rows) by task id from {source} "
+        f"(sha256 {record['task_ids_sha256'][:12]}): a subset run, not the whole benchmark"
+    )
+    return selected
 
 
 def _reject_attempt_qualified_rollout_ids(rows: Iterable[Mapping[str, Any]], fpath: Path) -> None:
@@ -2098,6 +2140,20 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "benchmark writes its num_repeats copies in a row), so every copy of each kept task is kept."
         ),
     )
+    task_ids: Optional[List[Union[str, int]]] = Field(
+        default=None,
+        description=(
+            "Run only these tasks of the input dataset: a subset, named and versioned by whoever keeps the list. "
+            "Each task is selected by the id its rows store (task_id, problem_id or instance_id), never by "
+            "position, and keeps every copy the input holds; a numeric id matches the same id stored as a number. The "
+            "selection is written to rollouts_task_selection.json, and the inspect labels the run's score as a "
+            "subset score. Not with task_ids_fpath or limit; use task_ids_fpath for a long list."
+        ),
+    )
+    task_ids_fpath: Optional[str] = Field(
+        default=None,
+        description="A file with the task ids to run, one per line (blank lines are skipped); otherwise as task_ids.",
+    )
     num_repeats: Union[int, Dict[str, int]] = Field(
         default=1,
         description=(
@@ -2179,6 +2235,15 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
                 "Set only one of them."
             )
         self.agent_map = {**(self.agent_map or {}), "_default": self.agent_name}
+        return self
+
+    @model_validator(mode="after")
+    def _validate_task_selection(self) -> "RolloutCollectionConfig":
+        chosen = [name for name in ("task_ids", "task_ids_fpath", "limit") if getattr(self, name)]
+        if len(chosen) > 1:
+            raise ValueError(f"Set only one of task_ids, task_ids_fpath and limit; got {', '.join(chosen)}.")
+        if self.task_ids is not None and not self.task_ids:
+            raise ValueError("task_ids is empty: list at least one task id, or leave it unset to run every task.")
         return self
 
     @model_validator(mode="after")
@@ -3521,6 +3586,7 @@ class RolloutCollectionHelper(BaseModel):
                 for row_idx, (line_no, row_str) in enumerate(numbered_rows)
             ]
         _reject_attempt_qualified_rollout_ids([row for _, _, row in raw_rows], _input_path)
+        raw_rows = _select_task_rows(raw_rows, config)
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
