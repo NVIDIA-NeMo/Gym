@@ -1,4 +1,4 @@
-# Install nemo-gym[cwsandbox] in the Harbor agent environment.
+# Select the CoreWeave SDK for the managed Harbor agent environment.
 # Compose with nemo_gym/sandbox/providers/cwsandbox/configs/cwsandbox.yaml
 # and a policy model config. Requires CWSANDBOX_API_KEY and a local TB 2.1 checkout.
 # Only tasks with prebuilt docker_image references are supported.
@@ -51,3 +51,6 @@ harbor_agent_environment_server:
       agent_server:
         type: responses_api_agents
         name: harbor_agent
+
+component_extras:
+  responses_api_agents/harbor_agent: [cwsandbox]
