@@ -46,7 +46,7 @@ At the end of your answer, you should provide your sources in a dictionary with 
 }}
 
 Question:
-"""
+{question}"""
 
 SEC_FILING_SEARCH_TOOL = {
     "type": "function",
@@ -256,7 +256,7 @@ def convert_entry(
         **data,
         "question": question,
         "responses_create_params": {
-            "input": [{"role": "user", "content": PROMPT + question, "type": "message"}],
+            "input": [{"role": "user", "content": PROMPT.format(question=question), "type": "message"}],
             "tools": tools,
             "parallel_tool_calls": True,
             "metadata": {

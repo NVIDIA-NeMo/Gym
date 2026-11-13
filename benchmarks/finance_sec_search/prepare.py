@@ -66,7 +66,7 @@ At the end of your answer, you should provide your sources in a dictionary with 
 }}
 
 Question:
-"""
+{question}"""
 
 # ---------------------------------------------------------------------------
 # Tool definitions — public finance_sec_search tools only
@@ -208,7 +208,7 @@ def _convert_row(row: dict, include_web_search: bool = False) -> dict:
         "question": question,
         "expected_answer": expected_answer,
         "responses_create_params": {
-            "input": [{"role": "user", "content": PROMPT + question, "type": "message"}],
+            "input": [{"role": "user", "content": PROMPT.format(question=question), "type": "message"}],
             "tools": tools,
         },
     }
