@@ -18,27 +18,38 @@
 Shape of the environment, and how it differs from resources_servers/swebench:
 
   seed_session  creates ONE general-purpose sandbox from a fixed image (no per-instance
-                image derivation, no conda activation, no anti-cheat git scrub) and hands
-                the agent back the handle pair it needs to re-attach.
+                image derivation, no conda activation, no anti-cheat git scrub) for the
+                session to work in.
   verify        has NO eval sandbox and runs no tests. It extracts the agent's final
                 answer and grades it with an LLM judge, exactly as the reference
                 simple-evals BrowseComp grader does.
 
-This pairing lets the unmodified responses_api_agents/opencode_sandboxed_agent run a
-search benchmark: the agent is told only the question, works inside the sandbox, and the
-reward comes from the judge rather than from a test harness.
+Two kinds of seed reach it. An Environment Server's episode seed opens a session keyed by its
+resources_session_id and lends the sandbox to a session harness as sandbox_access (only with
+sandbox_workdir set). An agent's own /run seeds with the dataset row and its session cookie and
+gets the sandbox back as sandbox_handle: that is how the unmodified
+responses_api_agents/opencode_sandboxed_agent runs the benchmark, through a legacy_agent relay.
+Either way the agent is told only the question, works inside the sandbox, and the reward comes
+from the judge rather than from a test harness.
 """
 
 import asyncio
+import hashlib
 import json
+import logging
 import re
+import shlex
 import sys
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import PurePosixPath
 from time import time
-from typing import Any, ClassVar, Dict, Optional, Tuple
+from typing import Annotated, Any, ClassVar, Dict, Optional, Tuple
 
 import aiohttp
-from fastapi import Request, Response
-from pydantic import ConfigDict, PrivateAttr
+import anyio
+from fastapi import FastAPI, Request, Response
+from pydantic import BeforeValidator, ConfigDict, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import (
@@ -50,6 +61,7 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     AGENT_LIMIT,
     AGENT_TIMEOUT,
+    JUDGE_UNPARSEABLE,
     MODEL_CONTEXT_LIMIT,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -57,6 +69,8 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    SandboxAccess,
+    SandboxConfig,
     SandboxResources,
     SandboxSpec,
     cpu_cap_env,
@@ -70,8 +84,15 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    LentSandboxes,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge
@@ -95,10 +116,18 @@ from nemo_gym.verification import JudgeError, call_judge
 # claim, whenever these numbers are compared.
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 from resources_servers.opencode_search.exa_cache import ExaCache
+from resources_servers.opencode_search.task_data import TaskData
 
+
+LOGGER = logging.getLogger(__name__)
 
 # A judge that echoes this instead of grading has repeated the template back at us.
 _JUDGE_TEMPLATE_ECHO = "The final exact answer extracted from the [response]"
+
+# The bounds LentSandboxes applies to the sandboxes it lends, applied to an agent run's sandbox too: a provider stop
+# that hangs must not hold a verify or the shutdown forever, and the shutdown stops this many at a time.
+_STOP_TIMEOUT_S = 120.0
+_SHUTDOWN_STOP_CONCURRENCY = 64
 
 
 def _last_assistant_text(response: NeMoGymResponse) -> str:
@@ -176,6 +205,19 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
     sandbox_image: str
+    # Working directory of the sandbox an episode seed lends to a session harness; the seed creates it. None turns
+    # lending off, so an episode seed is refused (422). An agent's own /run gets the image's working directory.
+    sandbox_workdir: Optional[str] = None
+
+    @field_validator("sandbox_workdir")
+    @classmethod
+    def _harness_workdir(cls, workdir: Optional[str]) -> Optional[str]:
+        # A harness works in this directory as its task root, so it is never the filesystem root or the shared /tmp.
+        if workdir is not None:
+            path = PurePosixPath(workdir)
+            if not path.is_absolute() or ".." in path.parts or path in (PurePosixPath("/"), PurePosixPath("/tmp")):
+                raise ValueError(f"sandbox_workdir must be an absolute directory other than / and /tmp: {workdir!r}")
+        return workdir
 
     # Grading. The judge is the only grader; there is no exact-match fallback, because a
     # BrowseComp answer is free text and string equality scores correct answers as wrong.
@@ -216,6 +258,10 @@ class SearchSeedSessionRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
 
 
+class SearchTaskSeed(TaskData, BaseSeedSessionRequest):
+    """The task_data an episode seed must carry: verify grades with its question and ground_truth."""
+
+
 class SearchSeedSessionResponse(BaseSeedSessionResponse):
     # The only field the agent reads. Without it opencode_sandboxed_agent silently creates its
     # own sandbox from a hardcoded SWE-bench image instead of connecting to this one.
@@ -233,12 +279,11 @@ class SearchVerifyRequest(SearchRunRequest, BaseVerifyRequest):
 #
 # SCOPE, and this is the part that is easy to get wrong: legacy's mask_sample gates the RL
 # GRADIENT, not the eval metric. Its published comparator scored the capped rows: its denominator
-# is the full row count including max_iteration endings. So we record the flag and score the row
-# anyway; see aggregate_metrics. Excluding them would report a higher number against a bar that
-# was computed the other way.
+# is the full row count including max_iteration endings. So these rows keep their judged reward,
+# and a number on that denominator is computed from the rows; Gym's own aggregate metrics leave
+# masked rows out (see aggregate_metrics).
 # agent_timed_out joins these: legacy masked it in the same branch (app.py:5742-5751, the
-# eval_timed_out/agent_timed_out arm). Like the other two it is RECORDED, not excluded from
-# the mean -- see aggregate_metrics.
+# eval_timed_out/agent_timed_out arm), and it is masked the same way.
 MASKED_TERMINAL_REASONS = frozenset({"max_iteration", "context_window", "agent_timed_out"})
 
 # The diagnostics each masked terminal reason reports on the verify response. They describe the
@@ -258,11 +303,52 @@ class SearchVerifyResponse(BaseVerifyResponse):
     judge_parsed: bool
     judge_attempts: int
     judge_time_taken: float
-    # True when the rollout ran out of budget rather than answering wrongly. Recorded only: the row
-    # keeps its real reward and is scored like any other, because that is how the comparator's
-    # number was computed. Consumers that should skip these (RL gradient, error analysis) filter on
-    # this field themselves.
+    # True when the reward is not a measurement of the answer: the session was lost before verify,
+    # or the judge gave no verdict (reward 0). Also true when the rollout ran out of budget rather
+    # than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave masked
+    # rows out of the quality scores.
     mask_sample: bool = False
+    # Whether grading reached a result: the judge's verdict, or the empty answer that needs none.
+    # False for a lost session and a judge that gave no verdict.
+    evaluation_completed: bool
+
+
+@dataclass(frozen=True)
+class _VerifyEvidence:
+    """What a session's verify keeps for its retries: a digest of the body it graded and, once grading reached a
+    result, the grading fields it answered with.
+
+    A retry must send the same body, so the grading fields and that body rebuild the first reply; a retry with
+    another body gets 409 rather than a grade of a different answer.
+    """
+
+    body_digest: str
+    grade: Optional[Dict[str, Any]] = None
+
+
+def _body_digest(body: SearchVerifyRequest) -> str:
+    return hashlib.sha256(json.dumps(body.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
+
+
+# The grading fields of a verify response whose answer no judge graded.
+_NOT_GRADED: Dict[str, Any] = {
+    "extracted_final_answer": "",
+    "final_text": "",
+    "judge_parsed": False,
+    "judge_attempts": 0,
+    "judge_time_taken": 0.0,
+    "evaluation_completed": False,
+}
+
+
+async def _stop(sandbox: AsyncSandbox) -> None:
+    """Stop an agent run's sandbox within _STOP_TIMEOUT_S, even while the request that stops it is being cancelled.
+
+    A client that disconnects cancels its request handler and every later await in it, so an unshielded stop would
+    never run and the sandbox would outlive every reference to it.
+    """
+    with anyio.CancelScope(shield=True), anyio.fail_after(_STOP_TIMEOUT_S):
+        await sandbox.stop()
 
 
 class SearchResourcesServer(SimpleResourcesServer):
@@ -270,18 +356,99 @@ class SearchResourcesServer(SimpleResourcesServer):
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
-    _session_id_to_sandbox: Dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = SearchTaskSeed
+
+    # The sandbox of each agent's own /run, by its cookie session, and the access lent to each episode session.
+    _agent_run_sandboxes: Dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
+    _sandbox_access: Dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
+    _lent_sandboxes: Optional[LentSandboxes] = PrivateAttr(default=None)
     # Rollouts in a row whose judge never produced a verdict. Reset by any success.
     _judge_consecutive_failures: int = PrivateAttr(default=0)
     _exa_cache: Any = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        self._session_id_to_sandbox = dict()
+        if self.config.sandbox_workdir is not None:
+            self._lent_sandboxes = LentSandboxes(
+                self.config.sandbox_provider,
+                self._lent_sandbox_config(),
+                image=self.config.sandbox_image,
+                workdir=self.config.sandbox_workdir,
+            )
 
-    async def _create_sandbox(self) -> AsyncSandbox:
+    def _lent_sandbox_config(self) -> SandboxConfig:
+        """sandbox_config as LentSandboxes takes it, so a lent sandbox matches an agent run's but for its workdir."""
+        settings = dict(self.config.sandbox_config)
+        derive_cpu_env = settings.pop("derive_cpu_env", True)
+        config = SandboxConfig.model_validate(settings)
+        cpu_env = cpu_cap_env(SandboxResources.from_mapping(config.resources).cpu) if derive_cpu_env else {}
+        return config.model_copy(
+            update={"env": cpu_env | config.env, "metadata": config.metadata | {"nemo_gym_agent": self.config.name}}
+        )
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # As in chartography and visual_coding_opencode: several workers are not tested with lent sandboxes.
+        if self._lent_sandboxes is None:
+            return None
+        return "lent sandboxes live in one worker's memory"
+
+    # ---- Sessions (the base class serves seed, close and the session lock) ------------------------
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._sandbox_access or session_id in self._agent_run_sandboxes
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        identity = self.session_identity(session_id)
+        if identity is None:
+            # An agent's own /run, which attaches to the sandbox by the handle the seed returns.
+            await self._start_agent_run_sandbox(session_id)
+            return
+        if self._lent_sandboxes is None:
+            raise ResourcesSeedRejectedError(
+                "This server lends a sandbox to an episode seed only with sandbox_workdir set"
+            )
+        # On failure lend() stops the sandbox it started; after it returns, the base releases a failed seed.
+        access = await self._lent_sandboxes.lend(session_id, identity[1])
+        await self._create_workdir(self._lent_sandboxes.get(session_id))
+        self._sandbox_access[session_id] = access
+
+    async def release_session_state(self, session_id: str) -> None:
+        # Each stop raises on failure and keeps its sandbox, so a later verify, close or shutdown tries again.
+        if self._lent_sandboxes is not None:
+            await self._lent_sandboxes.release(session_id)
+        self._sandbox_access.pop(session_id, None)
+        sandbox = self._agent_run_sandboxes.get(session_id)
+        if sandbox is not None:
+            await _stop(sandbox)
+            self._agent_run_sandboxes.pop(session_id, None)
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[SearchSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> SearchSeedSessionResponse | ResourcesSeedSessionResponse:
+        """The base seed, replying with the sandbox: its access to an episode seed, its handle to an agent's /run.
+
+        FastAPI serializes the reply through the return annotation, so it must name SearchSeedSessionResponse: with
+        only the base reply models, sandbox_handle is dropped and the agent silently starts a sandbox of its own.
+        """
+        reply = await super().seed_session(body, request=request)
+        if isinstance(reply, ResourcesSeedSessionResponse):
+            reply.sandbox_access = self._sandbox_access[reply.resources_session_id]
+            return reply
+        return SearchSeedSessionResponse(
+            sandbox_handle=self._agent_run_sandboxes[request.session[SESSION_ID_KEY]].sandbox_id
+        )
+
+    async def _start_agent_run_sandbox(self, session_id: str) -> None:
         global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        spec = self._agent_run_spec(global_config_dict)
+        sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config_dict))
+        # Registered before it starts, so release_session_state stops a start that failed or was cancelled.
+        self._agent_run_sandboxes[session_id] = sandbox
+        await sandbox.start(spec)
+
+    def _agent_run_spec(self, global_config_dict: Any) -> SandboxSpec:
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         sandbox_resources = SandboxResources.from_mapping(dict(self.config.sandbox_config.get("resources", {})))
@@ -289,7 +456,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
 
-        spec = SandboxSpec(
+        return SandboxSpec(
             image=self.config.sandbox_image,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
@@ -304,15 +471,38 @@ class SearchResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
 
-        sandbox = AsyncSandbox(resolved_sandbox_provider)
-        await sandbox.start(spec)
-        return sandbox
+    async def _create_workdir(self, sandbox: AsyncSandbox) -> None:
+        """Create sandbox_workdir in a lent sandbox: providers need not create a spec's workdir, and a harness
+        never prepares a borrowed one.
 
-    async def seed_session(self, request: Request, body: SearchSeedSessionRequest) -> SearchSeedSessionResponse:
-        sandbox = await self._create_sandbox()
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
+        A command after the start, since LentSandboxes has no setup hook. It runs from / because a command's default
+        directory is the missing workdir.
+        """
+        workdir = self.config.sandbox_workdir
+        result = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=60)
+        if result.return_code != 0 or result.error_type is not None:
+            output = (result.stderr or result.stdout or "").strip()[-500:]
+            raise RuntimeError(
+                f"Cannot create sandbox_workdir {workdir} in the lent sandbox "
+                f"(exit {result.return_code}, error {result.error_type}): {output}"
+            )
 
-        return SearchSeedSessionResponse(sandbox_handle=sandbox._handle.sandbox_id)
+    async def shutdown(self) -> None:
+        """Stop every sandbox still running, as when the server exits with sessions open or agent runs unverified."""
+        if self._lent_sandboxes is not None:
+            await self._lent_sandboxes.release_all()
+        self._sandbox_access.clear()
+        stopping = asyncio.Semaphore(_SHUTDOWN_STOP_CONCURRENCY)
+
+        async def stop(session_id: str, sandbox: AsyncSandbox) -> None:
+            async with stopping:
+                try:
+                    await _stop(sandbox)
+                except Exception:
+                    LOGGER.exception("Failed to stop the sandbox of agent run %s at shutdown", session_id)
+
+        sandboxes, self._agent_run_sandboxes = self._agent_run_sandboxes, {}
+        await asyncio.gather(*(stop(session_id, sandbox) for session_id, sandbox in sandboxes.items()))
 
     async def _call_judge(
         self,
@@ -337,8 +527,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         """Grade final_text against ground_truth. Returns a dict of result fields.
 
         Two failure modes are deliberately kept distinct: a judge that answered but could not be
-        parsed is a legitimate zero, while a judge that never answered is infrastructure noise and
-        raises JudgeError so judge_failsafe routes the row to the failures sidecar.
+        parsed returns judge_parsed False, which verify masks as inconclusive, while a judge that
+        never answered is infrastructure noise and raises JudgeError so judge_failsafe routes the
+        row to the failures sidecar.
         """
         answer = re.sub(r"<think>.*?</think>", "", final_text or "", flags=re.DOTALL).strip()
 
@@ -360,10 +551,9 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         started = time()
         last_error: Optional[str] = None
-        # Did the judge ever actually reply? A judge that answers but cannot be parsed is a
-        # legitimate zero and must stay in the scored population; only a judge we could never
-        # reach is infrastructure noise worth routing to the failures sidecar. Without this the
-        # two are conflated and a chatty-but-malformed judge silently shrinks the denominator.
+        # Did the judge ever actually reply? A judge that answers but cannot be parsed leaves a
+        # masked row in the rollouts (judge_unparseable, see verify); only a judge we could never
+        # reach is infrastructure noise worth routing to the failures sidecar.
         had_response = False
         for attempt in range(self.config.judge_max_attempts):
             try:
@@ -398,9 +588,8 @@ class SearchResourcesServer(SimpleResourcesServer):
                 await asyncio.sleep(max(0.0, self.config.judge_retry_delay_seconds))
 
         if had_response:
-            # The judge talked to us every time and we could never read a verdict out of it. That
-            # is a graded outcome, not infrastructure noise: score it zero and keep the row in the
-            # population, flagged so a regrade can revisit it.
+            # The judge talked to us every time and we could never read a verdict out of it. There
+            # is no grade to report: verify masks the row as inconclusive, so a regrade can revisit it.
             return {
                 "reward": 0.0,
                 "extracted_final_answer": "",
@@ -438,30 +627,32 @@ class SearchResourcesServer(SimpleResourcesServer):
                 f"masking the rest of the run."
             )
 
-    async def _release_sandbox(self, session_id: str) -> None:
-        sandbox = self._session_id_to_sandbox.pop(session_id, None)
-        if sandbox is None:
-            return
-        # The agent also stops the sandbox after verify returns; both sides tolerate the other
-        # having gone first. Releasing here keeps a crashed agent from leaking the pod.
-        try:
-            await sandbox.stop()
-        except Exception as e:  # noqa: BLE001
-            print(f"[search] sandbox stop failed (ignored): {type(e).__name__}: {e}", flush=True)
-
     # ---- Exa cache proxy ----------------------------------------------------------------------
-    def setup_webserver(self):
+    def setup_webserver(self) -> FastAPI:
         """Add the Exa proxy route alongside the standard resources-server endpoints.
 
         The plugin inside the sandbox POSTs its MCP JSON-RPC here instead of to mcp.exa.ai, so the
         ONLY plugin change is which base URL it uses. Everything else -- lookup, fuzzy matching,
         storage, provider rules, accounting -- lives here, on the Gym side, where it can be changed
         without touching a file that ships into the sandbox.
+
+        The app's lifespan also stops every sandbox still running when the server exits.
         """
         app = super().setup_webserver()
         if self.config.exa_cache_root:
             app.post("/mcp")(self._exa_proxy)
             app.get("/exa_cache_stats")(self._exa_cache_stats)
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
         return app
 
     @property
@@ -564,30 +755,59 @@ class SearchResourcesServer(SimpleResourcesServer):
             return Response(content=b"", status_code=502)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Report the headline mean over EVERY graded row, capped ones included.
+        """Gym's default aggregate metrics, which leave mask_sample rows out of the quality scores.
 
-        Deliberately does NOT drop mask_sample rows, even though the legacy stack set that flag for
-        the same endings. mask_sample there gates what enters the RL GRADIENT, not what enters an
-        eval metric: the published comparator's denominator is its full row count, and the
-        ungraded-reason rows plus the agent_error_kind=max_iteration rows account for exactly that
-        total -- so its capped rows were scored, not excluded. Dropping ours would shrink the
-        denominator against a bar computed the other way: an accounting gift, not a result.
-
-        The flag is still recorded per row, so a training consumer can mask on it and an analysis
-        can split on it; only the headline number stays comparable.
+        A masked row is either not a measurement (a lost session, a judge that gave no verdict) or
+        a rollout that ran out of budget, which keeps its judged reward. The flag stays on every
+        row, so a training consumer can mask on it and an analysis can split on it or recompute a
+        number over every row.
         """
         masked = sum(1 for vr in body.verify_responses if vr.get("mask_sample"))
         if masked:
             print(
-                f"[search] {masked}/{len(body.verify_responses)} row(s) carry mask_sample "
-                f"(budget-exhausted); SCORED anyway to match the comparator's denominator",
+                f"[search] {masked}/{len(body.verify_responses)} row(s) carry mask_sample and are "
+                f"left out of the quality metrics",
                 file=sys.stderr,
             )
         return await super().aggregate_metrics(body)
 
     async def verify(self, request: Request, body: SearchVerifyRequest) -> SearchVerifyResponse:
-        await self._release_sandbox(request.session[SESSION_ID_KEY])
+        """Grade the final answer, once per session.
 
+        The grade reads only the request, so a verify without a seed is graded too (allow_missing):
+        gym eval reverify, or an agent run whose cookie was lost. An identical retry replays the
+        verdict, or is graded again when the previous attempt reached none; a retry with another
+        body gets 409. A verify after the session's close is masked as lost.
+        """
+        session_id = request.session[SESSION_ID_KEY]
+        digest = _body_digest(body)
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                lost = lost_session_verification("the session was closed, or its seed never finished")
+                return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost))
+            evidence = verification.retained
+            if isinstance(evidence, _VerifyEvidence):
+                if evidence.body_digest != digest:
+                    raise ResourcesSessionConflictError("This session was already verified with another body")
+                if evidence.grade is not None:
+                    return SearchVerifyResponse(**(body.model_dump() | evidence.grade))
+            verification.retain(_VerifyEvidence(digest))
+            if self.has_session_state(session_id):
+                # Grading never reads the sandbox, so stop it before waiting on the judge. If the stop
+                # fails, verifying() tries again on exit and records the failure without replacing the grade.
+                try:
+                    await self.release_session_state(session_id)
+                except Exception:
+                    LOGGER.warning(
+                        "Failed to stop the sandbox of session %s before grading", session_id, exc_info=True
+                    )
+            grade = await self._grade(body)
+            if grade["evaluation_completed"]:
+                verification.retain(_VerifyEvidence(digest, grade))
+            return SearchVerifyResponse(**(body.model_dump() | grade))
+
+    async def _grade(self, body: SearchVerifyRequest) -> Dict[str, Any]:
+        """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics."""
         # Forwarded by the agent from the turn-budget plugin's stderr line; "" on a normal ending.
         terminal_reason = getattr(body, "opencode_terminal_reason", "")
         masked = terminal_reason in MASKED_TERMINAL_REASONS
@@ -597,37 +817,42 @@ class SearchResourcesServer(SimpleResourcesServer):
         if not final_text.strip():
             # The agent produced no answer at all. That is a real zero, not judge noise, and
             # spending a judge call on an empty string would only add latency.
-            return SearchVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                extracted_final_answer="",
-                final_text="",
-                judge_parsed=False,
-                judge_attempts=0,
-                judge_time_taken=0.0,
-                mask_sample=masked,
-                failure_kind=failure_kind,
-                failure_reason=failure_reason,
+            return _NOT_GRADED | {
+                "reward": 0.0,
+                "mask_sample": masked,
+                "failure_kind": failure_kind,
+                "failure_reason": failure_reason,
+                "evaluation_completed": True,
+            }
+
+        try:
+            result = await self._judge_answer(
+                question=body.question,
+                ground_truth=body.ground_truth,
+                final_text=final_text,
             )
+        except JudgeError:
+            # judge_failsafe answers this with a masked row built from the request body, so the row is marked
+            # inconclusive there.
+            body.evaluation_completed = False
+            raise
+        if not result["judge_parsed"]:
+            # Without a verdict the reward measures nothing, so this outranks a masked ending's kind.
+            masked, failure_kind = True, JUDGE_UNPARSEABLE
+            failure_reason = f"The judge gave no parseable verdict in {result['judge_attempts']} attempt(s)"
 
-        result = await self._judge_answer(
-            question=body.question,
-            ground_truth=body.ground_truth,
-            final_text=final_text,
-        )
-
-        return SearchVerifyResponse(
-            **body.model_dump(),
-            reward=result["reward"],
-            extracted_final_answer=result["extracted_final_answer"],
-            final_text=final_text,
-            judge_parsed=result["judge_parsed"],
-            judge_attempts=result["judge_attempts"],
-            judge_time_taken=result["judge_time_taken"],
-            mask_sample=masked,
-            failure_kind=failure_kind,
-            failure_reason=failure_reason,
-        )
+        return {
+            "reward": result["reward"],
+            "extracted_final_answer": result["extracted_final_answer"],
+            "final_text": final_text,
+            "judge_parsed": result["judge_parsed"],
+            "judge_attempts": result["judge_attempts"],
+            "judge_time_taken": result["judge_time_taken"],
+            "mask_sample": masked,
+            "failure_kind": failure_kind,
+            "failure_reason": failure_reason,
+            "evaluation_completed": result["judge_parsed"],
+        }
 
 
 if __name__ == "__main__":

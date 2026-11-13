@@ -242,3 +242,12 @@ policy_model:
         max_output_tokens: null
         max_tokens: null
         max_completion_tokens: null
+
+# opencode_sandboxed_agent serves no agent sessions, so this benchmark runs through a legacy_agent relay.
+opencode_sandboxed_search_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: opencode_sandboxed_search_agent

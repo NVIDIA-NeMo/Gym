@@ -38,6 +38,7 @@ opencode_search_example_agent:
         type: example
         jsonl_fpath: resources_servers/opencode_search/data/example.jsonl
 
+# opencode_sandboxed_agent serves no agent sessions, so its example stays on the legacy_agent relay.
 opencode_search_example_environment_server:
   environment_servers:
     legacy_agent:
