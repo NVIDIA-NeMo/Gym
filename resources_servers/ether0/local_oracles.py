@@ -57,11 +57,15 @@ def fetch_solubility(query_smiles: str) -> dict[str, Any]:
         return {"smiles": query_smiles, "error": "Only single molecules are supported"}
     try:
         prediction = _solubility.run(smiles=query_smiles)
+        if prediction is False:
+            return {"smiles": query_smiles, "error": "Solubility prediction failed."}
+        solubility = float(prediction.tolist()[0])
+        # NaN would otherwise bypass the grader's distance check and earn a positive reward.
+        if not math.isfinite(solubility):
+            raise ValueError(f"Non-finite solubility prediction: {solubility!r}")
     except Exception as error:
         raise OracleError(f"Solubility model failed on {query_smiles!r}: {error}") from error
-    if prediction is False:
-        return {"smiles": query_smiles, "error": "Solubility prediction failed."}
-    return {"smiles": query_smiles, "solubility": prediction.tolist()[0]}
+    return {"smiles": query_smiles, "solubility": solubility}
 
 
 def fetch_purchasable(query_smiles_list: list[str] | str) -> dict[str, bool]:

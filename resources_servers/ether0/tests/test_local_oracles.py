@@ -45,6 +45,15 @@ class TestInstallRejectsBadConfiguration:
 
 
 class TestSolubilityAdapter:
+    def test_multiple_molecules_are_an_error_reply(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        model = MagicMock()
+        monkeypatch.setattr(local_oracles, "_solubility", model)
+        assert local_oracles.fetch_solubility("CCO.CC") == {
+            "smiles": "CCO.CC",
+            "error": "Only single molecules are supported",
+        }
+        model.run.assert_not_called()
+
     def test_unpredictable_molecule_is_an_error_reply(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(local_oracles, "_solubility", MagicMock(run=MagicMock(return_value=False)))
         assert local_oracles.fetch_solubility("CCO") == {"smiles": "CCO", "error": "Solubility prediction failed."}

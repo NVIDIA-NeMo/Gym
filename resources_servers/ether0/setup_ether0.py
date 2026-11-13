@@ -29,6 +29,7 @@ ETHER0_REMOTES_SRC_PATH = ETHER0_PATH / "packages" / "remotes" / "src"
 
 
 def ensure_ether0() -> None:
+    """Expose the pinned upstream checkout, reusing a matching cache offline."""
     if not ETHER0_PATH.exists():
         logging.info("Cloning ether0 %s into %s", _REPO_REVISION, ETHER0_PATH)
         # Check out in a sibling directory and rename, so a failed fetch leaves nothing behind.
@@ -43,5 +44,14 @@ def ensure_ether0() -> None:
             checkout.rename(ETHER0_PATH)
         finally:
             shutil.rmtree(checkout, ignore_errors=True)
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ETHER0_PATH, encoding="utf-8", errors="replace"
+    ).strip()
+    if revision != _REPO_REVISION:
+        # Preserve cached files, which may include user edits, rather than resetting them.
+        raise RuntimeError(
+            f"Cached ether0 at {ETHER0_PATH} is {revision}; expected {_REPO_REVISION}. "
+            "Move the cached checkout aside and restart to recreate it."
+        )
     if str(ETHER0_SRC_PATH) not in sys.path:
         sys.path.insert(0, str(ETHER0_SRC_PATH))

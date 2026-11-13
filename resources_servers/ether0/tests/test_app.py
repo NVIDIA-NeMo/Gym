@@ -16,6 +16,7 @@ import asyncio
 import threading
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from app import (
     EVAL_FUNCTIONS,
@@ -281,6 +282,44 @@ class TestOracleRows:
             )
         assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
         assert result.failure_reason == "model failed"
+
+    @pytest.mark.parametrize(
+        ("prediction", "reward", "masked"),
+        [
+            pytest.param([float("nan")], 0.0, True, id="nan"),
+            pytest.param([float("inf")], 0.0, True, id="infinity"),
+            pytest.param([float("-inf")], 0.0, True, id="negative-infinity"),
+            pytest.param([], 0.0, True, id="empty"),
+            pytest.param(["invalid"], 0.0, True, id="nonnumeric"),
+            pytest.param([-3.0], 1.0, False, id="on-target"),
+            pytest.param([-2.0], 0.0, False, id="off-target"),
+            pytest.param(False, 0.0, False, id="unpredictable-molecule"),
+        ],
+    )
+    async def test_solubility_predictions_are_validated_before_scoring(
+        self, prediction: list[float | str] | bool, reward: float, masked: bool
+    ) -> None:
+        server = _make_server()
+        server.config.local_oracles = True
+        model = MagicMock(run=MagicMock(return_value=False if prediction is False else np.array(prediction)))
+        with (
+            patch.object(local_oracles, "_solubility", model),
+            patch.object(graders.rewards, "fetch_solubility", local_oracles.fetch_solubility),
+            patch.object(graders.rewards, "is_reasonable_molecule", return_value=True),
+        ):
+            result = await server.verify(
+                _make_request(
+                    "<answer>CCO</answer>",
+                    "sol_eval!:!('scaffold', 'CC', '-3.0', 'increase')!:!oracle-solubility/scaffold",
+                    "oracle-solubility/scaffold",
+                )
+            )
+        assert (result.reward, result.mask_sample) == (reward, masked)
+        assert result.failure_kind == (VERIFIER_ERROR if masked else None)
+        if masked:
+            assert result.failure_reason.startswith("Solubility model failed on 'CCO':")
+        else:
+            assert result.failure_reason is None
 
     @pytest.mark.parametrize("catalog_fails", [False, True], ids=["not-purchasable", "catalog-failure"])
     async def test_purchasability_failure_is_masked_but_a_negative_lookup_is_scored(self, catalog_fails: bool) -> None:
