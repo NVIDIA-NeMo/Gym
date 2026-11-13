@@ -13,6 +13,9 @@ maintainers:
 - SeanNaren
 intended_use:
 - evaluation
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

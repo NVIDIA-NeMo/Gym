@@ -14,6 +14,9 @@ maintainers:
 - lafrancef
 intended_use:
 - evaluation
+requirements:
+  gpu: true
+  network: public
 reward:
   range:
   - 0.0

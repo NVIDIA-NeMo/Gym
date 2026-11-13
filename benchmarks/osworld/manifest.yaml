@@ -16,6 +16,9 @@ maintainers:
 intended_use:
 - evaluation
 - training
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

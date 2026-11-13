@@ -15,6 +15,9 @@ maintainers:
 - krishnpci
 intended_use:
 - training
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
