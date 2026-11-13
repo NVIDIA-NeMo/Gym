@@ -34,4 +34,8 @@ datasets:
 model_server: policy_model
 canonical_split: benchmark
 prompt_source: agent
+adopted_from:
+  source: https://github.com/zou-group/collaborative-intelligence
+  ref: 3de5f7d0a652c0b393342b4fbae59b78034034ea  # pragma: allowlist secret
+  reconciled: '2026-11-14'
 lifecycle: active

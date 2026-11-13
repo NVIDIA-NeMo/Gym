@@ -36,4 +36,8 @@ datasets:
   num_repeats: 1
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/fresnellll/ChemCoTBench-V2
+  ref: f0bb2fb00c97cb3257294a639e28f960f2da157e
+  reconciled: '2026-10-12'
 lifecycle: active

@@ -32,7 +32,11 @@ datasets:
   prepare_script: benchmarks/legal_agent_bench/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
 lifecycle: active
 resources_server: null
+adopted_from:
+  source: https://github.com/harveyai/harvey-labs
+  ref: f46ef86e4788545622db25dcffa3aebb7a139929
+  reconciled: '2026-07-17'

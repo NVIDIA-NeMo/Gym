@@ -33,7 +33,11 @@ datasets:
     prompt_config: benchmarks/indic/in22/prompts/default.yaml
     num_repeats: 1
 standard_prompt_config: benchmarks/indic/in22/prompts/default.yaml
-canonical_split: benchmark
+canonical_split: test
 session_model: episode
 state: none
+adopted_from:
+  source: https://huggingface.co/datasets/ai4bharat/IN22-Gen
+  ref: e042ab3d3063110b1a85efa0a59bdbf8553bb928
+  reconciled: '2026-10-21'
 lifecycle: active

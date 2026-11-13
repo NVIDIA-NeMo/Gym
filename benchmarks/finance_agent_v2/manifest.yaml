@@ -33,6 +33,10 @@ datasets:
   prepare_script: benchmarks/finance_agent_v2/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: public
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/vals-ai/finance-agent-v2
+  ref: bb460b524472ae0955abdf243bbbac06958dc8c9
+  reconciled: '2026-08-11'
 lifecycle: active

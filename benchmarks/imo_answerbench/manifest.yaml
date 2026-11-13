@@ -34,6 +34,10 @@ datasets:
   prompt_config: benchmarks/prompts/generic/math.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/prompts/generic/math.yaml
+adopted_from:
+  source: https://github.com/google-deepmind/superhuman
+  ref: 326a740a6877d5ec098035c534d2fbd931fe83ee
+  reconciled: '2026-04-29'
 lifecycle: active

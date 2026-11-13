@@ -35,6 +35,10 @@ datasets:
   prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/harbor-framework/terminal-bench-science
+  ref: f81afac4f11048e77a15dfc8fb1dbfb897fea0ce
+  reconciled: '2026-10-23'
 lifecycle: active

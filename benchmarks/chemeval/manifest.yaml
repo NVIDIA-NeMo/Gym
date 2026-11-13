@@ -37,4 +37,8 @@ datasets:
   num_repeats: 1
 canonical_split: text
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/Ooo1/ChemEval
+  ref: 61d82e727865e9c6c110fffd3ab920e0ab2edc42
+  reconciled: '2026-10-12'
 lifecycle: active

@@ -277,7 +277,7 @@ def test_native_config_reuses_prompt_agent_and_verifier():
     benchmark = BenchmarkConfig.from_config_path(module.BENCHMARK_DIR / "config.yaml")
     assert benchmark.agent_name == "indic_mbpp_simple_agent"
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
-    assert manifest.canonical_split == "benchmark"
+    assert manifest.canonical_split == "test"
     assert manifest.resources_server == "scicodepile"
     assert manifest.agent_server == "simple_agent"
     assert manifest.datasets[0].model_dump(exclude_none=True) == {

@@ -37,3 +37,7 @@ datasets:
 model_server: policy_model
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/xjtupanda/VStar_Bench
+  ref: b1312e6fbf89ace5a50cc5b0214010aeb0f69bdc
+  reconciled: '2026-11-13'

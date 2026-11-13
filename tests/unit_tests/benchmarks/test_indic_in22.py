@@ -240,7 +240,7 @@ def test_gen_and_conv_compose_with_separate_preparation(config_names, monkeypatc
     datasets = datasets_to_prepare(OmegaConf.create(config))
     assert {dataset.name for dataset in datasets} == {"in22_gen", "in22_conv"}
     manifest = load_manifest(BENCHMARK_DIR / "manifest.yaml")
-    assert manifest.canonical_split == "benchmark"
+    assert manifest.canonical_split == "test"
     assert manifest.datasets[0].num_repeats == 1
     for dataset in datasets:
         subset = dataset.name.removeprefix("in22_")
