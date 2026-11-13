@@ -15,7 +15,7 @@ published protocol.
 
 ## Prepare
 
-The dataset declares `prepare_project: resources_servers/gdp_pdf`. Gym syncs
+The single-turn dataset declares `prepare_project: resources_servers/gdp_pdf`. Gym syncs
 that component's committed lock with `uv sync --locked` and runs preparation in
 an isolated environment under `uv_venv_dir`. It does not modify the running Gym
 interpreter or the agent's environment. The lock pins `liteparse` 2.5.0, the
@@ -78,3 +78,11 @@ compositing under tight image-count limits (see
 `responses_api_agents/gdp_pdf_agent/README.md`). The judge model also differs, and (unlike Surge's
 own scorer) our judge is shown the task prompt alongside each criterion. Artificial Analysis makes
 a similar caveat about their own reimplementation not being interchangeable with Surge's.
+
+## OpenCode
+
+`benchmarks/gdp_pdf/opencode.yaml` prepares the same questions and raw PDFs without
+OCR or rendering; it does not need the single-turn preparation environment.
+OpenCode can inspect pages and run Python in a sandbox. Follow the
+[OpenCode setup and evaluation recipe](../../resources_servers/gdp_pdf/README.md#gdppdf-with-opencode).
+These scores use a different protocol from the single-turn scores above.
