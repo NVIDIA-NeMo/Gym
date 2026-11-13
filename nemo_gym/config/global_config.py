@@ -69,7 +69,6 @@ from nemo_gym.config.config_types import (
     maybe_get_server_instance_config,
 )
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.orchestration.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (
@@ -114,6 +113,7 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+H2_PING_SIDECAR_KEY_NAME = "sidecar"
 COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
@@ -145,10 +145,15 @@ VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
+# Agents add the /ng-rollout/<id> prefix to model calls without capturing them, so model servers know the rollout.
+ROLLOUT_CORRELATION_KEY_NAME = "rollout_correlation"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
+# Set by a training framework whose rows carry model-call sampling values.
+# See ``nemo_gym/core/model_call_sampling.py``.
+MODEL_CALL_SAMPLING_BLOCK = "model_call_sampling"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -196,8 +201,10 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
+    MODEL_CALL_SAMPLING_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -221,22 +228,33 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "browsecomp_agent",
         "claude_code_agent",
+        "cline_agent",
         "codex_agent",
+        "copilot_agent",
+        "droid_agent",
+        "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
         "kilocode_agent",
+        "kimi_code_agent",
+        "mini_swe_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
         "openclaw_agent",
         "opencode_agent",
+        "openhands_agent",
         "pi_agent",
         "pool_agent",
         "simple_agent",
+        "simple_strands_agent",
         "stirrup_agent",
         "terminus_2_sandboxed_agent",
     }
 )
+# Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
+# Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -329,6 +347,11 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Otherwise two dispatches would share one capture key.
 # The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
+# Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
+MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
+# A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
+# the rollout's model calls is captured. False or absent leaves capture to the run's token_id_capture block.
+SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
@@ -979,7 +1002,7 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
-            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES or source.agent_type in HOST_RUN_SWAP_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
@@ -1016,7 +1039,8 @@ Duplicate config paths:
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
         """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
 
-        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        Those agents either do not implement agent sessions or are in HOST_RUN_SWAP_AGENT_TYPES, whose swap template
+        runs on the host through /run, so single_agent_turn_legacy would fail every episode.
         The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
         """
         for instance_name, instance in global_config_dict.items():
@@ -1033,7 +1057,7 @@ Duplicate config paths:
                 continue
             logger.info(
                 f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
-                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+                f"that agent type has no agent sessions, or its swap template runs on the host through /run."
             )
             servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
             servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
@@ -1875,9 +1899,12 @@ Set the keys individually, in a config or as overrides, e.g.:
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
             # UV related configuration
-            # UV caching directory overrides to local folders, under the cache root.
+            # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a
+            # local folder under the cache root.
+            exported_uv_cache_dir = environ.get("UV_CACHE_DIR", "").strip()
             global_config_dict.setdefault(
-                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+                UV_CACHE_DIR_KEY_NAME,
+                exported_uv_cache_dir or str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv"),
             )
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:

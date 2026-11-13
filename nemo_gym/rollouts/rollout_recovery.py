@@ -456,7 +456,7 @@ def _masked_evaluation_side_kind(
     if (
         not isinstance(kind, str)
         or not is_registered(kind)
-        or selected_class != FailureClass.EVALUATION
+        or (selected_class != FailureClass.EVALUATION and row.get("failure_outcome_action") != OutcomeAction.RETRY)
         or kind in _MASKED_REGRADE_KINDS
         or kind.startswith("transport_")
     ):
@@ -471,8 +471,8 @@ def masked_infrastructure_kind(
 
     A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
-    run. When the kind is evaluation-side through the shared classifier the rollout is retried like an infrastructure
-    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
+    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action (honored
+    whatever the attribution), the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
     model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
     (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
     saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.

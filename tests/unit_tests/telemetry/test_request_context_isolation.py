@@ -18,17 +18,16 @@ uvicorn queues a request that arrives before the previous response's terminating
 message as *pipelined* and starts its task from inside the previous request's task, so the
 new task inherits that request's contextvars. The OTel ASGI instrumentation then sees a
 current span, skips `traceparent` extraction, and files the request as an INTERNAL child of
-the previous one. Starlette's `BaseHTTPMiddleware`, which Gym's servers use, sends the
-terminating message late enough for clients to reuse the connection in between.
+the previous one. Any server that sends the terminating message late, such as one with a
+streaming reply, lets clients reuse the connection in between.
 
 The server here reproduces that window deliberately (a middleware that splits the final body
 and waits before the terminating message), the client reuses one connection from several
 coroutines with distinct `traceparent` headers, and the test checks every server span's
 parent. The control test shows the window really does mis-parent spans without the fix.
 
-The handler here also leaves a rollout id behind on purpose. With Gym's real stack that id
-does not leak (the `BaseHTTPMiddleware` layers run handlers in a child task); this app has no
-such layer, so the check exercises the guard the middleware keeps for stacks without one.
+The handler here also leaves a rollout id behind on purpose: Gym's middleware and handlers run
+in the request's own task, so only the isolation middleware keeps that id from the next request.
 """
 
 import asyncio
@@ -63,7 +62,7 @@ def _free_port() -> int:
 
 
 class _LateTerminatingBody:
-    """Send the terminating empty body message after a pause, as BaseHTTPMiddleware does."""
+    """Send the terminating empty body message after a pause, widening the pipelining window."""
 
     def __init__(self, app):
         self.app = app

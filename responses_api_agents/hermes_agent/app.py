@@ -87,6 +87,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
@@ -720,6 +721,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
+            # Compression is a side call that token capture does not deliver, so no training framework trains it: it
+            # keeps its own sampling.
+            "compression_model_base_url": self.resolve_model_base_url(
+                self.config.model_server.name, state.request.episode_id.capture_key, trained=False
+            ),
             "terminal_timeout": self.config.terminal_timeout,
         }
         timeout = self._agent_timeout_sec(body)
@@ -1223,3 +1229,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HermesAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HermesAgent.run_webserver()  # noqa: F401

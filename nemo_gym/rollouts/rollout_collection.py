@@ -43,7 +43,7 @@ from uuid import uuid4
 
 import aiohttp
 import orjson
-from aiohttp import ClientConnectorError, ClientError
+from aiohttp import ClientConnectorError, ClientError, ConnectionTimeoutError
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
@@ -74,8 +74,10 @@ from nemo_gym.config.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOWED_AGENTS_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SAMPLING_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -92,7 +94,11 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import (
+    check_rollout_id_length,
+    maybe_rollout_id_from_run_body,
+    skips_token_capture,
+)
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
@@ -112,10 +118,13 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
+    _aggregate_entry_for_member,
     _atomic_write_json,
+    _environment_status_members,
     _read_aggregate_entries,
     disable_run_status,
 )
@@ -177,10 +186,12 @@ from nemo_gym.telemetry.gym_metrics import (
     record_rollout_completed,
     record_rollout_health,
     record_rollout_reward,
+    record_run_summary,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.trajectory.trajectory_format import project_result_v1
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -207,6 +218,7 @@ from nemo_gym.agents.skills import SkillsConfig, load_skill_directory
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
+    is_unsent_connection_failure,
     raise_for_status,
     request,
 )
@@ -474,6 +486,11 @@ def _dataset_admitted_agents(
     return admitted
 
 
+def _environment_server_routes_of(global_config_dict: Optional[DictConfig]) -> dict[str, str]:
+    routes = None if global_config_dict is None else global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    return {} if routes is None else dict(OmegaConf.to_container(routes, resolve=True))
+
+
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
     """Pick the environment server a row is dispatched to, or None for today's agent path.
 
@@ -510,13 +527,20 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    # A training framework's sampling values ride beside the task, which they leave unchanged.
+    if row.get(MODEL_SAMPLING_KEY_NAME) is not None:
+        body["model_sampling"] = row[MODEL_SAMPLING_KEY_NAME]
+    # A rollout that skips token capture says so beside the task, which it leaves unchanged.
+    if skips_token_capture(row):
+        body["skip_token_capture"] = True
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
@@ -849,6 +873,7 @@ def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dic
         key: result[key]
         for key in (
             AGENT_REF_KEY_NAME,
+            NG_ENVIRONMENT_SERVER_KEY,
             TASK_INDEX_KEY_NAME,
             ROLLOUT_INDEX_KEY_NAME,
             NG_FAILURE_CLASS_KEY,
@@ -905,6 +930,7 @@ async def enrich_run_result(
     include_payloads: bool = True,
     rollout_latency_ms: Optional[float] = None,
     delete_capture: bool = False,
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> dict[str, Any]:
     """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
 
@@ -936,6 +962,8 @@ async def enrich_run_result(
     # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
+    redacted = _has_observation_gap(result, "multimodal_history_redacted")
+    payloads_kept = include_payloads and not redacted
     if capture_dirs and (
         not no_persist
         or NG_AGENT_OBSERVATIONS_KEY in result
@@ -949,8 +977,12 @@ async def enrich_run_result(
         quiesced = False
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-        payloads_kept = include_payloads and not _has_observation_gap(result, "multimodal_history_redacted")
-        merge_model_call_capture_into_record(result, capture_dirs, include_payloads=payloads_kept)
+        # Available unredacted responses verify exact tool requests before output omission.
+        merge_model_call_capture_into_record(
+            result,
+            capture_dirs,
+            include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
+        )
         capture = result.get("ng_model_call_capture")
         safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
 
@@ -960,7 +992,36 @@ async def enrich_run_result(
         or NG_TRAJECTORY_KEY in result
         or NG_VERIFIER_INVOCATIONS_KEY in result
     ):
-        _attach_trajectory_record(row, result)
+        _attach_trajectory_record(
+            row, result, schema_version=trajectory_schema_version, include_payloads=payloads_kept
+        )
+        trajectory = result.get(NG_TRAJECTORY_KEY)
+        if isinstance(trajectory, dict):
+            if not payloads_kept:
+                for call in trajectory.get("model_calls", []):
+                    call["request"] = None
+                    call["response"] = None
+                if trajectory_schema_version == "2.0":
+                    gaps = trajectory.setdefault("gaps", [])
+                    for tool in trajectory.get("tool_calls", []):
+                        gap = {
+                            "code": "tool_request_payload_unavailable",
+                            "invocation_id": tool["invocation_id"],
+                            "agent_instance": tool.get("agent_instance"),
+                            "span_id": tool["span_id"],
+                            "detail": None,
+                        }
+                        if tool.get("model_call_id") is not None and gap not in gaps:
+                            gaps.append(gap)
+
+    # Omission applies even when malformed capture prevents trajectory projection.
+    if not payloads_kept:
+        capture = result.get("ng_model_call_capture")
+        calls = capture.get("calls") if isinstance(capture, dict) else None
+        for call in calls if isinstance(calls, list) else []:
+            if isinstance(call, dict):
+                for key in ("request", "response", "request_raw", "response_raw"):
+                    call.pop(key, None)
 
     # Assembles ng_perf from ng_trajectory when observability is enabled.
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
@@ -971,6 +1032,19 @@ async def enrich_run_result(
 
 
 _ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
+
+
+def _returned_observation_envelopes(result: Any) -> list[tuple[dict[str, Any], str, str]]:
+    """Known evidence locations, preserving a returned episode's outer shape."""
+    if not isinstance(result, dict):
+        return []
+    envelopes = [(result, NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY)]
+    if _is_episode_response(result):
+        if isinstance(result.get("result"), dict):
+            envelopes.append((result["result"], NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY))
+        if isinstance(result.get("failure"), dict):
+            envelopes.append((result["failure"], "trajectory", "agent_observations"))
+    return envelopes
 
 
 async def _enrich_returned_result(
@@ -1127,6 +1201,13 @@ def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
     """Add a stored record's enrichment and identity keys to the reply ``run_examples`` returns in its own shape."""
     if record is result or not isinstance(result, dict):
         return
+    # Enrichment already made one projection decision over the collected evidence.
+    # Reflect that decision into existing nested producer slots instead of running
+    # ID restoration again without the collector's complete join/collision evidence.
+    for container, trajectory_key, bundle_key in _returned_observation_envelopes(result):
+        for target, source in ((trajectory_key, NG_TRAJECTORY_KEY), (bundle_key, NG_AGENT_OBSERVATIONS_KEY)):
+            if container.get(target) is not None and source in record:
+                container[target] = copy.deepcopy(record[source])
     for key in (*_ENRICHMENT_KEYS, *_SHARD_IDENTITY_KEYS):
         if key in record and key not in result:
             result[key] = record[key]
@@ -2371,7 +2452,7 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """Count a persisted attempt, including its numeric reward when scored."""
-    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+    if not is_metrics_exporter_active():
         return
     # These are the dispatch's original routing fields, captured before the
     # canonical persisted record maps kinds to sidecar classes. Keep main's
@@ -2682,12 +2763,18 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
-def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+def _refresh_shard_status_aggregation(
+    input_paths: List[str],
+    aggregate_metrics_fpath: Optional[Path],
+    *,
+    scored_rows: Iterable[Mapping[str, Any]] = (),
+) -> None:
     """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
     """
     entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    environment_members = _environment_status_members(scored_rows)
     for path in input_paths:
         status_fpath = batch_status_path_for(Path(path))
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
@@ -2698,7 +2785,7 @@ def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
             for agent, member in members.items():
-                entry = entries.get(agent)
+                entry, _ = _aggregate_entry_for_member(entries, agent, environment_member=agent in environment_members)
                 failed = (
                     aggregate_metrics_fpath is None
                     or artifact_error
@@ -3471,7 +3558,9 @@ class RolloutCollectionHelper(BaseModel):
         their agents here; leave it None to defer that to ``run_examples``, which does it against
         the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
         stored in each row (see ``nemo_gym.data.task_selection.select_tasks``), each task once before
-        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
+        repetition. Materialized task rows are routed by the config's ``environment_server_routes``, so pass
+        ``global_config_dict`` when the rows include any. Input rows are not mutated; the expanded, stamped copies
+        are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -3480,6 +3569,7 @@ class RolloutCollectionHelper(BaseModel):
             fan_out=fan_out,
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
+            environment_server_routes=_environment_server_routes_of(global_config_dict),
         )
         selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
@@ -3488,7 +3578,9 @@ class RolloutCollectionHelper(BaseModel):
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
-            self.resolve_task_sources(rows, global_config_dict)
+            self.resolve_task_sources(
+                [row for row in rows if NG_ENVIRONMENT_SERVER_KEY not in row], global_config_dict
+            )
         return rows
 
     @staticmethod
@@ -4135,11 +4227,15 @@ executions → not run again (left to recovery)
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
-        # Participation depends only on the agent name and the static global config.
+        # An agent's participation depends only on its name and the static global config, though a row can skip
+        # capture for itself.
         # Decide it once per agent, so the per-row and per-rollout checks below do not revalidate the global config.
         token_capture_enabled_by_agent: dict[str | None, bool] = {}
 
         def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
+            # A row that skips capture (a validation rollout) has no captured calls to rebuild.
+            if skips_token_capture(row):
+                return False
             agent_name = self._agent_name_for_row(row, global_config)
             if agent_name not in token_capture_enabled_by_agent:
                 token_capture_enabled_by_agent[agent_name] = token_capture_enabled_for_agent(
@@ -4381,6 +4477,9 @@ executions → not run again (left to recovery)
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
                     rollout_latency_ms=rollout_latency_ms,
+                    trajectory_schema_version=ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -4782,7 +4881,7 @@ executions → not run again (left to recovery)
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
         )
-        if get_exporters():
+        if get_exporters() or is_metrics_exporter_active():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
                 [],
@@ -4790,26 +4889,28 @@ executions → not run again (left to recovery)
                 persisted_success_keys,
                 histories=[store],
             )
-            export_metrics(
-                {
-                    "coverage/expected": expected_rollouts,
-                    "coverage/scored": scored_rollouts,
-                    "coverage/missing": completion["missing"],
-                    "coverage/not_scored": expected_rollouts - scored_rollouts,
-                    "coverage/measured": completion["measured"],
-                    "coverage/masked": completion["masked"],
-                    "coverage/unscored": completion["unscored"],
-                    "coverage/failed": completion["failed"],
-                    "coverage/failed_masked": completion["failed_masked"],
-                    "coverage/omitted": completion["intentionally_omitted"],
-                    "coverage/not_started": completion["not_started"],
-                    "coverage/missing_outcomes": completion["missing"],
-                    "coverage/open": completion["open"],
-                    "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
-                    **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
-                    **failure_metrics,
-                }
-            )
+            run_summary = {
+                "coverage/expected": expected_rollouts,
+                "coverage/scored": scored_rollouts,
+                "coverage/missing": completion["missing"],
+                "coverage/not_scored": expected_rollouts - scored_rollouts,
+                "coverage/measured": completion["measured"],
+                "coverage/masked": completion["masked"],
+                "coverage/unscored": completion["unscored"],
+                "coverage/failed": completion["failed"],
+                "coverage/failed_masked": completion["failed_masked"],
+                "coverage/omitted": completion["intentionally_omitted"],
+                "coverage/not_started": completion["not_started"],
+                "coverage/missing_outcomes": completion["missing"],
+                "coverage/open": completion["open"],
+                "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
+                **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                **failure_metrics,
+            }
+            if get_exporters():
+                export_metrics(run_summary)
+            # The same numbers for OTel dashboards, which read no experiment tracker.
+            record_run_summary(run_summary, run_id=store.manifest.run_id)
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -5421,13 +5522,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                                     ),
                                 )
                                 break
-                            except ClientConnectorError:
-                                # Every attempt so far was refused, so /run was never delivered and resending it
-                                # cannot start a second episode. A connection that was made keeps the strict limit.
+                            except (ClientConnectorError, ConnectionTimeoutError):
+                                # Every attempt so far was refused or timed out connecting, so /run was never
+                                # delivered and resending it cannot start a second episode. A connection that was
+                                # made keeps the strict limit.
                                 if _max_num_tries is None or time.monotonic() >= connect_deadline:
                                     raise
                                 if not attempt_errors or not all(
-                                    isinstance(error, ClientConnectorError) for error in attempt_errors
+                                    is_unsent_connection_failure(error) for error in attempt_errors
                                 ):
                                     raise
                                 await asyncio.sleep(0.5)
@@ -5508,11 +5610,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
                     if (
                         isinstance(failed_outcome, RolloutFailureRecord)
-                        and isinstance(e, ClientConnectorError)
-                        and all(isinstance(error, ClientConnectorError) for error in attempt_errors)
+                        and is_unsent_connection_failure(e)
+                        and all(is_unsent_connection_failure(error) for error in attempt_errors)
                     ):
                         # A connection that was never made cannot have delivered /run: every attempt failed to
-                        # connect. One that connected first may have delivered it.
+                        # connect, or timed out connecting. One that connected first may have delivered it.
                         failed_outcome = failed_outcome.model_copy(update={"delivery": "not_sent"})
                     return _CompletedRollout(
                         row=row,
@@ -5557,6 +5659,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         semaphore: Optional[Semaphore] = None,
         *,
         run_id: str | None = None,
+        max_num_tries: Optional[int] = None,
+        connect_grace_s: Optional[float] = None,
     ) -> _RowResultIterator:
         """Yield ``(row, completed_dict | RolloutFailureRecord)`` in completion order.
 
@@ -5567,6 +5671,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         a run, overriding any row stamp. Without it, existing row stamps are preserved;
         unstamped rows share a new invocation ID. Returned rows are invocation-owned copies;
         input rows are not modified. ``run_examples`` retains its behavior.
+
+        A refused or dropped connection is resent without limit unless the caller bounds it. ``max_num_tries`` limits
+        how often a ``/run`` whose connection was made and then dropped is sent, and ``connect_grace_s`` is how long a
+        ``/run`` whose every connection was refused (so it was never delivered) keeps being resent; ``gym eval run``
+        uses 2 and ``dispatch_connect_grace_s``. With a bound, the failure record's ``delivery`` can say ``not_sent``.
 
         On early stopping, await the iterator's ``aclose()`` to cancel and join unfinished
         client tasks, or ``aclose_and_drain()`` to also retrieve settled, unconsumed outcomes.
@@ -5581,7 +5690,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         return _RowResultIterator(
             self._run_examples_with_metadata(
-                examples, head_server_config=head_server_config, semaphore=semaphore, typed_outcomes=True
+                examples,
+                head_server_config=head_server_config,
+                semaphore=semaphore,
+                typed_outcomes=True,
+                _max_num_tries=max_num_tries,
+                _connect_grace_s=connect_grace_s,
             ),
         )
 
@@ -5600,6 +5714,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         retry_requests: bool = True,
         enrich_results: bool = False,
         include_model_call_payloads: bool = True,
+        trajectory_schema_version: Literal["1.0", "2.0"] | None = None,
         delete_model_call_capture: bool = False,
         record_output_dir: Optional[Path | str] = None,
         record_shard: Optional[str] = None,
@@ -5667,6 +5782,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
 
+        ``trajectory_schema_version`` also applies when ``enrich_results=False``: v1 projects returned producer
+        observations without reading captures or adding records; v2 retains their original qualified evidence.
+        The explicit choice overrides ``model_call_capture.trajectory_schema_version`` (default v1).
+
         ``enrich_results`` runs :func:`enrich_run_result` on each result before it is returned, so the caller receives
         what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
@@ -5708,6 +5827,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     observability_enabled=observability_enabled,
                     include_payloads=include_model_call_payloads,
                     delete_capture=delete_model_call_capture,
+                    trajectory_schema_version=trajectory_schema_version
+                    or ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version,
                 )
                 if writer is None:
                     await _enrich_returned_result(
@@ -5727,6 +5850,43 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
                 _reflect_enrichment(completed.result, record)
                 writer.write(record)
+
+        else:
+            returned_schema = trajectory_schema_version
+
+            async def enrich(completed: _CompletedRollout) -> None:
+                # Raw producer evidence stays qualified until the caller-facing boundary.
+                # Choosing a wire version does not opt into capture reads or enrichment.
+                nonlocal returned_schema
+                envelopes = _returned_observation_envelopes(completed.result)
+                if not any(
+                    isinstance(container.get(key), dict) and container[key].get("schema_version") == "2.0"
+                    for container, trajectory_key, bundle_key in envelopes
+                    for key in (trajectory_key, bundle_key)
+                ):
+                    return
+                if returned_schema is None:
+                    global_config = self.setup_server_client(head_server_config).global_config_dict
+                    returned_schema = ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version
+                if returned_schema == "2.0":
+                    return
+                for container, trajectory_key, bundle_key in envelopes:
+                    trajectory, bundle = container.get(trajectory_key), container.get(bundle_key)
+                    if trajectory is not None and not isinstance(trajectory, dict):
+                        continue
+                    if bundle is not None and not isinstance(bundle, dict):
+                        continue
+                    try:
+                        projected, projected_bundle = project_result_v1(trajectory or {}, bundle)
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        # Keep malformed producer evidence intact, as raw dispatch did.
+                        continue
+                    if trajectory_key in container and trajectory is not None:
+                        container[trajectory_key] = projected
+                    if bundle_key in container and projected_bundle is not None:
+                        container[bundle_key] = projected_bundle
 
         dispatched = examples
         run_id = None
@@ -5781,7 +5941,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # The shard's status members, as collection names them: the agent, or the Environment Server a row
             # is routed to.
             status_rows = []
-            for row in examples:
+            for row in dispatched:
                 status_row = _batch_status_row(row, {})
                 if AGENT_REF_KEY_NAME not in status_row:
                     status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
@@ -6247,7 +6407,7 @@ class RolloutAggregationHelper(BaseModel):
                 force=True,
             )
         else:
-            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, scored_rows=scored)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
@@ -6331,7 +6491,7 @@ class RolloutAggregationHelper(BaseModel):
                 f"{completion['open']} open (no final result). "
                 f"Details: {report_path}"
             )
-        if get_exporters():  # pragma: no cover
+        if get_exporters() or is_metrics_exporter_active():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
                 failures_fpaths,
@@ -6359,7 +6519,11 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing_outcomes"] = completion["missing"]
                 metrics["coverage/open"] = completion["open"]
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
-            export_metrics(metrics)
+            if get_exporters():
+                export_metrics(metrics)
+            # Only a single shard with attempt history has a run id of its own; a legacy shard has none.
+            single = len(input_paths) == 1 and len(histories) == 1
+            record_run_summary(metrics, run_id=histories[0].manifest.run_id if single else None)
 
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
