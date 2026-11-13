@@ -40,7 +40,10 @@ def test_snapshot_resource_identity(monkeypatch, requested, landed, expected):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("adapter", ["program_html", "page_image_query"])
-@pytest.mark.parametrize("outcome", ["healthy", "unavailable", "login", "same-url-login", "no-response"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["healthy", "unavailable", "login", "same-url-login", "no-response", "missing", "redirect", "missing-login-form"],
+)
 @pytest.mark.asyncio
 async def test_all_collectors_check_navigation_and_close_pages(monkeypatch, asynchronous, adapter, outcome):
     url = "http://snapshot.test/page"
@@ -54,15 +57,25 @@ async def test_all_collectors_check_navigation_and_close_pages(monkeypatch, asyn
 
     def read(expression, *args):
         if expression == snapshots._SNAPSHOT_LOGIN_FORM:
-            return outcome == "same-url-login"
+            return outcome in {"same-url-login", "missing-login-form"}
         return "saved" if adapter == "program_html" else [url + "/image.png"]
 
     page = SimpleNamespace(
-        url="http://snapshot.test/login" if outcome == "login" else url,
+        url="http://snapshot.test/login"
+        if outcome == "login"
+        else "http://snapshot.test/grid"
+        if outcome == "redirect"
+        else url,
         evaluate=method(side_effect=read),
         close=method(),
     )
-    response = None if outcome == "no-response" else SimpleNamespace(status=503 if outcome == "unavailable" else 200)
+    response = (
+        None
+        if outcome == "no-response"
+        else SimpleNamespace(
+            status=503 if outcome == "unavailable" else 404 if outcome in {"missing", "missing-login-form"} else 200
+        )
+    )
     if asynchronous:
         monkeypatch.setattr(snapshots, "goto", AsyncMock(return_value=response))
         root = SimpleNamespace(context=SimpleNamespace(new_page=AsyncMock(return_value=page)))
@@ -81,9 +94,18 @@ async def test_all_collectors_check_navigation_and_close_pages(monkeypatch, asyn
             "saved" if adapter == "program_html" else [url + "/image.png"]
         )
         snapshots.build_snapshot_context(plan, captured, captured)
+    elif outcome in {"missing", "redirect"}:
+        assert not record.get("error")
+        assert record["target_document"] is False
+        assert record["value" if adapter == "program_html" else "image_urls"] == (
+            "" if adapter == "program_html" else []
+        )
+        page.evaluate.assert_called_once_with(snapshots._SNAPSHOT_LOGIN_FORM)
+        if outcome == "missing":
+            snapshots.build_snapshot_context(plan, captured, captured)
     else:
         assert record["error"]
-        if outcome == "same-url-login":
+        if outcome in {"same-url-login", "missing-login-form"}:
             page.evaluate.assert_called_once_with(snapshots._SNAPSHOT_LOGIN_FORM)
         else:
             page.evaluate.assert_not_called()
@@ -118,3 +140,20 @@ def test_navigation_validation_preserves_observed_task_outcomes(phase, status, l
     else:
         with pytest.raises(EvaluatorInfrastructureError):
             snapshots._validate_snapshot_navigation(record, phase)
+
+
+@pytest.mark.parametrize(
+    "adapter,field,value",
+    [("program_html", "value", "saved"), ("page_image_query", "image_urls", ["http://snapshot.test/saved.png"])],
+)
+def test_context_normalizes_retained_error_document_evidence(adapter, field, value):
+    url = "http://snapshot.test/page"
+    before = {adapter: [{"key": "target", "url": url, field: value, "navigation": {"status": 404, "url": url}}]}
+    after = {adapter: [{"key": "target", "url": url, field: value, "navigation": {"status": 200, "url": url}}]}
+    result = snapshots.build_snapshot_context({}, before, after)
+    record = result["deltas"][adapter]["changed"][0]
+    if adapter == "program_html":
+        assert record["before_value"] == "" and record["delta_value"] == "saved"
+    else:
+        assert record["delta_image_urls"] == value
+    assert before[adapter][0][field] == value  # Original evidence is retained unchanged.

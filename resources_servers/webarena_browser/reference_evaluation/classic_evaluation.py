@@ -856,6 +856,10 @@ def _score_program_html_snapshot_records(
 ) -> float:
     score = 0.0
     for record in records:
+        # An unrelated landing document supplies neither target content nor
+        # proof of an empty target. Confirmed 404/410 absence is distinct.
+        if record.get("target_document") is False and not record.get("target_absent"):
+            continue
         full_value = str(record.get("value") or "")
         before_value = str(record.get("before_value") or "")
         before_score = _score_program_html_required(required, before_value)
@@ -878,8 +882,11 @@ def _score_program_html_snapshot_records(
             if fresh_match:
                 score = max(score, _score_program_html_required(required, delta_value))
 
-        if full_value and _score_program_html_required(required, full_value) > before_score:
-            score = max(score, _score_program_html_required(required, full_value))
+        # A confirmed empty target/absence can satisfy a deletion criterion.
+        # Require improvement over the baseline, including for empty strings.
+        full_score = _score_program_html_required(required, full_value)
+        if full_score > before_score:
+            score = max(score, full_score)
     return score
 
 

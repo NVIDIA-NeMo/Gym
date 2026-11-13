@@ -67,11 +67,13 @@ CASES = [
 ]
 
 
-def _target(locator: str, expected: str, *, url: str = "http://snapshot.test/page") -> tuple[dict, dict]:
+def _target(
+    locator: str, expected: str, *, url: str = "http://snapshot.test/page", required_contents: dict | None = None
+) -> tuple[dict, dict]:
     target = {
         "url": url,
         "locator": locator,
-        "required_contents": {"must_include": [expected]},
+        "required_contents": required_contents if required_contents is not None else {"must_include": [expected]},
     }
     spec = {"key": snapshot_target_key(target), "target": target}
     return target, {"snapshot_adapters": {"program_html": {"targets": [spec]}}}
@@ -283,6 +285,56 @@ NAVIGATION_CASES = [
         None,
     ),
 ]
+NAVIGATION_CASES = [
+    (name, before, after, {"must_include": ["saved"]}, expected) for name, before, after, expected in NAVIGATION_CASES
+]
+_ERROR_TEXT = '<main id="content">saved</main>'
+NAVIGATION_CASES += [
+    (
+        "before-404-login-form",
+        (404, "/page", '<form id="login-form"><input type="password"></form>'),
+        (200, "/page", "saved"),
+        {"must_include": ["saved"]},
+        None,
+    ),
+    (
+        "after-404-login-form",
+        (200, "/page", "saved"),
+        (404, "/page", '<form id="new_user"><input type="password"></form>'),
+        {"must_include": ["saved"]},
+        None,
+    ),
+    ("after-404-matching-error-text", (200, "/page", ""), (404, "/page", _ERROR_TEXT), {"must_include": ["saved"]}, 0),
+    ("after-410-matching-error-text", (200, "/page", ""), (410, "/page", _ERROR_TEXT), {"must_include": ["saved"]}, 0),
+    (
+        "after-redirect-matching-other-text",
+        (200, "/page", ""),
+        (200, "/grid", "saved"),
+        {"must_include": ["saved"]},
+        0,
+    ),
+    (
+        "before-404-matching-error-text",
+        (404, "/page", _ERROR_TEXT),
+        (200, "/page", "saved"),
+        {"must_include": ["saved"]},
+        1,
+    ),
+    (
+        "before-410-matching-error-text",
+        (410, "/page", _ERROR_TEXT),
+        (200, "/page", "saved"),
+        {"must_include": ["saved"]},
+        1,
+    ),
+    ("deletion-404-empty-criterion", (200, "/page", "old"), (404, "/page", _ERROR_TEXT), {"exact_match": ""}, 1),
+    ("deletion-410-empty-criterion", (200, "/page", "old"), (410, "/page", _ERROR_TEXT), {"exact_match": ""}, 1),
+    ("other-page-does-not-prove-empty-target", (200, "/page", "old"), (200, "/grid", "saved"), {"exact_match": ""}, 0),
+    ("healthy-empty-criterion", (200, "/page", "old"), (200, "/page", ""), {"exact_match": ""}, 1),
+    ("unchanged-empty-criterion", (200, "/page", ""), (200, "/page", ""), {"exact_match": ""}, 0),
+    ("unchanged-absent-criterion", (404, "/page", _ERROR_TEXT), (404, "/page", _ERROR_TEXT), {"exact_match": ""}, 0),
+    ("after-400-matching-error-text", (200, "/page", ""), (400, "/page", _ERROR_TEXT), {"must_include": ["saved"]}, 0),
+]
 
 
 @pytest.fixture
@@ -320,10 +372,16 @@ def navigation_site():
             thread.join()
 
 
-@pytest.mark.parametrize("name,before,after,expected", NAVIGATION_CASES, ids=[case[0] for case in NAVIGATION_CASES])
-def test_public_snapshot_navigation_with_real_browser(chromium, navigation_site, name, before, after, expected):
+@pytest.mark.parametrize(
+    "name,before,after,required,expected", NAVIGATION_CASES, ids=[case[0] for case in NAVIGATION_CASES]
+)
+def test_public_snapshot_navigation_with_real_browser(
+    chromium, navigation_site, name, before, after, required, expected
+):
     url, state = navigation_site
-    target, plan = _target("document.querySelector('#content').textContent", "saved", url=url)
+    target, plan = _target(
+        "document.querySelector('#content').textContent", "saved", url=url, required_contents=required
+    )
     config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
     task = _webarena_task(original_metadata=config, task_kwargs={"collision_plan": plan})
     state["response"] = before
@@ -352,9 +410,11 @@ def test_public_snapshot_navigation_with_real_browser(chromium, navigation_site,
         context.close()
 
 
-@pytest.mark.parametrize("name,before,after,expected", NAVIGATION_CASES, ids=[case[0] for case in NAVIGATION_CASES])
+@pytest.mark.parametrize(
+    "name,before,after,required,expected", NAVIGATION_CASES, ids=[case[0] for case in NAVIGATION_CASES]
+)
 @pytest.mark.asyncio
-async def test_async_snapshot_navigation_with_real_browser(navigation_site, name, before, after, expected):
+async def test_async_snapshot_navigation_with_real_browser(navigation_site, name, before, after, required, expected):
     async with async_playwright() as playwright:
         executable = playwright.chromium.executable_path
         if not Path(executable).is_file():
@@ -363,7 +423,9 @@ async def test_async_snapshot_navigation_with_real_browser(navigation_site, name
         try:
             context = await browser.new_context()
             url, state = navigation_site
-            target, plan = _target("document.querySelector('#content').textContent", "saved", url=url)
+            target, plan = _target(
+                "document.querySelector('#content').textContent", "saved", url=url, required_contents=required
+            )
             config = {"eval": {"eval_types": ["program_html"], "program_html": [target]}}
             state["response"] = before
             page = await context.new_page()
@@ -378,6 +440,65 @@ async def test_async_snapshot_navigation_with_real_browser(navigation_site, name
                 score, _ = await classic.evaluate_classic_task(config, {}, page, eval_context=evaluation_context)
                 assert score == expected
             assert context.pages == [page]
+        finally:
+            await browser.close()
+
+
+IMAGE_DOCUMENT_CASES = [
+    ("creation", (404, "/page"), (200, "/page"), 1),
+    ("error-page", (200, "/page"), (404, "/page"), 0),
+    ("other-page", (200, "/page"), (200, "/grid"), 0),
+]
+
+
+@pytest.mark.parametrize("name,before,after,expected", IMAGE_DOCUMENT_CASES)
+def test_sync_image_document_ownership(chromium, navigation_site, name, before, after, expected):
+    url, state = navigation_site
+    query = {"eval_image_url": url, "eval_image_class": "#content"}
+    plan = {
+        "snapshot_adapters": {"page_image_query": {"queries": [{"key": snapshot_target_key(query), "query": query}]}}
+    }
+    image = '<main id="content"><img src="/artifact.png"></main>'
+    context = chromium.new_context()
+    try:
+        page = context.new_page()
+        state["response"] = (*before, image if name == "creation" else "")
+        captured_before = snapshots.collect_browser_snapshots_sync(page, plan)
+        state["response"] = (*after, image)
+        captured_after = snapshots.collect_browser_snapshots_sync(page, plan)
+        result = snapshots.build_snapshot_context(plan, captured_before, captured_after)
+        records = result["deltas"]["page_image_query"]["added"] + result["deltas"]["page_image_query"]["changed"]
+        assert sum(len(record["delta_image_urls"]) for record in records) == expected
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("name,before,after,expected", IMAGE_DOCUMENT_CASES)
+@pytest.mark.asyncio
+async def test_async_image_document_ownership(navigation_site, name, before, after, expected):
+    async with async_playwright() as playwright:
+        executable = playwright.chromium.executable_path
+        if not Path(executable).is_file():
+            pytest.skip("Real-browser regression tests require the qualified Chromium bundle")
+        browser = await playwright.chromium.launch(executable_path=executable, headless=True, args=["--no-sandbox"])
+        try:
+            url, state = navigation_site
+            query = {"eval_image_url": url, "eval_image_class": "#content"}
+            plan = {
+                "snapshot_adapters": {
+                    "page_image_query": {"queries": [{"key": snapshot_target_key(query), "query": query}]}
+                }
+            }
+            image = '<main id="content"><img src="/artifact.png"></main>'
+            context = await browser.new_context()
+            page = await context.new_page()
+            state["response"] = (*before, image if name == "creation" else "")
+            captured_before = await snapshots.collect_browser_snapshots(page, plan)
+            state["response"] = (*after, image)
+            captured_after = await snapshots.collect_browser_snapshots(page, plan)
+            result = snapshots.build_snapshot_context(plan, captured_before, captured_after)
+            records = result["deltas"]["page_image_query"]["added"] + result["deltas"]["page_image_query"]["changed"]
+            assert sum(len(record["delta_image_urls"]) for record in records) == expected
         finally:
             await browser.close()
 

@@ -112,6 +112,11 @@ def _snapshot_navigation(page, response, requested_url: str) -> dict[str, Any]:
     return navigation
 
 
+def _snapshot_has_target_document(navigation: dict[str, Any], requested_url: str) -> bool:
+    status = navigation["status"]
+    return (200 <= status < 300 or status == 304) and _snapshot_url_matches(requested_url, navigation["url"])
+
+
 def _stable_key(record: dict[str, Any], preferred_keys: tuple[str, ...]) -> str:
     for key in preferred_keys:
         value = record.get(key)
@@ -389,12 +394,13 @@ async def _collect_program_html_snapshots(page, targets: list[dict[str, Any]]) -
         try:
             response = await goto(snapshot_page, url, wait_until="domcontentloaded", timeout=60000)
             navigation = _snapshot_navigation(snapshot_page, response, url)
+            target_document = _snapshot_has_target_document(navigation, url)
             if await snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
                 raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 target = spec["target"]
                 try:
-                    value = await _select_program_html_snapshot(target, snapshot_page)
+                    value = await _select_program_html_snapshot(target, snapshot_page) if target_document else ""
                     snapshots.append(
                         {
                             "key": spec["key"],
@@ -402,6 +408,7 @@ async def _collect_program_html_snapshots(page, targets: list[dict[str, Any]]) -
                             "locator": target.get("locator"),
                             "value": value,
                             "navigation": navigation,
+                            "target_document": target_document,
                         }
                     )
                 except Exception:
@@ -471,12 +478,17 @@ async def _collect_page_image_snapshots(page, queries: list[dict[str, Any]]) -> 
         try:
             response = await goto(snapshot_page, url, wait_until="domcontentloaded", timeout=60000)
             navigation = _snapshot_navigation(snapshot_page, response, url)
+            target_document = _snapshot_has_target_document(navigation, url)
             if await snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
                 raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 query = spec["query"]
                 try:
-                    urls = await _collect_image_urls(snapshot_page, str(query.get("eval_image_class", "")))
+                    urls = (
+                        await _collect_image_urls(snapshot_page, str(query.get("eval_image_class", "")))
+                        if target_document
+                        else []
+                    )
                     snapshots.append(
                         {
                             "key": spec["key"],
@@ -484,6 +496,7 @@ async def _collect_page_image_snapshots(page, queries: list[dict[str, Any]]) -> 
                             "locator": query.get("eval_image_class"),
                             "image_urls": urls,
                             "navigation": navigation,
+                            "target_document": target_document,
                         }
                     )
                 except Exception:
@@ -628,12 +641,13 @@ def _collect_program_html_snapshots_sync(page, targets: list[dict[str, Any]]) ->
         try:
             response = snapshot_page.goto(url, wait_until="domcontentloaded", timeout=60000)
             navigation = _snapshot_navigation(snapshot_page, response, url)
+            target_document = _snapshot_has_target_document(navigation, url)
             if snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
                 raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 target = spec["target"]
                 try:
-                    value = _select_program_html_snapshot_sync(target, snapshot_page)
+                    value = _select_program_html_snapshot_sync(target, snapshot_page) if target_document else ""
                     snapshots.append(
                         {
                             "key": spec["key"],
@@ -641,6 +655,7 @@ def _collect_program_html_snapshots_sync(page, targets: list[dict[str, Any]]) ->
                             "locator": target.get("locator"),
                             "value": value,
                             "navigation": navigation,
+                            "target_document": target_document,
                         }
                     )
                 except Exception:
@@ -709,12 +724,17 @@ def _collect_page_image_snapshots_sync(page, queries: list[dict[str, Any]]) -> l
         try:
             response = snapshot_page.goto(url, wait_until="domcontentloaded", timeout=60000)
             navigation = _snapshot_navigation(snapshot_page, response, url)
+            target_document = _snapshot_has_target_document(navigation, url)
             if snapshot_page.evaluate(_SNAPSHOT_LOGIN_FORM):
                 raise EvaluatorInfrastructureError("Snapshot navigation rendered a login form")
             for spec in specs:
                 query = spec["query"]
                 try:
-                    urls = _collect_image_urls_sync(snapshot_page, str(query.get("eval_image_class", "")))
+                    urls = (
+                        _collect_image_urls_sync(snapshot_page, str(query.get("eval_image_class", "")))
+                        if target_document
+                        else []
+                    )
                     snapshots.append(
                         {
                             "key": spec["key"],
@@ -722,6 +742,7 @@ def _collect_page_image_snapshots_sync(page, queries: list[dict[str, Any]]) -> l
                             "locator": query.get("eval_image_class"),
                             "image_urls": urls,
                             "navigation": navigation,
+                            "target_document": target_document,
                         }
                     )
                 except Exception:
@@ -818,6 +839,26 @@ def _validate_snapshots(plan: dict[str, Any], snapshots: dict[str, Any], phase: 
                 raise EvaluatorInfrastructureError(f"Malformed {phase} {adapter} capture")
 
 
+def _target_document_records(records: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    """Normalize retained navigation-aware captures without mutating raw evidence."""
+    normalized = []
+    for record in records:
+        if "navigation" not in record:
+            normalized.append(record)
+            continue
+        navigation = record["navigation"]
+        target_document = _snapshot_has_target_document(navigation, record["url"])
+        normalized.append(
+            {
+                **record,
+                field: record[field] if target_document else "" if field == "value" else [],
+                "target_document": target_document,
+                "target_absent": navigation["status"] in {404, 410},
+            }
+        )
+    return normalized
+
+
 def build_snapshot_context(
     plan: dict[str, Any] | None,
     before: dict[str, Any],
@@ -859,8 +900,8 @@ def build_snapshot_context(
         deltas["shopping_reviews"] = review_deltas
 
     if "program_html" in before or "program_html" in after:
-        before_records = before.get("program_html", [])
-        after_records = after.get("program_html", [])
+        before_records = _target_document_records(before.get("program_html", []), "value")
+        after_records = _target_document_records(after.get("program_html", []), "value")
         program_delta = diff_records(before_records, after_records, key_fields=("key",))
         before_by_key = {record.get("key"): record for record in before_records}
         for bucket in ("added", "changed"):
@@ -871,8 +912,8 @@ def build_snapshot_context(
         deltas["program_html"] = program_delta
 
     if "page_image_query" in before or "page_image_query" in after:
-        before_records = before.get("page_image_query", [])
-        after_records = after.get("page_image_query", [])
+        before_records = _target_document_records(before.get("page_image_query", []), "image_urls")
+        after_records = _target_document_records(after.get("page_image_query", []), "image_urls")
         image_delta = diff_records(before_records, after_records, key_fields=("key",))
         before_by_key = {record.get("key"): set(record.get("image_urls") or []) for record in before_records}
         for bucket in ("added", "changed"):
