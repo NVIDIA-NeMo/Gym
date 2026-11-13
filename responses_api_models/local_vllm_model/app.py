@@ -188,7 +188,7 @@ Environment variables: {env_vars_to_print}""")
 
     def start_vllm_server(self) -> None:
         # If base_url is already set, skip the local launch and connect to the external server.
-        # This process still joins Ray, because ray_enabled is read from source before the config exists.
+        # This process still joins Ray, because Gym decides from the class's ray_enabled, not from base_url.
         # external_app.py serves this case without Ray.
         if self.config.base_url:
             print(f"External base_url configured: {self.config.base_url}. Skipping local vLLM launch.")
