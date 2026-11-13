@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the real subprocess protocol without downloading scorer models."""
 
+import io
 import os
+import queue
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from scoring_process import ScoringProcess
@@ -199,3 +202,29 @@ finally:
     client.close()
 """
     subprocess.run([sys.executable, "-c", driver, str(path)], check=True, timeout=20)
+
+
+def test_response_reader_batches_raw_reads() -> None:
+    class CountingPipe(io.RawIOBase):
+        def __init__(self, data: bytes) -> None:
+            self.data = io.BytesIO(data)
+            self.read_calls = 0
+
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, buffer: bytearray) -> int:
+            self.read_calls += 1
+            return self.data.readinto(buffer)
+
+    first = "你好" * 65536 + "\n"
+    second = '{"ready": true}\n'
+    raw = CountingPipe((first + second).encode("utf-8"))
+    process = MagicMock(spec=subprocess.Popen)
+    process.stdout = raw
+    lines: queue.Queue[str] = queue.Queue()
+    ScoringProcess._read(process, lines)
+    assert [lines.get_nowait() for _ in range(3)] == [first, second, ""]
+    assert lines.empty()
+    # Allow different buffer sizes while rejecting one raw read per byte.
+    assert raw.read_calls < 200

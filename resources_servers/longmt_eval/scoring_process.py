@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+import io
 import json
 import logging
 import os
@@ -62,8 +63,11 @@ class ScoringProcess:
     def _read(process: subprocess.Popen[bytes], lines: queue.Queue[str]) -> None:
         assert process.stdout is not None
         try:
-            for line in process.stdout:
-                lines.put(line.decode("utf-8", errors="replace"))
+            # Only stdin needs to be unbuffered. Raw stdout.readline() reads one
+            # byte per syscall, which makes large JSON responses needlessly slow.
+            with io.BufferedReader(process.stdout) as stdout:
+                for line in stdout:
+                    lines.put(line.decode("utf-8", errors="replace"))
         finally:
             lines.put("")
 
