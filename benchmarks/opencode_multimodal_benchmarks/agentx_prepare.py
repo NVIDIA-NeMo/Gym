@@ -42,6 +42,8 @@ def validate_rows(rows: list[dict], *, media_root: Path | None = None) -> None:
             if declared_media != dict(entry["media"]):
                 raise ValueError(f"Agent-X source media differs at ID {task['index']}")
             params = row["responses_create_params"]
+            if params.get("metadata"):
+                raise ValueError("Agent-X canonical policy input cannot include request metadata")
             if params.get("tools"):
                 raise ValueError("Agent-X canonical policy input cannot include task-supplied tools")
             if any(

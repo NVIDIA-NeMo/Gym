@@ -134,7 +134,15 @@ async def test_concurrent_generic_judging_keeps_policy_responses_isolated(judge_
     + [
         (label, status, has_error)
         for label in ("[[A=B]]", "[[A!=B]]")
-        for status, has_error in (("failed", True), ("failed", False), ("completed", True), (None, True))
+        for status, has_error in (
+            ("failed", True),
+            ("failed", False),
+            ("cancelled", False),
+            ("in_progress", False),
+            ("queued", False),
+            ("completed", True),
+            (None, True),
+        )
     ],
 )
 @pytest.mark.parametrize("swap", [False, True])

@@ -83,7 +83,7 @@ class ToolRewardServer(ToolRewardVerifier, LLMJudgeResourcesServer):
         if (
             self.config.judge_equal_label == self.config.judge_not_equal_label
             or evaluation.verdict_label not in (self.config.judge_equal_label, self.config.judge_not_equal_label)
-            or evaluation.response.status in {"incomplete", "failed"}
+            or evaluation.response.status not in {None, "completed"}
             or evaluation.response.error is not None
             or {"conflicting_verdicts", "truncated_judge_output", "unparseable_judge_output", "no_verdict"}
             & set(evaluation.judgement_parsing_issues)

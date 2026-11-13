@@ -230,6 +230,7 @@ def test_embedded_media_must_be_valid_image_bytes(value):
         "previous_response_id",
         "conversation",
         "text",
+        "metadata",
     ],
 )
 def test_portable_bundle_rejects_modified_policy_prompt_even_with_matching_checksum(
@@ -264,16 +265,45 @@ def test_portable_bundle_rejects_modified_policy_prompt_even_with_matching_check
         }
         # The model request schema accepts this; canonical preparation must reject it.
         NeMoGymResponseCreateParamsNonStreaming.model_validate(params)
+    elif mutation == "metadata":
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+        params["metadata"] = {
+            "extra_body": json.dumps(
+                {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "answer",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "answer": {"type": "string", "const": row["verifier_metadata"]["answer"]}
+                                },
+                                "required": ["answer"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                }
+            )
+        }
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(params)
     else:
         params[mutation] = leaked
     modified = tmp_path / "modified.jsonl"
     modified.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    original_output = output.read_bytes()
     with pytest.raises(ValueError, match="canonical policy"):
         agentx_prepare.prepare(dataset=str(modified), sha256=sha256_file(modified), limit=limit)
+    assert output.read_bytes() == original_output
+    assert not output.with_suffix(".tmp").exists()
 
 
 @pytest.mark.parametrize("null_text", [False, True])
-def test_portable_bundle_preserves_sampling_with_omitted_or_null_text(source_release, tmp_path, null_text):
+@pytest.mark.parametrize("metadata", ["omitted", None, {}])
+def test_portable_bundle_preserves_sampling_with_empty_request_context(source_release, tmp_path, null_text, metadata):
     output = agentx_prepare.prepare(source_root=str(source_release))
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     for row in rows:
@@ -281,6 +311,9 @@ def test_portable_bundle_preserves_sampling_with_omitted_or_null_text(source_rel
         assert "text" not in params
         if null_text:
             params["text"] = None
+        assert "metadata" not in params
+        if metadata != "omitted":
+            params["metadata"] = metadata
         params.update(temperature=0.5, top_p=0.9, max_output_tokens=128)
     portable = tmp_path / "sampling.jsonl"
     portable.write_text("".join(json.dumps(row) + "\n" for row in rows))
