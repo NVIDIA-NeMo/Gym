@@ -1627,3 +1627,20 @@ def test_a_think_block_is_stripped_before_the_judge(workdir) -> None:
     assert _graded(verified) == (1.0, False, None, True)
     judge_request = judge.await_args.kwargs["json"].model_dump_json()
     assert "Marseille" not in judge_request and "Exact Answer: Paris" in judge_request
+
+
+def test_an_empty_plugin_log_is_refused_as_one_without_the_sentinel(workdir, tmp_path, started, stopped) -> None:
+    """A log that exists but holds nothing reads as "", which lacks the sentinel's line: the run is refused, terminally,
+    as when no log was written."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text("")
+    judge = _mock_judge(server, CORRECT)
+
+    refused = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert refused.status_code == 422, refused.text
+    assert "[nemo-gym-plugin] loaded sentinel" in refused.json()["detail"]
+    assert judge.await_count == 0 and stopped == [started[0][0]]
+    # The empty log it read is kept, so a retry is refused the same way.
+    assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).status_code == 422
