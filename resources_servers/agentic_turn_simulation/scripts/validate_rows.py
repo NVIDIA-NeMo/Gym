@@ -34,9 +34,10 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationRunRequest, _input_items, _row_tools
 from resources_servers.agentic_turn_simulation.harnesses import select_harness
 from resources_servers.agentic_turn_simulation.obstacles import ObstacleInjectionConfig, arm
+from resources_servers.agentic_turn_simulation.schemas import AgenticTurnSimulationRunRequest
+from resources_servers.agentic_turn_simulation.turns import _input_items, _row_tools
 
 
 AGENT = "agentic_turn_simulation_agent"
