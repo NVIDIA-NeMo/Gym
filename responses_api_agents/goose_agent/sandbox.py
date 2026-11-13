@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 
+import certifi
+
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
@@ -89,6 +91,9 @@ class GooseSession(AgentSessionState):
             raise RuntimeError(f"Cannot prepare the Goose session directory: {prepared.stderr or prepared.stdout}")
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
+        # The static release still needs CA roots to construct its HTTP client,
+        # even for an HTTP model endpoint. Minimal task images may have none.
+        await sandbox.upload(Path(certifi.where()), f"{self.root}/ca-certificates.pem")
         arch = await sandbox.exec("uname -m", cwd="/", timeout_s=60)
         if arch.return_code != 0 or arch.error_type:
             raise RuntimeError(f"Cannot read the sandbox architecture: {arch.stderr or arch.error_type}")

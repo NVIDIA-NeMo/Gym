@@ -44,7 +44,8 @@ system = next((a[len("--system="):] for a in sys.argv if a.startswith("--system=
 (root / "seen.json").write_text(json.dumps({
     "argv": sys.argv[1:], "prompt": prompt, "system": system, "cwd": os.getcwd(),
     "config": (root / "config" / "config.yaml").read_text(),
-    "env": {k: v for k, v in os.environ.items() if k.startswith(("GOOSE_", "OPENAI_"))},
+    "env": {k: v for k, v in os.environ.items() if k.startswith(("GOOSE_", "OPENAI_")) or k == "SSL_CERT_FILE"},
+    "ca_certificates": len(__import__("ssl").create_default_context(cafile=os.environ["SSL_CERT_FILE"]).get_ca_certs()),
 }))
 # A shell tool call inherits Goose's environment, which keeps the task's HOME.
 subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
@@ -335,6 +336,8 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
     assert seen["env"]["GOOSE_TEMPERATURE"] == "0.6"
     assert seen["env"]["GOOSE_CONTEXT_LIMIT"] == "262144"
     assert seen["env"]["GOOSE_PATH_ROOT"] == state.root
+    assert seen["env"]["SSL_CERT_FILE"] == f"{state.root}/ca-certificates.pem"
+    assert seen["ca_certificates"] > 0
     # The tool shell kept the task's HOME and environment; Goose's own files stayed in the session directory.
     assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
         str(tmp_path / "task-home"),
