@@ -7,7 +7,9 @@ domain: knowledge
 description: HLE-Diamond, the 1000-question Humanity's Last Exam subset split into 500 reasoning
   and 500 knowledge partitions, with prepared multimodal inputs and LLM-as-a-judge grading
   sliced by partition.
-modality: text, image
+modality:
+- text
+- image
 licensing: MIT
 authors:
 - rshahbazyan

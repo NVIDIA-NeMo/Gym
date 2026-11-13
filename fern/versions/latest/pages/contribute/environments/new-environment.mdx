@@ -374,7 +374,8 @@ kind: environment
 integration_profile: custom-gym-verifier
 domain: agent
 description: Single-step environment that rewards invoking the get_weather tool.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - fsiino-nvidia
@@ -409,7 +410,7 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `integration_profile` | string | Required; one of the profiles below |
 | `domain` | string | Required; `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other` |
 | `description` | string | Required; non-empty |
-| `modality` | string | Required; non-empty |
+| `modality` | list of strings | Required; every kind of input the model receives: `text`, `image`, `audio`, or `video`, each once. A task whose prompt is text and carries an image is `[text, image]`. Count what the model receives, not what the source files are: documents read through text tools are `text`. A manifest that still writes text (`text, image`, `image`, `vision`, `multimodal`) loads as the list it stands for until 0.9.0, and `gym env validate` names the list to write |
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
 | `authors` | list of strings | Required; non-empty and unique |
 | `maintainers` | list of strings or null | Optional; GitHub logins of the current maintainers, non-empty and unique |

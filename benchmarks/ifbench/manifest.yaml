@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: instruction_following
 description: IFBench instruction following evaluation using AllenAI's IFBench library
   (57 instruction types)
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - fsiino-nvidia

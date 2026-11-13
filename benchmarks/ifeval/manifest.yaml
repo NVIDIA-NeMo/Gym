@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: instruction_following
 description: IFEval prompt-level strict instruction following with binary all-instructions
   grading.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - arti4nvj

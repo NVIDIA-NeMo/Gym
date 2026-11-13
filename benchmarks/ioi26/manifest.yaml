@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: coding
 description: Execution of competitive programming competition questions
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

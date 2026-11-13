@@ -7,7 +7,8 @@ domain: math
 description: Four-class grading of math proofs — the policy model reads a problem
   plus a candidate proof and emits one of correct / almost / partial / incorrect as
   the last word.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

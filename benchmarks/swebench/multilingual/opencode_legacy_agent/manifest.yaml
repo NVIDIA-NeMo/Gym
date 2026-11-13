@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: SWE-bench multilingual test-split software engineering tasks using prepared
   repair prompts, a sandboxed OpenCode agent, and binary patch-resolution scoring.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

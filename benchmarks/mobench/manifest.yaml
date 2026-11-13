@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
 description: Lean4 formal proof verification environment
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - stephencge

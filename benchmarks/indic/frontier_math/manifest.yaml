@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
 description: Translations of 12 public FrontierMath problems with exact text-answer grading
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
   - ai4bharat

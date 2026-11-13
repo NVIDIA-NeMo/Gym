@@ -6,7 +6,8 @@ integration_profile: external-agent-loop
 domain: agent
 description: Harbor-native Legal Agent Benchmark document tasks scored by the official
   all-criteria full-task metric.
-modality: multimodal
+modality:
+- text
 licensing: MIT
 authors:
 - rystewart-nvidia

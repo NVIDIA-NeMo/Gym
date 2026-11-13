@@ -6,7 +6,8 @@ integration_profile: external-agent-loop
 domain: agent
 description: PinchBench v2.0.0 tasks run through the native OpenClaw benchmark harness,
   with continuous grading in [0, 1].
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - NVIDIA NeMo Gym contributors

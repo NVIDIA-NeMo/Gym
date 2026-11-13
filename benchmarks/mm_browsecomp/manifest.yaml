@@ -6,7 +6,9 @@ integration_profile: custom-gym-agent-loop
 domain: agent
 description: MM-BrowseComp multimodal web research (400 questions, 243 with images) on the BrowseComp
   harness with an independent answer judge.
-modality: multimodal
+modality:
+- text
+- image
 licensing: MIT
 authors:
 - smohsenitahe

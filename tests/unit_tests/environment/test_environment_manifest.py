@@ -14,6 +14,7 @@ from nemo_gym.environment.manifest import (
     IntegrationProfile,
     IntendedUse,
     ManifestError,
+    Modality,
     dump_manifest,
     load_listed_manifest,
     load_manifest,
@@ -170,7 +171,7 @@ def _manifest(*, profile: str = "custom-gym-verifier", kind: str = "environment"
         "integration_profile": profile,
         "domain": "math",
         "description": "Competition mathematics evaluation",
-        "modality": "text",
+        "modality": ["text"],
         "licensing": "Apache-2.0",
         "authors": ["alice"],
         "reward": {"range": [0, 1], "higher_is_better": True},
@@ -745,6 +746,55 @@ def test_load_listed_manifest_returns_the_main_manifest_or_a_listed_config(tmp_p
         load_listed_manifest(path, "my_eval/other")
     path.write_text(dump_manifest(_nested_listing_manifest()), encoding="utf-8")
     assert load_listed_manifest(path, "my_eval/pi_with_system").standard_prompt_config == "prompts/with_system.yaml"
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+@pytest.mark.parametrize(
+    ("modality", "valid"),
+    [
+        (["text", "image"], True),
+        (["text", "video", "audio"], True),
+        (["text", "text"], False),
+        (["multimodal"], False),
+        ([], False),
+    ],
+)
+def test_modality_lists_each_kind_of_input_once(backend: str, modality: list[str], valid: bool) -> None:
+    raw = _manifest() | {"modality": modality}
+    if backend == "schema":
+        assert (not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))) is valid
+    elif valid:
+        assert EnvironmentManifest.model_validate(raw).modality == modality
+    else:
+        with pytest.raises(ValidationError, match="modality"):
+            EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("written", "read"),
+    [
+        ("text", [Modality.TEXT]),
+        ("text, image", [Modality.TEXT, Modality.IMAGE]),
+        ("text,audio", ["text", "audio"]),
+        ("text, image, video, audio", ["text", "image", "video", "audio"]),
+        # One word other than text named the input beyond the text prompt.
+        ("image", ["text", "image"]),
+        ("video", ["text", "video"]),
+        ("multimodal", ["text", "image"]),
+        ("Vision", ["text", "image"]),
+    ],
+)
+def test_modality_written_as_text_loads_as_a_list(written: str, read: list[str]) -> None:
+    manifest = EnvironmentManifest.model_validate(_manifest() | {"modality": written})
+
+    assert manifest.modality == read
+    assert yaml.safe_load(dump_manifest(manifest))["modality"] == read
+
+
+@pytest.mark.parametrize("written", ["hologram", "text, smell"])
+def test_modality_text_with_an_unknown_word_names_the_values_it_takes(written: str) -> None:
+    with pytest.raises(ValidationError, match="'text', 'image', 'audio' or 'video'"):
+        EnvironmentManifest.model_validate(_manifest() | {"modality": written})
 
 
 @pytest.mark.parametrize("backend", ["pydantic", "schema"])
