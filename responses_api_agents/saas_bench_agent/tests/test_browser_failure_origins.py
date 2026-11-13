@@ -23,7 +23,6 @@ def native_functions():
     path = BENCHMARK_ROOT / "saas_bench/agent.py"
     tree = ast.parse(path.read_text())
     names = {
-        "ModelActionError",
         "TrajectoryNoProgressError",
         "_track_browser_runtime",
         "_is_context_limit_error",
@@ -53,7 +52,7 @@ def native_functions():
 async def test_model_call_boundary_only_attributes_confirmed_model_errors(kind, expected):
     ns = native_functions()
     if kind == "malformed_tool_call":
-        error = ns["ModelActionError"](kind)
+        error = ValueError("invalid model JSON")
     elif kind == "context_limit":
         error = RuntimeError("maximum context length exceeded")
         error.status_code = 400
@@ -64,6 +63,9 @@ async def test_model_call_boundary_only_attributes_confirmed_model_errors(kind, 
         error = TimeoutError("endpoint stalled")
 
     async def invoke(*args, **kwargs):
+        if kind == "malformed_tool_call":
+            owner._model_output_failure_kind = kind
+            owner._model_output_exception = error
         raise error
 
     owner = SimpleNamespace(_invoke_clean_output=invoke)
@@ -104,6 +106,7 @@ async def test_browser_fault_is_cleared_only_after_observation_recovers():
         ("cdp_start", "evaluation"),
         ("screenshot", "evaluation"),
         ("swallowed_screenshot", "evaluation"),
+        ("empty_history", "evaluation"),
         ("model_parse", "model"),
         ("unknown_after_turn", "evaluation"),
     ],
@@ -127,6 +130,9 @@ async def test_native_run_task_catch_all_preserves_failure_origin(tmp_path, monk
             self.history = history
 
         async def run(self, **kwargs):
+            if scenario == "empty_history":
+                history.history.clear()
+                return history
             if scenario in {"screenshot", "swallowed_screenshot"}:
                 try:
                     await browser.get_browser_state_summary()
@@ -135,7 +141,7 @@ async def test_native_run_task_catch_all_preserves_failure_origin(tmp_path, monk
                         raise
                 return history
             if scenario == "model_parse":
-                error = ns["ModelActionError"]("malformed_tool_call")
+                error = ValueError("invalid model JSON")
                 llm.last_actor_failure = {"failure_origin": "model", "failure_kind": "malformed_tool_call"}
                 llm.last_actor_exception = error
                 raise error
@@ -171,14 +177,16 @@ async def test_native_run_task_catch_all_preserves_failure_origin(tmp_path, monk
         _positive_timeout=lambda name, default: default,
         TASK_G_RULES="",
         _checkpoint_history=lambda **kwargs: {"trajectory": [{"actions": [{"click": {"index": 1}}]}]},
-        _extract_trajectory=lambda *args, **kwargs: [{"actions": [{"click": {"index": 1}}]}],
+        _extract_trajectory=lambda h, **kwargs: [{"actions": [{"click": {"index": 1}}]}] if h.history else [],
         _kill=kill,
         _atomic_write_json=lambda path, value: path.write_text(json.dumps(value)),
     )
     result = await ns["run_task"]({"task_id": "fixture"}, "model", "goal", str(tmp_path / "out"))
     assert result["status"] == "error" and result["failure_origin"] == origin
-    if scenario != "cdp_start":
+    if scenario not in {"cdp_start", "empty_history"}:
         assert result["trajectory"]  # The catch-all must not lose partial model evidence.
+    else:
+        assert not result["trajectory"]
 
 
 @pytest.mark.parametrize(
@@ -190,7 +198,7 @@ async def test_native_run_task_catch_all_preserves_failure_origin(tmp_path, monk
     ],
 )
 async def test_raw_response_parsing_separates_model_text_from_missing_response(completion, finish, origin, kind):
-    from pydantic import BaseModel
+    from pydantic import BaseModel, ValidationError
 
     class Output(BaseModel):
         action: str
@@ -218,6 +226,8 @@ async def test_raw_response_parsing_separates_model_text_from_missing_response(c
     )
     exec(compile(ast.Module(body=[owner], type_ignores=[]), str(source), "exec"), ns)
     client = ns["_CleanOutputChatOpenAI"]()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError if completion else RuntimeError) as caught:
         await client.ainvoke([], output_format=Output)
+    if completion:
+        assert isinstance(caught.value, ValidationError)  # Preserve browser-use's own JSON recovery branch.
     assert client.last_actor_failure == {"failure_origin": origin, "failure_kind": kind}

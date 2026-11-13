@@ -102,14 +102,6 @@ class TrajectoryNoProgressError(RuntimeError):
     """Stop an agent that is demonstrably repeating the same UI operation."""
 
 
-class ModelActionError(RuntimeError):
-    """A completed model response could not supply a valid action."""
-
-    def __init__(self, kind: str):
-        super().__init__(kind)
-        self.kind = kind
-
-
 def _track_browser_runtime(browser, faults: dict) -> None:
     """Retain failures swallowed by browser-use until that boundary recovers."""
     for name in ("start", "get_browser_state_summary"):
@@ -1541,10 +1533,12 @@ class _CleanOutputChatOpenAI(ChatOpenAI):
     async def ainvoke(self, messages, output_format=None, **kwargs) -> Any:
         self.last_actor_failure = None
         self.last_actor_exception = None
+        self._model_output_failure_kind = None
+        self._model_output_exception = None
         try:
             return await self._invoke_clean_output(messages, output_format=output_format, **kwargs)
         except Exception as exc:
-            kind = exc.kind if isinstance(exc, ModelActionError) else (
+            kind = self._model_output_failure_kind if self._model_output_exception is exc else (
                 "context_limit" if getattr(exc, "status_code", None) == 400 and _is_context_limit_error(exc) else None
             )
             self.last_actor_exception = exc
@@ -1598,7 +1592,9 @@ class _CleanOutputChatOpenAI(ChatOpenAI):
         try:
             parsed = output_format.model_validate_json(cleaned)
         except ValueError as exc:
-            raise ModelActionError("output_token_limit" if raw_result.stop_reason == "length" else "malformed_tool_call") from exc
+            self._model_output_failure_kind = "output_token_limit" if raw_result.stop_reason == "length" else "malformed_tool_call"
+            self._model_output_exception = exc
+            raise
         self.request_ids.append(self._last_response_request_id)
         return ChatInvokeCompletion(
             completion=parsed,
@@ -3067,6 +3063,8 @@ async def run_task(
             result.update(status="error", failure_origin="evaluation", failure_kind="browser_runtime_error")
         elif failure and not history.is_done():
             result.update(status="error", **failure)
+        elif not history.history:
+            result.update(status="error", failure_origin="evaluation", failure_kind="runtime_error")
 
     except Exception as e:
         partial_history = getattr(agent, "history", None) if agent is not None else None
