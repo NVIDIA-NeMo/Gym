@@ -6,19 +6,16 @@
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from typing import Literal
 
 import anyio
 
-from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
-from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
-from nemo_gym.utils.network_policy import restricted_network_policy
+from nemo_gym.server_runtime.sandbox_network import SandboxNetwork
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,26 +64,17 @@ class LentSandboxes:
         model_server: str | None = None,
         tool_servers: Sequence[str] = (),
     ) -> None:
-        if network_access != "inherit":
-            if not model_server:
-                raise ValueError(
-                    f"network_access {network_access} needs model_server, the model server the sandbox calls"
-                )
-            if "network_policy" in sandbox_config.provider_options:
-                raise ValueError("Set network_access or sandbox_config.provider_options.network_policy, not both")
-        if network_access == "model_and_tools" and not tool_servers:
-            raise ValueError(
-                "network_access model_and_tools needs tool_servers, the servers whose tools the harness calls"
-            )
-        if network_access != "model_and_tools" and tool_servers:
-            raise ValueError("tool_servers applies only to network_access model_and_tools")
+        # LentSandboxes has no no_network: a harness in the lent sandbox calls the model server.
+        self._network = SandboxNetwork(
+            access=network_access,
+            model_server=model_server if network_access != "inherit" else None,
+            tool_servers=tuple(tool_servers),
+        )
+        self._network.check(sandbox_config)
         self._provider = sandbox_provider
         self._config = sandbox_config
         self._image = image
         self._workdir = workdir
-        self._network_access = network_access
-        self._model_server = model_server
-        self._tool_servers = tuple(tool_servers)
         self._sandboxes: dict[str, AsyncSandbox] = {}
         # Sandboxes of failed seeds whose stop failed too. They are never lent; a later stop of each is retried.
         self._failed_seed_sandboxes: dict[str, AsyncSandbox] = {}
@@ -114,20 +102,16 @@ class LentSandboxes:
             return await self._access(sandbox)
         await self._stop_failed_seed_sandbox(resources_session_id)
         named_configs = get_global_config_dict()
+        provider_config = resolve_provider_config(self._provider, named_configs)
         spec = self._config.spec(
             self._provider,
             image=self._image,
             workdir=self._workdir,
             metadata={"task_id": task_id.task_id[:_LABEL_LIMIT]},
             files=files,
+            network_policy=self._network.policy(provider_config),
             named_configs=named_configs,
         )
-        provider_config = resolve_provider_config(self._provider, named_configs)
-        if self._network_access != "inherit":
-            spec = replace(
-                spec,
-                provider_options={**spec.provider_options, "network_policy": self._restricted_policy(provider_config)},
-            )
         sandbox = AsyncSandbox(provider_config)
         try:
             # start() stops the sandbox itself when delivering the files fails, but not under cancellation: its stop
@@ -181,19 +165,6 @@ class LentSandboxes:
             return
         await _stop(sandbox)
         self._failed_seed_sandboxes.pop(resources_session_id, None)
-
-    def _restricted_policy(self, provider_config: Mapping[str, object]) -> dict[str, object]:
-        """The egress rule for ``network_access``, refused (422) where it cannot be enforced.
-
-        It allows the model server's host, and for ``model_and_tools`` the tool servers' hosts too.
-        """
-        (provider_name,) = provider_config
-        servers = [self._model_server, *self._tool_servers]
-        try:
-            return restricted_network_policy(provider_name, [get_server_url(server) for server in servers])
-        except ValueError as error:
-            # A provider without network policies or a server on a loopback address: no retry can fix it.
-            raise ResourcesSeedRejectedError(f"Cannot lend a {self._network_access} sandbox: {error}") from error
 
     async def _access(self, sandbox: AsyncSandbox) -> SandboxAccess:
         return SandboxAccess(
