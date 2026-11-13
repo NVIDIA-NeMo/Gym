@@ -1,0 +1,25 @@
+{
+  "source_repository": "https://github.com/image2code/vision2code",
+  "base_commit": "000f2e162dd62fac5637c718e018d7123b3aff1e",
+  "working_tree_modified": true,
+  "rubric_version": "recreation_rubric_v5_whitespace_diagnostic",
+  "source_sha256": "b81999419c92ef403fce7905f01ccd2a7a47eebbc6960b67c0f8cfab1e2595b8",
+  "prompt_source_sha256": "e90b11d4d738d79ec03aa6a4a63681a30d3e6e0215ab765ecb631a878f6bc95c",
+  "note": "Golden outputs generated from the specified modified source checkout for all dataset rubrics and generic scoring. Strict-category and custom strict-ceiling modes are excluded. No sibling repository is needed at runtime or test time.",
+  "generic_source_sha256": "f433faff7fefc160eeed478d4cf6dc253fbfe61229917c4fe69b6ab7e2f5c6bd",
+  "generic_rubric_version": "generic_recreation_rubric_v1_equal_weight",
+  "image_metrics_source": "vision2code/evaluation/image_metrics.py",
+  "image_metrics_source_sha256": "9d6b487e325d4ad7ad941140fddfe75948b7a60edf5c0c8e337bfc53771d6ebe",
+  "image_metrics_golden": "image-metrics-golden.json: upstream image_metrics and apply_blend_a outputs for test_image_metrics.write_images cases",
+  "original_doc_eee_fixture": "original-doc-eee.json: unmodified public source definitions and scoring; historical DocVQA/EEE-Bench fixtures validate -v2 variants",
+  "judge_recovery_source": {
+    "repository": "https://github.com/image2code/vision2code",
+    "revision": "000f2e162dd62fac5637c718e018d7123b3aff1e",
+    "license": "Apache-2.0",
+    "files": [
+      "vision2code/evaluation/dataset_rubrics.py",
+      "vision2code/evaluation/generic_rubric.py",
+      "vision2code/benchmark/run_benchmark.py"
+    ]
+  }
+}

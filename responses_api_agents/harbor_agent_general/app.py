@@ -59,6 +59,7 @@ from nemo_gym.core import (
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
 
 
@@ -283,6 +284,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
         global_config = get_global_config_dict()
         self._sem = asyncio.Semaphore(global_config.get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
         self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
+        logger.warning(
+            "responses_api_agents/harbor_agent_general is deprecated. The built-in benchmarks that use it will be migrated to "
+            "the harbor environment server (environment_servers/harbor, see its README.md); no action is needed "
+            "from you yet. New work should use the harbor environment server."
+        )
 
     def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
         """Customize a request's copied job without modifying the shared template."""
@@ -782,3 +788,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

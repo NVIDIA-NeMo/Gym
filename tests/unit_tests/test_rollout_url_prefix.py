@@ -253,3 +253,27 @@ async def test_a_redirect_is_followed_and_rewritten_on_its_own_terms(location: s
             response = await client.post("/start")
     assert response.status_code == 200
     assert seen == expected_urls
+
+
+_TRACEPARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # A prefix the grammar reads is left alone, including a name and a bare prefix with no routed path.
+        ("http://gym:8000/ng-rollout/7-1/ng-agent-instance/judge/v1/responses", None),
+        ("http://gym:8000/ng-rollout/7-1/ng-agent-instance/judge/training-token-capture/v1/responses", None),
+        ("http://gym:8000/ng-rollout/7-1", None),
+        # A malformed prefix is left for the receiving server to refuse, not wrapped in a second prefix.
+        ("http://gym:8000/ng-rollout/7-1/ng-agent-instance/Judge/v1/responses", None),
+        # A trace-only path gets the capture key in front of the trace segment.
+        (
+            f"http://gym:8000/ng-trace/{_TRACEPARENT}/v1/responses",
+            f"http://gym:8000/ng-rollout/3-0-a1/ng-trace/{_TRACEPARENT}/v1/responses",
+        ),
+    ],
+)
+def test_with_rollout_prefix_reads_an_existing_prefix_through_the_grammar(url: str, expected: str | None) -> None:
+    with rollout_context("3-0-a1"):
+        assert with_rollout_prefix(url, ["http://gym:8000"]) == (expected or url)

@@ -18,7 +18,7 @@ This measures the dataset, not a model. A row whose golden patch does not make F
 pass is unusable for evaluation or training, so this is the check to run before trusting any
 score from swemer_oml.
 
-    gym env start --config resources_servers/swemer_oml/configs/swemer_oml.yaml \
+    gym env start --config resources_servers/swemer_oml/configs/swemer_oml_legacy_agent.yaml \
         --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
     python resources_servers/swemer_oml/apply_golden_patch.py \

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/vision2code/configs/vision2code.yaml
+vision2code:
+  resources_servers:
+    vision2code:
+      preparation:
+        include_canvas_dimensions: true
+        include_rendering_instructions: false
+        include_library_instructions: false
+      use_blended_reward: true
+      blended_reward_apply_judge_caps: false
+      verified: false
+vision2code_simple_agent:
+  responses_api_agents:
+    vision2code_agent:
+      num_passes: 3
+      result_selection: best
+      stop_on: final_judge_score
+      include_rendered_image: true
+      include_judge_scores: true
+      include_pixel_scores: true
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+judge_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true

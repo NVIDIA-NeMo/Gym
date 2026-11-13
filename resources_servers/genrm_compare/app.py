@@ -1125,7 +1125,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             **outcome,
         ).model_dump(mode="json", exclude_none=True)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         """Export the outcome of each session's member whose cohort has finished; an empty state otherwise."""
         return {session_id: self._finished_member_state(session_id) for session_id in session_ids}
 
@@ -1570,7 +1570,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
         # input carries only the conversation history (standard OpenAI roles).
         # The comparison payload is passed via metadata so the request schema stays
-        # generic and GenRMModelMixin._preprocess_chat_completion_create_params can
+        # generic and the genrm_model server (append_genrm_roles in its common.py) can
         # inject the GenRM-specific roles (response_1, response_2, principle) server-side.
         messages: List[NeMoGymEasyInputMessage] = [
             NeMoGymEasyInputMessage(
