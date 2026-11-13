@@ -5,7 +5,7 @@ version: 1.0.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: translation
 description: IN22-Gen bidirectional English-Indic translation with reference chrF, chrF++, and BLEU metrics.
 modality: text
 licensing: CC-BY-4.0

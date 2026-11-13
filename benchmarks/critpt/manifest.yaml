@@ -3,7 +3,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
-domain: other
+domain: knowledge
 description: Research-level physics problems scored by the Artificial Analysis API
 modality: text
 licensing: unknown
