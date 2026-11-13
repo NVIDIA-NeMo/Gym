@@ -41,7 +41,7 @@ UPSTREAM_REPO = "https://github.com/SWE-rebench/SWE-rebench-V2.git"
 # Pinned so a parser change upstream cannot silently move scores between runs. Bump
 # deliberately, and re-baseline when you do. c71902a8 (2026-03-12) is the tree the swe_agents
 # harness graded with.
-UPSTREAM_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
+UPSTREAM_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"  # pragma: allowlist secret
 
 # Upstream has moved this file between releases; accept both layouts rather than pinning one.
 _PARSER_RELATIVE_PATHS = (Path("lib") / "agent" / "log_parsers.py", Path("agent") / "log_parsers.py")
@@ -53,7 +53,9 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
     """Clone once across concurrent workers, using a mkdir lock.
 
     ``gym env start`` may bring several server workers up at once, and an unsynchronised clone
-    into a shared path yields a half-written tree that imports with a confusing error.
+    into a shared path yields a half-written tree that imports with a confusing error. The tree
+    is built in a private staging directory and published with one rename, so a parser file under
+    ``destination`` always belongs to a complete checkout of ``UPSTREAM_COMMIT``.
     """
     if _parser_path(destination) is not None:
         return
@@ -75,21 +77,20 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
         if _parser_path(destination) is not None:
             return
         shutil.rmtree(destination, ignore_errors=True)
+        staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+        shutil.rmtree(staging, ignore_errors=True)
         try:
+            subprocess.run(["git", "init", "-q", str(staging)], check=True, capture_output=True)
             subprocess.run(
-                ["git", "clone", "--depth", "1", UPSTREAM_REPO, str(destination)],
+                ["git", "fetch", "--depth", "1", UPSTREAM_REPO, UPSTREAM_COMMIT],
+                cwd=staging,
                 check=True,
                 capture_output=True,
             )
-            if UPSTREAM_COMMIT != "main":
-                subprocess.run(
-                    ["git", "fetch", "--depth", "1", "origin", UPSTREAM_COMMIT], cwd=destination, check=True
-                )
-                subprocess.run(["git", "checkout", UPSTREAM_COMMIT], cwd=destination, check=True)
-        except BaseException:
-            # A tree left on main by a failed pin would pass the parser check on the next call.
-            shutil.rmtree(destination, ignore_errors=True)
-            raise
+            subprocess.run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=staging, check=True, capture_output=True)
+            os.rename(staging, destination)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     finally:
         shutil.rmtree(lock_path, ignore_errors=True)
 

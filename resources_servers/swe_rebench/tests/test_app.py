@@ -18,6 +18,8 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import re
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -591,25 +593,30 @@ class TestLogParserPin:
     filled from another commit must not stand in for the pinned one."""
 
     @staticmethod
-    def _fake_git(calls: list, fail_on: str | None = None):
-        import subprocess as sp
-
+    def _fake_git(calls: list, fail_on: str | None = None, on_call=None):
         def run(args, cwd=None, check=False, capture_output=False):
-            calls.append(args[1])
-            if args[1] == fail_on:
-                raise sp.CalledProcessError(128, args)
-            if args[1] == "clone":
-                parser = Path(args[-1]) / "lib" / "agent" / "log_parsers.py"
-                parser.parent.mkdir(parents=True)
-                parser.write_text("NAME_TO_PARSER = {'pinned': lambda log: {}}\n")
+            command = args[1]
+            calls.append(args)
+            if on_call is not None:
+                on_call(command)
+            if command == fail_on:
+                raise subprocess.CalledProcessError(128, args)
+            if command == "init":
+                Path(args[-1]).mkdir(parents=True)
+            elif command in ("clone", "checkout"):
+                # A clone checks out upstream main; only the checkout of the pin is the pinned tree.
+                root = Path(args[-1]) if command == "clone" else Path(cwd)
+                parser = root / "lib" / "agent" / "log_parsers.py"
+                parser.parent.mkdir(parents=True, exist_ok=True)
+                parser.write_text(f"NAME_TO_PARSER = {{{command!r}: lambda log: {{}}}}\n")
 
         return run
 
-    def test_pinned_to_the_commit_the_swe_agents_harness_graded_with(self) -> None:
+    def test_pinned_to_a_full_commit(self) -> None:
         from resources_servers.swe_rebench import log_parsers
 
-        assert log_parsers.UPSTREAM_COMMIT == "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
-        assert log_parsers._repo_dir_name() == "SWE-rebench-V2-c71902a8cf8d"
+        assert re.fullmatch(r"[0-9a-f]{40}", log_parsers.UPSTREAM_COMMIT)
+        assert log_parsers._repo_dir_name() == f"SWE-rebench-V2-{log_parsers.UPSTREAM_COMMIT[:12]}"
 
     def test_a_cached_clone_of_main_is_not_reused(self, monkeypatch, tmp_path) -> None:
         from resources_servers.swe_rebench import log_parsers
@@ -621,17 +628,29 @@ class TestLogParserPin:
         monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
         monkeypatch.setattr(log_parsers, "_MODULE", None)
         module = log_parsers.load_parsers(tmp_path)
-        assert calls == ["clone", "fetch", "checkout"]
-        assert set(module.NAME_TO_PARSER) == {"pinned"}
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+        assert calls[1][-1] == log_parsers.UPSTREAM_COMMIT
+        assert set(module.NAME_TO_PARSER) == {"checkout"}
 
-    def test_a_failed_pin_leaves_no_tree_behind(self, monkeypatch, tmp_path) -> None:
-        import subprocess as sp
+    def test_the_tree_is_visible_only_once_the_pin_is_checked_out(self, monkeypatch, tmp_path) -> None:
+        """A worker waiting on the clone lock returns as soon as a parser file exists, so one must
+        never appear under the destination before the pinned checkout is complete."""
+        from resources_servers.swe_rebench import log_parsers
 
+        destination = tmp_path / log_parsers._repo_dir_name()
+        seen: list = []
+        on_call = lambda command: seen.append((command, log_parsers._parser_path(destination)))  # noqa: E731
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], on_call=on_call))
+        log_parsers._clone_locked(destination)
+        assert seen and all(path is None for _, path in seen), seen
+        assert log_parsers._parser_path(destination) is not None
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    def test_a_failed_fetch_leaves_no_tree_behind(self, monkeypatch, tmp_path) -> None:
         from resources_servers.swe_rebench import log_parsers
 
         destination = tmp_path / log_parsers._repo_dir_name()
         monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on="fetch"))
-        with pytest.raises(sp.CalledProcessError):
+        with pytest.raises(subprocess.CalledProcessError):
             log_parsers._clone_locked(destination)
-        assert not destination.exists(), "a main checkout left here would pass for the pinned tree next time"
-        assert not any(p.name.endswith(".clone.lockdir") for p in tmp_path.iterdir())
+        assert list(tmp_path.iterdir()) == [], "no clone, staging tree, or lock may survive a failed fetch"
