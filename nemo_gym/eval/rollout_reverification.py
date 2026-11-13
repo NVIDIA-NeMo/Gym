@@ -142,6 +142,10 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
         ),
     )
     output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
+    forward_agent_evidence: bool = Field(
+        default=False,
+        description="Forward saved agent trajectories and observations to /verify for execution-dependent grading.",
+    )
     force: bool = Field(
         default=False,
         description=(
@@ -734,7 +738,7 @@ def check_saved_patch_replay(
 _IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
 
 
-def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: bool = False) -> Dict:
     saved_patch_failure = _is_judge_failure(pair.rollout) or (
         pair.rollout.get("failure_kind") == VERIFIER_ERROR and pair.rollout.get("evaluation_completed") is False
     )
@@ -777,6 +781,10 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
+    if forward_agent_evidence:
+        for key in ("ng_trajectory", "ng_agent_observations"):
+            if key in pair.rollout:
+                payload[key] = pair.rollout[key]
     if replay_patch:
         payload["saved_model_patch"] = saved_patch
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
@@ -862,9 +870,10 @@ def _prepare_payloads(
     retry_terminal_timeouts: bool = False,
     *,
     selected_rollouts: Optional[Iterable[Dict]] = None,
+    forward_agent_evidence: bool = False,
 ) -> List[Dict]:
     all_payloads = [
-        _build_verify_payload(pair)
+        _build_verify_payload(pair, forward_agent_evidence=forward_agent_evidence)
         for pair in _yield_inputs_and_rollouts_paired(
             materialized_inputs_jsonl_fpath,
             rollouts_jsonl_fpath,
@@ -1912,6 +1921,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                forward_agent_evidence=config.forward_agent_evidence,
                 **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
@@ -1925,6 +1935,7 @@ class RolloutReverificationHelper(BaseModel):
                     output_fpaths,
                     config.resume_from_cache,
                     rollout_predicate=lambda row: bound_results.get(logical_rollout_id(row)) == row,
+                    forward_agent_evidence=config.forward_agent_evidence,
                 )
 
         if config.settle_into_source:
