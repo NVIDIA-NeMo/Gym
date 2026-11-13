@@ -4,6 +4,8 @@
 
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,23 @@ from nemo_gym.sandbox.providers import utils
 
 
 pytestmark = pytest.mark.sandbox
+
+
+@pytest.fixture
+def require_permission_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise repair races even when the ordinary tree would be removable."""
+    original = utils.shutil.rmtree
+    first = True
+
+    def rmtree(*args, **kwargs):
+        nonlocal first
+        if first:
+            first = False
+            raise PermissionError("permission repair required")
+        return original(*args, **kwargs)
+
+    rmtree.avoids_symlink_attacks = original.avoids_symlink_attacks
+    monkeypatch.setattr(utils.shutil, "rmtree", rmtree)
 
 
 def test_cleanup_removes_read_only_tree_and_leaves_symlink_targets(tmp_path: Path) -> None:
@@ -39,7 +58,7 @@ def test_cleanup_removes_read_only_tree_and_leaves_symlink_targets(tmp_path: Pat
 
 @pytest.mark.parametrize("replace_ancestor", [False, True])
 def test_cleanup_metadata_race_cannot_redirect_chmod(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_ancestor: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_ancestor: bool, require_permission_repair: None
 ) -> None:
     staging = tmp_path / "staging"
     parent = staging / "parent"
@@ -82,9 +101,15 @@ def test_cleanup_metadata_race_cannot_redirect_chmod(
     monkeypatch.setattr(Path, "lstat", racing_lstat)
     monkeypatch.setattr(os, "fstat", racing_fstat)
     try:
-        utils.remove_writable_tree(staging)
+        if replace_ancestor:
+            utils.remove_writable_tree(staging)
+            assert not staging.exists()
+        else:
+            # This move changes the pinned child's parent; fail closed rather
+            # than continuing a walk through an unexpected ancestor.
+            with pytest.raises(OSError, match="moved during permission repair"):
+                utils.remove_writable_tree(staging)
         assert replaced, "The replacement must happen during cleanup"
-        assert not staging.exists()
         assert (target / "keep").read_text() == "host data"
         assert stat.S_IMODE(target.stat().st_mode) == 0o555
     finally:
@@ -92,7 +117,7 @@ def test_cleanup_metadata_race_cannot_redirect_chmod(
 
 
 def test_cleanup_rejects_directory_replaced_by_symlink_before_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_permission_repair: None
 ) -> None:
     staging = tmp_path / "staging"
     child = staging / "child"
@@ -179,7 +204,9 @@ def test_cleanup_root_replacement_after_open_cannot_redirect_chmod(
         outside.chmod(0o755)
 
 
-def test_cleanup_does_not_chmod_foreign_uid_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cleanup_does_not_chmod_foreign_uid_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_permission_repair: None
+) -> None:
     staging = tmp_path / "staging"
     staging.mkdir()
     (staging / "output").write_text("result")
@@ -200,3 +227,121 @@ def test_cleanup_does_not_chmod_foreign_uid_directories(tmp_path: Path, monkeypa
     monkeypatch.setattr(os, "fchmod", forbidden_chmod)
     utils.remove_writable_tree(staging)
     assert not staging.exists()
+
+
+def test_cleanup_writable_tree_needs_no_permission_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    staging = tmp_path / "staging"
+    (staging / "child").mkdir(parents=True)
+    (staging / "child/output").write_text("keep no files")
+
+    def unexpected_chmod(*args):
+        raise AssertionError("A writable tree should not need a permission repair pass")
+
+    original_scandir = os.scandir
+    scanned = []
+
+    def count_scans(fd):
+        scanned.append(os.fstat(fd).st_ino)
+        return original_scandir(fd)
+
+    monkeypatch.setattr(os, "fchmod", unexpected_chmod)
+    monkeypatch.setattr(os, "scandir", count_scans)
+    utils.remove_writable_tree(staging)
+    assert not staging.exists()
+    assert len(scanned) == len(set(scanned)) == 2, "Writable directories should only be scanned once"
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("depth, fd_limit", [(1200, 4096), (160, 256)])
+def test_cleanup_deep_tree_with_bounded_descriptors(
+    tmp_path: Path, depth: int, fd_limit: int, read_only: bool
+) -> None:
+    # Limits affect only this child process. Directory-relative creation also
+    # avoids the platform's maximum absolute path length.
+    script = r"""
+import os, resource, shutil, sys
+from pathlib import Path
+from nemo_gym.sandbox.providers.utils import remove_writable_tree
+root = Path(sys.argv[1]) / 'staging'
+depth, fd_limit, read_only = map(int, sys.argv[2:])
+root.mkdir()
+old_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+cleanup_limit = 4096 if old_limit[1] == resource.RLIM_INFINITY else min(4096, old_limit[1])
+fd_limit = min(fd_limit, cleanup_limit)
+if depth == 1200:
+    # Preserve a recursion regression even on CI hosts with a lower hard fd cap.
+    sys.setrecursionlimit(100)
+    depth = min(depth, fd_limit - 64)
+fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    for _ in range(depth):
+        os.mkdir('d', dir_fd=fd)
+        child = os.open('d', os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        if read_only:
+            os.fchmod(fd, 0o555)
+        os.close(fd)
+        fd = child
+finally:
+    os.close(fd)
+try:
+    resource.setrlimit(resource.RLIMIT_NOFILE, (fd_limit, old_limit[1]))
+    remove_writable_tree(root)
+    assert not root.exists(), 'staging directory leaked'
+finally:
+    # Clean up even when exercising a deliberately broken implementation.
+    resource.setrlimit(resource.RLIMIT_NOFILE, (cleanup_limit, old_limit[1]))
+    if root.exists():
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            while True:
+                os.fchmod(fd, 0o755)
+                try:
+                    child = os.open('d', os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                except FileNotFoundError:
+                    break
+                os.close(fd)
+                fd = child
+        finally:
+            os.close(fd)
+        shutil.rmtree(root)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), str(depth), str(fd_limit), str(int(read_only))],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cleanup_rejects_changed_parent_during_ascent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, require_permission_repair: None
+) -> None:
+    staging = tmp_path / "staging"
+    child = staging / "child"
+    child.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("host data")
+    identity = child.stat()
+    original_scandir = os.scandir
+    moved = False
+
+    def move_during_scan(fd):
+        nonlocal moved
+        info = os.fstat(fd)
+        if not moved and (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+            moved = True
+            child.rename(outside / "moved")
+            outside.chmod(0o555)
+        return original_scandir(fd)
+
+    monkeypatch.setattr(os, "scandir", move_during_scan)
+    try:
+        with pytest.raises(OSError, match="moved during permission repair"):
+            utils.remove_writable_tree(staging)
+        assert moved
+        assert (outside / "keep").read_text() == "host data"
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o555
+    finally:
+        outside.chmod(0o755)

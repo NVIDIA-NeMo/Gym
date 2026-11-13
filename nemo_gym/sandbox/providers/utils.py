@@ -69,33 +69,62 @@ def remove_writable_tree(path: Path) -> None:
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
-    def make_writable(directory_fd: int) -> None:
-        info = os.fstat(directory_fd)
-        mode = stat.S_IMODE(info.st_mode)
-        if info.st_uid == os.geteuid():
-            writable = mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
-            if mode != writable:
-                os.fchmod(directory_fd, writable)
-        # Other-UID directories may already be writable through group/other bits
-        # or ACLs. Let rmtree use those permissions rather than failing chmod.
-        with os.scandir(directory_fd) as entries:
-            for entry in entries:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-                try:
-                    child_fd = os.open(entry.name, directory_flags, dir_fd=directory_fd)
-                except OSError as error:
-                    if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
-                        # The entry disappeared or became a file/link before open.
-                        continue
-                    raise
-                try:
-                    make_writable(child_fd)
-                finally:
-                    os.close(child_fd)
+    def make_writable(root_fd: int) -> None:
+        # Keep entry names and parent identities, not open ancestor descriptors.
+        # On ascent, verify '..' still names the parent we visited before using
+        # it. A concurrent move must not send permission repair outside the tree.
+        stack: list[tuple[tuple[int, int], list[str]]] = []
+        directory_fd = os.dup(root_fd)
+        try:
+            while True:
+                info = os.fstat(directory_fd)
+                mode = stat.S_IMODE(info.st_mode)
+                if info.st_uid == os.geteuid():
+                    writable = mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+                    if mode != writable:
+                        os.fchmod(directory_fd, writable)
+                # Other-UID directories may already be writable via group/other
+                # bits or ACLs. Do not try to change their permissions.
+                with os.scandir(directory_fd) as entries:
+                    children = [entry.name for entry in entries if entry.is_dir(follow_symlinks=False)]
+                stack.append(((info.st_dev, info.st_ino), children))
+                while stack:
+                    if stack[-1][1]:
+                        name = stack[-1][1].pop()
+                        try:
+                            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                        except OSError as error:
+                            if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                                continue
+                            raise
+                        os.close(directory_fd)
+                        directory_fd = child_fd
+                        break
+                    stack.pop()
+                    if not stack:
+                        return
+                    parent = os.open("..", directory_flags, dir_fd=directory_fd)
+                    try:
+                        info = os.fstat(parent)
+                        if (info.st_dev, info.st_ino) != stack[-1][0]:
+                            raise OSError("Sandbox staging directory moved during permission repair")
+                    except BaseException:
+                        os.close(parent)
+                        raise
+                    os.close(directory_fd)
+                    directory_fd = parent
+        finally:
+            os.close(directory_fd)
 
     parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
+        try:
+            shutil.rmtree(path.name, dir_fd=parent_fd)
+            return
+        except PermissionError:
+            # Most workspaces need no chmod pass. Repair only after deletion
+            # encounters a read-only directory, retaining descriptor-safe access.
+            pass
         root_fd = os.open(path.name, directory_flags, dir_fd=parent_fd)
         try:
             make_writable(root_fd)
