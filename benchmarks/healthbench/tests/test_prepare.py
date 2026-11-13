@@ -48,6 +48,13 @@ def test_preserves_native_conversation_and_rubrics():
     assert TaskData.model_validate(row).rubrics == data["rubrics"]
 
 
+def test_every_row_carries_its_source_id_as_the_task_id():
+    row = to_gym_row(source(), 1, benchmark_name="healthbench")
+
+    assert row["task_id"] == row["source_id"]
+    assert TaskData.model_validate(row).task_id == row["source_id"]
+
+
 @pytest.mark.parametrize("prepare", [prepare_hb, prepare_hbp])
 def test_prepared_rows_share_the_verifier_task_contract(tmp_path, prepare):
     p = tmp_path / "source.jsonl"
