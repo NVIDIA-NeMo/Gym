@@ -137,6 +137,10 @@ class TestJudgeRetryLadder:
         assert worst_case_s == pytest.approx(750.0)
         assert worst_case_s < 0.25 * 4 * 3600
 
+    def test_the_dead_judge_breaker_trips_after_25_rollouts_by_default(self):
+        """By default a run stops after 25 rollouts in a row that the judge left without a verdict."""
+        assert SearchResourcesServerConfig.model_fields["judge_max_consecutive_failures"].default == 25
+
 
 def _verify_request(**extra) -> SearchVerifyRequest:
     return SearchVerifyRequest.model_validate(

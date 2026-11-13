@@ -1759,3 +1759,42 @@ def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workd
     ]
     reasons = [reply.json()["failure_reason"] for reply in replies]
     assert all(isinstance(reason, str) and reason.strip() for reason in reasons), reasons
+
+
+def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> None:
+    """Rollouts in a row whose judge could not be reached stop the run (500, retried on resume), and a verdict starts
+    the count again."""
+    server = _server(workdir, judge_max_consecutive_failures=2)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    def verify() -> Any:
+        client.cookies.clear()
+        return client.post("/verify", json=_verify_body())
+
+    server.server_client.post = AsyncMock(side_effect=JudgeError("connection refused"))
+    first = verify()
+    assert first.status_code == 200, first.text
+    assert _graded(first) == (0.0, True, "judge_failed", False)
+    tripped = verify()
+    assert tripped.status_code == 500, tripped.text
+
+    _mock_judge(server, CORRECT)
+    assert _graded(verify()) == (1.0, False, None, True)
+    # The count started again, so one more unreachable judge sends its row to the failures sidecar and stops nothing.
+    server.server_client.post = AsyncMock(side_effect=JudgeError("connection refused"))
+    assert _graded(verify()) == (0.0, True, "judge_failed", False)
+
+
+def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
+    """With judge_max_consecutive_failures 0, rollouts without a verdict are masked one by one and the run goes on."""
+    server = _server(workdir, judge_max_consecutive_failures=0)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    _mock_judge(server, NO_VERDICT)
+
+    replies = []
+    for _ in range(5):
+        client.cookies.clear()
+        replies.append(client.post("/verify", json=_verify_body()))
+
+    assert [reply.status_code for reply in replies] == [200] * 5
+    assert {_graded(reply) for reply in replies} == {(0.0, True, "judge_unparseable", False)}
