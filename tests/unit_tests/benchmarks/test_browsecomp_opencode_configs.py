@@ -19,10 +19,13 @@ from pydantic import BaseModel
 
 from benchmarks.browsecomp.prepare_opencode import OUTPUT_FPATH
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.client import ServerClient
-from nemo_gym.config import get_first_server_config_dict
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseRunServerTypeConfig
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    get_first_server_config_dict,
+)
 from resources_servers.opencode_search.app import SearchResourcesServer, SearchResourcesServerConfig
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig, _session_opencode_config_error
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
