@@ -5287,14 +5287,15 @@ class TestReasoningFieldConfig:
         ],
     )
     @mark.parametrize("content", [None, "visible answer", [{"type": "text", "text": "visible answer"}]])
+    @mark.parametrize("input_field", ["reasoning_content", "reasoning"])
     def test_explicit_harness_reasoning_reaches_selected_backend_fields(
-        self, reasoning_field: str, expected_keys: set[str], content: Any
+        self, reasoning_field: str, expected_keys: set[str], content: Any, input_field: str
     ) -> None:
         model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
         body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
             {
                 "model": "caller-model",
-                "messages": [{"role": "assistant", "content": content, "reasoning_content": "prior reasoning"}],
+                "messages": [{"role": "assistant", "content": content, input_field: "prior reasoning"}],
             }
         )
         assistant = model._preprocess_chat_completion_create_params(MagicMock(), body.model_dump(exclude_unset=True))[
