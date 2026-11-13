@@ -427,7 +427,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                                 request.episode_id,
                                 request.task.model_dump(mode="json"),
                                 deadline,
-                                restart=self.checkpoint_mode == "restart_only",
+                                restart=self.checkpoint_mode_in_effect() == "restart_only",
                             )
                             begun = True
                         response = await self.run(request, cleanup)
@@ -508,7 +508,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        self._checkpoint = EnvironmentParticipant(mode=self.checkpoint_mode)
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in _ENVIRONMENT_CHECKPOINT_MODES:
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        self._checkpoint = EnvironmentParticipant(mode=mode)
         install_server_participant(
             app,
             self._checkpoint,
@@ -570,6 +573,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         for episode_id in sorted(unconfirmed, key=lambda episode_id: episode_id.capture_key):
             LOGGER.error(f"Episode cleanup unconfirmed at shutdown: episode_id={episode_id.capture_key}")
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance's episodes take part in checkpoints; the class's ``checkpoint_mode`` unless an override
+        knows better, such as a protocol whose configuration runs steps between which it records no boundary."""
+        return self.checkpoint_mode
 
     @abstractmethod
     async def run(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
