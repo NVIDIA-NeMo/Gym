@@ -146,6 +146,7 @@ def to_gym_row(record: dict[str, Any], row_number: int, *, benchmark_name: str) 
 
     row = {
         "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{benchmark_name}/{source_id}")),
+        "task_id": source_id,
         "source_id": source_id,
         "conversation": conversation,
         "rubrics": rubrics,

@@ -139,6 +139,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Resources server's. Unset, the bound agent's own `tool_servers`, so an agent moved off the legacy_agent relay
     # keeps the tool servers its /run seeded.
     tool_servers: list[ResourcesServerRef] | None = None
+    forward_agent_evidence: bool = False
     # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
@@ -735,7 +736,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
+                json=self._verify_body(request, agent_response)
+                | verification_failure_fields(agent_response)
+                | (
+                    {"ng_trajectory": trajectory.model_dump(mode="json")}
+                    if self.config.forward_agent_evidence and trajectory is not None
+                    else {}
+                )
+                | (
+                    {"ng_agent_observations": observations.model_dump(mode="json")}
+                    if self.config.forward_agent_evidence and observations is not None
+                    else {}
+                ),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},

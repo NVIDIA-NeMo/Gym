@@ -39,3 +39,6 @@ def test_queued_snapshot_rechecked_under_original_lock(tmp_path):
     ):
         with run_lock(source), pytest.raises(ConfigError):
             validate_settle_source_snapshot(source, json.dumps(invalid))
+    with run_lock(source), pytest.raises(ConfigError, match="Invalid rejudge source snapshot JSON"):
+        validate_settle_source_snapshot(source, '{"rollouts.jsonl":')
+    assert {name: (tmp_path / name).read_bytes() for name in names} == {name: b"original" for name in names}

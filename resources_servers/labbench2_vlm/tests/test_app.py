@@ -676,3 +676,22 @@ class TestPdfTextExtraction:
 
         out = _files_to_text(d)
         assert "Alpha" in out and "Beta" in out
+
+
+class TestTaskId:
+    def test_example_rows_with_a_task_id_match_the_task_schema(self):
+        import json
+
+        from nemo_gym.data import TaskDataValidator, load_task_data_schema
+
+        root = Path(__file__).resolve().parents[1]
+        adapter = load_task_data_schema(root)
+        validator = TaskDataValidator("labbench2_vlm", adapter, "example.jsonl")
+        rows = [json.loads(line) for line in (root / "data" / "example.jsonl").read_text().splitlines() if line]
+        for number, row in enumerate(rows):
+            row["task_id"] = row["verifier_metadata"]["id"]
+            validator.validate_row(number, row)
+
+        assert validator.report.rows == len(rows)
+        assert validator.report.error_rows == 0
+        assert not validator.report.unknown_keys
