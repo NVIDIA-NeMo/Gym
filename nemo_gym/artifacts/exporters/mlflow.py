@@ -67,6 +67,7 @@ from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.secret_utils import hide_secrets_in_container
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,21 @@ def _sanitize_key(key: str) -> Optional[str]:
         logger.warning(f"Dropping entry {key!r}: nothing is left of the name once sanitized.")
         return None
     return sanitized
+
+
+def _config_payload(config_dict: DictConfig) -> dict[str, Any]:
+    """The delivered JSON configuration, refusing keys that collide when encoded as strings."""
+
+    def unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"MLflow configuration keys collide after JSON encoding: {key!r}")
+            result[key] = value
+        return result
+
+    encoded = orjson.dumps(OmegaConf.to_container(config_dict, resolve=False), option=orjson.OPT_NON_STR_KEYS)
+    return json.loads(encoded, object_pairs_hook=unique_keys)
 
 
 class MLflowExporter(BaseExporter):
@@ -133,6 +149,13 @@ class MLflowExporter(BaseExporter):
         self._delivered_metrics: dict[str, Any] = {}
 
     def setup(self) -> None:
+        if self._exported_artifacts is not None:
+            config = OmegaConf.load(self._exported_artifacts.resolved_config_yaml_fpath)
+        else:
+            config = OmegaConf.create(
+                hide_secrets_in_container(OmegaConf.to_container(self.global_config_dict, resolve=False))
+            )
+        _config_payload(config)
         # The MLflow SDK reads the bearer token from the environment, not from client kwargs.
         # Left unset for unauthenticated servers so no stray Authorization header is sent.
         if self.config.mlflow_tracking_token:
@@ -216,7 +239,7 @@ class MLflowExporter(BaseExporter):
 
     def _log_config(self, config_dict: DictConfig) -> None:
         client, run_id = self._active()
-        container = OmegaConf.to_container(config_dict)
+        container = _config_payload(config_dict)
 
         params = [
             Param(name, str(value)[:MAX_PARAM_VAL_LENGTH])
@@ -332,10 +355,10 @@ class MLflowExporter(BaseExporter):
             for operation in self._pending_operations:
                 operation.wait()
             self._pending_operations.clear()
-            saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath))
-            if self._delivered_config_digest != self._payload_digest(saved_config):
+            saved_config = OmegaConf.load(artifacts.resolved_config_yaml_fpath)
+            if self._delivered_config_digest != self._payload_digest(_config_payload(saved_config)):
                 raise RuntimeError("Delivered configuration differs from the final saved configuration.")
-            if upload != _upload_intent(OmegaConf.create(saved_config)).upload_rollouts:
+            if upload != _upload_intent(saved_config).upload_rollouts:
                 raise RuntimeError("Live upload setting differs from the final saved configuration.")
             if upload:
                 from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
