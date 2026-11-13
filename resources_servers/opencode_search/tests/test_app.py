@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import random
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
+from nemo_gym.verification import JudgeError
 from resources_servers.opencode_search.app import (
     SearchResourcesServer,
     SearchResourcesServerConfig,
@@ -134,12 +137,11 @@ class TestJudgeRetryLadder:
         assert cfg["judge_max_attempts"].default == 4
 
     def test_a_dead_judge_cannot_eat_the_wall(self):
-        """One rollout against a black-hole judge must stay far under a 4h job wall.
+        """The outer ladder alone, counting each attempt as one request, stays far under a 4 h job wall: one attempt
+        at the full timeout, then each retry paying the delay plus the shorter retry timeout, 750 s with the defaults.
 
-        This is the property the ladder exists for. The schedule it replaced (15 attempts at 300s
-        each) burned ~90 min per rollout, so a dead endpoint starved the run of completed rows
-        while every sample still scored. Worst case is one full attempt at the per-attempt
-        timeout, then each retry paying the delay plus the shorter retry timeout.
+        Each attempt is one call_judge, which sends its request up to three times, so a judge that never answers holds
+        a rollout longer than this (test_a_dead_judge_holds_a_rollout_for_every_request_of_every_attempt).
         """
         cfg = SearchResourcesServerConfig.model_fields
         attempts = cfg["judge_max_attempts"].default
@@ -148,6 +150,44 @@ class TestJudgeRetryLadder:
         )
         assert worst_case_s == pytest.approx(750.0)
         assert worst_case_s < 0.25 * 4 * 3600
+
+    async def test_a_dead_judge_holds_a_rollout_for_every_request_of_every_attempt(self, monkeypatch):
+        """Each of the judge_max_attempts attempts is one call_judge, which sends the request up to three times with
+        at most 2 s and then 4 s of backoff: with the defaults, a judge that never answers holds a rollout for
+        2,094 s when Gym's client sends each request once, as the comment on judge_max_attempts says."""
+        server = SearchResourcesServer(
+            config=SearchResourcesServerConfig(
+                host="0.0.0.0",
+                port=0,
+                entrypoint="app.py",
+                name="opencode_search",
+                sandbox_provider="opensandbox",
+                sandbox_config={},
+                sandbox_image="image",
+                judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        timeouts, waits = [], []
+
+        async def post(**kwargs):
+            timeouts.append(kwargs["timeout"].total)
+            raise TimeoutError
+
+        async def sleep(seconds):
+            waits.append(seconds)
+
+        server.server_client.post = post
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+        # Every backoff at its cap.
+        monkeypatch.setattr(random, "uniform", lambda low, high: high)
+
+        with pytest.raises(JudgeError):
+            await server._judge_answer(question="q", ground_truth="a", final_text="an answer")
+
+        assert timeouts == [300.0] * 3 + [120.0] * 9
+        assert waits == [2.0, 4.0, 30.0] * 3 + [2.0, 4.0]
+        assert sum(timeouts) + sum(waits) == pytest.approx(2094.0)
 
     def test_the_dead_judge_breaker_trips_after_25_rollouts_by_default(self):
         """By default verify answers 500 once 25 rollouts in a row are left without a verdict."""
