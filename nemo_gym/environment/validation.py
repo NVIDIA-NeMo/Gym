@@ -862,10 +862,10 @@ def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifes
     """Check that a setup or protocol names a manifest it can belong to.
 
     A setup runs its target's tasks and scoring with another harness or runtime, so both declare the same kind,
-    task datasets, resources server and grading mode. When both build prompts from templates, they also declare the
-    same templates: a harness may add its own instructions, but the benchmark's template is part of its rules. A
-    protocol scores a benchmark's tasks under other rules, so its target is a benchmark's main manifest. Whether a
-    protocol's tasks match is left to review, because a protocol may run its own prepared copy of the data.
+    task datasets or Harbor target, resources server and grading mode. When both build prompts from templates, they
+    also declare the same templates: a harness may add its own instructions, but the benchmark's template is part of
+    its rules. A protocol scores a benchmark's tasks under other rules, so its target is a benchmark's main manifest.
+    Whether a protocol's tasks match is left to review, because a protocol may run its own prepared copy of the data.
     """
     field, target_name = (
         ("setup_of", manifest.setup_of) if manifest.setup_of is not None else ("protocol_of", manifest.protocol_of)
@@ -908,6 +908,11 @@ def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifes
         raise EnvironmentValidationError(
             f"setup_of '{target_name}' runs other task datasets; a config with other tasks is its own environment. "
             f"If you changed a config both manifests use, run `gym env validate --sync` on '{target_name}' first."
+        )
+    if manifest.harbor_target != target.harbor_target:
+        raise EnvironmentValidationError(
+            f"setup_of '{target_name}' runs another Harbor target, '{manifest.harbor_target}' instead of "
+            f"'{target.harbor_target}'; a config with other tasks is its own environment."
         )
     if (manifest.resources_server, manifest.grading_mode) != (target.resources_server, target.grading_mode):
         raise EnvironmentValidationError(

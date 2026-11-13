@@ -1209,6 +1209,29 @@ def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> Non
         validate_environment(setup_path)
 
 
+@pytest.mark.parametrize(("setup_target", "valid"), [("terminal_bench_4", True), ("terminal_bench_2_1", False)])
+def test_a_setup_of_a_harbor_backed_benchmark_runs_the_same_target(
+    setup_target: str, valid: bool, tmp_path: Path
+) -> None:
+    # Neither manifest declares datasets, so the Harbor target is what says which tasks they run.
+    main_path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    setup_path = main_path.parent / "other/manifest.yaml"
+    setup_path.parent.mkdir()
+    config = yaml.safe_load(main_path.with_name("config.yaml").read_text(encoding="utf-8"))
+    config["harbor_target"] = setup_target
+    setup_path.with_name("config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    setup = load_manifest(main_path).model_copy(
+        update={"name": "harbor_demo/other", "setup_of": "harbor_demo", "harbor_target": setup_target}
+    )
+    setup_path.write_text(dump_manifest(setup), encoding="utf-8")
+
+    if valid:
+        assert validate_environment(setup_path).name == "harbor_demo/other"
+    else:
+        with pytest.raises(EnvironmentValidationError, match="another Harbor target"):
+            validate_environment(setup_path)
+
+
 def test_link_outside_a_catalog_directory_is_rejected(tmp_path: Path) -> None:
     manifest = EnvironmentManifest.model_validate(_manifest() | {"name": "standalone", "setup_of": "demo"})
 

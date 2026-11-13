@@ -449,7 +449,7 @@ For named configs, put the manifest in the workload's catalog directory and set 
 
 A named config is often a variant of another workload rather than a workload of its own. Its manifest can say so:
 
-- **`setup_of`:** the config runs the same tasks and scoring as the named manifest, with another harness or runtime. Validation checks that both manifests declare the same kind, task datasets, resources server, and grading mode. When both use `prompt_source: template`, it also checks that they declare the same prompt templates. A harness may add its own instructions, but a different benchmark template makes the config a protocol.
+- **`setup_of`:** the config runs the same tasks and scoring as the named manifest, with another harness or runtime. Validation checks that both manifests declare the same kind, task datasets or `harbor_target`, resources server, and grading mode. When both use `prompt_source: template`, it also checks that they declare the same prompt templates. A harness may add its own instructions, but a different benchmark template makes the config a protocol.
 - **`protocol_of`:** a benchmark config scores the same tasks as the named benchmark under another prompt, tools, or scoring, such as a variant with a system prompt. Validation checks that the named manifest is a benchmark; whether the tasks match is checked in review, because a protocol may prepare its own copy of the data.
 
 `protocol_of` names a benchmark's main manifest. `setup_of` names a main manifest or a protocol, so a protocol can also run under another harness. Neither names a setup. Scores from different protocols are not comparable.
