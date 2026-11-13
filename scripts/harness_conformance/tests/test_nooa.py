@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import _config, check_runtime
-from scripts.harness_conformance.nooa import NOOAProbe, observer_module_name
-from scripts.harness_conformance.provider import ANSWER, Probe
+from scripts.harness_conformance.nooa import observer_module_name
+from scripts.harness_conformance.probes import ANSWER, NOOAProbe, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.core import NeMoGymResponse
