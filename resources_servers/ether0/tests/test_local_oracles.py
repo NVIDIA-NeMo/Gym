@@ -22,10 +22,12 @@ ZINC20_PATH = os.environ.get("ETHER0_ZINC20_BLOOM_PATH")
 
 
 class TestInstallRejectsBadConfiguration:
-    def test_checkpoint_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(local_oracles.MOLTRANS_PATH_ENV_VAR, raising=False)
-        with pytest.raises(ValueError, match="needs the MolTrans checkpoint"):
-            local_oracles.install(None, "zinc20.bloom")
+    def test_download_failure_stops_install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        download = MagicMock(side_effect=RuntimeError("download failed"))
+        monkeypatch.setattr(local_oracles, "ensure_moltrans", download)
+        with pytest.raises(RuntimeError, match="download failed"):
+            local_oracles.install(None, None)
+        download.assert_called_once_with(None)
 
     def test_file_missing(self, tmp_path) -> None:
         checkpoint = tmp_path / "model.pt"

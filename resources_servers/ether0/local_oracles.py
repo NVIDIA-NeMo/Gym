@@ -13,17 +13,17 @@ Two files are needed:
 
 - the MolTrans checkpoint ``USPTO480k_model_step_400000.pt`` (linked from upstream's
   ``packages/remotes/README.md``), from ``moltrans_model_path`` or upstream's
-  ``ETHER0_REMOTES_MOLTRANS_MODEL_PATH``. It is never downloaded here;
+  ``ETHER0_REMOTES_MOLTRANS_MODEL_PATH``, defaulting to the nemo-gym/ether0 cache.
+  Missing checkpoints are downloaded and checksum-verified before loading;
 - the ZINC20 filter ``zinc20.bloom`` (the ``zinc20`` catalog of ``molbloom`` 2.3.4), from
   ``zinc20_bloom_path``. Without a path ``molbloom`` uses ``~/.cache/molbloom``, downloading
   the 2 GB file there on first use.
 
-``install`` fails when a file is missing, when the checkpoint is not the pinned one, or when a
+``install`` fails when a download fails, an explicit bloom file is missing, the checkpoint is not pinned, or a
 model does not answer a control query, so a run cannot start with an oracle that would score
 every answer zero.
 """
 
-import hashlib
 import logging
 import math
 import os
@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from resources_servers.ether0.setup_ether0 import ETHER0_REMOTES_SRC_PATH
+from resources_servers.ether0.setup_moltrans import MOLTRANS_PATH_ENV_VAR, ensure_moltrans
 
 
 logger = logging.getLogger(__name__)
@@ -40,9 +41,7 @@ ORACLE_FUNCTIONS = ("fetch_solubility", "fetch_purchasable", "fetch_forward_rxn"
 # The reward functions that call an oracle, by their name in a row's solution string.
 ORACLE_EVAL_FUNCTIONS = frozenset({"sol_eval", "rxn_forward"})
 REMOTE_ORACLES_ENV_VAR = "ETHER0_REMOTES_API_BASE_URL"
-MOLTRANS_PATH_ENV_VAR = "ETHER0_REMOTES_MOLTRANS_MODEL_PATH"
 
-MOLTRANS_SHA256 = "1b610fee588a9632543605d28423ba589d63447d7921bbee36eac1b8a48de587"  # pragma: allowlist secret
 _MOLTRANS_CONTROL = ("CC(=O)Cl.CCO>>", "CCOC(C)=O")  # acetyl chloride + ethanol -> ethyl acetate
 
 _solubility: Any = None
@@ -95,22 +94,10 @@ def install(moltrans_model_path: str | None, zinc20_bloom_path: str | None) -> N
     """Load the three oracle models, check each with a control query, and rebind them on ``ether0.rewards``."""
     global _solubility, _moltrans
 
-    moltrans_model_path = moltrans_model_path or os.environ.get(MOLTRANS_PATH_ENV_VAR)
-    if not moltrans_model_path:
-        raise ValueError(
-            f"local_oracles needs the MolTrans checkpoint: set moltrans_model_path or {MOLTRANS_PATH_ENV_VAR}, "
-            f"set {REMOTE_ORACLES_ENV_VAR} to use ether0-serve, or set local_oracles to false."
-        )
-    checkpoint = Path(moltrans_model_path)
     bloom = Path(zinc20_bloom_path) if zinc20_bloom_path else None
-    for path in (checkpoint, bloom):
-        if path is not None and not path.is_file():
-            raise FileNotFoundError(f"ether0 oracle file not found: {path}")
-    # The checkpoint is a pickle: check it is the pinned file before torch loads it.
-    with checkpoint.open("rb") as stream:
-        actual = hashlib.file_digest(stream, "sha256").hexdigest()
-    if actual != MOLTRANS_SHA256:
-        raise ValueError(f"{checkpoint} is not the pinned MolTrans checkpoint (sha256 {actual}).")
+    if bloom is not None and not bloom.is_file():
+        raise FileNotFoundError(f"ether0 oracle file not found: {bloom}")
+    checkpoint = ensure_moltrans(moltrans_model_path)
 
     # TensorFlow (solubility) and torch (MolTrans) fail over CUDA libraries when they share a
     # process, and the node's GPUs belong to the model servers: keep this process on CPU.

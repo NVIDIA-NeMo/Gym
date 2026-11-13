@@ -12,17 +12,10 @@
 - Converting IUPAC name to SMILES
 - Answering multiple-choice questions about safety, ADME properties, BBB permeability, toxicity, scent, and pKa
 
-Retro-synthesis and oracle-solubility are graded by three chemistry models (solubility, purchasability, forward reaction). By default the resources server runs them in-process (`local_oracles: true`) and needs:
-
-| File | SHA-256 | Setting |
-| --- | --- | --- |
-| `USPTO480k_model_step_400000.pt` (95 MB, linked from ether0's [`packages/remotes/README.md`](https://github.com/Future-House/ether0/blob/b77e0d8eb06f62c8528da72bff22d4c7fee11371/packages/remotes/README.md)) | `1b610fee588a9632543605d28423ba589d63447d7921bbee36eac1b8a48de587` | `moltrans_model_path`, or `ETHER0_REMOTES_MOLTRANS_MODEL_PATH` |
-| `zinc20.bloom` (2 GB, the `zinc20` catalog of `molbloom` 2.3.4) | `7c6939251f2c86b7ee996faa727478bb6ceeffc675ab27f7f7e3a181a288b766` | `zinc20_bloom_path`; if unset, `molbloom` downloads it to `~/.cache/molbloom` |
-
-The server refuses to start if the checkpoint is missing or does not match the checksum, or if a model fails its control query. Alternatives:
-
-- set `ETHER0_REMOTES_API_BASE_URL` to a running `ether0-serve` (see the [ether0 repo](https://github.com/Future-House/ether0/)); the local oracles are then not loaded;
-- set `local_oracles: false`; with no remote either, those rows are returned with `mask_sample=true` instead of a reward of zero.
+Retro-synthesis and oracle-solubility are graded by three chemistry models running in-process
+(`local_oracles: true`). Missing MolTrans checkpoints and the default ZINC20 catalog download
+on first use. See the [resources server setup](../../resources_servers/ether0/README.md)
+for cache locations, pinned checksums, path overrides, offline setup, and remote-oracle options.
 
 ## Quickstart 
 
