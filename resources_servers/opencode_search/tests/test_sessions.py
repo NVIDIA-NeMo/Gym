@@ -1901,3 +1901,17 @@ def test_an_agent_run_reseed_whose_stop_fails_is_refused_and_keeps_the_first_san
     assert refused.status_code == 500, refused.text
     assert stop.await_count == 1 and len(started) == 1
     assert server._agent_run_sandboxes == {session_id: started[0][0]}
+
+
+def test_an_episode_seed_cannot_take_over_an_agent_run_session(workdir, started, stopped) -> None:
+    """The converse of an agent run's seed refused over an episode session: the run keeps its sandbox."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_row()).status_code == 200
+    (cookie_session,) = server._agent_run_sandboxes
+    client.cookies.clear()
+
+    refused = client.post("/seed_session", json=_seed(cookie_session))
+
+    assert refused.status_code == 409, refused.text
+    assert len(started) == 1 and stopped == [] and server.has_session_state(cookie_session)
