@@ -249,7 +249,7 @@ Tradeoffs of LLM judges include extra latency and cost, non-determinism unless y
 
 - **Policy model:** the model being trained/evaluated to produce task outputs.
 - **Judge model:** a second model used inside `verify()` for scoring.
-- **Resources server:** the environment server that manages state, executes tools, formats tool results into messages for the model, and runs verification to produce a reward.
+- **Resources Server:** the server that manages state, executes tools, formats tool results into messages for the model, and runs verification to produce a reward.
 - **Verifier metadata:** task-specific fields passed from JSONL into `verify()`.
 - **Internal judge call:** call to a configured NeMo Gym model server through `/v1/responses`.
 - **External judge call:** direct OpenAI-compatible call (often `/v1/chat/completions`) to another endpoint.

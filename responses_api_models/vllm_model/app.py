@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Literal, Opti
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from multidict import CIMultiDict
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
@@ -36,6 +37,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
+    MODEL_SAMPLING_HEADER,
+    MODEL_SAMPLING_NULL,
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
     FailureHeader,
@@ -46,8 +49,11 @@ from nemo_gym.core import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
+    current_session_key,
     failure_report_for,
+    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -58,11 +64,14 @@ from nemo_gym.models import (
     SimpleResponsesAPIModel,
     VLLMConverter,  # noqa: F401  # re-exported for importers of this module
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
+    add_dynamo_gym_extras,
     context_overflow_error_fields,
     is_propagated_refusal,
     make_external_capture_handler,
     note_generation_backend,
     note_generation_request,
+    pop_dynamo_call_result,
+    split_dynamo_capture_refusal,
     split_responses_input_output_items,  # noqa: F401
     start_model_execution,
     validate_framework_context_options,
@@ -72,6 +81,7 @@ from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    TOKEN_FIELDS,
     CaptureAdmissionError,
     CaptureContext,
     CaptureInputError,
@@ -156,6 +166,9 @@ _UNSUPPORTED_VALUE_PATTERNS = (
 )
 # The error category recorded for such a refusal; the acceptance gate types it as ``invalid_request_parameter``.
 INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
+# Request fields that choose what the engine reports about the tokens it samples, not how it samples them. A trained
+# agent's Model Server may pin these: NeMo RL's score centering pins logprobs and top_logprobs on its policy's server.
+_REPORTING_ONLY_SAMPLING_OVERRIDES = frozenset({"logprobs", "top_logprobs"})
 
 
 def _names_context_window(message: str) -> bool:
@@ -170,6 +183,25 @@ def _names_context_window(message: str) -> bool:
     if isinstance(payload, dict):
         payload = payload.get("error", payload)
     return isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error"
+
+
+def _lift_dynamo_capture_refusal(error: ClientResponseError) -> None:
+    """Move the Dynamo frontend's refusal acknowledgement off the error message onto ``CAPTURE_REFUSAL_HEADER``.
+
+    The error then reads as the native server's: the acknowledgement in its header, the engine's own message.
+    """
+    try:
+        body = json.loads(getattr(error, "response_content", b"") or b"")
+    except ValueError:
+        return
+    if not isinstance(body, dict) or not isinstance(body.get("message"), str):
+        return
+    message, model_call_id = split_dynamo_capture_refusal(body["message"])
+    if model_call_id is None:
+        return
+    error.response_content = json.dumps({**body, "message": message}).encode()
+    error.headers = CIMultiDict(error.headers or {})
+    error.headers[CAPTURE_REFUSAL_HEADER] = model_call_id
 
 
 def _is_context_length_error(error: ClientResponseError) -> bool:
@@ -229,6 +261,10 @@ _REFIT_MARGIN_TOKENS = 16
 # ``max_tokens``, and /v1/completions has only ``max_tokens``.
 _CHAT_BUDGET_KEYS = ("max_completion_tokens", "max_tokens")
 _COMPLETIONS_BUDGET_KEYS = ("max_tokens",)
+# Every name an output budget can take: the Chat names, then the one the Responses API reads.
+_OUTPUT_BUDGET_KEYS = (*_CHAT_BUDGET_KEYS, "max_output_tokens")
+# The name each endpoint other than Chat reads its output budget under.
+_OUTPUT_BUDGET_KEY_BY_API = {"completions": "max_tokens", "responses": "max_output_tokens"}
 
 
 def _effective_budget_key(outbound: Dict[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -317,6 +353,36 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
     if isinstance(identity, dict):
         context.update({key: identity[key] for key in ("rollout_id", "model_call_id")})
     return context
+
+
+def _log_web_completion(response: dict[str, Any], context: dict[str, Any]) -> None:
+    """Retain upstream stop diagnostics without logging model text or images."""
+
+    if context.get("adapter") != "web_agent":
+        return
+    choices = response.get("choices") or []
+    if not choices:
+        return
+    choice = choices[0]
+    message = choice.get("message") or {}
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    usage = response.get("usage") or {}
+    LOG.info(
+        "event=web_upstream_completion task=%s step=%s parse_attempt=%s response_id=%s "
+        "finish_reason=%s stop_reason=%r tool_calls=%d reasoning_tool_markup=%s "
+        "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+        context.get("task_id", "unknown"),
+        context.get("step"),
+        context.get("parse_attempt"),
+        response.get("id"),
+        choice.get("finish_reason"),
+        choice.get("stop_reason"),
+        len(message.get("tool_calls") or []),
+        "<tool_call>" in reasoning or "<function=" in reasoning,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -482,6 +548,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    # Speak the dialect of a Dynamo frontend (ai-dynamo >= 1.5.1) that runs NeMo RL's chat engine. The frontend
+    # rejects unknown request fields and drops unknown response fields, so NeMo RL's fields ride in `nvext` under
+    # their native names: one `nemo_rl:gym:<JSON object>` entry in every request's `nvext.annotations`, and the
+    # `nvext.nemo_rl` object on the response, lifted to where the native server puts each field. Echoed
+    # per-message token fields are stripped from requests, and `/context/measure` measures through a chat call,
+    # as the frontend has no `/tokenize`. Token capture with external staging requires
+    # `token_id_capture.external_staging_backend: dynamo_worker`.
+    dynamo_frontend: bool = False
     propagate_context_overflow_errors: bool = False
     refit_output_budget_to_window: bool = Field(
         default=True,
@@ -491,10 +565,26 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
             "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
             "records `requested_max_tokens` and `applied_max_tokens` and an `output_budget_refit` event with the "
-            "window, which the gate's facts count. A budget within the window is never changed: "
+            "window, which the gate's facts count. A budget within the window is not changed by this setting: "
             "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
-            "(or empty completion), so a harness that compacts its history still gets the cue. A prompt that leaves "
+            "(or empty completion), so a harness that compacts its history still gets the cue; "
+            "`refit_output_budget_to_prompt` opts in to lowering that budget too. A prompt that leaves "
             "no output token keeps the refusal too. Turn it off to keep every length refusal."
+        ),
+    )
+    refit_output_budget_to_prompt: bool = Field(
+        default=False,
+        description=(
+            "Opt in to the same single resend for the other length refusal: the requested output budget fits the "
+            "context window by itself, but the prompt and that budget together overflow it. The call is sent once "
+            "more with the budget lowered to the window minus the prompt minus the same small margin, so the model "
+            "answers with what the window leaves instead of the call ending on an empty `length` completion once the "
+            "prompt passes the window minus the budget. The prompt length and the capture are those of "
+            "`refit_output_budget_to_window`, whose setting does not matter here. A prompt that alone fills the "
+            "window leaves no output token and keeps the `context_length_exceeded` refusal, as does any refusal that "
+            "names no window. Off by default: with it off a prompt and budget that overflow together always keep the "
+            "refusal, which is the cue a harness that compacts its history relies on. Enable it for a benchmark whose "
+            "agent does not compact and whose output budget is large against the window."
         ),
     )
 
@@ -540,8 +630,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     forward_unvalidated_reasoning_effort: bool = Field(
         default=False,
         description=(
-            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list (for example "
-            "`max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat "
+            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list "
+            "verbatim as the chat "
             "`reasoning_effort`, instead of refusing the request with 422. The engine validates the value. "
             "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false` and "
             "`use_completions_api: false`."
@@ -608,6 +698,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_key_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the current session key to the engine endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "observability_enabled or token capture."
+        ),
+    )
 
     # Optional path to a file that publishes the current backend base_url.
     # Used for shared serving jobs that move hosts when they restart.
@@ -663,9 +761,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
         if self.is_responses_native:
+            # stream_keepalive_s is also refused by setup_webserver, but only after a local engine has started.
             for option in (
                 "forward_unvalidated_reasoning_effort",
                 "inline_tool_output_images",
+                "stream_keepalive_s",
             ):
                 if getattr(self, option):
                     raise ValueError(
@@ -675,6 +775,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
                 "reasoning_effort, so the effort would be dropped"
+            )
+        if self.inline_tool_output_images and self.use_completions_api:
+            raise ValueError(
+                "inline_tool_output_images requires use_completions_api=false: /v1/completions takes text-only "
+                "messages, so every inlined image would be refused"
             )
         return self
 
@@ -696,6 +801,40 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "native Responses route forwards requests without the Responses-to-Chat conversion that "
                 "implements the bridge, and vLLM's native route renders function tools only, so a custom "
                 "tool would be accepted but never shown to the model."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dynamo_frontend(self) -> "VLLMModelConfig":
+        # The dialect covers only the chat completions call; the frontend rejects required_prefix_token_ids,
+        # and neither return_token_ids (sent for request_prompt_and_generation_token_ids) nor conversation_params
+        # (sent for forward_session_id_as_conversation_id) is a field it accepts.
+        if self.dynamo_frontend and (
+            self.use_completions_api
+            or self.is_responses_native
+            or self.supply_prefix_token_ids
+            or self.request_prompt_and_generation_token_ids
+            or self.forward_session_id_as_conversation_id
+        ):
+            raise ValueError(
+                "dynamo_frontend is not supported with use_completions_api, is_responses_native, "
+                "supply_prefix_token_ids, request_prompt_and_generation_token_ids (the frontend rejects "
+                "the return_token_ids field it sends), or forward_session_id_as_conversation_id (the frontend "
+                "rejects the conversation_params field it sends)"
+            )
+        # The frontend reads `reasoning` as an alias of `reasoning_content` and rejects a message that carries
+        # both (`400 duplicate field 'reasoning'`). Only a server that replays reasoning onto assistant messages
+        # writes both. Checked after validation, so the NEMO_GYM_REASONING_FIELD default is covered too.
+        if (
+            self.dynamo_frontend
+            and self.uses_reasoning_parser
+            and self.uses_interleaved_reasoning
+            and not self.preserve_reasoning_in_assistant_content
+            and self.reasoning_field == "both"
+        ):
+            raise ValueError(
+                "dynamo_frontend needs reasoning_field: reasoning_content; with 'both' (from config or "
+                "NEMO_GYM_REASONING_FIELD), every echoed reasoning turn fails with 400 duplicate field 'reasoning'"
             )
         return self
 
@@ -789,6 +928,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     async def _propagate_context_refusal(self, error: ClientResponseError) -> bool:
         """Preserve length errors in framework mode; settle only worker-acknowledged refusals."""
+        if self.config.dynamo_frontend:
+            _lift_dynamo_capture_refusal(error)
         context = current_capture_context()
         source_history = context is not None and context.parent_resolution_mode == "source_history"
         if (
@@ -819,15 +960,21 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> bool:
         """Lower ``outbound``'s output budget, in place, to what the window the refusal names leaves after the prompt.
 
-        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. Only a budget
-        that by itself exceeds the window is lowered, the refusal ``_length_refusal_category`` calls
-        ``invalid_output_token_parameter``. Nothing changes when the setting is off, when ``error`` is not a length
-        refusal naming the window, when the call has no budget, when the budget fits the window (prompt and budget
-        together overflowing stays a ``context_length_exceeded`` refusal, the cue for a harness to compact), or when
-        the window minus the prompt minus the margin leaves no output token. Calls admitted by an external capture worker are left alone: the worker has
-        settled the refused call, so a second send under the same call id is not this server's to make.
+        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. A budget that by
+        itself exceeds the window, the refusal ``_length_refusal_category`` calls ``invalid_output_token_parameter``, is
+        lowered when ``refit_output_budget_to_window`` is on. A budget that fits the window while the prompt and the
+        budget together overflow it is lowered only when ``refit_output_budget_to_prompt`` is on; with it off the call
+        keeps the ``context_length_exceeded`` refusal, the cue for a harness to compact. Nothing changes when the
+        setting for the refusal's case is off, when ``error`` is not a length refusal naming the window, when the call
+        has no budget, when the window minus the prompt minus the margin leaves no output token (a prompt that alone
+        fills the window), or when the lowered budget would not be lower. Calls admitted by an external capture worker
+        are left alone: the worker has settled the refused call, so a second send under the same call id is not this
+        server's to make. Through a Dynamo frontend, which has no ``/tokenize``, a refusal that states no prompt length
+        is left alone too.
         """
-        if not self.config.refit_output_budget_to_window or not _is_context_length_error(error):
+        if not (
+            self.config.refit_output_budget_to_window or self.config.refit_output_budget_to_prompt
+        ) or not _is_context_length_error(error):
             return False
         context = current_capture_context()
         if context is not None and context.external_staging:
@@ -836,15 +983,25 @@ class VLLMModel(SimpleResponsesAPIModel):
         budget = None if key is None else outbound[key]
         message, _, _ = context_overflow_error_fields(error)
         window = _CONTEXT_WINDOW_SIZE.search(message)
-        if type(budget) is not int or window is None or budget <= int(window.group(1)):
+        if type(budget) is not int or window is None:
+            return False
+        if not (
+            self.config.refit_output_budget_to_window
+            if budget > int(window.group(1))
+            else self.config.refit_output_budget_to_prompt
+        ):
             return False
         prompt_tokens = _stated_prompt_tokens(message)
         if prompt_tokens is None:
+            if self.config.dynamo_frontend:
+                # The frontend has no /tokenize. NeMo RL's chat engine lowers a budget that does not fit and
+                # refuses only a prompt that fills the window, which no count would refit.
+                return False
             prompt_tokens = await self._count_prompt_tokens(client, tokenize_body())
             if prompt_tokens is None:
                 return False
         applied = int(window.group(1)) - prompt_tokens - _REFIT_MARGIN_TOKENS
-        if applied < 1:
+        if applied < 1 or applied >= budget:
             return False
         outbound[key] = applied
         execution.update(
@@ -931,7 +1088,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                 processed = await self._prepare_chat_request(request, chat)
             except (ValueError, NotImplementedError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
-            result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
+            if self.config.dynamo_frontend:
+                # The Dynamo frontend has no /tokenize, so NeMo RL's chat engine measures the chat call:
+                # `ng_measure` asks it for the prompt length only, returned in nvext.nemo_rl.
+                add_dynamo_gym_extras(processed, {"ng_measure": True})
+                response = await client.create_chat_completion(
+                    _headers=self._external_capture_handler.request_headers(), **processed
+                )
+                result = pop_dynamo_call_result(response) or {}
+            else:
+                result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
         finally:
             reset_token_sink(token)
         count = result.get("prompt_token_count")
@@ -960,19 +1126,46 @@ class VLLMModel(SimpleResponsesAPIModel):
             body = _set_aside_unlisted_reasoning_effort(request, body)
         return await super().responses_dispatch(request, body)
 
+    def _sampling_pins(self) -> List[str]:
+        """The ``sampling_overrides`` fields that change how the engine samples."""
+        return sorted(set(self.config.sampling_overrides or {}) - _REPORTING_ONLY_SAMPLING_OVERRIDES)
+
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
+            sampling_config = model_call_sampling_config(getattr(self.server_client, "global_config_dict", None))
+            pins = self._sampling_pins()
+            if pins and sampling_config is not None and self.config.name in sampling_config.required_model_servers:
+                raise ValueError(
+                    f"Model Server {self.config.name!r} serves an agent that the training framework trains, so it "
+                    f"cannot set sampling_overrides {pins}: that agent samples with the framework's values."
+                )
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
                 self.config.name,
                 self.config.sampling_overrides,
             )
+            pinned_limits = [
+                (key, self.config.sampling_overrides[key])
+                for key in _OUTPUT_BUDGET_KEYS
+                if key in self.config.sampling_overrides
+            ]
+            if any(value != pinned_limits[0][1] for _, value in pinned_limits[1:]):
+                LOG.warning(
+                    "`%s` pins the output-token limit to different values under different names %s; "
+                    "every endpoint sends %s=%s",
+                    self.config.name,
+                    dict(pinned_limits),
+                    *pinned_limits[0],
+                )
 
         self._clients = [
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
+                session_key_headers=self.config.session_key_headers,
                 max_connection_retries=(
                     self.config.endpoint_connection_retries
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
@@ -1021,9 +1214,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "token_id_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
-            self._external_capture_handler = make_external_capture_handler(
-                capture_config.token_id_capture.external_staging_backend
-            )
+            backend = capture_config.token_id_capture.external_staging_backend
+            # The capture block is global, so judges see dynamo_worker too; only a dialect server must match it.
+            if self.config.dynamo_frontend and backend != "dynamo_worker":
+                raise ValueError(
+                    f"`{self.config.name}` sets dynamo_frontend=true, which needs "
+                    "token_id_capture.external_staging_backend=dynamo_worker"
+                )
+            self._external_capture_handler = make_external_capture_handler(backend)
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -1109,7 +1307,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
 
-    def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_sampling_overrides(
+        self, body_dict: Dict[str, Any], *, api: Literal["chat", "completions", "responses"]
+    ) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
 
         Applied last at every site that builds a request for the engine, so the pinned values win
@@ -1117,9 +1317,36 @@ class VLLMModel(SimpleResponsesAPIModel):
         the client sent nothing. Every path has to call this: a harness picks its own endpoint, and
         a pin that covers only one of them yields off-policy generation while reporting that
         sampling is pinned.
+
+        A pinned output-token limit replaces the request's limit under every name and is sent under
+        the name the ``api`` endpoint reads. Otherwise a request that names the limit differently
+        from the pin reaches the engine with both, and the engine may read the request's. A pin that
+        names the limit more than once sends the value of the first name in ``_OUTPUT_BUDGET_KEYS``
+        order on every endpoint, so one config caps a run alike whichever endpoint serves it.
         """
-        if self.config.sampling_overrides:
-            body_dict.update(self.config.sampling_overrides)
+        if not self.config.sampling_overrides:
+            return body_dict
+        pins = self._sampling_pins()
+        if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+            # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
+                "training framework's values for an agent it trains, which must sample with them. Remove them "
+                "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
+                "Model Server of its own.",
+            )
+        overrides = dict(self.config.sampling_overrides)
+        pinned_limits = {key: overrides.pop(key) for key in _OUTPUT_BUDGET_KEYS if key in overrides}
+        body_dict.update(overrides)
+        if pinned_limits:
+            for key in _OUTPUT_BUDGET_KEYS:
+                body_dict.pop(key, None)
+            if api == "chat":
+                limit_key = next((key for key in _CHAT_BUDGET_KEYS if key in pinned_limits), "max_tokens")
+            else:
+                limit_key = _OUTPUT_BUDGET_KEY_BY_API[api]
+            body_dict[limit_key] = next(iter(pinned_limits.values()))
         return body_dict
 
     async def _responses_native(
@@ -1145,7 +1372,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
-        self._apply_sampling_overrides(body_dict)
+        self._apply_sampling_overrides(body_dict, api="responses")
 
         note_generation_request(body_dict)
         client = self._resolve_client(request)
@@ -1386,18 +1613,32 @@ class VLLMModel(SimpleResponsesAPIModel):
                     raise NotImplementedError
 
         if extra_body:
+            if _effective_budget_key(body_dict, _CHAT_BUDGET_KEYS) is not None:
+                # The request body's limit wins under either name. An extra_body limit under the other
+                # name would otherwise reach the engine too, and vLLM reads max_completion_tokens first.
+                extra_body = {key: value for key, value in extra_body.items() if key not in _CHAT_BUDGET_KEYS}
             body_dict = extra_body | body_dict
 
         self._splice_audio_from_metadata(body_dict, metadata)
 
-        self._apply_sampling_overrides(body_dict)
+        self._apply_sampling_overrides(body_dict, api="chat")
         self._validate_single_choice_token_request(body_dict)
         if self._external_capture_handler is not None:
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+        if self.config.dynamo_frontend:
+            self._prepare_dynamo_request(body_dict)
 
-        if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
+        # A Dynamo capture call carries its admission in the annotation, not as a top-level ng_capture.
+        capture = current_capture_context()
+        captured = body_dict.get("ng_capture") or (
+            self.config.dynamo_frontend
+            and capture is not None
+            and capture.external_staging
+            and capture.capture_admission is not None
+        )
+        if captured and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
             # vLLM ignores top_logprobs when specific IDs are requested. Equal
             # counts do not guarantee those IDs are the sampler's top-k head.
             raise HTTPException(
@@ -1414,6 +1655,46 @@ class VLLMModel(SimpleResponsesAPIModel):
                 body_dict.pop("top_logprobs", None)
 
         return body_dict
+
+    def _prepare_dynamo_request(self, body_dict: Dict[str, Any]) -> None:
+        """Fit a chat request to the Dynamo frontend, which rejects unknown top-level fields.
+
+        Every request carries the ``nemo_rl:gym:`` annotation. Without capture, it holds the last echoed
+        turn's tokens as ``required_prefix_token_ids``, which NeMo RL's native server derives from the
+        messages itself. A capture call resolves its prefix from staging, and the capture handler has
+        already added its ``ng_capture``. The echoed token fields, which the frontend also rejects, are
+        then stripped from the messages.
+        """
+        extras = {}
+        if self._external_capture_handler is None:
+            for message_dict in reversed(body_dict.get("messages") or []):
+                if "prompt_token_ids" in message_dict:
+                    extras["required_prefix_token_ids"] = (
+                        message_dict["prompt_token_ids"] + message_dict["generation_token_ids"]
+                    )
+                    break
+        add_dynamo_gym_extras(body_dict, extras)
+        for message_dict in body_dict.get("messages") or []:
+            for field_name in TOKEN_FIELDS:
+                message_dict.pop(field_name, None)
+
+    def _lift_dynamo_call_result(self, chat_completion_dict: Dict[str, Any]) -> None:
+        """Move the engine's ``nvext.nemo_rl`` token fields onto the message, where the native server puts them.
+
+        ``routed_experts`` comes along when router replay is on. The token-information path below then
+        validates the fields as it does the native server's, including the log probability count.
+        """
+        result = pop_dynamo_call_result(chat_completion_dict)
+        if not self.config.return_token_id_information:
+            return
+        if result is None:
+            raise RuntimeError(f"`{self.config.name}` got a Dynamo response without nvext.nemo_rl.")
+        missing = REQUIRED_TOKEN_METADATA_FIELDS.difference(result)
+        if missing:
+            raise RuntimeError(f"`{self.config.name}` got Dynamo nvext.nemo_rl without: {', '.join(sorted(missing))}.")
+        chat_completion_dict["choices"][0]["message"].update(
+            {field: result[field] for field in TOKEN_METADATA_FIELDS.intersection(result)}
+        )
 
     def _splice_audio_from_metadata(self, body_dict: Dict[str, Any], metadata: Dict[str, Any]) -> None:
         """Move audio metadata into content blocks on the most recent user message."""
@@ -1667,13 +1948,22 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        extra_headers = (
+            self._external_capture_handler.request_headers() if self._external_capture_handler is not None else {}
+        )
         execution["upstream_attempted"] = True
         context = current_capture_context()
-        transport_options = (
+        transport_options: dict[str, Any] = (
             {"_resend_after_disconnect": False}
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        if current_model_sampling_segment() == MODEL_SAMPLING_NULL:
+            # A training framework's generation server holds every call to its training sampling, except the calls
+            # of agents it does not train, which keep their own.
+            transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
+        if extra_headers:
+            transport_options["_headers"] = {**transport_options.get("_headers", {}), **extra_headers}
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(
@@ -1783,6 +2073,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        _log_web_completion(chat_completion_dict, log_context)
         # An aborted request is an infrastructure failure, not a token-limit
         # completion. Failing before conversion prevents grading partial text;
         # the rollout collector can retain the failure for retry on resume.
@@ -1824,6 +2115,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self._external_capture_handler is not None:
             self._external_capture_handler.prepare_response(chat_completion_dict)
+        elif self.config.dynamo_frontend:
+            self._lift_dynamo_call_result(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -2306,6 +2599,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         # request-level fields.
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
+            # /v1/completions reads only max_tokens and ignores max_completion_tokens, falling back to
+            # its own default of 16 tokens. Rename a chat-spelled default so it applies. A request
+            # limit still wins, because the request body is merged over the defaults.
+            default_limit = extra_body.pop("max_completion_tokens", None)
+            if default_limit is not None:
+                extra_body.setdefault("max_tokens", default_limit)
+            if out.get("max_tokens") is None:
+                # A null request limit is unset; /v1/completions would turn it into its 16-token default.
+                out.pop("max_tokens", None)
             out = extra_body | out
 
         if self.config.return_token_id_information:
@@ -2318,7 +2620,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         # chat_completions() branches here before preprocessing, so the pin has to be applied again.
         # vLLM accepts the same sampling field names on /v1/completions, and the body is forwarded as raw JSON,
         # so params without a first-class OpenAI completion field (top_k, min_p) pass through.
-        return self._apply_sampling_overrides(out)
+        return self._apply_sampling_overrides(out, api="completions")
 
     def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
         """Wrap a /v1/completions response as a NeMoGymChatCompletion.
@@ -2383,6 +2685,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         }
 
+        if choice_dict.get("stop_reason") is not None:
+            chat_completion_dict["choices"][0]["stop_reason"] = choice_dict["stop_reason"]
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
         if completion_dict.get("metrics") is not None:
@@ -2462,7 +2766,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=url,
                 api_key=self.config.api_key,
+                # The inference engine is not a NeMo Gym server, so its retries stay bounded.
+                internal=False,
                 default_headers=self.config.default_headers,
+                session_key_headers=self.config.session_key_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
@@ -2498,10 +2805,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # Route by session when the call carries a rollout: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
-        # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        # collect them. Keying on the session keeps its turns on one endpoint. This is the same key
+        # the outbound session header carries, so an upstream router and this server agree.
+        session_id = current_session_key() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)

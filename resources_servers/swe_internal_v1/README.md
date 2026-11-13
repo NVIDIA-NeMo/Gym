@@ -61,7 +61,7 @@ Grades each task with the dataset's own patch, which measures the dataset rather
 
 ```bash
 gym env start \
-  --config resources_servers/swe_internal_v1/configs/swe_internal_v1.yaml \
+  --config resources_servers/swe_internal_v1/configs/swe_internal_v1_legacy_agent.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/swe_internal_v1/apply_golden_patch.py \
@@ -77,6 +77,15 @@ A row is supported when its golden patch resolved in every pass of a 3x sweep; t
 holds only those rows.
 
 ## Running an agent
+
+`configs/swe_internal_v1.yaml` is the default OpenCode session pairing for the example taskset.
+The resources-only configuration is now `configs/swe_internal_v1_legacy_agent.yaml`; use it for
+golden-patch validation. `configs/swe_internal_v1_opencode.yaml` retains the legacy relay pairing
+for the training dataset.
+
+```bash
+gym env start --config resources_servers/swe_internal_v1/configs/swe_internal_v1.yaml
+```
 
 ```bash
 gym env start --config resources_servers/swe_internal_v1/configs/swe_internal_v1_opencode.yaml
