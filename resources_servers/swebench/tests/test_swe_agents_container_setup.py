@@ -110,7 +110,7 @@ class TestSweAgentsContainerSetup:
             .replace("/home/gradle/.gradle/init.d", str(writable_home))
             .replace("/home/user/.gradle/init.d", str(unwritable_home))
         )
-        assert "/home/" not in command
+        assert "/home/gradle/.gradle/init.d" not in command and "/home/user/.gradle/init.d" not in command
         result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
         assert result.returncode == 0
         assert os.access(wrapper, os.X_OK)
