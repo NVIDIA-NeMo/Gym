@@ -1182,7 +1182,8 @@ def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, pass
 
 
 def compacted_events() -> str:
-    """events() with an automatic compaction before the final answer, in the message shapes OpenCode 1.17.11 saves."""
+    """events() with an automatic compaction before the final answer, in the message shapes OpenCode 1.17.11 saves.
+    Every message's info is also in usage_messages, as in the export opencode_agent writes, which usage counts from."""
     prompt, answer = json.loads(events())["messages"]
     summary = {
         "info": {
@@ -1195,7 +1196,8 @@ def compacted_events() -> str:
         },
         "parts": [{"type": "text", "text": "Summary of the work so far"}],
     }
-    return json.dumps({"messages": [prompt, _compaction(), summary, _CONTINUE, answer]})
+    messages = [prompt, _compaction(), summary, _CONTINUE, answer]
+    return json.dumps({"messages": messages, "usage_messages": [message["info"] for message in messages]})
 
 
 @pytest.mark.parametrize("exclude", [False, True])
