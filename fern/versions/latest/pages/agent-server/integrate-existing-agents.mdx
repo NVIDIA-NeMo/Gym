@@ -312,6 +312,13 @@ an owned or borrowed sandbox. Opt in during `/v1/agent_sessions` seed with
 `continuation: {mode: resume_harness_session}`. Existing adapters reject continuation
 requirements they cannot satisfy before preparing the sandbox.
 
+Pi also resumes its saved session across activations, in a sandbox session. Pi does not report a
+`trajectory`, which the default requirements include, so a Pi seed names the observations it requires
+from the ones Pi reports:
+`continuation: {mode: resume_harness_session, observations: [timing, harness_tool_calls, reasoning, compaction]}`.
+A seed that requires `trajectory` is refused. For how Pi carries its system prompt and images across
+activations, see the [Pi agent README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/pi_agent/README.md#multi-turn-continuation).
+
 Use the existing `/v1/responses` request body and session cookie. Send
 `x-ng-agent-activation: 1` for the first input delta, `2` for the next, and so on.
 Identical requests at the same index replay the original response. Conflicting

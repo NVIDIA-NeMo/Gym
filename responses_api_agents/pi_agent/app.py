@@ -23,6 +23,7 @@ import shlex
 import shutil
 from asyncio import Semaphore
 from collections.abc import Mapping, Sequence
+from contextlib import AsyncExitStack
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, ClassVar, Literal, Optional
@@ -36,6 +37,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
@@ -89,7 +91,7 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.pi_agent.sandbox import PiSandboxSession
+from responses_api_agents.pi_agent.sandbox import PiSandboxSession, interrupted_outcome
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
 
@@ -589,6 +591,19 @@ def _build_pi_observations(
     )
 
 
+def _set_invocation_outcome(
+    observations: AgentObservationBundle, *, status: str | None, error_type: str | None, duration_ms: float | None
+) -> None:
+    """Set how the activation's root invocation ended; a None status keeps the one Pi's events gave."""
+    for record in observations.records:
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+            if status is not None:
+                record.status = status
+            record.error_type = error_type
+            if duration_ms is not None:
+                record.duration_ms = duration_ms
+
+
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     """Return (user_message, system_message) from a responses body input list."""
     items = list(body_input)
@@ -722,7 +737,7 @@ class PiAgentVerifyResponse(BaseVerifyResponse):
 
 
 class PiAgent(SimpleResponsesAPIAgent):
-    """Runs the pi CLI (pi --print --mode json --no-session)"""
+    """Runs the pi CLI (pi --print --mode json)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Pi 0.80.2's terminal assistant error; tested on that pinned version."""
@@ -826,6 +841,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Pi"
             ),
             runtime=runtime,
+            directory=directory,
         )
         try:
             if owns_sandbox:
@@ -903,6 +919,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations
             or AgentObservationBundle(source="pi", gaps=[ObservationGap(code="observation_capture_failed")]),
+            cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
 
     def _validate_request(
@@ -989,16 +1006,23 @@ class PiAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
         media: Sequence[MediaFile] = (),
+        timeout: float | None = None,
+        deadline: float | None = None,
     ) -> NeMoGymResponse:
+        """Run one activation; a continuation passes the deadline it set before preparing the activation."""
         # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
+        # Calls go to the episode's rollout route; the header Pi sends correlates each with this activation.
+        models["providers"]["nemo"]["headers"] = {"x-session-id": state.invocation_id}
         # Without image input on the model, Pi leaves images out of model requests, including images its read tool
         # returns, which it replaces with an "omitted" note. A text-only deployment rejects requests that carry an
-        # image, so image input is declared only for a prompt with images or when the configuration asks for it.
-        if media or self.config.image_input:
+        # image, so image input is declared only for a session with prompt images or when the configuration asks
+        # for it. A continued session keeps earlier turns' images in its saved conversation, so it stays declared.
+        state.has_prompt_images = state.has_prompt_images or bool(media)
+        if state.has_prompt_images or self.config.image_input:
             for model in models["providers"]["nemo"]["models"]:
                 model["input"] = ["text", "image"]
         # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
@@ -1028,14 +1052,22 @@ class PiAgent(SimpleResponsesAPIAgent):
             files["mcp-servers.json"] = json.dumps(mcp_servers)
             mcp_extension = ["--extension", f"{state.session.session_dir}/gym_mcp.mjs"]
             mcp_env["NEMO_GYM_PI_MCP_CONFIG"] = f"{state.session.session_dir}/mcp-servers.json"
-        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        if timeout is None:
+            timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
             "--print",
             "--mode",
             "json",
-            "--no-session",
+            # A continuation session saves the conversation, images included, under this ID, and a later
+            # activation resumes it. A one-activation session never resumes, so it saves nothing: the saved
+            # conversation would hold another copy of every image under the session directory.
+            *(
+                ["--session-dir", state.pi_session_directory, "--session-id", state.harness_session_id]
+                if state.is_continuation
+                else ["--no-session"]
+            ),
             "--provider",
             "nemo",
             "--model",
@@ -1073,7 +1105,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             **mcp_env,
         }
         try:
-            async with self.sem:
+            async with AsyncExitStack() as stack:
+                # A continuation's wait for a runner slot spends its activation's budget. Only the wait is bounded
+                # here: the run has its own deadline, and finalizing it has its own cleanup bound.
+                async with asyncio.timeout_at(deadline):
+                    await stack.enter_async_context(self.sem)
                 try:
                     # Staging spends the activation's budget; Pi runs for what remains.
                     raw = await state.execute(
@@ -1084,7 +1120,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                         timeout=timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
                         files=files,
-                        deadline=monotonic() + timeout,
+                        deadline=deadline if deadline is not None else monotonic() + timeout,
                     )
                 except TimeoutError:
                     # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
@@ -1107,28 +1143,25 @@ class PiAgent(SimpleResponsesAPIAgent):
             conversation = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
             conversation.append(NeMoGymEasyInputMessage(role="user", content=prompt))
             try:
-                state.observations = _build_pi_observations(
-                    events,
-                    state.request.episode_id.capture_key,
-                    self.config.model_server,
-                    [*conversation, *output],
-                    transcript_available=bool(output),
-                    capture_correlated=True,
+                observations = self._activation_observations(
+                    state, events, [*conversation, *output], transcript_available=bool(output)
                 )
             except Exception:
                 LOG.exception("failed to build interrupted Pi observations")
-                state.observations = AgentObservationBundle(
+                observations = AgentObservationBundle(
                     source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
                 )
-            state.observations.gaps.append(
+            observations.gaps.append(
                 ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__)
             )
-            state.observations.gaps.extend([*unusable_grant_gaps, *_gym_mcp_gaps(events)])
+            observations.gaps.extend([*unusable_grant_gaps, *_gym_mcp_gaps(events)])
             if state.runtime_info is None:
-                state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
-            for record in state.observations.records:
-                if isinstance(record, AgentInvocation):
-                    record.status = "incomplete"
+                observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+            status, error_type = interrupted_outcome(failure)
+            _set_invocation_outcome(
+                observations, status=status, error_type=error_type, duration_ms=state.activation_duration_ms
+            )
+            state.record_observations(observations)
             raise
         events = _parse_recorded_events(raw)
         output = []
@@ -1258,50 +1291,191 @@ class PiAgent(SimpleResponsesAPIAgent):
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 # Stirrup's timeout report: the deadline stopped a run that had neither ended nor submitted.
                 **({"stop_reason": "wall_time"} if cleanup["timed_out"] and _was_still_working(events) else {}),
+                **(
+                    {"activation_id": str(state.activation_id), "harness_session_id": state.harness_session_id}
+                    if state.is_continuation
+                    else {}
+                ),
             },
         )
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
         conversation_input.append(NeMoGymEasyInputMessage(role="user", content=prompt))
         try:
-            state.observations = _build_pi_observations(
-                events,
-                state.request.episode_id.capture_key,
-                self.config.model_server,
-                [*conversation_input, *output],
-                transcript_available=bool(output),
-                capture_correlated=True,
+            observations = self._activation_observations(
+                state, events, [*conversation_input, *output], transcript_available=bool(output)
             )
         except Exception:
             # Observation parsing must not turn a valid response/patch into a
             # failed episode (the existing local Pi path has the same policy).
             LOG.exception("failed to build sandbox Pi observations")
-            state.observations = AgentObservationBundle(
-                source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
+            observations = AgentObservationBundle(source="pi", gaps=[ObservationGap(code="observation_parse_failed")])
+        assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
+        reported_model_error = (
+            bool(error) and not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying)
+        )
+        if error:
+            # Pi's events end the run as they saw it; a failure the adapter found afterward overrides them.
+            _set_invocation_outcome(
+                observations,
+                status="failed",
+                error_type="provider_error" if reported_model_error else "server_error",
+                duration_ms=state.activation_duration_ms,
             )
-        if incomplete and not error:
-            for record in state.observations.records:
-                if isinstance(record, AgentInvocation):
-                    record.status = "incomplete"
+        elif incomplete:
+            _set_invocation_outcome(
+                observations,
+                status="incomplete",
+                error_type="timeout" if cleanup["timed_out"] else "context_limit" if model_limit else None,
+                duration_ms=state.activation_duration_ms,
+            )
+        else:
+            _set_invocation_outcome(
+                observations, status=None, error_type=None, duration_ms=state.activation_duration_ms
+            )
         if runtime is None:
-            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+            observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup["return_code"] is None:
-            state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
-        state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
-        state.observations.gaps.extend([*unusable_grant_gaps, *_gym_mcp_gaps(events)])
+            observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+        observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
+        observations.gaps.extend([*unusable_grant_gaps, *_gym_mcp_gaps(events)])
         if cached_tokens is None:
-            state.observations.gaps.append(
+            observations.gaps.append(
                 ObservationGap(
                     code="cached_token_usage_unavailable",
                     detail="Pi cache counters are absent, invalid, or defaulted to zero",
                 )
             )
+        state.record_observations(observations)
+        if state.is_continuation:
+            # A multi-turn environment reads each activation's own observations from its response.
+            response = response.model_copy(update={_INTERNAL_OBSERVATIONS_KEY: observations.model_dump(mode="json")})
         if error:
-            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
+            if reported_model_error:
                 # Classify a failed compaction call, not the overflow it was recovering from.
                 return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
+
+    def _activation_observations(
+        self,
+        state: PiSandboxSession,
+        events: list[tuple[float, dict[str, Any]]],
+        conversation: list[Any],
+        *,
+        transcript_available: bool,
+    ) -> AgentObservationBundle:
+        """Build one activation's observations under its own invocation identity."""
+        observations = _build_pi_observations(
+            events,
+            state.invocation_id,
+            self.config.model_server,
+            conversation,
+            transcript_available=transcript_available,
+            capture_correlated=True,
+        )
+        if state.is_continuation:
+            for record in observations.records:
+                if isinstance(record, AgentInvocation):
+                    record.activation_id = state.activation_id
+                    record.harness_session_id = state.harness_session_id
+        return observations
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        # Pi reports its tool calls with timing, its reasoning and its compactions, but builds no trajectory record.
+        return AgentContinuationCapabilities(observations=["timing", "harness_tool_calls", "reasoning", "compaction"])
+
+    def _continuation_close_timeout(self) -> float:
+        return self.config.session_close_timeout_seconds
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        assert isinstance(state, PiSandboxSession)
+        validated, media = self._validate_request(body)
+        # The base agent passes this same request object to _activate_agent_session_state, which reuses the result
+        # so that the images are decoded once.
+        state.validated_input = (body, validated, media)
+        _, system = self._conversation_input(validated)
+        supplied_instructions = validated.instructions is not None or any(
+            getattr(item, "role", None) == "system" for item in validated.input
+        )
+        # Pi rebuilds its system prompt from the command line on every run and applies it to the whole saved
+        # conversation, so a later activation cannot add a system message at its own point in the conversation.
+        if state.system_instructions is not None and supplied_instructions and system != state.system_instructions:
+            raise HTTPException(422, "Pi continuation cannot replace session instructions")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Run one delta under its own budget, which preparing it and waiting for a runner slot also spend."""
+        assert isinstance(state, PiSandboxSession)
+        cached, state.validated_input = state.validated_input, None
+        if cached is not None and cached[0] is body:
+            _, body, media = cached
+        else:
+            # Another request was validated after this one, so its result does not apply here.
+            body, media = self._validate_request(body)
+        prompt, system = self._conversation_input(body)
+        if state.system_instructions is None:
+            state.system_instructions = system
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        state.activation_started = monotonic()
+        deadline = state.activation_started + timeout
+        try:
+            async with asyncio.timeout_at(deadline):
+                await state.prepare_activation(
+                    activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+                )
+            return await self._sandbox_response(
+                state,
+                body,
+                prompt=prompt,
+                system=state.system_instructions,
+                media=media,
+                timeout=timeout,
+                deadline=deadline,
+            )
+        except TimeoutError as error:
+            # A failure before Pi ran, such as preparation reaching the deadline, still reports the activation.
+            observations = state.record_interrupted_activation(activation_id, error)
+            # Pi runs only with at least one centisecond left, as SandboxSession.execute requires.
+            if state.session.launch_started or deadline - monotonic() >= 0.01:
+                raise
+            # The activation's budget ran out while it was queued or staged, before Pi started. Its saved
+            # conversation is as the previous activation left it, so the session can still be continued: the
+            # activation ends incomplete, as a run stopped at its deadline does, instead of failing the episode.
+            return self._unstarted_activation_response(state, body, timeout=timeout, observations=observations)
+        except BaseException as error:
+            state.record_interrupted_activation(activation_id, error)
+            raise
+
+    def _unstarted_activation_response(
+        self,
+        state: PiSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        timeout: float,
+        observations: AgentObservationBundle,
+    ) -> NeMoGymResponse:
+        """The response of a continuation activation whose deadline passed before Pi started."""
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.model,
+            object="response",
+            output=[],
+            status="incomplete",
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                "harness_execution": "sandbox",
+                "pi_version": self.config.pi_version,
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                "activation_id": str(state.activation_id),
+                "harness_session_id": state.harness_session_id,
+            },
+        ).model_copy(update={_INTERNAL_OBSERVATIONS_KEY: observations.model_dump(mode="json")})
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -1554,6 +1728,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, PiSandboxSession)
+            if state.is_continuation:
+                # The base binds each indexed activation, joins and replays its retries, and lets close stop it.
+                return await self.activate_agent_session(request, body)
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")

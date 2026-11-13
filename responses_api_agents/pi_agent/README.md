@@ -170,7 +170,9 @@ may include images as base64 data-URI `input_image` parts. The adapter stages ea
 `@file` argument, so the same task gives Pi the same prompt in every sandbox. Staging is part of the
 activation: it spends the agent timeout, and closing the session stops it. Staged images stay in a
 borrowed sandbox after the session ends. A session declares image input on the Gym model when the prompt
-has images or when the agent configuration sets `image_input: true`. With image input declared, Pi also sends the
+has images or when the agent configuration sets `image_input: true`. A continuation session keeps declaring it
+after any activation's prompt has images, because later activations resend those images from the saved
+conversation. With image input declared, Pi also sends the
 model images its tools return, such as task files it reads, and a text-only deployment rejects those requests.
 Without it, Pi replaces such an image with a note saying it was omitted. Set `image_input: true` for a vision model
 whose tasks keep their images in the sandbox, where the prompt has none.
@@ -239,9 +241,43 @@ Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
-Each sandbox session supports one activation and a matching episode and rollout identity.
-Identical request retries join the running activation or replay its result; changed requests
-are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
+A sandbox session needs a matching episode and rollout identity. Without `continuation` in the seed, it
+supports one activation, and Pi runs with `--no-session`, so it saves no conversation. Identical request retries join the running activation or replay its result;
+changed requests are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
+
+### Multi-turn continuation
+
+A seed with `continuation` opens a session that takes later user turns. Pi saves the conversation under
+the session directory with `--session-dir` and a session ID fixed at seed, and each activation resumes it,
+so the model sees earlier turns, tool calls, tool results and images. Pi stores each image's data in the
+saved conversation, so a later turn does not need an earlier turn's staged file. A seed that requires
+`trajectory` observations is refused: Pi reports tool calls with timing, reasoning and compactions, but
+builds no trajectory record.
+
+- Each activation sends the `x-ng-agent-activation` header with its 1-based index. The base agent joins
+  and replays a retry of the same index with the same input, and rejects a changed input, a skipped index,
+  and a new index while one is running or after one failed.
+- An activation is one user message, optionally preceded by a system message, with the same request
+  controls as a one-activation session. Its images are staged as above, within the activation.
+- Pi does not save its system prompt, and rebuilds it for the whole conversation on every run. Every
+  activation therefore passes the first activation's system prompt. A later activation may repeat it or
+  leave it out; a different one is rejected.
+- Each activation stages its prompt, supervisor and output in its own directory, under its own timeout,
+  which preparing the activation, waiting for a runner slot and staging also spend. An activation whose
+  timeout runs out before Pi starts returns an `incomplete` response with no output, and its invocation
+  reports error type `timeout`. Pi's saved conversation is as the previous activation left it, so the
+  session can still be continued. Its model calls send `x-session-id`
+  `<agent session ID>:activation-<index>`, the invocation ID its observations use, so the model server's
+  capture correlates each call with its activation. Responses carry `activation_id` and
+  `harness_session_id` metadata, and the activation's own observations in `_ng_agent_observations`.
+- Each activation's invocation reports its status, its duration, and an error type: `timeout` or
+  `cancelled` for a run stopped at its deadline or by close, `context_limit` for a run that reached the
+  model's context limit, `provider_error` for a model call error Pi reported, and `server_error` for any
+  other failure.
+- Close stops a running activation and returns every activation's observations in order, with
+  `cleanup_confirmed`.
+- A turn stopped at its deadline can still be continued: when a stopped run leaves a tool call without
+  a result, Pi 0.80.2 adds a "No result provided" result before the next turn.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 Pi never falls back to a host CLI when sandbox setup
 fails. Calls without an agent session retain the local Pi behavior; they do not operate

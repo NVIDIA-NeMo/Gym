@@ -185,10 +185,13 @@ class Sandbox:
         self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def run(self, command, **kwargs):
-        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
+        self.directory = [path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh")][-1]
         assert staged(self)["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert f"bash {self.directory}/{HARNESS_RUNNER_FILE} {self.directory}/params.sh" in command
+        # The runner stays in the session directory; a continuation stages each activation's params beside it.
+        runner = next(path for path in self.files if path.endswith(f"/{HARNESS_RUNNER_FILE}"))
+        assert self.directory.startswith(runner.rsplit("/", 1)[0])
+        assert f"bash {runner} {self.directory}/params.sh" in command
         assert "process_supervisor.sh" in command
         self.started.set()
         if not self.blocked:
@@ -198,7 +201,7 @@ class Sandbox:
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def stop_runner(self):
-        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
+        self.directory = [path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh")][-1]
         self.result["timed_out"] = True
         self.save_result()
         self.exited.set()
@@ -1957,7 +1960,7 @@ async def _run_locally(command, *, limit=8, **kwargs):
 
 def _run_session_locally(sandbox, state, directory: Path, *, limit: float = 8) -> None:
     """Point a seeded session's files and commands at local paths and processes."""
-    state.session.session_dir = str(directory)
+    state.session.session_dir = state.directory = str(directory)
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
