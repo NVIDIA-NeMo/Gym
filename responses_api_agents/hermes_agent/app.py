@@ -270,7 +270,14 @@ def _hermes_message_content(content: str | list[dict[str, Any] | BaseModel]) -> 
     if not any(part.get("type") == "input_image" for part in parts):
         return "".join(part.get("text", "") for part in parts)
     return [
-        {"type": "image_url", "image_url": {"url": part["image_url"], "detail": part.get("detail", "auto")}}
+        # Chat has no "original" detail; use its highest supported level.
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": part["image_url"],
+                "detail": "high" if part.get("detail") == "original" else part.get("detail", "auto"),
+            },
+        }
         if part.get("type") == "input_image"
         else {"type": "text", "text": part.get("text", "")}
         for part in parts

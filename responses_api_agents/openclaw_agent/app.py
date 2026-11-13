@@ -901,6 +901,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         "model": {"primary": self._effective_model()},
                         "sandbox": {"mode": "off"},
                         "memorySearch": {"enabled": False},
+                        # Disable the configurable 1200 px resize for image-capable sessions.
+                        **({"imageMaxDimensionPx": 2**31 - 1} if media or self.config.image_input else {}),
                     }
                 },
                 "tools": {
@@ -997,7 +999,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 ),
                 default=0,
             )
-            if image_count < len(set(media)):
+            if image_count < len(media):
                 if state.observations is not None and state.observations.records:
                     state.observations.records[0].status = "failed"
                 raise RuntimeError("OpenClaw retained fewer prompt images than supplied")

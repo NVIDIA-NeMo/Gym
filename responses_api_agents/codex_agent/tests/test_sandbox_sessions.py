@@ -3977,7 +3977,8 @@ def image_part(gray: int = 0) -> dict:
 @pytest.mark.parametrize("image_only", [False, True])
 def test_session_stages_images_once_and_attaches_in_order(setup, image_only):
     agent, sandbox = setup
-    content = [image_part(0), image_part(1), image_part(0)]
+    grays = (0, 1, 1)  # A reversed attachment order must fail while repeated images still share a file.
+    content = [image_part(gray) for gray in grays]
     if not image_only:
         content.insert(1, {"type": "input_text", "text": "Describe these"})
     body = {"input": [{"role": "system", "content": "system"}, {"role": "user", "content": content}]}
@@ -3994,8 +3995,8 @@ def test_session_stages_images_once_and_attaches_in_order(setup, image_only):
     payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
     command = payload["command"]
     paths = [command[i + 1] for i, arg in enumerate(command) if arg == "--image"]
-    assert paths == [f"{MEDIA_DIRECTORY}/{hashlib.sha256(image_bytes(gray)).hexdigest()}.png" for gray in (0, 1, 0)]
-    assert [sandbox.files[path] for path in paths] == [image_bytes(gray) for gray in (0, 1, 0)]
+    assert paths == [f"{MEDIA_DIRECTORY}/{hashlib.sha256(image_bytes(gray)).hexdigest()}.png" for gray in grays]
+    assert [sandbox.files[path] for path in paths] == [image_bytes(gray) for gray in grays]
     assert command[-2:] == ["--", "" if image_only else "-"]
     assert payload["prompt"] == ("" if image_only else "Describe these")
     assert len([path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]) == 2
@@ -4008,7 +4009,65 @@ def test_session_stages_images_once_and_attaches_in_order(setup, image_only):
         for part in msg["content"]
         if part["type"] == "input_image"
     ]
-    assert [part["image_url"] for part in images] == [image_part(gray)["image_url"] for gray in (0, 1, 0)]
+    assert [part["image_url"] for part in images] == [image_part(gray)["image_url"] for gray in grays]
+
+
+@pytest.mark.parametrize("ending", ["completed", "output-limit", "wall-timeout", "model-error"])
+@pytest.mark.parametrize("retained", [0, 1, 2])
+def test_session_requires_every_native_prompt_image(setup, ending, retained):
+    agent, sandbox = setup
+    if ending == "output-limit":
+        transcript = [json.loads(line) for line in sandbox.events.splitlines()]
+        transcript[-1][1] = {
+            "type": "turn.failed",
+            "error": {
+                "message": "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+            },
+        }
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+    elif ending == "wall-timeout":
+        sandbox.result.update(timed_out=True, return_code=-signal.SIGTERM)
+    elif ending == "model-error":
+        sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": BAD_REQUEST}}])
+        sandbox.result["return_code"] = 1
+    publish = sandbox.publish
+
+    def publish_images():
+        publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+            [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        *[image_part() for _ in range(retained)],
+                        {"type": "input_text", "text": "image content omitted because it could not be processed"},
+                    ],
+                }
+            ]
+        )
+
+    sandbox.publish = publish_images
+    body = {"input": [{"role": "user", "content": [image_part(), image_part()]}]}
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        missing = retained < 2 and ending in {"completed", "output-limit"}
+        if missing:
+            assert result.status_code == 502, result.text
+            assert f"Codex attached {retained} of 2 prompt images" in result.json()["detail"]
+        else:
+            assert result.status_code == 200, result.text
+            assert result.json()["status"] == (
+                "failed" if ending == "model-error" else "completed" if ending == "completed" else "incomplete"
+            )
+            if ending != "model-error":
+                assert "Fixed" in json.dumps(result.json()["output"])
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        if missing:
+            assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize(

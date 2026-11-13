@@ -737,7 +737,12 @@ def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_proces
 
 
 @pytest.mark.parametrize("image_only", [False, True])
-def test_prompt_images_reach_pinned_hermes_model_requests(tmp_path, restore_process_globals, image_only) -> None:
+@pytest.mark.parametrize(
+    "detail,sent_detail", [("auto", "auto"), ("low", "low"), ("high", "high"), ("original", "high")]
+)
+def test_prompt_images_reach_pinned_hermes_model_requests(
+    tmp_path, restore_process_globals, image_only, detail, sent_detail
+) -> None:
     """Exercise the installed Hermes loop, not a mock of its multimodal input handling."""
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
@@ -747,7 +752,7 @@ def test_prompt_images_reach_pinned_hermes_model_requests(tmp_path, restore_proc
     )
     content = [
         {"type": "input_text", "text": "before"},
-        {"type": "input_image", "image_url": image_uri, "detail": "high"},
+        {"type": "input_image", "image_url": image_uri, "detail": detail},
         {"type": "input_text", "text": "after"},
     ]
     if image_only:
@@ -776,7 +781,7 @@ def test_prompt_images_reach_pinned_hermes_model_requests(tmp_path, restore_proc
         output = _run(_payload(server.base_url, max_turns=4, **adapter._conversation_params(body)), tmp_path)
     expected = [
         {"type": "text", "text": "before"},
-        {"type": "image_url", "image_url": {"url": image_uri, "detail": "high"}},
+        {"type": "image_url", "image_url": {"url": image_uri, "detail": sent_detail}},
         {"type": "text", "text": "after"},
     ]
     if image_only:

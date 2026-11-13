@@ -48,11 +48,11 @@ def native_image_event(*, distinct=False):
             "content": [
                 {"type": "text", "text": "Native prompt"},
                 {"type": "image", "data": IMAGE_URI.split(",", 1)[1], "mimeType": "image/png"},
-                *(
-                    [{"type": "image", "data": SECOND_IMAGE.to_data_uri().split(",", 1)[1], "mimeType": "image/gif"}]
-                    if distinct
-                    else []
-                ),
+                {
+                    "type": "image",
+                    "data": (SECOND_IMAGE if distinct else IMAGE).to_data_uri().split(",", 1)[1],
+                    "mimeType": "image/gif" if distinct else "image/png",
+                },
             ],
         },
     }
@@ -85,18 +85,18 @@ def test_session_stages_prompt_images_and_replays_once(setup, monkeypatch, image
             replay = client.post(path, json=image_body(image_only=image_only, distinct=distinct))
             assert replay.json() == first.json()
             decode.assert_called_once()
-        assert len(uploads) == (2 if distinct else 1)
+        assert len(uploads) == 2
         assert sandbox.files[uploads[0]] == IMAGE.data
-        if distinct:
-            assert sandbox.files[uploads[1]] == SECOND_IMAGE.data
+        assert sandbox.files[uploads[1]] == (SECOND_IMAGE.data if distinct else IMAGE.data)
         assert uploads[0].startswith(f"{sandbox.directory}/home/.openclaw/media/")
         prompt = staged(sandbox)["prompt"]
         assert prompt.count(f"[Image: source: {uploads[0]}]") == 1
-        if distinct:
-            assert prompt.index(uploads[0]) < prompt.index(uploads[1])
+        assert prompt.count(f"[Image: source: {uploads[1]}]") == 1
+        assert prompt.index(uploads[0]) < prompt.index(uploads[1])
         assert ("Describe the image" in prompt) is not image_only
         config = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
         assert config["models"]["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+        assert config["agents"]["defaults"]["imageMaxDimensionPx"] == 2**31 - 1
         assert client.post(path, json={"input": "different"}).status_code == 409
         sandbox.launch.assert_awaited_once()
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
@@ -107,6 +107,7 @@ def test_session_stages_prompt_images_and_replays_once(setup, monkeypatch, image
             if item.get("role") == "user"
         )
         assert user["content"][1]["image_url"] == IMAGE_URI
+        assert user["content"][2]["image_url"] == (SECOND_IMAGE.to_data_uri() if distinct else IMAGE_URI)
         sandbox.disconnect.assert_awaited_once()
         sandbox.stop.assert_not_awaited()
 
@@ -123,6 +124,7 @@ def test_image_capability_is_opt_in_for_text_prompts(setup, image_input):
         assert config["models"]["providers"]["nemo"]["models"][0]["input"] == (
             ["text", "image"] if image_input else ["text"]
         )
+        assert config["agents"]["defaults"].get("imageMaxDimensionPx") == (2**31 - 1 if image_input else None)
         assert staged(sandbox)["prompt"] == "task"
         assert not any("/media/" in path for path in sandbox.files)
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
@@ -159,12 +161,15 @@ def test_rejects_unsupported_images_before_activation_and_allows_recovery(setup,
 
 
 @pytest.mark.parametrize("stop_reason", ["stop", "length"])
-@pytest.mark.parametrize("retained", [False, True])
-def test_gradable_responses_require_native_prompt_images(setup, monkeypatch, stop_reason, retained):
+@pytest.mark.parametrize("retained", [0, 1, 2])
+@pytest.mark.parametrize("distinct", [False, True])
+def test_gradable_responses_require_native_prompt_images(setup, monkeypatch, stop_reason, retained, distinct):
     agent, sandbox = setup
     sandbox.events = events(stop_reason=stop_reason)
     if retained:
-        sandbox.events = json.dumps(native_image_event()) + "\n" + sandbox.events
+        native = native_image_event(distinct=distinct)
+        native["message"]["content"] = native["message"]["content"][: retained + 1]
+        sandbox.events = json.dumps(native) + "\n" + sandbox.events
     original_upload = sandbox.upload
 
     async def upload(source, destination):
@@ -174,8 +179,8 @@ def test_gradable_responses_require_native_prompt_images(setup, monkeypatch, sto
     monkeypatch.setattr(sandbox, "upload", upload)
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
-        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json=image_body())
-        if retained:
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json=image_body(distinct=distinct))
+        if retained == 2:
             assert result.status_code == 200, result.text
             assert result.json()["status"] == ("completed" if stop_reason == "stop" else "incomplete")
             assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
@@ -183,7 +188,7 @@ def test_gradable_responses_require_native_prompt_images(setup, monkeypatch, sto
             assert result.status_code >= 500
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
-        if not retained:
+        if retained < 2:
             assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
 
 
@@ -236,6 +241,15 @@ async def test_image_staging_is_fenced_and_spends_activation_deadline(setup, mon
     await asyncio.wait_for(entered.wait(), 1)
     if ending == "close":
         await state.close(1)
+    # Check completion separately so an outer TimeoutError cannot satisfy the expected deadline error.
+    done, _ = await asyncio.wait({task}, timeout=2)
+    try:
+        assert task in done, "image staging did not stop at its deadline or close fence"
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await state.close(1)
     with pytest.raises(
         asyncio.CancelledError if ending == "close" else TimeoutError if ending == "deadline" else RuntimeError
     ):
@@ -251,6 +265,7 @@ def test_native_transcript_image_bytes_and_order_are_preserved():
     user = parse_openclaw_session_items([native_image_event()], include_input=True)[0]
     assert user.model_dump()["content"] == [
         {"type": "input_text", "text": "Native prompt"},
+        {"type": "input_image", "image_url": IMAGE_URI, "detail": "auto"},
         {"type": "input_image", "image_url": IMAGE_URI, "detail": "auto"},
     ]
 

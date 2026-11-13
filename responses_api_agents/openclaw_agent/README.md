@@ -218,7 +218,15 @@ Sandbox request support is deliberately explicit:
   without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
   explicit ID and episode without a cookie, including after a lost seed response. Closing an
   unknown ID prevents a delayed seed from creating it. Filesystem paths use independent random IDs.
-- A text user prompt, optionally preceded by one system message. Text-part arrays are accepted.
+- One user prompt, optionally preceded by one system message. Text-part arrays are accepted. Sandbox sessions
+  also accept base64 data-URI `input_image` parts, with or without text; local execution rejects images with HTTP 422.
+  Each image occurrence gets a separate file under `<session>/home/.openclaw/media/`, removed on close, so repeated
+  images remain repeated. The adapter appends one `[Image: source: <path>]` line per file after the prompt text.
+  These session-specific paths remain visible to the model. Image order is preserved, but text/image interleaving
+  and the requested `detail` are not. For image-capable sessions, the adapter disables OpenClaw's configurable
+  1200 px resize. OpenClaw 2026.6.11 can still resize or re-encode large images in its native file-loading and
+  byte-limit processing. Exported conversations retain images as data URIs. Completed and output-limit replies
+  must retain every supplied image occurrence; wall-time limits keep their existing behavior.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.

@@ -142,8 +142,9 @@ are rejected.
 
 Images: user messages, earlier user turns included, may hold base64 data-URI `input_image` parts (PNG, JPEG, GIF
 or WebP). Each is checked with `nemo_gym.core.MediaFile`, and its media type is corrected to match its bytes. Hermes
-gets them as Chat Completions `image_url` parts in their original order, with `detail` kept, and sends them to the
-model unresized; no files are staged in the sandbox. Image URLs, file IDs, malformed or unsupported images, and
+gets them as Chat Completions `image_url` parts in their original order and sends them to the model unresized.
+It preserves `auto`, `low`, and `high` detail; Responses-only `original` maps to `high`, the closest Chat level.
+No files are staged in the sandbox. Image URLs, file IDs, malformed or unsupported images, and
 images outside user messages return HTTP 422. Use a vision model: Hermes passes the images on as given, and a
 text-only deployment rejects the request. The response output keeps only each message's text, while the session
 conversation in the agent observations keeps the images, so base64 data makes those records large. Hermes estimates

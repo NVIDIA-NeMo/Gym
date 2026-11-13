@@ -1303,6 +1303,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
             state.observations = associate_codex_compaction_calls(
                 state.observations, state.model_attempts or [], model_ref=self.config.model_server
             )
+            if media and status != "failed" and not cleanup["timed_out"]:
+                # Codex replaces images it cannot decode with text and continues without them.
+                invocation = state.observations.records[0]
+                image_count = max(
+                    (
+                        sum(
+                            (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
+                            == "input_image"
+                            for part in item.content
+                        )
+                        for item in invocation.conversation
+                        if getattr(item, "role", None) == "user" and isinstance(item.content, list)
+                    ),
+                    default=0,
+                )
+                if image_count < len(media):
+                    error = f"Codex attached {image_count} of {len(media)} prompt images"
+                    invocation.status = "failed"
         else:
             gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))

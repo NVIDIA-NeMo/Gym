@@ -175,8 +175,9 @@ class OpenClawSandboxSession(AgentSessionState):
         prompt = payload["prompt"]
         # The CLI only loads local images under its media allowlist. Session-owned files are
         # removed on close; staging runs inside the shared close fence and activation deadline.
-        for file in dict.fromkeys(media):
-            path = f"{directory}/home/.openclaw/media/{PurePosixPath(media_path(file)).name}"
+        # OpenClaw deduplicates marker paths, so repeated images need separate files.
+        for index, file in enumerate(media, 1):
+            path = f"{directory}/home/.openclaw/media/{index}-{PurePosixPath(media_path(file)).name}"
             await upload_bytes(self.session.sandbox, path=path, data=file.data)
             prompt += f"\n[Image: source: {path}]"
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
