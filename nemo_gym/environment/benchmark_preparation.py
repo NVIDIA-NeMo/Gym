@@ -255,6 +255,15 @@ def _prepare_json_default(value: Any) -> Any:
     raise TypeError(f"Cannot serialize preparation value of type {type(value).__name__}")
 
 
+def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    """The rows of a JSONL file, one per newline-terminated line.
+
+    ``str.splitlines()`` also breaks at U+2028, U+0085, vertical tab and form feed, which a JSON string may hold
+    unescaped, so it would cut a row in the middle of a string.
+    """
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
+
+
 def datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
     """Every dataset the resolved config prepares: benchmark datasets and other datasets with a prepare_script."""
     # A benchmark dataset may be declared by an agent block (legacy) or a resources server
@@ -443,7 +452,7 @@ def plan_for_config(
     benchmark = benchmarks[0]
 
     prepare_datasets([benchmark], prepare_config)
-    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    rows = read_jsonl_rows(benchmark.dataset.jsonl_fpath)
     return build_eval_plan(
         rows,
         benchmark=PlanBenchmark(

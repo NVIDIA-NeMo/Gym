@@ -190,7 +190,7 @@ class CaptureCommandError(RuntimeError):
     (such as "timeout" or "sandbox") when the provider reported no exit status.
     """
 
-    def __init__(self, message: str, *, return_code: int, error_type: str | None) -> None:
+    def __init__(self, message: str, *, return_code: int | None, error_type: str | None) -> None:
         super().__init__(message)
         self.return_code = return_code
         self.error_type = error_type
@@ -198,7 +198,7 @@ class CaptureCommandError(RuntimeError):
 
 async def _exec(sandbox: Any, command: str, *, timeout_s: int = 300) -> Any:
     result = await sandbox.exec(command, timeout_s=timeout_s)
-    if result.return_code != 0:
+    if result.return_code != 0 or getattr(result, "error_type", None) is not None:
         raise CaptureCommandError(
             result.stderr or result.stdout or f"exit {result.return_code}",
             return_code=result.return_code,
