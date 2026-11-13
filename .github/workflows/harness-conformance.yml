@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       harnesses: ${{ steps.select.outputs.harnesses }}
+      matrix: ${{ steps.select.outputs.matrix }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -59,25 +60,31 @@ jobs:
     if: needs.select.outputs.harnesses != '' && needs.select.outputs.harnesses != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    # NOOA's private task runtime belongs to a disposable container, never the runner host.
-    container: ${{ matrix.harness == 'nooa' && fromJSON('{"image":"python:3.13.14-slim","options":"--init"}') || '' }}
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
-      matrix:
-        harness: ${{ fromJSON(needs.select.outputs.harnesses) }}
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
     env:
       HARNESS: ${{ matrix.harness }}
+      PROBE_REQUIRES_ROOT: ${{ matrix.requires_root }}
     steps:
-      - name: Install NOOA container tools
-        if: matrix.harness == 'nooa'
-        run: apt-get update && apt-get install -y --no-install-recommends git curl
+      - name: Install runtime prerequisites
+        if: matrix.packages != ''
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          installer=()
+          if [[ "$(id -u)" != 0 ]]; then installer=(sudo); fi
+          read -r -a packages <<< "$PACKAGES"
+          "${installer[@]}" apt-get update
+          "${installer[@]}" apt-get install -y --no-install-recommends "${packages[@]}"
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs.checkout-ref }}
           submodules: recursive
           persist-credentials: false
-      - name: Trust checkout for NOOA container builds
-        if: matrix.harness == 'nooa'
+      - name: Trust checkout for container builds
+        if: matrix.container != ''
         run: |
           # Checkout adds safe.directory under a temporary HOME. Later packaging
           # needs the same trust in this disposable container's normal Git config.
@@ -91,9 +98,6 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
-      - name: Install terminal runtime
-        if: matrix.harness == 'terminus_2_sandboxed'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       - name: Install pinned dependencies and runtime
         timeout-minutes: 12
         env:
@@ -123,8 +127,8 @@ jobs:
           HARNESS: ${{ matrix.harness }}
         run: |
           launcher=()
-          # The Terminus sandbox contract creates /logs/agent as root.
-          if [[ "$HARNESS" == "terminus_2_sandboxed" ]]; then launcher=(sudo --preserve-env=GITHUB_ACTIONS); fi
+          # Some sandbox contracts require root for task setup.
+          if [[ "$PROBE_REQUIRES_ROOT" == "true" ]]; then launcher=(sudo --preserve-env=GITHUB_ACTIONS); fi
           if "${launcher[@]}" .venv/bin/python -m scripts.run_harness_conformance \
             --harness "$HARNESS" --output "$PROBE_OUTPUT"; then
             code=0
@@ -140,8 +144,8 @@ jobs:
           HARNESS: ${{ matrix.harness }}
           PROBE_EXIT_CODE: ${{ steps.probes.outputs.exit_code || '2' }}
         run: |
-          # Restore access even when a root-run Terminus probe stops partway through.
-          if [[ "$HARNESS" == "terminus_2_sandboxed" && -d "$PROBE_OUTPUT" ]]; then
+          # Restore access even when a root-run probe stops partway through.
+          if [[ "$PROBE_REQUIRES_ROOT" == "true" && -d "$PROBE_OUTPUT" ]]; then
             sudo chown -R "$(id -u):$(id -g)" "$PROBE_OUTPUT"
           fi
           python3 -m scripts.harness_conformance.ci report --harness "$HARNESS" \
