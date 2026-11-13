@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
@@ -73,6 +74,12 @@ def stop_marked_processes(name: str) -> None:
             fd = os.pidfd_open(int(entry.name))
         except (ProcessLookupError, PermissionError):
             continue
+        except OSError as exc:
+            # Some visible tasks cannot be opened as PID handles (for example a
+            # non-leader during a task transition). Never signal them by PID.
+            if exc.errno == errno.EINVAL:
+                continue
+            raise
         try:
             if marker in (entry / "environ").read_bytes().split(b"\0"):
                 signal.pidfd_send_signal(fd, signal.SIGKILL)

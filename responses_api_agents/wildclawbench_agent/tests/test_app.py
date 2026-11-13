@@ -522,7 +522,9 @@ def test_copy_guards_nested_symlinks_in_both_directions(tmp_path, monkeypatch):
     assert outside.read_text() == "unchanged"
 
 
-def test_process_marker_cleans_setsid_descendant_but_not_other_process(tmp_path):
+@pytest.mark.parametrize("unavailable_task", [False, True])
+def test_process_marker_cleans_setsid_descendant_but_not_other_process(tmp_path, monkeypatch, unavailable_task):
+    import errno
     import os
 
     from responses_api_agents.wildclawbench_agent.enroot_docker import stop_marked_processes
@@ -534,6 +536,23 @@ def test_process_marker_cleans_setsid_descendant_but_not_other_process(tmp_path)
         env=dict(os.environ, WILDCLAW_CONTAINER=marker),
     )
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    if unavailable_task:
+        pidfd_open = os.pidfd_open
+        iterdir = Path.iterdir
+        invalid_pid = 2147483647
+
+        def open_task(pid):
+            if pid == invalid_pid:
+                raise OSError(errno.EINVAL, "Task cannot be opened as a PID handle")
+            return pidfd_open(pid)
+
+        def entries(path):
+            if path == Path("/proc"):
+                return iter(Path(f"/proc/{pid}") for pid in (invalid_pid, marked.pid, other.pid))
+            return iterdir(path)
+
+        monkeypatch.setattr(os, "pidfd_open", open_task)
+        monkeypatch.setattr(Path, "iterdir", entries)
     try:
         stop_marked_processes(marker)
         assert marked.wait(timeout=5) < 0
@@ -543,6 +562,22 @@ def test_process_marker_cleans_setsid_descendant_but_not_other_process(tmp_path)
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+
+
+def test_process_marker_does_not_hide_pidfd_resource_exhaustion(monkeypatch):
+    import errno
+    import os
+
+    from responses_api_agents.wildclawbench_agent.enroot_docker import stop_marked_processes
+
+    def exhausted(pid):
+        raise OSError(errno.EMFILE, "No PID handles available")
+
+    monkeypatch.setattr(Path, "iterdir", lambda path: iter([Path("/proc/2147483647")]))
+    monkeypatch.setattr(os, "pidfd_open", exhausted)
+    with pytest.raises(OSError) as exc:
+        stop_marked_processes("unused")
+    assert exc.value.errno == errno.EMFILE
 
 
 @pytest.mark.parametrize("existing,contents", [(False, False), (True, False), (True, True)])
