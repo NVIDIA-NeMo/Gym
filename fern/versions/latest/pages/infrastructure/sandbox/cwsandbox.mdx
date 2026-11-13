@@ -21,13 +21,16 @@ uv pip install -e '.[cwsandbox]'
 ```
 
 For an isolated Gym server, include `cwsandbox` in that server's `nemo-gym` extras.
-For the Harbor agent, enable its optional extra:
+For the Harbor agent, select the extra in the environment configuration:
 
-```bash
-uv sync --project responses_api_agents/harbor_agent --extra cwsandbox
+```yaml
+component_extras:
+  responses_api_agents/harbor_agent: [cwsandbox]
 ```
 
-The default Harbor install does not include the CoreWeave SDK.
+`harbor_agent_cwsandbox.yaml` already includes this setting. The standard `ng_run`
+setup installs the SDK in the managed agent environment. Other Harbor configs do
+not select this extra.
 
 Set `CWSANDBOX_API_KEY` to an authorized CoreWeave Sandbox key. Optionally set
 `CWSANDBOX_BASE_URL` for a deployment-specific endpoint. The reusable config at
