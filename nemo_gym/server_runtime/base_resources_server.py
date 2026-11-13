@@ -403,6 +403,20 @@ class ResourcesCloseSessionResponse(BaseModel):
     resources_session_id: str
 
 
+# A resources server whose task ends through its state, rather than through one tool's call, answers this route for
+# an episode's resources session (its session cookie) with ResourcesTaskState. single_agent_turn's step loop
+# (end_on_task_state) reads it between steps and ends the episode once the task has ended.
+RESOURCES_TASK_STATE_PATH = "/task_state"
+
+
+class ResourcesTaskState(BaseModel):
+    """``GET /task_state``: whether the resources session's task has ended. A server may add fields of its own."""
+
+    model_config = ConfigDict(extra="allow")
+
+    task_ended: bool
+
+
 class ResourcesSeedRejectedError(HTTPException, ValueError):
     """Refuse a seed whose input no retry can fix, such as ``task_data`` that fails validation.
 

@@ -37,6 +37,7 @@ from yarl import URL
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_EPISODE_STEP_LIMIT_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
@@ -495,6 +496,113 @@ class TestApp:
         records = close.json()["agent_observations"]["records"]
         assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
         assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
+
+    @pytest.mark.parametrize(("steps", "limit", "last_status"), [(3, 5, "completed"), (3, 3, "incomplete")])
+    async def test_a_session_whose_steps_a_caller_drives_keeps_one_invocation_as_the_agents_own_loop(
+        self, monkeypatch: MonkeyPatch, steps: int, limit: int, last_status: str
+    ) -> None:
+        """With AGENT_EPISODE_STEP_LIMIT_HEADER the caller owns the episode's step limit: each one-step activation
+        extends the episode's invocation instead of recording an incomplete run of its own, and only a step at the
+        caller's limit stops the episode short, as the agent's own max_steps would."""
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            max_steps=1,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": True}
+        server = SimpleAgent(config=config, server_client=server_client)
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        def tool_call(step: int) -> MagicMock:
+            call = {
+                "id": f"fc-{step}",
+                "call_id": f"call-{step}",
+                "name": "get_weather",
+                "arguments": "{}",
+                "type": "function_call",
+                "status": "completed",
+            }
+            return _mock_response(response_base | {"id": f"resp-{step}", "output": [call]})
+
+        server_client.post = AsyncMock(side_effect=[tool_call(step) for step in range(1, steps + 1)])
+        monkeypatch.setattr(
+            "responses_api_agents.simple_agent.app.http_request", AsyncMock(return_value=_mock_response(content="{}"))
+        )
+        client = TestClient(server.setup_webserver())
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=episode_id,
+                task_id=TaskId(taskset="example", task_id="0"),
+                tool_accesses=[
+                    DirectHTTPToolAccess(name="weather.direct_http", required=True, base_url="http://resources:8000")
+                ],
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        conversation: list = [{"role": "user", "content": "weather?"}]
+        for step in range(1, steps + 1):
+            result = client.post(
+                "/ng-rollout/rollout/v1/responses",
+                json={"input": conversation},
+                headers={AGENT_EPISODE_STEP_LIMIT_HEADER: str(limit)},
+            )
+            assert result.status_code == 200
+            # The caller sends the whole conversation with each step.
+            conversation = [*conversation, *result.json()["output"]]
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=episode_id).model_dump(
+                mode="json"
+            ),
+        )
+
+        records = close.json()["agent_observations"]["records"]
+        assert [record["kind"] for record in records] == ["agent_invocation"] + ["tool_call"] * steps
+        invocation = records[0]
+        assert invocation["invocation_id"] == "root"
+        assert invocation["status"] == last_status
+        assert [call["response_id"] for call in invocation["model_calls"]] == [
+            f"resp-{n}" for n in range(1, steps + 1)
+        ]
+        # The last step's conversation, which holds every step, once.
+        assert len(invocation["conversation"]) == 1 + 2 * steps
+        assert {record["invocation_id"] for record in records[1:]} == {"root"}
+
+    async def test_an_episode_step_limit_that_is_not_a_positive_integer_is_refused(self) -> None:
+        server, _ = _make_agent(False)
+        client = TestClient(server.setup_webserver())
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        result = client.post(
+            "/ng-rollout/rollout/v1/responses", json={"input": "q"}, headers={AGENT_EPISODE_STEP_LIMIT_HEADER: "0"}
+        )
+
+        assert result.status_code == 422
+        assert AGENT_EPISODE_STEP_LIMIT_HEADER in result.text
 
     async def test_a_session_activation_creates_its_episode_with_the_session_state(self) -> None:
         """Subclasses that keep task context in the session state read it here; the sessionless path skips it."""

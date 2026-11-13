@@ -1,6 +1,14 @@
 # OfficeEnv: connected SaaS apps simulated per rollout. The environment is the officeenv
 # package, installed as the server's README.md says; rows come from `officeenv emit` and carry
 # the officeenv version that emitted them.
+#
+# Its rows run on Gym's single_agent_turn, which drives the simple agent one step per activation and reads the
+# resources session's task state between steps (end_on_task_state), so an episode ends before the next model call
+# once its task has ended (complete_task), when the model answers without calling a tool, or after
+# max_episode_steps steps.
+config_paths:
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
 officeenv_resources_server:
   resources_servers:
     officeenv:
@@ -12,6 +20,12 @@ officeenv_resources_server:
       # term (README, "Training length penalty"); the other knobs default as in app.py.
       length_penalty:
         enabled: false
+      # The environment server below ends an episode at the step that ends its task, so the calls that step makes
+      # after the one that ended it are refused rather than run.
+      close_tools_on_task_end: true
+      # The step loop drives the simple agent one step per activation. An agent that runs its own loop would take
+      # steps after the task ended, so `gym env resolve` refuses an --agent-type swap before anything starts.
+      allowed_agents: [simple_agent]
 officeenv_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -22,17 +36,28 @@ officeenv_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      max_steps: 50
+      # One step per activation: the environment server drives the steps and keeps the episode's limit.
+      max_steps: 1
       datasets:
       - name: example
         type: example
         jsonl_fpath: resources_servers/officeenv/data/example.jsonl
-# Rollout collection dispatches to environment servers; the simple agent owns its episode
-# through /run, so the legacy_agent environment server stands in front of it.
+        taskset: officeenv:example
 officeenv_environment_server:
+  _inherit_from: single_agent_turn
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: officeenv_resources_server
       agent_server:
         type: responses_api_agents
         name: officeenv_simple_agent
+      # The agent calls the tool routes directly, with the episode's session cookie.
+      resources_tool_transports: [direct_http]
+      max_episode_steps: 50
+      end_on_task_state: true
+
+# After the server blocks: Gym's README table reads a config's first mapping as its servers.
+environment_server_routes:
+  "officeenv:example": officeenv_environment_server

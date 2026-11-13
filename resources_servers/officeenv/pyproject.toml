@@ -7,6 +7,9 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
+    # The time zone database OfficeEnv pins (it installs apart, README.md "The OfficeEnv version"). Without it the lock
+    # takes pandas' older tzdata, and every locked sync of this venv puts that one back under OfficeEnv.
+    "tzdata==2026.6",
 ]
 
 [tool.uv]
