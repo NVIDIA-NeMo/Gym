@@ -36,6 +36,7 @@ from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import fake_executor as fake_executor
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import mlflow_job
 from tests.unit_tests.orchestration.test_evaluation_health import _run
+from tests.unit_tests.orchestration.test_fresh_restart import _cut_before_inventory
 from tests.unit_tests.orchestration.test_resubmit_repin import launcher_at as launcher_at
 from tests.unit_tests.orchestration.test_resubmit_walltime import (
     _launcher_at_the_pinned_revision as _launcher_at_the_pinned_revision,
@@ -273,3 +274,31 @@ def test_a_rejudged_run_without_a_grading_record_is_not_said_to_be_graded(monkey
         "none: report the run as unverified: the rows were re-judged and no grading was recorded, so whether they "
         "were graded is unknown; no recovery command records it"
     )
+
+
+def test_the_unsafe_continuation_keeps_the_extension_that_made_the_plan_possible(tmp_path, slurm_bin):
+    job_dir = _spent_after(tmp_path, resume_script.RESUME_REFUSED_REASON)
+
+    out = submit.inspect_recovery(*_handle(job_dir), extend_retries=1)
+
+    assert out.decision.action.value == "resubmit", out.decision.reason
+    assert out.decision.requested == ["--extend-retries 1"]
+    action = out.operator_verdict["action"]
+    assert "start a fresh run as the stop says" in action
+    assert f"`{RUN} --extend-retries 1 --allow-unsafe-resume --unsafe-resume-reason TEXT`" in action, action
+
+
+def test_a_failed_driver_install_names_its_fix_before_the_longer_walltime_restart(tmp_path, slurm_bin):
+    job_dir = _cut_before_inventory(tmp_path, slurm_bin)
+    (job_dir / resume_script.INCOMPLETE_MARKER_NAME).write_text(
+        "Previous job 101 ended FAILED: driver_install_failed: (error text omitted); "
+        "the chain does not retry it; see logs/driver-101.log\n"
+    )
+
+    out = submit.inspect_recovery(*_handle(job_dir))
+
+    assert out.decision.action.value == "fresh-restart", out.decision.reason
+    assert "driver_install_failed" in out.decision.reason
+    action = out.operator_verdict["action"]
+    assert action.index("fix the driver install") < action.index("gym eval resubmit"), action
+    assert "--max-walltime HH:MM:SS --walltime-reason TEXT" in action

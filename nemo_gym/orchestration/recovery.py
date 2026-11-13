@@ -6210,6 +6210,8 @@ _TYPED_REMEDIES: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     PROVIDER_QUOTA_EXHAUSTED: ("wait until the grading provider's quota resets, then run", ()),
 }
+# The typed stops a fresh restart repeats until their fix is made.
+_RESTART_FIXES = (PROVIDER_CREDENTIALS_REJECTED, DRIVER_INSTALL_FAILED, ENVIRONMENT_PREPARE_FAILED)
 # The typed stops whose own text says a recovery cannot continue the saved run as it is.
 _UNSAFE_RESUME = ("--allow-unsafe-resume", "--unsafe-resume-reason TEXT")
 _PROTOCOL_VIOLATION_REMEDY = (
@@ -6560,10 +6562,13 @@ def operator_verdict(
         # Gym's own decision: no task inventory was saved, and its reason names the command.
         named = re.search(r"--max-walltime is required: (gym eval resubmit \S+ \S+ --recover .*)$", decision.reason)
         command = f"`{named[1]}`" if named else _command(decision, _EXPLICIT_BUDGET)
+        # A typed failure the restart would repeat (a failed install or preparation, rejected credentials) is fixed first.
+        kind = _stop_kind(decision)
+        fix = _TYPED_REMEDIES[kind][0].removesuffix(", then run") + ", then " if kind in _RESTART_FIXES else ""
         return _verdict(
             "needs_action",
             f"the run saved no task inventory ({decision.reason.split('; --max-walltime is required')[0]})",
-            f"queue it again as a fresh run with a longer walltime (the walltime is yours to choose): {command}",
+            f"{fix}queue it again as a fresh run with a longer walltime (the walltime is yours to choose): {command}",
         )
     if decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
         settled = expected - sum(counts.get(s, 0) for s in _OPEN_STATES)
