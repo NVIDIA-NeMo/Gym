@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13.14"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
@@ -2773,7 +2773,6 @@ dependencies = [
     { name = "pydantic-core" },
     { name = "pydot" },
     { name = "pyjwt" },
-    { name = "pypdf" },
     { name = "python-multipart" },
     { name = "requests" },
     { name = "rich" },
@@ -2916,7 +2915,6 @@ requires-dist = [
     { name = "pydantic-core" },
     { name = "pydot" },
     { name = "pyjwt", specifier = ">=2.15.1" },
-    { name = "pypdf", specifier = ">=5.1.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
@@ -2930,8 +2928,8 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.14.1" },
     { name = "sqlparse", marker = "extra == 'mlflow'", specifier = ">=0.6.0" },
     { name = "tenacity", marker = "extra == 'sandbox'", specifier = ">=9.1.4" },
-    { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "tomlkit", marker = "extra == 'dev'", specifier = ">=0.12" },
+    { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "tqdm" },
     { name = "urllib3", specifier = ">=2.8.0" },
     { name = "uvicorn" },
@@ -4568,15 +4566,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
-]
-
-[[package]]
-name = "pypdf"
-version = "7.0.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/00/c2/4c34b3229abae3e2fcc7809e6cf80fdea159771a37142f475fbf1009c809/pypdf-7.0.1.tar.gz", hash = "sha256:0a78bb99efb41e9088260e9a8e5da134a5cbb9a322014744177bf29b5267ea6d", size = 7206748, upload-time = "2026-11-10T11:47:22.582Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/a9/ae11deef21eaac5113f8c3848da1c42423b7abeca0abc349bfec7abf4c4e/pypdf-7.0.1-py3-none-any.whl", hash = "sha256:6131b764b046282357037309e7ef2a1b7679d4a5c53eed3db2bfbf7c673ddc2b", size = 416136, upload-time = "2026-11-10T11:47:20.716Z" },
 ]
 
 [[package]]

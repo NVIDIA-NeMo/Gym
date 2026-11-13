@@ -42,6 +42,7 @@ import base64
 import binascii
 import io
 import json
+import logging
 from time import time
 from typing import Any, Dict, Iterator, List, Optional
 from uuid import uuid4
@@ -51,7 +52,6 @@ from uuid import uuid4
 # MessageCreateParams (request) is a TypedDict used purely as a hint; NeMoGymAnthropicMessage
 # (response) is the BaseModel used to validate what we emit.
 from anthropic.types.message_create_params import MessageCreateParams
-from pypdf import PdfReader
 
 from nemo_gym.core.responses_api_types import (
     TOKEN_METADATA_FIELDS,
@@ -71,6 +71,10 @@ from nemo_gym.core.responses_api_types import (
     TokenIDLogProbMixin,
 )
 from nemo_gym.models.anthropic_utils import NeMoGymAnthropicMessage
+
+
+logger = logging.getLogger(__name__)
+_warned_missing_pypdf = False
 
 
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
@@ -456,8 +460,9 @@ class AnthropicConverter:
         """Render an Anthropic `document` block (e.g. Claude Code reading a PDF) as text.
 
         Responses and Chat Completions inputs have no document part, so a PDF is passed as its extracted
-        text and a plain-text document as its text. Anything else becomes a short note, so the tool
-        result still reaches the model instead of failing the request.
+        text (pypdf ships with each model server, which serves this ingress) and a plain-text document as
+        its text. Anything else becomes a short note, so the tool result still reaches the model instead
+        of failing the request. A missing pypdf logs one warning per process.
         """
         source = block.get("source") or {}
         title = block.get("title")
@@ -465,6 +470,14 @@ class AnthropicConverter:
         if source.get("type") == "text":
             return source.get("data", "")
         if source.get("type") == "base64" and source.get("media_type") == "application/pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                global _warned_missing_pypdf
+                if not _warned_missing_pypdf:
+                    _warned_missing_pypdf = True
+                    logger.warning("pypdf is not installed, so PDF document blocks reach the model as a note")
+                return f"[{label}: PDF text extraction requires pypdf in the model server environment]"
             try:
                 reader = PdfReader(io.BytesIO(base64.b64decode(source["data"])))
                 pages = [page.extract_text() or "" for page in reader.pages]

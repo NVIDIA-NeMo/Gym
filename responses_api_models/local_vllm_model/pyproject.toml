@@ -19,6 +19,11 @@ version = "0.2.0rc0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,ray]",
+    # pypdf: the Anthropic Messages ingress every model server serves (nemo_gym/models/anthropic_converter.py)
+    # passes a PDF `document` block (e.g. Claude Code reading a PDF) to the model as its extracted text.
+    # Updated Fri Nov 13, 2026 with pypdf>=5.1.0
+    # License: BSD 3-Clause https://github.com/py-pdf/pypdf/blob/main/LICENSE
+    "pypdf>=5.1.0",
     "hf-transfer==0.1.9",
     "uvicorn==0.40.0",
     "vllm==0.11.0; sys_platform == 'darwin'",

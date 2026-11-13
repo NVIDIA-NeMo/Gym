@@ -26,6 +26,11 @@ dependencies = [
     ########################################
 
     "nemo-gym[dev]",
+    # pypdf: the Anthropic Messages ingress every model server serves (nemo_gym/models/anthropic_converter.py)
+    # passes a PDF `document` block (e.g. Claude Code reading a PDF) to the model as its extracted text.
+    # Updated Fri Nov 13, 2026 with pypdf>=5.1.0
+    # License: BSD 3-Clause https://github.com/py-pdf/pypdf/blob/main/LICENSE
+    "pypdf>=5.1.0",
 
     # nemo-switchyard: provides the native in-process Switchyard server this model server hosts
     # (switchyard_rust.server.Server). Scoped to this model server rather than Gym's core

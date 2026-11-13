@@ -22,11 +22,14 @@ two directions against drift.
 
 import base64
 import json
+import logging
+import sys
 
 import pytest
 from anthropic.types import Message
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models import anthropic_converter
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
@@ -326,6 +329,7 @@ class TestAnthropicRequestToResponses:
         }
 
     def test_tool_result_pdf_document_becomes_text(self) -> None:
+        pytest.importorskip("pypdf")
         block = {
             "type": "document",
             "source": {
@@ -347,6 +351,7 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].output == "plain"
 
     def test_tool_result_unreadable_pdf_document_becomes_note(self) -> None:
+        pytest.importorskip("pypdf")
         block = {
             "type": "document",
             "title": "a.pdf",
@@ -356,6 +361,19 @@ class TestAnthropicRequestToResponses:
         params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
 
         assert params.input[0].output.startswith("[document 'a.pdf': could not read PDF")
+
+    def test_tool_result_pdf_document_without_pypdf_warns(self, monkeypatch, caplog) -> None:
+        monkeypatch.setitem(sys.modules, "pypdf", None)
+        monkeypatch.setattr(anthropic_converter, "_warned_missing_pypdf", False)
+        block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": ""}}
+
+        with caplog.at_level(logging.WARNING, logger=anthropic_converter.__name__):
+            params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+
+        assert (
+            params.input[0].output == "[document: PDF text extraction requires pypdf in the model server environment]"
+        )
+        assert "pypdf is not installed" in caplog.text
 
 
 class TestResponsesToAnthropicResponse:

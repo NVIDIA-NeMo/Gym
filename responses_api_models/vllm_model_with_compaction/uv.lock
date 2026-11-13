@@ -1209,7 +1209,6 @@ dependencies = [
     { name = "pydantic-core" },
     { name = "pydot" },
     { name = "pyjwt" },
-    { name = "pypdf" },
     { name = "python-multipart" },
     { name = "requests" },
     { name = "rich" },
@@ -1287,7 +1286,6 @@ requires-dist = [
     { name = "pydantic-core" },
     { name = "pydot" },
     { name = "pyjwt", specifier = ">=2.15.1" },
-    { name = "pypdf", specifier = ">=5.1.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
@@ -2581,6 +2579,7 @@ version = "0.2.0rc0"
 source = { editable = "." }
 dependencies = [
     { name = "nemo-gym", extra = ["dev"] },
+    { name = "pypdf" },
 ]
 
 [package.optional-dependencies]
@@ -2592,6 +2591,7 @@ telemetry = [
 requires-dist = [
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
+    { name = "pypdf", specifier = ">=5.1.0" },
 ]
 provides-extras = ["telemetry"]
 
