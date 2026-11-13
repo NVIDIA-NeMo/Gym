@@ -16,6 +16,7 @@ import asyncio
 import json
 from asyncio import Semaphore
 from collections import defaultdict
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -799,6 +800,31 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    @pytest.mark.parametrize("forward", [None, False, True])
+    def test_saved_agent_evidence_requires_explicit_opt_in(self, forward):
+        evidence = {"schema_version": "2.0", "source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input={"responses_create_params": {"input": []}},
+            rollout={
+                "response": {"output": []},
+                "ng_trajectory": trajectory,
+                "ng_agent_observations": evidence,
+                "opencode_tool_reward": {"auxiliary_reward": 0.1},
+            },
+        )
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        payload = _build_verify_payload(pair, **options)
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
+        assert "opencode_tool_reward" not in payload
+
     def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
         """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
         pair = InputRolloutPair(
@@ -846,6 +872,19 @@ class TestBuildVerifyPayload:
             "responses_create_params": {"input": "q1"},
             "response": {"output": "hello"},
         }
+
+    @pytest.mark.parametrize("task_data", [None, []])
+    def test_materialized_task_data_must_be_an_object(self, task_data) -> None:
+        pair = InputRolloutPair(
+            input={"task_input": {"responses_create_params": {"input": "q1"}, "task_data": task_data}},
+            rollout={"response": {"output": "saved answer"}},
+        )
+        before = json.dumps({"input": pair.input, "rollout": pair.rollout}, sort_keys=True)
+
+        with pytest.raises(ConfigError, match="task_input.task_data must be an object"):
+            _build_verify_payload(pair)
+
+        assert json.dumps({"input": pair.input, "rollout": pair.rollout}, sort_keys=True) == before
 
     def test_generic_task_input_preserves_verifier_fields(self) -> None:
         fields = {"responses_create_params": {"input": "q1"}, "instance_id": "a", "verifier_metadata": {"answer": 42}}
@@ -1316,13 +1355,15 @@ class TestPreparePayloads:
         build_calls: list = []
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._build_verify_payload",
-            lambda p: build_calls.append(p) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            lambda p, *, forward_agent_evidence: build_calls.append((p, forward_agent_evidence))
+            or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
         )
 
         _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
 
         assert len(build_calls) == 1
-        assert build_calls[0] is pair
+        assert build_calls[0][0] is pair
+        assert build_calls[0][1] is False
 
     def test_resume_from_cache_drops_already_completed_keys(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1549,6 +1590,76 @@ class TestRunVerificationPayloads:
         sent = mock_client.post.await_args.kwargs["json"]
         assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
         assert returned["_ng_environment_server"] == "env_a"
+
+    @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
+    @pytest.mark.parametrize("materialized", [False, True])
+    async def test_agent_context_is_omitted_from_native_verify_requests(
+        self, monkeypatch: pytest.MonkeyPatch, context_location: str, materialized: bool
+    ) -> None:
+        context = {"agent": {"artifacts": {"media": {"path": "figs/1"}}}}
+        task_input = {
+            "responses_create_params": {"input": "q1"},
+            "task_data": {"answer": 42},
+            "verifier_metadata": {"answer": "sunny"},
+        }
+        expected_fields = deepcopy(task_input)
+        if context_location in ("top_level", "both"):
+            task_input["agent_context"] = context
+        if context_location in ("task_data", "both"):
+            task_input["task_data"]["agent_context"] = context
+        input_row = self._make_row("agent_a") | ({"task_input": task_input} if materialized else task_input)
+        original_input = deepcopy(input_row)
+        response = {"output": [{"type": "message", "role": "assistant", "content": []}]}
+        payload = _build_verify_payload(InputRolloutPair(input=input_row, rollout={"response": response}))
+        original_payload = deepcopy(payload)
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(returned, result)] = await self._collect(_run_verification_payloads([payload]))
+
+        if materialized:
+            expected_fields |= expected_fields.pop("task_data")
+        assert mock_client.post.await_args.kwargs["json"] == (
+            self._make_row("agent_a") | expected_fields | {"response": response}
+        )
+        assert result == {"reward": 1.0}
+        assert returned == original_payload
+        assert input_row == original_input
+
+    @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
+    async def test_agent_context_is_omitted_from_atif_verify_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context_location: str
+    ) -> None:
+        materialized, manifest = TestPrepareAtifPayloads()._write_inputs_and_manifest(tmp_path)
+        row = orjson.loads(materialized.read_bytes())
+        row |= {"verifier_metadata": {"answer": "sunny"}, "task_data": {"answer": 42}}
+        expected_fields = deepcopy(row)
+        context = {"agent": {"values": {"tag": "figqa2"}}}
+        if context_location in ("top_level", "both"):
+            row["agent_context"] = context
+        if context_location in ("task_data", "both"):
+            row["task_data"]["agent_context"] = context
+        materialized.write_bytes(orjson.dumps(row) + b"\n")
+        [payload] = _prepare_atif_payloads(materialized, manifest)
+        original_payload = deepcopy(payload)
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"fixture-agent": "rs"}, response_json={"reward": 1.0})
+
+        [(returned, result)] = await self._collect(_run_verification_payloads([payload]))
+
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert sent == expected_fields | {"response": original_payload["response"]}
+        assert [item["type"] for item in sent["response"]["output"]] == [
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert result == {"reward": 1.0}
+        assert returned == original_payload
+        assert ATIF_PROVENANCE_KEY not in sent and ATIF_PROVENANCE_KEY in returned
+        assert orjson.loads(materialized.read_bytes()) == row
 
     async def test_returns_row_and_response_json_for_each_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [self._make_row("agent_a", i) for i in range(3)]
@@ -1918,6 +2029,33 @@ class TestPrepareOutputFpaths:
 
 class TestLoadReverifiedResults:
     """Tests for _load_reverified_results: read the main jsonl once, sorted, with minimal routing rows."""
+
+    def test_identity_recovery_ignores_blank_lines_and_keyless_legacy_diagnostics(self, tmp_path: Path) -> None:
+        cached = {
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "response": {"output": []},
+            "reward": 0.25,
+        }
+        stamps = {"_ng_environment_server": "collected_env", "_ng_result_type": "legacy_agent"}
+        source = tmp_path / "source.jsonl"
+        source.write_bytes(
+            b"\n \t\n"
+            + orjson.dumps({"error": "legacy transport diagnostic"})
+            + b"\n"
+            + orjson.dumps(cached | stamps | {"reward": 1.0})
+            + b"\n"
+        )
+        output = tmp_path / "rescored.jsonl"
+        output.write_bytes(orjson.dumps(cached) + b"\n")
+        before = {path: path.read_bytes() for path in (source, output)}
+
+        results, rows = _load_reverified_results(output, (tmp_path / "absent_failures.jsonl", source, source))
+
+        assert results == [cached | stamps]
+        assert rows == [{AGENT_REF_KEY_NAME: cached[AGENT_REF_KEY_NAME], "_ng_environment_server": "collected_env"}]
+        assert {path: path.read_bytes() for path in (source, output)} == before
 
     def test_reads_sorted_results_and_minimal_routing_rows(self, tmp_path: Path) -> None:
         out = tmp_path / "out.jsonl"
@@ -2946,6 +3084,32 @@ class TestRunFromConfigResumeFromCache:
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
+    @pytest.mark.parametrize("forward", [None, False, True])
+    @pytest.mark.parametrize("resume", [False, True])
+    async def test_reverification_config_controls_saved_evidence(self, tmp_path, monkeypatch, forward, resume):
+        evidence = {"source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input=self._row("agent_a", 0),
+            rollout={"response": {"output": []}, "ng_trajectory": trajectory, "ng_agent_observations": evidence},
+        )
+        dispatched = []
+        self._patch(monkeypatch, [pair], dispatched)
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        config = self._make_config(tmp_path, resume_from_cache=resume, **options)
+        assert config.forward_agent_evidence is bool(forward)
+        await RolloutReverificationHelper().run_from_config(config)
+        [payload] = dispatched
+        assert payload["response"] == pair.rollout["response"]
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
+
     async def test_resume_preserves_prior_output_and_reruns_only_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3507,6 +3671,8 @@ class TestRunFromConfigJudgeFailedOnly:
             successes=[self._success(0)],
             failures=[{**self._failure(1), "stage_index": 1}],
         )
+        failures = tmp_path / "rollouts_failures.jsonl"
+        failures.write_bytes(b"\n \t\n" + failures.read_bytes())
         before = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
         dispatched: list = []
         self._patch(monkeypatch, dispatched)

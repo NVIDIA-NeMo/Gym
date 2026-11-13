@@ -107,14 +107,14 @@
   },
   "responses_api_agents/nemo_fabric_agent": {
     "override-dependencies": [
-      "openai==2.44.0",
+      "openai==2.45.0",
       "pyjwt==2.15.1",
       "certifi>=2026.10.19"
     ]
   },
   "responses_api_agents/nooa_agent": {
     "override-dependencies": [
-      "openai==2.44.0"
+      "openai==2.45.0"
     ]
   },
   "responses_api_agents/osworld_agent": {
@@ -126,7 +126,9 @@
       "alibabacloud-ecs20140526",
       "alibabacloud-tea-openapi",
       "alibabacloud-tea-util",
-      "volcengine-python-sdk"
+      "volcengine-python-sdk",
+      "paddleocr",
+      "paddlepaddle"
     ],
     "override-dependencies": [
       "grpcio-status==1.71.2",
@@ -142,7 +144,7 @@
   "responses_api_agents/simple_strands_agent": {
     "override-dependencies": [
       "numpy==2.3.2",
-      "openai==2.44.0",
+      "openai==2.45.0",
       "pyarrow>=25.0.1"
     ]
   },

@@ -504,3 +504,35 @@ async def test_unversioned_custody_row_cannot_use_persisted_fallback_key(tmp_pat
     result = await FileLineageStore(tmp_path).resolve("r", _request())
     assert result.status == ParentResolutionStatus.UNRESOLVED
     assert result.match is None
+
+
+def _repaired_request(name: str, arguments: str = '{"command":"cd /repo && ls"}') -> list[dict]:
+    """The request after OpenCode's tool-call repair renamed the served ``Bash`` call ``call_0``."""
+    request = _request(rewritten=False)
+    request[2] = {"type": "function_call", "call_id": "call_0", "name": name, "arguments": arguments}
+    return request
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_opencode_lowercased_resolves_to_the_served_call(stores) -> None:
+    # OpenCode renames a call whose lowercase name is a known tool to that name, in every later request.
+    await _publish(stores)
+    result = await stores[2].resolve("r", _repaired_request("bash"))
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.reason == "tool_call_turn"
+    assert result.match.model_call_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_a_call_renamed_to_another_tool_stays_unresolved(stores) -> None:
+    await _publish(stores)
+    result = await stores[2].resolve("r", _repaired_request("grep"))
+    assert result.status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_the_poison_log_names_only_the_tools_of_the_last_model_turn() -> None:
+    from nemo_gym.models.token_capture.sink import _trailing_tool_names
+
+    assert _trailing_tool_names(_repaired_request("bash")) == ["bash", "Read"]
+    assert _trailing_tool_names(None) == []
+    assert _trailing_tool_names([{"role": "user", "content": "hi"}]) == []

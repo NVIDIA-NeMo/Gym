@@ -1,0 +1,20 @@
+# BabyVision (388 rows) under OpenCode with a Python shell: a visual-reasoning instruction,
+# opencode 1.17.11 tools (bash/read/glob/grep/write/edit/todowrite, `read`
+# returns images), 1800 s per task and no turn cap, and a gpt-4o-mini correctness judge.
+# The environment is the generic visual_coding_opencode, which runs each task in a sandbox session;
+# this file only adds the data. Data: prepare.py downloads UnipatAI/BabyVision at a pinned revision
+# (or reads $BABYVISION_PARQUET, a local copy of its parquet file).
+config_paths:
+  - resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml
+
+visual_coding_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: babyvision_opencode
+        type: benchmark
+        jsonl_fpath: benchmarks/babyvision_opencode/data/babyvision_opencode_benchmark.jsonl
+        prepare_script: benchmarks/babyvision_opencode/prepare.py
+        # prepare.py saves every image as a PNG with Pillow, which a dev install of Gym lacks.
+        prepare_dependencies: [pillow]
+        num_repeats: 1

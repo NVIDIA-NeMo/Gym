@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities, AgentContinuationRequirements
     from nemo_gym.agents.agent_outcome import (
         AGENT_OUTCOME_METADATA_KEY,
+        HARNESS_STEP_LIMIT_METADATA_KEY,
         AgentOutcome,
         AgentOutcomePolicyConfig,
         OutcomeAction,
@@ -61,10 +62,11 @@ if TYPE_CHECKING:
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
-    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
+    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime, probe_sandbox_platform
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -120,6 +122,7 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
+    "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
@@ -144,7 +147,9 @@ _PUBLIC_API = {
     "is_harness_termination_failure": "utils.supervisor_client",
     "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "probe_sandbox_platform": "utils.sandbox_python",
     "raises_agent_failure": "testing.failure_assertions",
+    "resolve_agent_context_artifact": "utils.agent_context",
     "resolve_agent_timeout": "utils.task_timeout",
     "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",

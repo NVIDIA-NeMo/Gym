@@ -6,8 +6,8 @@
 ```python
 planned = plan_benchmark("ifeval")                        # resolve, prepare, plan and collate
 runner = TaskRunner(planned.rows, registry_server=BaseServerConfig(host="127.0.0.1", port=11000))
-result = await runner.run_task(planned.plan.tasks[0].task_id.task_id)
-result.rewards                                            # one reward per repeat
+outcome = await runner.run_task(planned.plan.tasks[0].task_id.task_id)
+outcome.reward                                            # None when the rollout has no reward
 ```
 
 To start the servers from Python too, serve the benchmark and give the yielded registry server to the runner:
@@ -27,37 +27,63 @@ The registry server is the server that serves the run's config and the other ser
 talks to it.
 
 This is the API for callers outside Gym. They import the names `nemo_gym.environment` exports (`plan_benchmark`,
-`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult` and `EvalPlan`) and `ConfigError` from
-`nemo_gym.config`. Signatures and result fields change only additively, and tests pin them. `TaskResult.results`
-holds Gym's raw `/run` responses, whose keys can change: depend on `rewards`, and use `results` for debugging.
+`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`) and
+`ConfigError` from `nemo_gym.config`. It is experimental: signatures and result fields may change without a
+deprecation period, and tests pin the current ones. `RolloutOutcome.raw` is Gym's raw `/run` response (the failure
+record for a failed `/run`), whose keys can change: depend on the other fields, and use `raw` for debugging.
 """
 
 import json
+import math
+import re
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError, ignoring_command_line
 from nemo_gym.config.global_config import (
+    AGENT_REF_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     scoped_global_config_dict,
 )
 from nemo_gym.core.episode_types import is_materialized_task_row
+from nemo_gym.core.failure_kinds import (
+    FailureStage,
+    is_evaluation_side,
+    is_registered,
+)
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
-from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
+from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config, read_jsonl_rows
 from nemo_gym.eval.eval_plan import EvalPlan
-from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
-from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import (
+    NG_ENVIRONMENT_SERVER_KEY,
+    RolloutCollectionHelper,
+    _metric_failure_kind,
+)
+from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+from nemo_gym.server_runtime.supervisor.server_supervisor import (
+    RunHelper,
+    ServerSpinupTimeoutError,
+    ServerStartFailedError,
+)
+from nemo_gym.telemetry.gym_metrics import record_rollout_completed, record_rollout_reward
+from nemo_gym.utils.decorators import experimental
+
+
+# The bounds `gym eval run` puts on a `/run` call: a connection that was made and dropped is sent twice, and one that
+# was refused is resent for a minute (`dispatch_connect_grace_s`). Without them a dead server is retried for ever.
+_MAX_RUN_TRIES = 2
+_CONNECT_GRACE_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -92,14 +118,74 @@ class PlannedBenchmark:
 
 
 @dataclass(frozen=True)
-class TaskResult:
-    """One task's rollouts: a reward per repeat and Gym's raw `/run` results, in the same order."""
+class TaskFailure:
+    """What Gym observed when a rollout failed. It reports; what to do about it is the caller's decision.
 
-    task_id: str
-    rewards: list[float]
-    results: list[dict[str, Any]]
+    `kind` is Gym's failure kind (the vocabulary is in `nemo_gym/core/failure_kinds.py`; a `<server>:<kind>` kind is an
+    environment's own): the cause when the reporter named one, else `environment_server_failed` (the environment
+    reported a failure without a kind) or `agent_request_failed` (the `/run` call failed). `domain` is derived from
+    it and `evaluation_side` classifies it.
+
+    `source` says who reported the failure. `delivery` is Gym's evidence about whether the `/run` request reached the
+    agent: `not_sent` (every connection attempt was refused, so resending cannot start a second episode),
+    `possibly_delivered` (it may have been processed) or `delivered`. It is the evidence to use for a retry decision;
+    `terminal` is only the reporter's statement that the episode must not be attempted again, and `False` does not mean
+    it is safe to retry. `stage` is where in the episode it happened, when the reporter knows. `reason`, `http_status`
+    and `exception_type` are diagnostics.
+    """
+
+    kind: str
+    source: Literal["environment", "collector"]
+    delivery: Literal["not_sent", "possibly_delivered", "delivered"]
+    stage: Optional[FailureStage] = None
+    terminal: bool = False
+    reason: Optional[str] = None
+    http_status: Optional[int] = None
+    exception_type: Optional[str] = None
+
+    @property
+    def domain(self) -> str:
+        """The layer that observed the failure: the part of `kind` before its first `_` or `:`.
+
+        Names are `<domain>_<condition>` and an environment's own are `<server>:<kind>`, so `agent_run_error` is in
+        `agent`, `judge_failed` in `judge` and `myenv:bad_input` in `myenv`. A name with neither, such as `cancelled`,
+        is its own domain. It names a layer, not whose fault the failure was: `agent_timeout` and `agent_run_error` are
+        both in `agent`. Use `evaluation_side` for that.
+        """
+        return re.split(r"[_:]", self.kind, maxsplit=1)[0]
+
+    @property
+    def evaluation_side(self) -> Optional[bool]:
+        """Whether the kind is an evaluation-side fault (True) or the model's own outcome (False).
+
+        None for a kind that is not in Gym's vocabulary, such as an environment's own `<server>:<kind>`. This is the
+        kind's own class; a recorded HTTP status can refine an occurrence of it (see `failure_kinds.py`).
+        """
+        return is_evaluation_side(self.kind) if is_registered(self.kind) else None
 
 
+@dataclass(frozen=True)
+class RolloutOutcome:
+    """One rollout's outcome: its reward as the verifier returned it, and the failure if one was reported.
+
+    `reward` is None when no reward exists, as for a failed `/run`: an infrastructure failure is not a score of zero.
+    A masked rollout keeps the reward the verifier returned. `masked` is True when the verifier says that reward is not
+    a valid measurement of the evaluated system (for example a lost session reports 0 and masks it), so a caller that
+    computes scores must leave masked rollouts out. A failed `/run` has no sample, so its `masked` is False and its
+    `reward` is None. `prompt` and `output` are `responses_create_params.input` and `response.output` as JSON text, for
+    display and debugging, or None when the result has no such shape (for example a native episode result). `raw` is
+    Gym's own `/run` response (the failure record for a failed `/run`), whose keys can change: use it for debugging only.
+    """
+
+    reward: Optional[float]
+    failure: Optional[TaskFailure] = None
+    masked: bool = False
+    prompt: Optional[str] = None
+    output: Optional[str] = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@experimental(once=True)
 def plan_benchmark(
     benchmark: str,
     *,
@@ -129,6 +215,7 @@ def plan_benchmark(
     return PlannedBenchmark(plan=plan, rows=rows)
 
 
+@experimental(once=True)
 @contextmanager
 def serve_benchmark(
     benchmark: str,
@@ -221,55 +308,144 @@ def _collated_rows(global_config_dict: DictConfig, output_dir: Path) -> list[dic
     collated = output_dir / "benchmark.jsonl"
     if not collated.exists():
         raise ConfigError(f"Collation did not produce {collated}")
-    return [json.loads(line) for line in collated.read_text().splitlines() if line.strip()]
+    return read_jsonl_rows(collated)
 
 
 class TaskRunner:
-    """Runs single tasks of collated rows against Gym servers that are already running.
+    """Runs single tasks of collated rows, flat or materialized, against Gym servers that are already running.
 
-    The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row,
-    repeats it, sends it through the agent's `/run` and returns the rewards. Concurrent calls in one
-    event loop are supported.
+    The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row, sends it
+    through the agent's `/run`, or a materialized row through the environment server its taskset routes to, and
+    returns the rollout's outcome. The running servers' configuration is read from the registry server once and shared
+    by every call, flat or materialized, so build a new `TaskRunner` after the deployment's servers change.
+    Concurrent calls in one event loop are supported.
     """
 
+    @experimental(once=True)
     def __init__(self, rows: Sequence[Mapping[str, Any]], *, registry_server: BaseServerConfig):
-        self._helper = RolloutCollectionHelper()
+        self._helper = RolloutCollectionHelper(reuse_server_client=True)
         self._registry_server = registry_server
         self._row_of_task = _first_row_of_each_task(rows)
-        for task_id, row in self._row_of_task.items():
-            if is_materialized_task_row(row):
-                raise ConfigError(f"Task {task_id!r} is a materialized task row; TaskRunner runs flat task rows only.")
 
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
 
-    async def run_task(self, task_id: str, *, num_repeats: int = 1, rollout_id: Optional[str] = None) -> TaskResult:
-        """Run `num_repeats` rollouts of one task.
+    @experimental(once=True)
+    async def run_task(self, task_id: str, *, rollout_id: Optional[str] = None) -> RolloutOutcome:
+        """Run one rollout of a task.
 
-        `rollout_id` names the rollouts for Gym's rollout correlation (e.g. verification events); repeats
-        get `<rollout_id>-r<n>`. It must differ between concurrent calls; a fresh one is made when it is None.
+        `rollout_id` names the rollout for Gym's rollout correlation (e.g. verification events). It must differ between
+        concurrent calls; a fresh one is made when it is None.
+
+        A `/run` call that fails (a client error, a bad JSON body, a timeout or an unusable reply) does not raise: the
+        outcome has a `failure` and no reward. A refused connection is resent for a minute, and one that dropped is sent
+        twice, as `gym eval run` does. Any other exception, such as a programming error, and cancellation
+        propagate.
         """
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
+        task_row = self._row_of_task[task_id]
+        global_config_dict = (
+            self._helper.setup_server_client(self._registry_server).global_config_dict
+            if is_materialized_task_row(task_row)
+            else None
+        )
         with ignoring_command_line():
             rows = self._helper.preprocess_examples(
-                [self._row_of_task[task_id]], task_ids=[task_id], num_repeats=num_repeats
+                [task_row], task_ids=[task_id], num_repeats=1, global_config_dict=global_config_dict
             )
-        rollout_id = rollout_id or uuid.uuid4().hex
-        rows = [_with_rollout_id(row, rollout_id, index, num_repeats) for index, row in enumerate(rows)]
-        completions = self._helper.run_examples(rows, head_server_config=self._registry_server)
+        row = {**rows[0], "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
+        completions = self._helper.run_outcomes(
+            [row],
+            head_server_config=self._registry_server,
+            max_num_tries=_MAX_RUN_TRIES,
+            connect_grace_s=_CONNECT_GRACE_S,
+        )
         try:
-            completed = [await rollout for rollout in completions]
+            (completion,) = completions
+            resolved_row, result = await completion
         finally:
             await completions.aclose()
-        results = [result for _, result in completed]
-        return TaskResult(task_id=task_id, rewards=[result["reward"] for result in results], results=results)
+        outcome = _outcome(result)
+        _record_outcome(outcome, _dispatch_label(self._helper, resolved_row))
+        return outcome
+
+
+def _dispatch_label(helper: RolloutCollectionHelper, row: Mapping[str, Any]) -> str:
+    """The dispatch name of the row, or `unknown` when it names neither an environment server nor an agent.
+
+    The rollout has finished by now, so a label must not cost the caller its outcome.
+    """
+    if NG_ENVIRONMENT_SERVER_KEY in row or AGENT_REF_KEY_NAME in row:
+        return helper._dispatch_name(dict(row))
+    return "unknown"
+
+
+def _record_outcome(outcome: RolloutOutcome, dispatch_name: str) -> None:
+    """Count the rollout in `gym.rollout.completed_total` and, when it is scored, in `gym.rollout.rewarded_total`.
+
+    A failure makes the outcome `failed` and labels it with its kind, whatever the reward is. Without a failure the
+    outcome is `scored` when there is a reward and `unscored` when there is none. Only a scored rollout with a finite
+    reward is counted in `rewarded_total`.
+    """
+    failure = outcome.failure
+    if failure is not None:
+        record_rollout_completed(
+            "failed",
+            dispatch_name=dispatch_name,
+            failure_kind=_metric_failure_kind(failure.kind),
+            failure_type=failure.exception_type,
+        )
+        return
+    if outcome.reward is None:
+        record_rollout_completed("unscored", dispatch_name=dispatch_name)
+        return
+    record_rollout_completed("scored", dispatch_name=dispatch_name)
+    if math.isfinite(outcome.reward):
+        record_rollout_reward(outcome.reward, dispatch_name=dispatch_name, masked=outcome.masked)
+
+
+def _raw(result: Mapping[str, Any] | RolloutFailureRecord) -> dict[str, Any]:
+    return result.model_dump(mode="json") if isinstance(result, RolloutFailureRecord) else dict(result)
+
+
+def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome:
+    if isinstance(result, RolloutFailureRecord):
+        return RolloutOutcome(reward=None, failure=_failure_of_record(result), raw=_raw(result))
+    kind, reason = result.get("failure_kind"), result.get("failure_reason")
+    failure = None
+    if kind:
+        failure = TaskFailure(
+            kind=str(kind),
+            source="environment",
+            delivery="delivered",
+            reason=None if reason is None else str(reason),
+        )
+    prompt = (result.get("responses_create_params") or {}).get("input")
+    output = (result.get("response") or {}).get("output")
+    return RolloutOutcome(
+        reward=result.get("reward"),
+        failure=failure,
+        masked=bool(result.get("mask_sample")),
+        prompt=None if prompt is None else json.dumps(prompt, default=str),
+        output=None if output is None else json.dumps(output, default=str),
+        raw=_raw(result),
+    )
+
+
+def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
+    return TaskFailure(
+        kind=record.sidecar_failure_class,
+        source=record.source,
+        delivery=record.delivery,
+        stage=record.failure.stage,
+        terminal=record.failure.terminal,
+        reason=record.failure.failure_reason,
+        http_status=record.http_status,
+        exception_type=record.exception_type,
+    )
 
 
 def _first_row_of_each_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
     ids = list(dict.fromkeys(row_task_id(row) for row in rows))
     return {row_task_id(rows[index]): rows[index] for index in select_tasks(rows, ids)}
-
-
-def _with_rollout_id(row: dict[str, Any], rollout_id: str, index: int, num_repeats: int) -> dict[str, Any]:
-    return {**row, "_ng_rollout_id": rollout_id if num_repeats == 1 else f"{rollout_id}-r{index}"}

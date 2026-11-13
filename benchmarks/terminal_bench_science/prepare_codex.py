@@ -60,7 +60,7 @@ def _prepare_in_server_environment(arguments: list[str]) -> Path:
     from omegaconf import open_dict
 
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-    from nemo_gym.orchestration import get_venv_path, run_command, setup_env_command
+    from nemo_gym.server_runtime.supervisor import get_venv_path, run_command, setup_env_command
 
     setup_config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(

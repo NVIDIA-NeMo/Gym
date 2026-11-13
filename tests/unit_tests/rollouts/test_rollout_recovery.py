@@ -19,7 +19,7 @@ import asyncio
 import json
 import multiprocessing
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
@@ -967,6 +967,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
+    recorded = []
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -1017,6 +1019,7 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/open": 2,
         "coverage/failure_budget_exhausted": 0,
     }
+    assert recorded == [(exported[-1], report["run_id"])]  # The same run summary goes to OTel.
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
     assert progress["progress/my_agent/masked_pct"] == 100.0
     assert progress["progress/my_agent/failed"] == 1
@@ -1049,6 +1052,53 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     assert exported[-1]["coverage/measured"] == 1 and exported[-1]["coverage/masked"] == 1
     assert exported[-1]["coverage/failed"] == 0
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
+
+
+async def test_run_summary_reaches_otel_without_an_experiment_tracker(runner_config, monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from nemo_gym.telemetry import gym_metrics
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    class _Handle:
+        is_exporting = True
+        meter = provider.get_meter("run-summary-collection-test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    gym_metrics._reset_for_testing()
+    runner_config.disable_aggregation = False
+    runner_config.upload_rollouts = False
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(collection, "get_exporters", lambda: [])
+    export_metrics = MagicMock()
+    monkeypatch.setattr(collection, "export_metrics", export_metrics)
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
+    try:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+        data = reader.get_metrics_data()
+        metrics = {
+            metric.name: {frozenset(point.attributes.items()): point.value for point in metric.data.data_points}
+            for resource_metric in data.resource_metrics
+            for scope_metric in resource_metric.scope_metrics
+            for metric in scope_metric.metrics
+            if metric.name.startswith("gym.run.")
+        }
+    finally:
+        provider.shutdown()
+        gym_metrics._reset_for_testing()
+
+    report = json.loads(coverage_path_for(Path(runner_config.output_jsonl_fpath)).read_text())
+    run = frozenset({(gym_metrics.RUN_ID_ATTRIBUTE, report["run_id"])})
+    export_metrics.assert_not_called()
+    assert metrics["gym.run.info"] == {run: 1}
+    assert metrics["gym.run.coverage.scored"] == {run: report["scored"]}
+    assert metrics["gym.run.coverage.failed"] == {run: 0}
+    assert report["scored"] > 0
 
 
 @pytest.mark.parametrize("failure_type", ["typed", "legacy", "kill_shaped", "skipped", "suppressed"])
@@ -2494,3 +2544,69 @@ async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rol
     runner_config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(runner_config)
     assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]
+
+
+def test_run_outcomes_forwards_the_connection_bounds_and_is_unbounded_without_them(monkeypatch):
+    seen = []
+
+    def fake(self, examples, **kwargs):
+        seen.append(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_examples_with_metadata", fake)
+    row = failing_row()
+
+    RolloutCollectionHelper().run_outcomes([row])
+    RolloutCollectionHelper().run_outcomes([row], max_num_tries=2, connect_grace_s=60.0)
+
+    assert (seen[0]["_max_num_tries"], seen[0]["_connect_grace_s"]) == (None, None)
+    assert (seen[1]["_max_num_tries"], seen[1]["_connect_grace_s"]) == (2, 60.0)
+
+
+def _refused_connection():
+    from aiohttp import ClientConnectorError
+    from aiohttp.client_reqrep import ConnectionKey
+
+    return ClientConnectorError(ConnectionKey("127.0.0.1", 1, False, True, None, None, None), OSError(111, "refused"))
+
+
+async def test_a_refused_connection_is_resent_within_the_grace_and_then_reported_as_not_sent(monkeypatch):
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = _refused_connection()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) > 1
+    assert (outcome.source, outcome.delivery) == ("collector", "not_sent")
+    assert outcome.exception_type == "ClientConnectorError"
+
+
+async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_not_resent_by_the_grace(monkeypatch):
+    from aiohttp import ServerDisconnectedError
+
+    calls = []
+
+    async def post(*, _on_transport_failure=None, **kwargs):
+        calls.append(kwargs)
+        error = ServerDisconnectedError()
+        _on_transport_failure(error, False)
+        raise error
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+    _, outcome = await next(
+        RolloutCollectionHelper().run_outcomes([failing_row()], max_num_tries=2, connect_grace_s=0.3)
+    )
+
+    assert len(calls) == 1
+    assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
+    assert outcome.exception_type == "ServerDisconnectedError"

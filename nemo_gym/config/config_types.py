@@ -1064,6 +1064,8 @@ class AggregateMetrics(BaseModel):
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
 TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
+# Sampling values for a model call, or `null`, placed after the other prefixes (nemo_gym/core/model_call_sampling.py).
+MODEL_SAMPLING_PATH_SEGMENT = "ng-sampling"
 
 # The listen backlog of every Gym server socket, above uvicorn's default of 2048.
 # A burst of new connections at Gym's concurrency then waits in the queue rather than on TCP retransmission backoff.
