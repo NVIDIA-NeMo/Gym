@@ -67,6 +67,10 @@ or recovery re-judging a row whose judge failed) cannot mask a budget ending, on
 body carries no `opencode_terminal_reason`, and an episode's ending was only in its sandbox's plugin
 log. A row that ended on its budget comes back from such a verify graded and unmasked.
 
+Gym judges a `judge_unparseable` row again from its saved answer, on either pairing, at the end of
+the collection and when the run resumes, and replaces it once the judge gives a verdict. Changed:
+before, a reply without a verdict scored the row 0, and no re-judge picked it up.
+
 ## Sessions
 
 On the episode path, an Environment Server seeds this server, which starts the episode's sandbox and
@@ -98,7 +102,9 @@ a crash an episode starts over from its input.
   graded, since the grade reads only the request. With `plugin_log_path` set, an Environment
   Server's verify (it sends `x-ng-checkpoint-close-follows: 1`) for a session this server holds no
   sandbox or earlier verify for, as after a restart, is masked as `session_lost` instead: its plugin
-  log went with the sandbox.
+  log went with the sandbox. Recovery keeps such a row masked; `gym eval resubmit` with `--recover`,
+  `--rerun-masked-without-artifact` and a `--rerun-reason` runs it again, which counts as one failed
+  attempt within its cap.
 * **Plugin log.** With `plugin_log_path` set, an episode's verify first reads that file from the sandbox
   (60 s at most): the receipts plugin (`opencode_bundle/nemo_gym_receipts.js`) copies the OpenCode
   plugins' lines there. The read prints that the file is absent, or the file's size in bytes and then
@@ -230,8 +236,9 @@ startup refuses a setting that cannot work:
 * `episode_sandbox_files` maps absolute sandbox paths to files relative to the Gym root, read at startup
   and staged in each lent sandbox. A path must lie outside `sandbox_workdir`, where the model's tools
   could list and change the file, and outside `/tmp/nemo-gym-opencode*`. A source must name a regular
-  file relative to the Gym root, without `..`: an absolute source, a missing one or a directory fails
-  startup. Stage under `/tmp`, which every image has: a provider need not create parent directories.
+  file relative to the Gym root, without `..`: an absolute source or one with `..` fails startup, and
+  with `sandbox_workdir` set, which makes the server read each source, so does a missing one or a
+  directory. Stage under `/tmp`, which every image has: a provider need not create parent directories.
   Each file is uploaded once, when the sandbox starts (`SandboxSpec.files`); an upload that fails stops
   the sandbox, and the seed answers 500, a non-terminal episode failure that a resume retries. Nothing
   reads the files back or checks their digests in each episode; the BrowseComp scripted smoke checks

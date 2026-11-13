@@ -300,11 +300,12 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # Upstream, overridable so a run can be pinned to a frozen mirror.
     exa_upstream_url: str = "https://mcp.exa.ai/mcp"
 
-    # STATELESS: a verify without the close-follows header that an Environment Server sends with an episode's verify,
-    # such as gym eval reverify's, grades only its body (question, ground truth, saved response), so a saved run can be
-    # re-graded under another judge or prompt without running the model again. Such a re-grade cannot reproduce a
-    # budget mask: the body built from a saved row carries no ending, and an episode's ending was read from the plugin
-    # log in its sandbox, which stopped with the episode (see README).
+    # STATELESS: a verify for a session this server holds no sandbox, earlier verify, seed under way or close for, sent
+    # without the close-follows header that an Environment Server sends with an episode's verify, such as gym eval
+    # reverify's, grades only its body (question, ground truth, saved response), so a saved run can be re-graded under
+    # another judge or prompt without running the model again. Such a re-grade cannot reproduce a budget mask: the body
+    # built from a saved row carries no ending, and an episode's ending was read from the plugin log in its sandbox,
+    # which stopped with the episode (see README).
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # Sandbox the agent works in. One fixed image for every row: these tasks carry no
@@ -342,7 +343,8 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     episode_export_dir: Optional[str] = None
     # An absolute directory on this host, one per run, which a run's overlay sets. An episode's verify then copies the
     # regular files directly in episode_export_dir to <capture key>/<task id>/attempt-<attempt>/ under it, after the
-    # plugin log read and before the sandbox stops, and reports the copy in the row as opencode_export_copy. A copy
+    # plugin log read and before the sandbox stops, and reports the copy in the row as opencode_export_copy, except in
+    # the reply of a verify refused for its plugin log (422) or answering 500 once the judge breaker trips. A copy
     # that fails or is refused is logged and reported there, and never changes the reward, mask_sample or
     # evaluation_completed. None copies nothing.
     episode_export_copy_dir: Optional[str] = None
@@ -569,8 +571,8 @@ class _ExportCopy:
     (opencode_export_copy)."""
 
     # "copied"; "absent" when the sandbox has no episode_export_dir; "oversize" when the files hold more than
-    # episode_export_max_bytes, and none is copied; "failed" when the listing or a download failed or ran out of time,
-    # and nothing is kept.
+    # episode_export_max_bytes, and none is copied; "failed" when the listing, a download or a file operation on this
+    # host failed, a copied file's size differs from the listing, or the copy ran out of time, and nothing is kept.
     status: Literal["copied", "absent", "oversize", "failed"]
     # The directory on this host the files are copied to. It exists only when they were.
     dir: str
@@ -1157,8 +1159,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         Besides a closed session: with plugin_log_path set, an episode's grade depends on the plugin log in its sandbox
         (the plugin gate and the budget masks), so an episode's verify for a session this server holds neither the
         sandbox nor a first attempt's evidence for, as after a restart, which stops every sandbox, cannot be graded
-        either. Only an Environment Server's episode verify sends CHECKPOINT_CLOSE_FOLLOWS_HEADER; a verify without it,
-        from the relay agent or gym eval reverify, reads only its body and is graded.
+        either. Of this server's callers, only an Environment Server's episode verify sends
+        CHECKPOINT_CLOSE_FOLLOWS_HEADER; a verify without it, from the relay agent or gym eval reverify, reads only its
+        body and is graded.
         """
         if verification.is_lost:
             return "the session was closed, or its seed never finished"
