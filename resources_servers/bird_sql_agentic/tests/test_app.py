@@ -227,8 +227,9 @@ class TestExecuteSqlEndpoint:
         assert body["rows"] == []
 
     def test_rejects_path_like_db_id(self, client) -> None:
-        with pytest.raises(ValueError):
-            client.post("/seed_session", json={"db_id": "../SchoolDB", "question": "q", "gt_sql": "SELECT 1"})
+        response = client.post("/seed_session", json={"db_id": "../SchoolDB", "question": "q", "gt_sql": "SELECT 1"})
+        assert response.status_code == 422
+        assert "Invalid db_id" in response.text
 
 
 # ---------------------------------------------------------------------------

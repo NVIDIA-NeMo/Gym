@@ -27,6 +27,7 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
@@ -85,7 +86,7 @@ class BirdSqlAgenticResourcesServer(BirdSqlResourcesServer):
 
     def _bind_db(self, session_id: str, db_id: str) -> None:
         if not _DB_ID_PATTERN.match(db_id):
-            raise ValueError(f"Invalid db_id: {db_id!r}")
+            raise ResourcesSeedRejectedError(f"Invalid db_id: {db_id!r}")
         self.session_id_to_db_id[session_id] = db_id
 
     async def seed_session(
