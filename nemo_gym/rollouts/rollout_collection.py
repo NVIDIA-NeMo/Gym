@@ -205,6 +205,14 @@ from nemo_gym.utils.path_utils import (
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
+    task_selection_path_for,
+)
+from nemo_gym.utils.task_ids import (
+    TaskSelection,
+    task_ids_as_strings,
+    task_ids_digest,
+    task_selection,
+    task_selection_record,
 )
 from nemo_gym.utils.tqdm import tqdm
 
@@ -227,7 +235,7 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.data.task_selection import select_tasks
+from nemo_gym.data.task_selection import select_task_rows, select_tasks
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -550,6 +558,65 @@ def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -
         if row_str in tasks or len(tasks) < limit:
             tasks.add(row_str)
             yield line_no, row_str
+
+
+def _task_selection(config: "RolloutCollectionConfig") -> Optional[TaskSelection]:
+    """The task ids the run selects and their source; None when it selects none. Reads the id file, writes nothing."""
+    return task_selection(config.task_ids, config.task_ids_fpath)
+
+
+def _select_task_rows(
+    raw_rows: List[Tuple[int, str, Dict]], selection: Optional[TaskSelection]
+) -> List[Tuple[int, str, Dict]]:
+    """The rows of the selected tasks, every copy of each; all rows without a selection. Writes nothing."""
+    if selection is None:
+        return raw_rows
+    selected = [raw_rows[index] for index in select_task_rows([row for _, _, row in raw_rows], selection.task_ids)]
+    print(
+        f"Selecting {len(set(selection.task_ids))} tasks ({len(selected)} rows) by task id from {selection.source} "
+        f"(sha256 {task_ids_digest(selection.task_ids)[:12]}): a subset run, not the whole benchmark"
+    )
+    return selected
+
+
+def _write_task_selection_record(output_fpath: Path, selection: TaskSelection, rows: int) -> None:
+    """Record a fresh run's task selection beside its output (``rollouts_task_selection.json``)."""
+    record_path = task_selection_path_for(output_fpath)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(task_selection_record(selection, rows), indent=2) + "\n", encoding="utf-8")
+
+
+def _start_or_resume_store(
+    output_fpath: Path,
+    config: "RolloutCollectionConfig",
+    prepare_inputs: Callable[[Optional[TaskSelection]], tuple[list[dict], RunManifest]],
+) -> RolloutStore:
+    """``RolloutStore.start_or_resume`` for a collection run, which records the run's task selection once its inputs
+    are accepted on a fresh start (the store removes an earlier run's record then). An accepted resume keeps the record
+    its run wrote, or writes it if a crash before the write left none (never when the identity was overridden: the
+    run then holds its saved inputs, not these); a refused resume changes nothing. The ids are read once per
+    preparation, so the rows and the record agree."""
+    prepared: dict[str, Any] = {}
+
+    def prepare() -> tuple[list[dict], RunManifest]:
+        selection = _task_selection(config)
+        rows, manifest = prepare_inputs(selection)
+        prepared.update(selection=selection, rows=len(rows))
+        return rows, manifest
+
+    store = RolloutStore.start_or_resume(
+        output_fpath,
+        prepare,
+        resume=config.resume_from_cache,
+        allow_unsafe=config.allow_unsafe_resume,
+        resubmit=config.resubmit,
+    )
+    if prepared.get("selection") is not None and (
+        store.started_fresh
+        or (not store.manifest.identity_overridden and not task_selection_path_for(output_fpath).exists())
+    ):
+        _write_task_selection_record(output_fpath, prepared["selection"], prepared["rows"])
+    return store
 
 
 def _reject_attempt_qualified_rollout_ids(rows: Iterable[Mapping[str, Any]], fpath: Path) -> None:
@@ -2098,6 +2165,25 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "benchmark writes its num_repeats copies in a row), so every copy of each kept task is kept."
         ),
     )
+    task_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Run only these tasks of the input dataset: a subset, named and versioned by whoever keeps the list. "
+            "Each task is selected by the id its rows store (task_id, problem_id or instance_id), never by "
+            "position, and keeps every copy the input holds. The selection is written to "
+            "rollouts_task_selection.json when the run starts, and the inspect, the MLflow run and `gym eval compare` "
+            "label the run's score as a subset score. Hydra reads an unquoted 7 or true as a number or a boolean: "
+            "they are taken as the ids '7' and 'true', but a leading zero or an exponent is lost, so quote such ids "
+            "or use task_ids_fpath. Not with task_ids_fpath or limit."
+        ),
+    )
+    task_ids_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "A file with the task ids to run, one per line; blank lines and lines starting with # are skipped. "
+            "Otherwise as task_ids."
+        ),
+    )
     num_repeats: Union[int, Dict[str, int]] = Field(
         default=1,
         description=(
@@ -2179,6 +2265,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
                 "Set only one of them."
             )
         self.agent_map = {**(self.agent_map or {}), "_default": self.agent_name}
+        return self
+
+    @field_validator("task_ids", mode="before")
+    @classmethod
+    def _task_ids_as_strings(cls, value: Any) -> Any:
+        return task_ids_as_strings(value)
+
+    @model_validator(mode="after")
+    def _validate_task_selection(self) -> "RolloutCollectionConfig":
+        if self.task_ids_fpath is not None and not self.task_ids_fpath.strip():
+            raise ValueError("task_ids_fpath is empty: name a file of task ids, or leave it unset to run every task.")
+        chosen = [name for name in ("task_ids", "task_ids_fpath", "limit") if getattr(self, name)]
+        if len(chosen) > 1:
+            raise ValueError(f"Set only one of task_ids, task_ids_fpath and limit; got {', '.join(chosen)}.")
+        if self.task_ids is not None and not self.task_ids:
+            raise ValueError("task_ids is empty: list at least one task id, or leave it unset to run every task.")
         return self
 
     @model_validator(mode="after")
@@ -3498,7 +3600,14 @@ class RolloutCollectionHelper(BaseModel):
     _collection_started: bool = PrivateAttr(default=False)
     _store: RolloutStore | None = PrivateAttr(default=None)
 
-    def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
+    def _preprocess_rows_from_config(
+        self, config: RolloutCollectionConfig, selection: Optional[TaskSelection] = None
+    ) -> List[Dict]:
+        """The run's input rows as the config expands them. Writes nothing, so it also serves read paths.
+
+        ``selection``: the task ids and their source already read (``_task_selection``); read from the config when
+        not given.
+        """
         # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
@@ -3521,6 +3630,7 @@ class RolloutCollectionHelper(BaseModel):
                 for row_idx, (line_no, row_str) in enumerate(numbered_rows)
             ]
         _reject_attempt_qualified_rollout_ids([row for _, _, row in raw_rows], _input_path)
+        raw_rows = _select_task_rows(raw_rows, selection if selection is not None else _task_selection(config))
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
@@ -4111,8 +4221,8 @@ executions → not run again (left to recovery)
                 with config.materialized_jsonl_fpath.open("rb") as materialized_file:
                     validate_batch([orjson.loads(line) for line in materialized_file if line.strip()])
 
-        def prepare_inputs() -> tuple[list[dict], RunManifest]:
-            input_rows = self._preprocess_rows_from_config(config)
+        def prepare_inputs(selection: Optional[TaskSelection]) -> tuple[list[dict], RunManifest]:
+            input_rows = self._preprocess_rows_from_config(config, selection)
             # Materialized inputs must contain resolved agent routing for custom
             # drivers and for reproducible identity checks on resume.
             direct_source_rows = [row for row in input_rows if NG_ENVIRONMENT_SERVER_KEY not in row]
@@ -4132,13 +4242,7 @@ executions → not run again (left to recovery)
             )
             return input_rows, manifest
 
-        store = RolloutStore.start_or_resume(
-            output_fpath,
-            prepare_inputs,
-            resume=config.resume_from_cache,
-            allow_unsafe=config.allow_unsafe_resume,
-            resubmit=config.resubmit,
-        )
+        store = _start_or_resume_store(output_fpath, config, prepare_inputs)
         if config.resume_from_cache and store.started_fresh:
             # The exporters reopened the run recorded next to this output, which starts anew: so does that run.
             for exporter in get_exporters():
@@ -5172,6 +5276,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         unknown = sorted(requested - available)
         if not unknown:
             return
+        from nemo_gym.utils.text import listed_names
+
+        instances_by_agent_type: Dict[str, List[str]] = defaultdict(list)
+        for name in sorted(available):
+            for agent_type in global_config_dict[name]["responses_api_agents"]:
+                instances_by_agent_type[str(agent_type)].append(name)
         hints = []
         for name in unknown:
             # Naming a non-agent instance (e.g. a resources server via agent_map) is as fatal as a
@@ -5179,10 +5289,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if name in global_config_dict:
                 hints.append(f"{name!r} (exists but is not an agent instance)")
                 continue
+            if name in instances_by_agent_type:
+                instances = listed_names(instances_by_agent_type[name])
+                hints.append(f"{name!r} (an agent type, not an instance; use {instances})")
+                continue
             close = get_close_matches(name, available, n=1)
             hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
         raise ValueError(
             f"Rows reference agents not present in the running config: {', '.join(hints)}. "
+            "Agent names (`--agent`, `agent_ref.name`) are agent instance names, the top-level keys in the config. "
+            f"Agent instances in this run: {listed_names(sorted(available)) or 'none'}. "
             "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
         )
 
