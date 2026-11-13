@@ -418,10 +418,10 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `authors` | list of strings | Required; non-empty and unique |
 | `maintainers` | list of strings or null | Optional; GitHub logins of the current maintainers, non-empty and unique |
 | `intended_use` | list of strings or null | Optional; `evaluation`, `training`, or both; unknown when absent |
-| `training_allowed` | boolean or null | Optional; whether the environment's data may be used for training; unknown when absent |
+| `training_allowed` | boolean, `unknown`, or null | Optional; whether the environment's data may be used for training. Write `unknown` when nobody knows; leaving the field out means nobody answered |
 | `overlaps_with` | list of strings or null | Optional; benchmarks whose tasks overlap with this environment's data |
 | `primary_metric` | string or null | Optional; the key metric that is the headline score |
-| `requirements` | object or null | Optional; `gpu` (the environment itself needs a GPU) and `internet` (a run needs outbound internet access), each a boolean and unknown when absent |
+| `requirements` | object or null | Optional; `gpu` (the environment itself needs a GPU) and `internet` (a run needs outbound internet access), each `true`, `false`, or `unknown` |
 | `reward` | object | Required; `range` is two finite numbers ordered `lower <= upper` (a constant range is allowed) and `higher_is_better` is boolean |
 | `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
 | `config_path` | string | Optional; defaults to `config.yaml` beside the manifest; must be relative and stay inside the catalog tree |

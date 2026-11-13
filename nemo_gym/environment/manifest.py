@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Mapping
+from typing import Annotated, Any, Literal, Mapping
 
 import yaml
 from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
@@ -32,6 +32,9 @@ _PRIVATE_LICENSE_VALUES = frozenset({"internal", "proprietary", "unknown"})
 SOURCE_PATTERN = r"^(?:(?:https?|ssh|git|file)://\S+|[^@\s]+@[^:\s]+:\S+)$"
 CALLABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
 GITHUB_LOGIN_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
+# A yes-or-no answer that an author can also give as "unknown". An absent field means nobody answered;
+# "unknown" means somebody checked and nobody knows.
+BoolOrUnknown = bool | Literal["unknown"]
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 License = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -155,13 +158,13 @@ class AdoptedFrom(_ManifestModel):
 
 
 class ManifestRequirements(_ManifestModel):
-    """What a run needs beyond the model under test; an absent value is unknown."""
+    """What a run needs beyond the model under test: each value is true, false or "unknown"."""
 
-    gpu: bool | None = Field(
+    gpu: BoolOrUnknown | None = Field(
         default=None,
         description="Whether the environment itself needs a GPU, for example to score answers.",
     )
-    internet: bool | None = Field(
+    internet: BoolOrUnknown | None = Field(
         default=None,
         description="Whether a run needs outbound internet access, for example web search or downloads.",
     )
@@ -307,9 +310,9 @@ class EnvironmentManifest(_ManifestModel):
         json_schema_extra={"uniqueItems": True},
         description="Whether the environment is meant for evaluation, training or both; unknown when absent.",
     )
-    training_allowed: bool | None = Field(
+    training_allowed: BoolOrUnknown | None = Field(
         default=None,
-        description="Whether its data may be used for training; unknown when absent.",
+        description='Whether its data may be used for training: true, false or "unknown".',
     )
     overlaps_with: list[NonEmptyString] | None = Field(
         default=None,
