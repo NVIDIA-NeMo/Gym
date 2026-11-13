@@ -286,6 +286,7 @@ def build_job_manifest(
     driver_env = dict(config.driver.env)
     if benchmark.command is not None:
         driver_env |= _command_env(benchmark, run_dir_str)
+    driver_env["NEMO_GYM_BENCH_DIR"] = run_dir_str
 
     driver_container: dict[str, Any] = {
         "name": "driver",
