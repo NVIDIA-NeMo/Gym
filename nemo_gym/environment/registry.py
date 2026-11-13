@@ -24,7 +24,12 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.environment.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.environment.benchmarks import (
+    MANIFEST_FILENAME,
+    _benchmark_config_name,
+    _benchmark_config_paths,
+    _is_benchmark_config,
+)
 from nemo_gym.environment.discovery import iter_server_configs, read_config_metadata
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
@@ -245,6 +250,22 @@ def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[st
             yield child.name, config_path
 
 
+def _legacy_config_name(tree_dir: Path, config_path: Path, kind: CatalogKind) -> Optional[str]:
+    """The name :func:`_legacy_config_paths` lists ``config_path`` under, or None when it does not list it.
+
+    Reads only that one config instead of scanning the tree, so a selector can afford it on every launch.
+    """
+    relative = config_path.relative_to(tree_dir)
+    if kind == "benchmark":
+        # The benchmark scan globs `**/*.yaml`, which skips hidden files and folders.
+        if any(part.startswith(".") for part in relative.parts) or not _is_benchmark_config(config_path):
+            return None
+        return _benchmark_config_name(relative)
+    if len(relative.parts) == 2 and relative.name == ENVIRONMENT_CONFIG_FILENAME:
+        return relative.parts[0]
+    return None
+
+
 def _manifest_paths(tree_dir: Path) -> List[Path]:
     """Every ``manifest.yaml`` under ``tree_dir``, without descending into Harbor datasets.
 
@@ -318,6 +339,12 @@ def _discover_registry_tree(
         declared_by[manifest.name] = manifest_path
         key = (kind, manifest.name)
         if key in claimed:
+            # An earlier root shadows this entry, but its config is still this manifest's: listing that config again
+            # under its folder path would give it a second, unrelated ID.
+            try:
+                manifest_configs.add(resolve_manifest_config_path(manifest_path, manifest))
+            except ManifestError:
+                pass
             continue
         try:
             entry = _manifest_entry(tree_dir, manifest_path, manifest, kind)

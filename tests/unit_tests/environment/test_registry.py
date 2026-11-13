@@ -22,10 +22,15 @@ from nemo_gym.environment.manifest import dump_manifest
 from nemo_gym.environment.registry import (
     RegistryError,
     _discover_environments_in_dir,
+    _legacy_config_name,
+    _legacy_config_paths,
     discover_environment_catalog,
     discover_environments,
     resolve_catalog_entry,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _make_env(environments_dir: Path, name: str, config_body: str) -> Path:
@@ -372,6 +377,16 @@ class TestEnvironmentCatalog:
 
         assert [entry.manifest_path for entry in entries] == [high_manifest]
 
+    def test_a_shadowed_manifest_still_claims_its_config(self, tmp_path: Path, monkeypatch) -> None:
+        # The later root's `demo` loses to the earlier root's; its config is not listed again under its folder name.
+        high = tmp_path / "high"
+        low = tmp_path / "low"
+        _write_manifest(high, "environments", "demo", _manifest("demo"))
+        _write_manifest(low, "environments", "moved", _manifest("demo"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        assert [entry.name for entry in discover_environment_catalog()] == ["demo"]
+
     def test_manifest_requires_a_sibling_config(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(
             tmp_path,
@@ -504,6 +519,17 @@ class TestEnvironmentCatalog:
             claimed=frozenset({("environment", "mcqa")}),
         )
         assert set(deduplicated) == {("benchmark", "resources_servers/mcqa/science")}
+
+
+@pytest.mark.parametrize(("subdir", "kind"), [("benchmarks", "benchmark"), ("environments", "environment")])
+def test_one_configs_catalog_name_follows_the_tree_scan(subdir: str, kind: str) -> None:
+    """The selectors check one config by the rules the catalog scans a whole tree with; on this checkout they agree."""
+    tree = REPO_ROOT / subdir
+    scanned = {config_path: name for name, config_path in _legacy_config_paths(tree, kind)}
+    named = {config_path: _legacy_config_name(tree, config_path, kind) for config_path in tree.rglob("*.yaml")}
+
+    assert scanned
+    assert {config_path: name for config_path, name in named.items() if name is not None} == scanned
 
 
 class TestReadEnvironmentDetails:

@@ -821,6 +821,9 @@ def _write_manifest_atomically(path: Path, manifest: EnvironmentManifest) -> Non
 
 def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManifest) -> None:
     catalog_directory = _catalog_directory(manifest_path)
+    # Catalog discovery refuses a manifest at the root of its tree, so validation refuses it too.
+    if catalog_directory is not None and manifest_path.parent == catalog_directory:
+        raise EnvironmentValidationError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
     catalog_kind = catalog_directory.name if catalog_directory is not None else None
     expected_kind = {
         "environments": EnvironmentKind.ENVIRONMENT,

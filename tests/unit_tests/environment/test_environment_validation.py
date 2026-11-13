@@ -869,6 +869,16 @@ def test_manifest_name_is_an_id_that_need_not_match_its_folder(tmp_path: Path) -
     assert validate_environment(manifest_path).name == "renamed"
 
 
+def test_a_manifest_at_the_root_of_a_catalog_tree_is_refused(tmp_path: Path) -> None:
+    # Catalog discovery refuses it, so validation must too, although its name no longer has to match a folder.
+    manifest_path = _asset(tmp_path)
+    root_manifest = manifest_path.rename(tmp_path / "environments/manifest.yaml")
+    _replace_manifest(root_manifest, config_path="demo/config.yaml")
+
+    with pytest.raises(EnvironmentValidationError, match="named catalog directory"):
+        validate_environment(root_manifest)
+
+
 def test_two_manifests_in_one_tree_cannot_declare_one_name(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path)
     copy_path = tmp_path / "environments/copy/manifest.yaml"
