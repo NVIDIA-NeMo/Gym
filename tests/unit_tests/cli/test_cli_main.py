@@ -1698,7 +1698,6 @@ class TestAgentSelector:
         assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
         agent = resolved[new_name].responses_api_agents.langgraph_agent
         assert agent.entrypoint == f"{flavor}_agent.py"
-        assert agent.num_workers == 1
         for binding in ("resources_server", "model_server", "datasets"):
             assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers

@@ -467,6 +467,64 @@ class TestNeMoGymResponse:
         assert web_search_call.model_dump(mode="json") == payload
 
 
+class TestChatCompletionFinishReasons:
+    @pytest.mark.parametrize("stop_reason", [None, 0, 11, "repetition_detected"])
+    def test_vllm_repetition_finish_reason_is_sdk_compatible(self, stop_reason: str | int | None) -> None:
+        payload = {
+            "id": "chatcmpl-repetition",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "repetition",
+                    "stop_reason": stop_reason,
+                    "message": {"role": "assistant", "content": "Retained answer."},
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+        original = deepcopy(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+        saved = NeMoGymChatCompletion.model_validate_json(completion.model_dump_json(exclude_unset=True))
+
+        expected = deepcopy(original)
+        expected["choices"][0].update(finish_reason="stop", native_finish_reason="repetition")
+        assert saved.model_dump(exclude_unset=True) == expected
+        assert payload == original
+        assert type(saved.choices[0].stop_reason) is type(stop_reason)
+        sdk = ChatCompletion.model_validate_json(saved.model_dump_json(exclude_unset=True))
+        assert sdk.choices[0].finish_reason == "stop"
+        assert sdk.choices[0].native_finish_reason == "repetition"
+
+    @pytest.mark.parametrize("finish_reason", ["stop", "length", "content_filter", "tool_calls", "function_call"])
+    def test_standard_finish_reasons_are_unchanged(self, finish_reason: str) -> None:
+        payload = {
+            "index": 0,
+            "finish_reason": finish_reason,
+            "stop_reason": 0,
+            "message": {"role": "assistant", "content": "Retained answer."},
+        }
+
+        choice = NeMoGymChoice.model_validate(payload)
+
+        assert choice.model_dump(exclude_unset=True) == payload
+        assert "native_finish_reason" not in choice.model_dump()
+
+    def test_unrecognized_finish_reason_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="finish_reason"):
+            NeMoGymChoice.model_validate(
+                {
+                    "index": 0,
+                    "finish_reason": "unknown_provider_error",
+                    "stop_reason": "repetition_detected",
+                    "message": {"role": "assistant", "content": "Retained answer."},
+                }
+            )
+
+
 class TestTokenMetadataValidation:
     @pytest.mark.parametrize(
         "token_metadata",
@@ -2182,6 +2240,7 @@ def test_response_field_set_is_pinned() -> None:
         "prompt",
         "prompt_cache_key",
         "prompt_cache_retention",
+        "prompt_cache_options",
         "reasoning",
         "safety_identifier",
         "service_tier",
@@ -2411,6 +2470,33 @@ def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> N
     assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"
 
 
+@pytest.mark.parametrize("counts", [[], [None], [0], [3], [3, 4], [None, 4], [3, None], [3, None, 4]])
+def test_cache_write_usage_preserves_known_and_unknown(counts: list[int | None]) -> None:
+    usages = []
+    for count in counts:
+        usage = _usage(cached_tokens=0, reasoning_tokens=0)
+        usage.input_tokens_details.cache_write_tokens = count
+        usages.append(usage)
+    before = [usage.model_dump() for usage in usages]
+    expected = sum(counts) if all(count is not None for count in counts) else None
+    summed = NeMoGymResponseUsage.sum_from_list(usages)
+    assert summed.input_tokens_details.cache_write_tokens == expected
+    assert summed.input_tokens == sum(usage.input_tokens for usage in usages)
+    assert summed.output_tokens == sum(usage.output_tokens for usage in usages)
+    assert [usage.model_dump() for usage in usages] == before
+    accumulated = None
+    for usage in usages:
+        accumulated = accumulate_response_usage(accumulated, usage)
+    if accumulated is not None:
+        assert accumulated.input_tokens_details.cache_write_tokens == expected
+
+
+def test_cache_write_usage_omission_is_unknown() -> None:
+    details = NeMoGymResponseInputTokensDetails(cached_tokens=None)
+    assert details.cache_write_tokens is None
+    assert "cache_write_tokens" not in details.model_dump(exclude_unset=True)
+
+
 class TestUntypedInputItems:
     """A replayed input item without a type is classified by its fields; one that fits no item is rejected."""
 
@@ -2486,3 +2572,21 @@ def test_sum_from_list_of_no_usages_is_a_known_zero() -> None:
 
     assert (total.input_tokens, total.output_tokens, total.total_tokens) == (0, 0, 0)
     assert (total.input_tokens_details.cached_tokens, total.output_tokens_details.reasoning_tokens) == (0, 0)
+
+
+def test_empty_usage_seed_preserves_later_cache_write_counts() -> None:
+    seed = NeMoGymResponseUsage.sum_from_list([])
+    usage = _usage(cached_tokens=2, reasoning_tokens=3)
+    usage.input_tokens_details.cache_write_tokens = 7
+    before = usage.model_dump()
+
+    total = accumulate_response_usage(seed, usage)
+
+    assert total.input_tokens_details.cache_write_tokens == 7
+    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+    )
+    assert seed.input_tokens_details.cache_write_tokens == 0
+    assert usage.model_dump() == before

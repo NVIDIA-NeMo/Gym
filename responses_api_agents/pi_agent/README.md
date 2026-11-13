@@ -6,7 +6,11 @@ verification, and cleanup. Pi borrows the sandbox and runs its own model/tool lo
 
 [configs/pi_agent.yaml](configs/pi_agent.yaml) is the default agent configuration. Benchmark
 and agent settings are independent; the run configuration connects them through the
-Environment Server. This harness is currently for evaluation; token IDs and logprobs are not wired up.
+Environment Server.
+
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Configure and run
 
@@ -188,8 +192,9 @@ Pi decides how to send each attached file:
 Saved trajectories record the user prompt's text but not its images.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
-reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
-smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
+reasoning tokens. Under the default `output_token_policy: fixed`, an adapter-owned Pi extension applies it as
+`max_tokens`, preserving any smaller upstream cap; under `remaining_context` the extension removes the cap
+(see [Local CLI compatibility](#local-cli-compatibility)). Limits must be positive JavaScript-safe integers. Request-level
 `max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
@@ -307,8 +312,10 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 
 ## Local CLI compatibility
 
-Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
-`auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
+`auto_compaction` and `output_token_policy` apply to local runs and sandbox sessions alike. Under
+`output_token_policy`, `fixed` caps each request at `max_output_tokens`, and `remaining_context` drops the cap
+so the model server sizes the output from the context the request leaves. The optional per-call `bash_timeout`
+is local only; sandbox sessions use `sandbox_bash_timeout_seconds`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
 `mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
 instead and reject required HTTP tool grants rather than silently ignoring them.

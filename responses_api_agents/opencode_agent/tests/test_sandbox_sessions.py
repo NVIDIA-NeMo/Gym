@@ -1466,7 +1466,7 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
             "input_tokens": 11 + cache,
             "output_tokens": 2 + reasoning,
             "total_tokens": 13 + cache + reasoning,
-            "input_tokens_details": {"cached_tokens": cache or None},
+            "input_tokens_details": {"cached_tokens": cache or None, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": reasoning or None},
         }
         assert [item["type"] for item in response["output"]] == [

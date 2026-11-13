@@ -145,7 +145,7 @@ def test_chat_completion_usage_to_response_usage():
     # The provider total is kept as reported, not recomputed from prompt + completion.
     assert usage.model_dump() == {
         "input_tokens": 300,
-        "input_tokens_details": {"cached_tokens": 100},
+        "input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": None},
         "output_tokens": 1400,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 1701,
@@ -159,6 +159,17 @@ def test_usage_detail_prefers_nested_details_in_mappings():
     }
 
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 5
+
+
+@pytest.mark.parametrize("count", [None, 0, 7])
+def test_chat_cache_write_usage_preserves_reported_counts(count: int | None) -> None:
+    details = {} if count is None else {"cache_write_tokens": count}
+    usage = CompletionUsage(prompt_tokens=11, completion_tokens=3, total_tokens=99, prompt_tokens_details=details)
+
+    converted = chat_completion_usage_to_response_usage(usage)
+
+    assert converted.input_tokens_details.cache_write_tokens == count
+    assert (converted.input_tokens, converted.output_tokens, converted.total_tokens) == (11, 3, 99)
 
 
 # ===========================================================================
@@ -1899,6 +1910,41 @@ def test_chat_completion_to_response_preserves_native_finish_reason(converter: C
     )
 
     assert response.native_finish_reason == "refusal"
+
+
+@pytest.mark.parametrize("stop_reason", [None, 0, 11, "repetition_detected"])
+def test_chat_completion_to_response_preserves_stop_reason(
+    converter: ChatCompletionsConverter, stop_reason: str | int | None
+) -> None:
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-stopped",
+            "created": 0,
+            "model": "test",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "stop_reason": stop_reason,
+                    "message": {"role": "assistant", "content": "retained answer"},
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+    )
+
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(model="test", input="question"), completion
+    )
+    saved = NeMoGymResponse.model_validate_json(response.model_dump_json())
+
+    assert getattr(saved, "native_stop_reason", None) == stop_reason
+    assert ("native_stop_reason" in saved.model_dump()) is (stop_reason is not None)
+    assert saved.status == "completed"
+    assert saved.incomplete_details is None
+    assert saved.output_text == "retained answer"
+    assert (saved.usage.input_tokens, saved.usage.output_tokens, saved.usage.total_tokens) == (3, 2, 5)
 
 
 # ===========================================================================

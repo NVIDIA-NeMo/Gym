@@ -29,6 +29,7 @@ from nemo_gym.core import (
     EpisodeId,
     FailureReportRow,
     NeMoGymResponse,
+    failure_kinds,
     rollout_context,
 )
 from nemo_gym.rollouts import NG_TERMINAL_KEY
@@ -740,7 +741,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_kind=(
                 VERIFIER_ERROR
                 if verifier_failure or ungraded_verifier
-                else (session.termination.failure_kind or _selected_failure_kind(extra))
+                else _agent_failure_kind(session.termination, extra, masked=not legacy)
                 if failure
                 else None
             ),
@@ -940,6 +941,13 @@ def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
             return AgentTermination(reason="nonzero_exit", detail="The final model call hit max_output_tokens")
         return AgentTermination(reason="timeout", detail="The agent stopped at its time limit")
     return AgentTermination(reason="nonzero_exit", detail=f"Agent response status: {response.status}")
+
+
+def _agent_failure_kind(termination: AgentTermination, harness_metadata: dict, *, masked: bool) -> str | None:
+    """The kind of an agent infrastructure failure: the one the server typed, else the harness's, else, for a masked
+    result, ``infrastructure_error`` so the row is never masked without a kind."""
+    kind = termination.failure_kind or _selected_failure_kind(harness_metadata)
+    return kind or (failure_kinds.INFRASTRUCTURE_ERROR if masked else None)
 
 
 def _selected_failure_kind(harness_metadata: dict) -> str | None:

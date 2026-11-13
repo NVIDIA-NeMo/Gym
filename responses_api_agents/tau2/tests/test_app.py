@@ -661,7 +661,7 @@ class TestApp:
         assert result["num_agent_calls"] == 3  # the canned greeting plus two kept agent messages
         assert result["response"]["usage"] == {
             "input_tokens": 3200,
-            "input_tokens_details": {"cached_tokens": 2048},
+            "input_tokens_details": {"cached_tokens": 2048, "cache_write_tokens": None},
             "output_tokens": 390,
             "output_tokens_details": {"reasoning_tokens": 335},
             "total_tokens": 3590,

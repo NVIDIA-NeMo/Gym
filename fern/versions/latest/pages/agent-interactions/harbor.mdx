@@ -85,6 +85,48 @@ harnesses with `allowed_agents` in its `dataset.toml`; `--allow-unsupported-pair
 declares its own MCP servers needs a harness that can take them; see
 [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool).
 
+### A benchmark config that names a target
+
+A benchmark config can hand `gym eval run --benchmark` to a task target: it sets `harbor_target` (any target above)
+in the config file itself and defines the one agent instance the benchmark runs by default, with its benchmark
+settings. The run is the target's run with that harness: the per-taskset Environment Server, rows and outputs are the
+same, and `--sandbox`, `--only-tasks`, `--exclude-tasks`, `--skip-unloadable` and `--agent-type` apply as above.
+`gym eval prepare --benchmark` writes the rows of every task for the benchmark's own harness; it takes none of those
+flags.
+
+```yaml
+# benchmarks/my_benchmark/config.yaml
+harbor_target: terminal_bench_4
+config_paths:
+- responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml
+mini_swe_agent:
+  responses_api_agents:
+    mini_swe_agent:
+      step_limit: 500
+```
+
+```bash
+gym eval run --benchmark my_benchmark --sandbox opensandbox --model-type vllm_model --model <model> --model-url <url>
+gym eval run --benchmark my_benchmark --agent-type hermes_agent --sandbox opensandbox ...
+```
+
+`--agent-type NAME[/FLAVOR]` runs another harness's shipped config on the same tasks, without the benchmark's harness
+settings; the dataset's `[gym] allowed_agents` still decides whether it may. `--agent` is refused here: it names the
+harness of a positional target. The agent instance is defined directly, under the shipped instance name of the
+config it includes (an `_inherit_from` instance is refused). Besides it the config, and the configs it includes, may
+set top-level keys: the shipped `harbor_environment_server` instance's settings (for example a longer
+`default_episode_timeout_seconds`), `builds:` and sandbox blocks, and the keys they interpolate; keys that only the
+harness's shipped config sets stay with that harness. Preparation reads them before any `--config` overlay, and the
+run writes them to `benchmark_settings_<agent>.yaml` and loads it after the server's and the sandbox provider's own
+configs, whichever harness runs, including one `--agent-type` swaps in; `--config` overlays and command-line
+overrides still win. A variant that includes a Harbor-backed config repeats `harbor_target` in its own file, and a
+Harbor-backed config passed with `--config` instead of `--benchmark` is refused. Another resources or environment
+server instance, in the config or any config it includes, is refused, since it would start beside the taskset's. Such a benchmark runs on its own (not
+with a second `--benchmark`) and `gym eval plan` does not plan it, since it declares no dataset of its own.
+`gym list benchmarks` lists it through its manifest, which sets the same `harbor_target` (refer to
+[Environment Manifest](/main/contribute/environments/new-environment#field-reference)), and inspecting it shows a
+`gym eval run --benchmark` example; listing it prepares or fetches nothing.
+
 ## Configure the server
 
 Deployment settings stay out of task and dataset files, so a dataset runs unchanged on every deployment:
@@ -98,7 +140,9 @@ Deployment settings stay out of task and dataset files, so a dataset runs unchan
 
 `gym eval run` and `gym dataset validate` write `run_config_<agent>.yaml` to the results folder, binding a `harbor`
 Environment Server instance for the dataset to the harness. They load that file, the harness's config,
-`environment_servers/harbor/configs/harbor.yaml` and the provider config, in that order. `--config` files follow,
+`environment_servers/harbor/configs/harbor.yaml`, the provider config and, for a
+[benchmark config that names a target](#a-benchmark-config-that-names-a-target), its
+`benchmark_settings_<agent>.yaml`, in that order. `--config` files follow,
 then the model server config that `--model-type` names (for `gym eval run`), then `env.yaml`. Command-line overrides
 load last, so they win.
 
@@ -191,6 +235,7 @@ A run writes under `results/harbor/<taskset>/`, relative to the directory you ru
 | Path | What it holds |
 | --- | --- |
 | `tasks_<agent>.jsonl`, `run_config_<agent>.yaml` | The rows and the generated run configuration. `<agent>` is the harness's instance name, such as `hermes_agent`. |
+| `benchmark_settings_<agent>.yaml` | For a [benchmark config that names a target](#a-benchmark-config-that-names-a-target), its settings other than its agent instance, loaded after the server's and the provider's configs. |
 | `rollouts.jsonl` | One result per task and repeat, except failed episodes, which go to `rollouts_failures.jsonl`. |
 | `rollouts_run_summary.json` | What ran, every file of the run, and each task's status, reward and log paths. |
 | `verifier/` | One folder per verification, written by the server, with `test-stdout.txt`, the reward file and `trajectory.json`. |

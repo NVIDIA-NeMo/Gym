@@ -81,6 +81,7 @@ from nemo_gym.data.tasks.harbor.manifest import (
     report_rewrite,
 )
 from nemo_gym.data.tasks.harbor.materialize import (
+    ENVIRONMENT_SERVER_INSTANCE,
     run_config,
     write_rows,
 )
@@ -102,6 +103,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
 IMAGES_FILE = "images.json"
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
+# The benchmark config key that hands `gym eval prepare/run --benchmark` to a Harbor target (see `harbor_benchmark`).
+HARBOR_TARGET_KEY = "harbor_target"
 ORACLE_AGENT = "harbor_oracle_agent"
 # A harness that calls the Gym model server from inside the task sandbox, where 127.0.0.1 is the container
 # itself, needs the model server to advertise the node's IP (`use_absolute_ip`). The harness declares that on
@@ -126,11 +129,10 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
         "enabled_toolsets": ["terminal"],
         "chat_template_kwargs_enabled": False,
     },
-    # Episode sessions are process-local, so the harness must run as one worker. Its shipped template
-    # leaves `resources_server.name` unset for benchmark composition; here the environment server
-    # drives it, so the generated instance declares none (and is not a composition source).
+    # Without a resources server, its episode sessions are process-local, so the harness must run as one worker.
+    # Its shipped template leaves `resources_server.name` unset for benchmark composition;
+    # here the environment server drives it, so the generated instance declares none (and is not a composition source).
     "terminus_2_sandboxed_agent": {"num_workers": 1, "resources_server": None},
-    "miniswe_sandboxed_agent": {"num_workers": 1},
 }
 
 
@@ -171,6 +173,11 @@ class AgentSelection:
     impl_name: str
     # The harness calls the model server from inside the task sandbox (see ``runs_in_sandbox``).
     runs_in_sandbox: bool = False
+    # A Harbor-backed benchmark's own top-level settings besides its agent instance: the shipped
+    # ``harbor_environment_server`` instance's settings (such as a longer episode bound), ``builds:`` and sandbox
+    # blocks, and the keys they interpolate. ``build_run`` loads them after the server's and the sandbox provider's
+    # own configs, whichever harness runs.
+    benchmark_settings: dict[str, Any] | None = field(default=None, hash=False)
 
 
 def _write_skipped(output_dir: Path, errors: dict[str, HarborTaskError]) -> None:
@@ -937,6 +944,136 @@ def resolve_agent(agent: str) -> AgentSelection:
     )
 
 
+def _includes_set_harbor_target(path: Path) -> bool:
+    """Whether a config that does not set ``harbor_target`` itself includes one that does. A config whose includes
+    cannot be loaded counts as not, so the composed-server path reports it as before."""
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.config.global_config import GlobalConfigDictParser
+
+    try:
+        _, closure = GlobalConfigDictParser().load_extra_config_paths([str(path.resolve())])
+    except (ConfigError, OSError, yaml.YAMLError):
+        return False
+    return any(HARBOR_TARGET_KEY in entry for entry in closure)
+
+
+@dataclass(frozen=True)
+class HarborBenchmark:
+    """A benchmark config backed by a Harbor target: ``gym eval run --benchmark`` runs ``target`` with ``agent``."""
+
+    config_path: Path
+    target: str
+    agent: AgentSelection
+
+
+def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
+    """Read a benchmark config's ``harbor_target``; ``None`` for a benchmark that composes its own servers.
+
+    A Harbor-backed benchmark config names its target (a task folder, a committed entry such as
+    ``terminal_bench_4``, or a ``harbor:`` reference) and, with the configs its ``config_paths`` include, defines
+    exactly one agent instance: the harness the benchmark runs by default, with its benchmark settings. The run
+    config's agent inherits that instance, as it inherits the shipped config ``--agent`` names, so the instance
+    is defined directly (an ``_inherit_from`` instance is refused: the run's agent would inherit an unresolved
+    source). The other top-level keys of the file and the configs it includes are the agent's
+    ``benchmark_settings``, such as the shipped ``harbor_environment_server`` instance's settings, which also apply
+    to a harness ``--agent-type`` swaps in; keys only a config that defines the agent instance contributes (the
+    harness's shipped config, not an included Harbor-backed benchmark) stay with that harness. Another resources or environment server instance, in the file
+    or any config it includes, would start beside the taskset's and is refused. ``harbor_target`` is read from the
+    file itself: a config whose includes set it but which does not is refused, so a variant of a Harbor-backed
+    preset repeats it rather than falling through to the composed-server path.
+    """
+    from omegaconf import OmegaConf
+
+    from nemo_gym.config.global_config import (
+        CONFIG_PATHS_KEY_NAME,
+        INHERIT_FROM_KEY_NAME,
+        ConfigPathNotFoundError,
+        GlobalConfigDictParser,
+    )
+
+    path = Path(config_path)
+    config = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(config, dict):
+        return None
+    if HARBOR_TARGET_KEY not in config:
+        if config.get(CONFIG_PATHS_KEY_NAME) and _includes_set_harbor_target(path):
+            raise ValueError(
+                f"{path} includes a config that sets `{HARBOR_TARGET_KEY}`, but does not set it itself; set "
+                f"`{HARBOR_TARGET_KEY}` in the benchmark file itself (a variant of a Harbor-backed preset repeats it)"
+            )
+        return None
+    target = config[HARBOR_TARGET_KEY]
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError(f"{path}: `{HARBOR_TARGET_KEY}` must name a Harbor task folder, entry or reference")
+    # The file with every config it includes, merged as the run merges them (an includer wins), unresolved.
+    try:
+        _, closure = GlobalConfigDictParser().load_extra_config_paths([str(path.resolve())])
+    except ConfigPathNotFoundError as error:
+        raise ValueError(f"{path}: {error}") from error
+    effective = OmegaConf.to_container(OmegaConf.merge(*closure), resolve=False)
+    # The file is merged last (an includer follows everything it pulled in).
+    included = [OmegaConf.to_container(entry, resolve=False) for entry in closure[:-1]]
+    agents = [name for name, value in effective.items() if isinstance(value, dict) and "responses_api_agents" in value]
+    if len(agents) != 1:
+        raise ValueError(
+            f"{path} sets `{HARBOR_TARGET_KEY}`, so it and the configs it includes must define exactly one "
+            f"responses_api_agents instance (the harness the benchmark runs); found {len(agents)}"
+        )
+    servers = [
+        name
+        for name, value in effective.items()
+        if isinstance(value, dict)
+        and name != ENVIRONMENT_SERVER_INSTANCE
+        and any(key in value for key in ("resources_servers", "environment_servers"))
+    ]
+    if servers:
+        raise ValueError(
+            f"{path} sets `{HARBOR_TARGET_KEY}`: the run composes the Harbor environment server, so it and the "
+            f"configs it includes cannot define {', '.join(servers)}"
+        )
+    instance = effective[agents[0]]
+    if INHERIT_FROM_KEY_NAME in instance:
+        raise ValueError(
+            f"{path}: the agent instance `{agents[0]}` sets `{INHERIT_FROM_KEY_NAME}`; define it directly instead "
+            "(include the harness's shipped config and set its settings under the shipped instance name)"
+        )
+    impls = instance["responses_api_agents"]
+    if not isinstance(impls, dict) or len(impls) != 1:
+        raise ValueError(f"{path} must define exactly one agent implementation under {agents[0]}")
+    impl_name, impl_config = next(iter(impls.items()))
+    server_settings = effective.get(ENVIRONMENT_SERVER_INSTANCE)
+    if server_settings is not None and not isinstance(server_settings, dict):
+        raise ValueError(f"{path}: `{ENVIRONMENT_SERVER_INSTANCE}` must be a mapping of the server's settings")
+    # A key only the harness's shipped config sets (a config that also defines the agent instance) is the harness's,
+    # not the benchmark's; every other key, from the file or an include, travels with whichever harness runs. An
+    # included Harbor-backed benchmark (it sets `harbor_target`) also defines the agent, but its settings are the
+    # benchmark's: a variant that includes a preset keeps the preset's server settings.
+    harnesses = [entry for entry in included if agents[0] in entry and HARBOR_TARGET_KEY not in entry]
+    benchmark_sources = [
+        config,
+        *(entry for entry in included if agents[0] not in entry or HARBOR_TARGET_KEY in entry),
+    ]
+    harness_only = {
+        key for entry in harnesses for key in entry if not any(key in source for source in benchmark_sources)
+    }
+    settings = {
+        key: value
+        for key, value in effective.items()
+        if key not in (HARBOR_TARGET_KEY, CONFIG_PATHS_KEY_NAME, agents[0]) and key not in harness_only
+    }
+    return HarborBenchmark(
+        config_path=path.resolve(),
+        target=target.strip(),
+        agent=AgentSelection(
+            config_path=path.resolve(),
+            instance_name=agents[0],
+            impl_name=impl_name,
+            runs_in_sandbox=runs_in_sandbox(impl_name, impl_config),
+            benchmark_settings=settings or None,
+        ),
+    )
+
+
 def resolve_sandbox_config(provider: str) -> Path:
     relative = SANDBOX_PROVIDER_CONFIG.format(provider=provider)
     for root in component_search_roots():
@@ -1021,6 +1158,12 @@ def build_run(
     config_paths = [config_path.resolve(), agent.config_path, _config_path(ENVIRONMENT_SERVER_CONFIG)]
     if sandbox is not None:
         config_paths.append(resolve_sandbox_config(sandbox))
+    if agent.benchmark_settings:
+        # The server's and the provider's own configs follow the agent's and would override a benchmark's settings
+        # for them; a swapped-in harness's config does not carry them at all.
+        settings_path = prepared.output_dir / f"benchmark_settings_{agent.instance_name}.yaml"
+        settings_path.write_text(yaml.safe_dump(agent.benchmark_settings, sort_keys=False))
+        config_paths.append(settings_path.resolve())
     # Later config files win: explicit user overlays must follow component/provider defaults.
     tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
     tokens += [token for token in overrides if not token.startswith("+agent_name=")]

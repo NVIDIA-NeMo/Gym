@@ -151,6 +151,24 @@ measurement:
   [`opencode_agent` README](../../responses_api_agents/opencode_agent/README.md#pinned-offline-runtime-bundle)
   describes and set `sandbox_plugin_dependencies_path` and `sandbox_plugin_dependencies_sha256` to remove the wait.
 
+`hle/pi` and `hle/pi_search` run `pi_agent` the same way, from `PI_SANDBOX_IMAGE`, the image built from
+[Pi's `offline_science_image`](../../responses_api_agents/pi_sandboxed_agent/offline_science_image), with the shared
+settings in [`offline_science.yaml`](../../responses_api_agents/pi_agent/configs/profiles/offline_science.yaml).
+`hle/pi_legacy_agent` and `hle/pi_search_legacy_agent` keep the deprecated `pi_sandboxed_agent` on the
+`legacy_agent` relay.
+
+`pi_agent` carries over the deprecated Pi preset's runtime, output policy, compaction, Bash cap and network policy.
+What still differs:
+
+- Failures: a run that stops at its output, context or time limit is graded on what it produced. A harness crash
+  (nonzero exit, no result) is retried and then reported as a failed rollout. The deprecated preset scored both
+  as 0 (`execution_failure_reward_zero`).
+- Prompt: `pi_agent`'s runtime guard adds a short note on sandbox execution to the system prompt.
+- Requests: `pi_agent` refuses request fields other than the input, `instructions` and `model`, such as
+  `temperature` or `reasoning`, with 422; the deprecated agent ignored them.
+- Artifacts: there is no host artifact directory (`PI_ARTIFACTS_DIR`); the rollout rows carry the agent's
+  observations.
+
 See the shared [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
 for images, credentials and network policies. Its token limits, step cap and artifact directories describe the
 `*_legacy_agent` presets.

@@ -2152,6 +2152,38 @@ class TestListEnvironments:
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
 
+    @pytest.mark.parametrize(
+        ("kind", "harbor_target", "usage"),
+        [
+            (
+                "benchmark",
+                "terminal_bench_4",
+                "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model",
+            ),
+            (
+                "environment",
+                "terminal_bench_4",
+                "gym eval run terminal_bench_4 --agent <harness> --sandbox <provider> --model-type vllm_model",
+            ),
+            ("benchmark", None, "gym env start --benchmark tb4 --model-type vllm_model"),
+        ],
+    )
+    def test_inspect_shows_how_a_harbor_backed_entry_runs(
+        self, monkeypatch: MonkeyPatch, capsys, kind, harbor_target, usage
+    ) -> None:
+        """`gym env start` does not compose a Harbor-backed entry's environment server; `gym eval run` does."""
+        entry = replace(self._ALPHA, name="tb4", kind=kind, harbor_target=harbor_target)
+        self._mock_catalog(monkeypatch, overrides={"component_name": "tb4", "json": True}, entries=(entry,))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {"domain": "agent", "description": "", "value": None, "datasets": []},
+        )
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out)["usage_example"] == usage
+
     def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"component_name": "alfa"}, entries=(self._ALPHA,))
 
@@ -2285,3 +2317,76 @@ def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
         RunHelper().start(None)
     initialize.assert_not_called()
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("verifier_error", [False, True])
+def test_server_data_validation_checks_manifest_verifiers(
+    monkeypatch: MonkeyPatch, tmp_path: Path, verifier_error: bool
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo"
+    server_dir.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    entries = [
+        EnvironmentCatalogEntry(
+            name=name,
+            config_path=tmp_path / name / "config.yaml",
+            path=tmp_path / name,
+            manifest_path=tmp_path / name / "manifest.yaml",
+            resources_server="demo",
+        )
+        for name in ("benchmark_a", "benchmark_b")
+    ]
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    validation = MagicMock(return_value=SimpleNamespace(datasets=()))
+    monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validation)
+    verifier = MagicMock(side_effect=RuntimeError("bad verifier") if verifier_error else None)
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    if verifier_error:
+        with raises(RuntimeError, match="bad verifier"):
+            nemo_gym.cli.env._validate_data_single(config)
+    else:
+        nemo_gym.cli.env._validate_data_single(config)
+        assert verifier.call_count == 2
+        for entry in entries:
+            validation.assert_any_call(entry.manifest_path, entry.config_path, validate_datasets=False)
+            verifier.assert_any_call(entry, update_expected=False, validation=validation.return_value)
+
+
+@pytest.mark.parametrize("legacy_artifact", [None, "example_metrics.json", "example_rollouts.jsonl"])
+def test_server_data_validation_keeps_legacy_contract(
+    monkeypatch: MonkeyPatch, tmp_path: Path, legacy_artifact: str | None
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo/data"
+    server_dir.mkdir(parents=True)
+    (server_dir / "example.jsonl").write_text("{}\n" * 5)
+    monkeypatch.chdir(tmp_path)
+    entries = ()
+    if legacy_artifact:
+        (server_dir / legacy_artifact).write_text("{}\n" * 5)
+        # Neither partial legacy artifacts nor invalid metrics may bypass legacy validation.
+        if legacy_artifact == "example_metrics.json":
+            (server_dir / "example.jsonl").write_text("{}\n" * 4)
+        entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    message = (
+        "Expected 5 examples" if legacy_artifact == "example_metrics.json" else "must run the example data validation"
+    )
+    with raises(AssertionError, match=message):
+        nemo_gym.cli.env._validate_data_single(config)
+
+
+def test_manifest_server_data_validation_rejects_conflict_artifacts(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "resources_servers/demo/data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "example-conflict.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    verifier = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    with raises(AssertionError, match="Found conflicting paths"):
+        nemo_gym.cli.env._validate_data_single(config)
+    verifier.assert_not_called()
