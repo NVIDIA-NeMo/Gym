@@ -16,9 +16,14 @@ from pydantic import BaseModel
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-from resources_servers.opencode_search.app import SearchResourcesServer, SearchResourcesServerConfig
+from resources_servers.opencode_search.app import (
+    _EXPORT_COPY_TIMEOUT_S,
+    SearchResourcesServer,
+    SearchResourcesServerConfig,
+)
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig, _session_opencode_config_error
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+from tests.unit_tests.benchmarks.test_browsecomp_opencode_configs import EXPORT_COPY_S
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -165,3 +170,9 @@ def test_the_resources_server_copies_the_exports_from_where_the_agent_writes_the
 
     assert resources.episode_export_dir == agent.export_dir == export_dir
     assert resources.episode_export_copy_dir is None
+
+
+def test_the_core_timing_check_counts_the_export_copy_at_this_servers_bound() -> None:
+    """The core suite checks that an episode ends before its lent sandbox expires with the export copy at its bound, a
+    constant of its own since that suite imports no server. It must be the bound this server applies."""
+    assert EXPORT_COPY_S == _EXPORT_COPY_TIMEOUT_S

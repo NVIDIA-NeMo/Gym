@@ -63,6 +63,10 @@ RUN_VARIABLES = (
 # log at verify.
 WORKDIR_CREATE_S = 60
 PLUGIN_LOG_READ_S = 60
+# opencode_search's bound on the whole export copy at verify (_EXPORT_COPY_TIMEOUT_S), which a run's overlay can turn
+# on. This suite imports no server, so resources_servers/opencode_search/tests/test_browsecomp_presets.py checks that
+# the two agree.
+EXPORT_COPY_S = 300
 NODE = shutil.which("node")
 
 
@@ -336,7 +340,8 @@ def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
     # Each admitted episode holds a sandbox; any one worker can run every admitted episode, so none waits for OpenCode.
     assert agent["concurrency"] >= pairing["max_concurrent_episodes"]
     # Everything before the judge, each step at its bound: the seed (the sandbox start, its workdir and OpenCode's
-    # install), the run, the agent's close, and verify's plugin-log read and sandbox stop.
+    # install), the run, the agent's close, and verify's plugin-log read, export copy (counted since an overlay can
+    # turn it on) and sandbox stop.
     before_judge = (
         sandbox["ready_timeout_s"]
         + WORKDIR_CREATE_S
@@ -344,6 +349,7 @@ def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
         + agent["timeout"]
         + agent["session_close_timeout_seconds"]
         + PLUGIN_LOG_READ_S
+        + EXPORT_COPY_S
         + STOP_TIMEOUT_S
     )
     assert before_judge < deadline
