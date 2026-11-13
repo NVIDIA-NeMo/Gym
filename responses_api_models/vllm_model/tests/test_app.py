@@ -1857,6 +1857,8 @@ class TestApp:
         [
             # The frontend rejects the return_token_ids field this flag sends.
             ({"request_prompt_and_generation_token_ids": True}, "return_token_ids"),
+            # The frontend rejects the conversation_params field this flag sends.
+            ({"forward_session_id_as_conversation_id": True}, "conversation_params"),
             # An echoed reasoning turn would carry both `reasoning` and its alias.
             ({"uses_reasoning_parser": True, "reasoning_field": "both"}, "duplicate field 'reasoning'"),
             ({"uses_reasoning_parser": True, "reasoning_field": "reasoning_content"}, None),
@@ -9644,6 +9646,10 @@ _REFIT_STATED_PROMPT_V029 = (
 _REFIT_NO_PROMPT_COUNT = (
     "max_tokens=131072 cannot be greater than max_model_len=8192. Please request fewer output tokens."
 )
+# How NeMo RL's chat engine, behind a Dynamo frontend, refuses a prompt that fills the window.
+_REFIT_DYNAMO_PROMPT_FILLS_WINDOW = (
+    "Prompt length (8200) fills or exceeds this model's maximum context length (8192). No room for output tokens."
+)
 
 
 def _refit_model(monkeypatch: MonkeyPatch, use_completions_api: bool) -> VLLMModel:
@@ -9782,6 +9788,22 @@ async def test_a_refit_counts_the_prompt_with_tokenize_when_the_refusal_does_not
         assert tokenize.kwargs == {"model": "dummy_model", "messages": first["messages"]}
     execution = request.state.nemo_gym_model_execution
     assert (execution["requested_max_tokens"], execution["applied_max_tokens"]) == (131072, _REFIT_APPLIED)
+
+
+async def test_a_refusal_through_dynamo_is_not_counted_with_tokenize(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
+    model = TestApp()._setup_server(monkeypatch, dynamo_frontend=True)
+    client = _refit_engine(_engine_bad_request_error(_REFIT_DYNAMO_PROMPT_FILLS_WINDOW))
+    model._clients = [client]
+
+    response = await model.chat_completions(_refit_request(), _refit_body({"max_tokens": 131072}))
+
+    assert response.choices[0].finish_reason == "length"
+    # The frontend has no /tokenize, and the budget is NeMo RL's to lower: one call, no count, no resend.
+    [call] = _generation_calls(client, False)
+    assert call["max_tokens"] == 131072
+    client.create_tokenize.assert_not_awaited()
 
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])

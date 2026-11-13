@@ -804,17 +804,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     @model_validator(mode="after")
     def _validate_dynamo_frontend(self) -> "VLLMModelConfig":
         # The dialect covers only the chat completions call; the frontend rejects required_prefix_token_ids,
-        # and return_token_ids (sent for request_prompt_and_generation_token_ids) is not a field it accepts.
+        # and neither return_token_ids (sent for request_prompt_and_generation_token_ids) nor conversation_params
+        # (sent for forward_session_id_as_conversation_id) is a field it accepts.
         if self.dynamo_frontend and (
             self.use_completions_api
             or self.is_responses_native
             or self.supply_prefix_token_ids
             or self.request_prompt_and_generation_token_ids
+            or self.forward_session_id_as_conversation_id
         ):
             raise ValueError(
                 "dynamo_frontend is not supported with use_completions_api, is_responses_native, "
-                "supply_prefix_token_ids, or request_prompt_and_generation_token_ids (the frontend rejects "
-                "the return_token_ids field it sends)"
+                "supply_prefix_token_ids, request_prompt_and_generation_token_ids (the frontend rejects "
+                "the return_token_ids field it sends), or forward_session_id_as_conversation_id (the frontend "
+                "rejects the conversation_params field it sends)"
             )
         # The frontend reads `reasoning` as an alias of `reasoning_content` and rejects a message that carries
         # both (`400 duplicate field 'reasoning'`). Only a server that replays reasoning onto assistant messages
@@ -963,7 +966,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         has no budget, when the window minus the prompt minus the margin leaves no output token (a prompt that alone
         fills the window), or when the lowered budget would not be lower. Calls admitted by an external capture worker
         are left alone: the worker has settled the refused call, so a second send under the same call id is not this
-        server's to make.
+        server's to make. Through a Dynamo frontend, which has no ``/tokenize``, a refusal that states no prompt length
+        is left alone too.
         """
         if not (
             self.config.refit_output_budget_to_window or self.config.refit_output_budget_to_prompt
@@ -986,6 +990,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             return False
         prompt_tokens = _stated_prompt_tokens(message)
         if prompt_tokens is None:
+            if self.config.dynamo_frontend:
+                # The frontend has no /tokenize. NeMo RL's chat engine lowers a budget that does not fit and
+                # refuses only a prompt that fills the window, which no count would refit.
+                return False
             prompt_tokens = await self._count_prompt_tokens(client, tokenize_body())
             if prompt_tokens is None:
                 return False

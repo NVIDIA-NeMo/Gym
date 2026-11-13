@@ -345,13 +345,14 @@ These settings are refused at startup together with `dynamo_frontend: true`:
 | `use_completions_api: true`, `is_responses_native: true` | Only the Chat Completions call is covered. |
 | `supply_prefix_token_ids: true` | The frontend rejects the top-level `required_prefix_token_ids` field. The annotation carries the prefix instead. |
 | `request_prompt_and_generation_token_ids: true` | The frontend rejects the `return_token_ids` field this setting sends. The token IDs already come back in `nvext.nemo_rl`. |
+| `forward_session_id_as_conversation_id: true` | The frontend rejects the `conversation_params` field this setting sends. |
 | `reasoning_field: both` on a server that replays reasoning (`uses_reasoning_parser: true`, `uses_interleaved_reasoning: true`, `preserve_reasoning_in_assistant_content: false`) | The frontend reads `reasoning` as another name for `reasoning_content` and answers a message that carries both with `400 duplicate field 'reasoning'`. Set `reasoning_field: reasoning_content`. |
 
 A call behaves differently than against a vLLM server in three ways:
 
-- **Output budget.** NeMo RL's chat engine lowers an output budget (`max_tokens` or `max_completion_tokens`) that does not fit to what the context window leaves, and refuses only a prompt that fills the window by itself. `refit_output_budget_to_window` and `refit_output_budget_to_prompt` therefore have no call to resend.
-- **Request fields.** The frontend refuses, with HTTP 400, vLLM request fields that its own request type lacks, for example `structured_outputs`, `truncate_prompt_tokens` and `priority`. It accepts `stop_token_ids`, `allowed_token_ids`, `bad_words_token_ids`, `cache_salt`, `logprob_token_ids` and `detokenize` but does not hand them to NeMo RL's chat engine, so they have no effect.
-- **Error messages on ai-dynamo 1.7.** That release replaces the message of a 4xx error with the status's reason phrase. A context-length refusal then arrives as a bare `Bad Request`, which VLLMModel cannot tell from any other invalid request, so the call fails instead of returning `finish_reason: "length"`. ai-dynamo 1.5.1 forwards the message.
+- **Output budget.** NeMo RL's chat engine lowers an output budget (`max_tokens` or `max_completion_tokens`) that does not fit to what the context window leaves, and refuses only a prompt that fills the window by itself. `refit_output_budget_to_window` and `refit_output_budget_to_prompt` therefore have no call to resend, and VLLMModel does not ask the frontend for a `/tokenize` count.
+- **Request fields.** The frontend refuses, with HTTP 400, vLLM request fields that its own request type lacks, for example `structured_outputs` and `chat_template`. It accepts `stop_token_ids`, `allowed_token_ids`, `bad_words_token_ids`, `cache_salt`, `logprob_token_ids` and `detokenize` but does not hand them to NeMo RL's chat engine, so they have no effect. Both hold on ai-dynamo 1.5.1 and 1.7.
+- **Error messages.** VLLMModel recognizes a context-length refusal, and the acknowledgement of a refused capture call, from the error's message. ai-dynamo 1.5.1 forwards the message of every 4xx error. From ai-dynamo 1.7 the frontend forwards it only for an error raised as one of Dynamo's typed errors, and otherwise sends the status's reason phrase, such as `Bad Request`. A context-length refusal that arrives without its message fails the call instead of returning `finish_reason: "length"`.
 
 ### Token capture through Dynamo
 
