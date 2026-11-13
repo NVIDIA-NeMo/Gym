@@ -1860,6 +1860,7 @@ from collections.abc import Awaitable
 import anyio
 
 from nemo_gym.core import FailureHeader
+from nemo_gym.sandbox import LocalProvider
 from resources_servers.opencode_search.app import SearchVerifyRequest
 
 
@@ -2133,3 +2134,53 @@ async def test_an_episode_seed_cancelled_at_an_await_stops_its_sandbox(workdir, 
     assert len(reached) == 1 and finished == reached
     assert not server.has_session_state("session") and server._lent_sandboxes.get("session") is None
     assert server._sandbox_access == {}
+
+
+def test_a_sandbox_the_relay_agent_stopped_first_does_not_break_a_reseed_or_the_shutdown(
+    workdir, tmp_path, started, stopped
+) -> None:
+    """The relay agent stops its sandbox itself, also when it refuses a run and never verifies, which leaves this server
+    holding a sandbox that is gone. A re-seed of the cookie stops it again, which the provider takes as stopped, before
+    it starts another; the shutdown stops the second."""
+    server = _server(None)
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_row()).status_code == 200
+        ((first, _),) = started
+        workspace = tmp_path / "agent-runs" / first.sandbox_id
+        assert workspace.is_dir()
+        # The agent stops it through a provider client of its own: this server's client still takes it to be running.
+        asyncio.run(LocalProvider().close(first._handle))
+        assert not workspace.exists()
+
+        reseeded = client.post("/seed_session", json=_row())
+
+        assert reseeded.status_code == 200, reseeded.text
+        assert len(started) == 2 and stopped == [first]
+        assert reseeded.json() == {"sandbox_handle": started[1][0].sandbox_id}
+    assert stopped == [first, started[1][0]] and server._agent_run_sandboxes == {}
+
+
+def test_a_stop_that_fails_at_shutdown_is_logged_and_the_other_sandboxes_still_stop(
+    workdir, started, monkeypatch, caplog
+) -> None:
+    """The shutdown stops every agent run's sandbox. A stop that fails there, as with a provider that refuses to stop a
+    sandbox the relay agent already stopped, is logged; the other sandboxes still stop, and the server still exits."""
+    server = _server(None)
+    attempts: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        attempts.append(self)
+        if self is started[0][0]:
+            raise RuntimeError("the provider refused the stop: the sandbox is gone")
+        await real_stop(self)
+
+    with caplog.at_level("ERROR"), TestClient(server.setup_webserver()) as client:
+        for _ in range(2):
+            client.cookies.clear()
+            assert client.post("/seed_session", json=_row()).status_code == 200
+        monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    assert len(attempts) == 2 and {id(sandbox) for sandbox in attempts} == {id(sandbox) for sandbox, _ in started}
+    assert started[1][0].teardown_confirmed is True and server._agent_run_sandboxes == {}
+    assert "Failed to stop the sandbox of agent run" in caplog.text
