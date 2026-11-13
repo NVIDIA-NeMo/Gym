@@ -120,7 +120,7 @@ The mirrored Gym CICD and Fern workflows run automatically for verified commits 
 
 If the build-docs check fails:
 
-1. **Test documentation locally**: Follow the [Fern docs quickstart](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md).
+1. **Test documentation locally**: Follow the one-time setup in the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md), then the [`nemo-gym-docs` skill](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs).
    - For local documentation previews, ensure Node.js 22+ is installed.
    - From the repository root, run `make docs-login` once to provision and authenticate Fern.
    - From the repository root, run `make docs` to generate the API reference and start the local preview.
@@ -136,7 +136,7 @@ If the build-docs check fails:
 You do **not** need Fern dashboard org membership to contribute docs.
 
 1. Edit MDX under `fern/versions/latest/pages/`.
-2. If you add a page that is not auto-discovered, update the bleeding-edge nav in [`fern/versions/main.yml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/main.yml). Folders mounted with `title-source: frontmatter` usually pick up new pages automatically; otherwise add a `- page:` entry under the right section. See the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md) and the `nemo-gym-docs` skill.
+2. If you add a page that is not auto-discovered, update the bleeding-edge nav in [`fern/versions/main.yml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/main.yml). Folders mounted with `title-source: frontmatter` usually pick up new pages automatically; otherwise add a `- page:` entry under the right section. See the [`nemo-gym-docs` skill](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs).
 3. Open a pull request from a fork or branch.
 4. Rely on CI: `fern check` and the automatic Fern preview comment use the repository `DOCS_FERN_TOKEN`, including for fork PRs.
 

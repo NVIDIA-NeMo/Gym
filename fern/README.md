@@ -6,7 +6,7 @@ This directory holds the Fern MDX source for the NeMo Gym documentation site at 
 
 ## Do you need setup at all?
 
-No, to contribute a page. Edit MDX under `fern/versions/latest/pages/`, open a PR, and CI runs `fern check` and comments a preview URL. CI authenticates with the repository `DOCS_FERN_TOKEN`.
+No, to contribute a page. Edit MDX under `fern/versions/latest/pages/` and open a PR; CI checks it and comments a preview URL.
 
 Yes, to preview locally with the Python API reference (`make docs`). That needs a Fern account in the `nvidia` org.
 

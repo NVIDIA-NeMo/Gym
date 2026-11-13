@@ -58,8 +58,9 @@ docs.nvidia.com/nemo/gym/latest/get-started/quickstart      redirects to /main/g
    <content>
    ```
 
-3. If the parent folder is mounted in `main.yml` with `title-source: frontmatter`, the page is auto-discovered and needs no nav edit. Otherwise add a `- page:` entry under the right `section:` in `fern/versions/main.yml`.
-4. Do not copy the page into a `v<release>/` folder unless the user asks for a back-port.
+3. If the parent folder is mounted in `main.yml` with `title-source: frontmatter`, the page is auto-discovered and needs no nav edit. Otherwise add a `- page:` entry under the right `section:` in `fern/versions/main.yml`. `position:` orders pages in an auto-discovered folder; without it, pages sort alphabetically by filename.
+4. Run `make docs-check` and preview the page at `/main/<subdirectory>/<filename>`.
+5. Do not copy the page into a `v<release>/` folder unless the user asks for a back-port.
 
 ### Update a Page
 
@@ -85,8 +86,8 @@ Only when the user asks. Apply the same change under `fern/versions/v<release>/p
 
 Request: *"Rename `/main/get-started/setup` to `/main/get-started/detailed-setup`."*
 
-1. `git mv fern/versions/latest/pages/get-started/setup.mdx fern/versions/latest/pages/get-started/detailed-setup.mdx`
-2. Add a redirect in `fern/docs.yml`:
+1. `git mv fern/versions/latest/pages/get-started/setup.mdx fern/versions/latest/pages/get-started/detailed-setup.mdx`, and update its `path:` in `main.yml` if it has a manual entry.
+2. Add a redirect in `fern/docs.yml`. Both `source` and `destination` need the full `/nemo/gym/` basepath with a leading slash:
 
    ```yaml
    redirects:
@@ -141,13 +142,13 @@ Badges go on the last line inside a `<Card>`, separated from the body by a blank
 </Cards>
 ```
 
-A new custom component goes in `fern/components/`, with its CSS in a sibling file imported from the TSX.
+A new custom component goes in `fern/components/`. Put its styles in a `<style>` block inside the TSX, as `NavButton.tsx` does: Fern's bundler does not load `import "./*.css"`, and the global theme owns `docs.yml` `css:`.
 
 The footer, logos, favicon, fonts, colors, base CSS and OneTrust JS come from the `nvidia` global theme (`global-theme: nvidia` in `docs.yml`). Do not add `footer:`, `logo:`, `favicon:`, `css:`, `js:`, `colors:`, `layout:`, `theme:`, or `navbar-links:` to `docs.yml`; change them upstream in NVIDIA/fern-components. The one exception is the `logo.right-text: NeMo Gym` override.
 
 ### Images
 
-Put images in `fern/assets/` and reference them with root-relative paths.
+Put shared images in `fern/assets/`, or version-scoped images under that version's `pages/`, and reference them with root-relative paths.
 
 ### Links
 
@@ -175,6 +176,7 @@ make docs                   # generate the library reference, then `fern docs de
 make docs-check             # `fern check`: config + MDX validation
 make docs-preview           # shared preview URL on *.docs.buildwithfern.com (needs DOCS_FERN_TOKEN)
 make docs-generate-library  # regenerate the library reference only
+make docs-publish           # trigger the publish workflow on main (only when the user asks)
 ```
 
 Or from `fern/`: `npm run check`, `npm run dev`, `npm run generate:library`.
@@ -193,11 +195,11 @@ DCO sign-off is required. PR titles follow Conventional Commits (for example, `d
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `fern-docs-ci.yml` | PR mirror push | `fern check` |
-| `fern-docs-preview.yml` | Approved PR mirror push | Publishes a preview and comments its URL on the PR |
+| `fern-docs-ci.yml` | PR mirror push touching `fern/**` or the docs test | `fern check` and `tests/unit_tests/test_fern_docs_links.py` |
+| `fern-docs-preview.yml` | Approved PR mirror push touching `fern/**` | Publishes a preview and comments its URL on the PR. Fork PRs need mirror approval first. |
 | `publish-fern-docs.yml` | Push to `main` touching `fern/**`, a `docs/v*` tag, or manual dispatch | Publishes to docs.nvidia.com/nemo/gym |
 
-Preview and publish use the `DOCS_FERN_TOKEN` secret. Do not push a `docs/v*` tag or run `make docs-publish` unless the user asks.
+Preview and publish use the `DOCS_FERN_TOKEN` secret (setup in [`fern/README.md`](../../../fern/README.md)). Release tags use the form `docs/v<MAJOR>.<MINOR>.<PATCH>`, for example `git tag docs/v0.8.0 && git push origin docs/v0.8.0`. Do not push a tag or run `make docs-publish` unless the user asks.
 
 ## Cutting a New Release
 
