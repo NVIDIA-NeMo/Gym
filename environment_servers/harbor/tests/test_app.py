@@ -5183,6 +5183,37 @@ class TestGeneralization:
         assert [p.stopped for p in providers] == [1, 1, 1]
         assert not server._sandboxes and server._pull_retry_gate._value == 4
 
+    async def test_verifier_start_retries_do_not_multiply_image_pull_retries(self, tmp_path, monkeypatch):
+        # Pull failures are retried only by the gated pull loop: 1 + image_pull_retries starts, not that times
+        # (1 + verifier_start_retries), and no outer attempt makes an ungated first start again.
+        server, task, starts, gates, providers = self.verifier_retrying_server(
+            tmp_path, monkeypatch, ["ErrImagePull"] * 9, verifier_start_retries=2, verifier_start_retry_delay_s=0
+        )
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and "ErrImagePull" in result.failure_reason
+        assert len(starts) == 3 and gates == [4, 3, 3]
+        assert not server._sandboxes and server._pull_retry_gate._value == 4
+
+    async def test_a_verifier_start_failure_whose_stop_fails_keeps_its_cause(self, tmp_path, monkeypatch):
+        server, task, _, _, _ = self.verifier_retrying_server(
+            tmp_path, monkeypatch, [], verifier_start_retries=2, verifier_start_retry_delay_s=0
+        )
+        root = ValueError("provider said no")
+        failure = RuntimeError("could not start")
+        failure.__cause__ = root
+
+        async def failing_start(*args, **kwargs):
+            raise failure
+
+        async def failing_stop(key):
+            raise RuntimeError("stop refused")
+
+        monkeypatch.setattr(server, "_start_with_pull_retries", failing_start)
+        monkeypatch.setattr(server, "_stop_sandbox", failing_stop)
+        with pytest.raises(RuntimeError, match="could not start") as caught:
+            await server._create_verifier_sandbox(task, episode_key="ep")
+        assert caught.value is failure and caught.value.__cause__ is root and caught.value.__suppress_context__
+
     async def test_verifier_sandbox_other_start_failures_are_not_retried(self, tmp_path, monkeypatch):
         server, task, starts, _, _ = self.verifier_retrying_server(
             tmp_path, monkeypatch, ["quota exceeded for namespace"]
