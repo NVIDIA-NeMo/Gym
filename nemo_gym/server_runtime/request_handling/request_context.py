@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.model_call_sampling import model_sampling_context
 
 
 try:
@@ -43,7 +44,7 @@ class RequestContextIsolationMiddleware:
 
     Each request therefore runs in a task of its own, with a copy of the context captured when the middleware was
     installed.
-    That copy also starts with no OTel context and no rollout id.
+    That copy also starts with no OTel context, no rollout id and no model sampling segment.
     The OTel ASGI instrumentation runs inside this middleware, and must see no current span.
     Only then does it extract the inbound ``traceparent`` rather than file the request as a child of the previous one.
     """
@@ -62,7 +63,7 @@ class RequestContextIsolationMiddleware:
     async def _serve(self, scope: Scope, receive: Receive, send: Send) -> None:
         otel_token = _otel_context.attach(_otel_context.Context()) if _otel_context is not None else None
         try:
-            with rollout_context(None):
+            with rollout_context(None), model_sampling_context(None):
                 await self.app(scope, receive, send)
         finally:
             if otel_token is not None:

@@ -16,6 +16,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
@@ -30,6 +31,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from pydantic import BaseModel, ConfigDict
 from pytest import MonkeyPatch
 from yarl import URL
 
@@ -75,6 +77,8 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    AgentContext,
+    AgentContextArtifact,
     AgentSessionParticipant,
     AgentSessionRecord,
     BaseResourcesServerConfig,
@@ -89,6 +93,7 @@ from nemo_gym.server_runtime import (
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ParticipantControlPlane,
+    RestoredAgentSession,
     RestoreRequest,
     RolloutIdRequiredError,
     SimpleResourcesServer,
@@ -103,6 +108,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentConfig,
     SimpleAgentLoopState,
     SimpleAgentRunRequest,
+    SimpleAgentSessionState,
     SimpleAgentVerifyRequest,
     _policy_request_timed_out,
 )
@@ -489,6 +495,95 @@ class TestApp:
         records = close.json()["agent_observations"]["records"]
         assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
         assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
+
+    async def test_a_session_activation_creates_its_episode_with_the_session_state(self) -> None:
+        """Subclasses that keep task context in the session state read it here; the sessionless path skips it."""
+        seen_states = []
+
+        class _StatefulAgent(SimpleAgent):
+            async def _create_session_episode(self, state, body, **kwargs):
+                seen_states.append(state)
+                return await super()._create_session_episode(state, body, **kwargs)
+
+        server, server_client = _make_agent(False, _StatefulAgent)
+        reply = {
+            "id": "resp-1",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg-1",
+                    "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+        }
+        server_client.post = AsyncMock(side_effect=lambda **kwargs: _mock_response(reply))
+        client = TestClient(server.setup_webserver())
+
+        assert client.post("/v1/responses", json={"input": "no session"}).status_code == 200
+        assert seen_states == []
+
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session", episode_id=episode_id, task_id=TaskId(taskset="example", task_id="0")
+        )
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "question?"}).status_code == 200
+
+        [state] = seen_states
+        assert state is server._session_state("agent-session")
+        assert server_client.post.await_count == 2
+
+    async def test_checkpoint_restore_rebuilds_typed_agent_context(self) -> None:
+        class FigureContext(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            media: AgentContextArtifact
+            tag: str
+
+        @dataclass
+        class FigureState(SimpleAgentSessionState):
+            context: FigureContext | None = None
+
+        class FigureAgent(SimpleAgent):
+            agent_context_model = FigureContext
+
+            def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureState:
+                state = super()._new_session_state(body)
+                inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+                return FigureState(**inherited, context=self.parse_agent_context(body))
+
+        server, _ = _make_agent(False, FigureAgent)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="example", task_id="0"),
+            agent_context=AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}}),
+        )
+        client = TestClient(server.setup_webserver())
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        exported = (await server.export_agent_sessions(["agent-session"], checkpoint_id="c"))["agent-session"]
+        restored, _ = _make_agent(False, FigureAgent)
+        replacement = EpisodeId(rollout_id="rollout", attempt=1)
+
+        await restored.restore_agent_sessions(
+            [RestoredAgentSession(session_key="agent-session", episode_id=replacement, session=exported)]
+        )
+
+        state = restored._session_state("agent-session")
+        assert isinstance(state, FigureState)
+        assert state.request.agent_context == seed.agent_context
+        assert state.context == FigureContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
+        assert state.request.episode_id == replacement
+        assert exported["request"]["agent_context"] == seed.agent_context.model_dump(mode="json")
+        assert exported["request"]["episode_id"] == seed.episode_id.model_dump(mode="json")
 
     async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
         config = SimpleAgentConfig(
@@ -1474,7 +1569,7 @@ class TestApp:
         actual_usage_dict = actual_responses_dict["usage"]
         expected_usage_dict = {
             "input_tokens": 101,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 202,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 303,
@@ -1913,7 +2008,9 @@ class TestCheckpointContinuation:
                 return _mock_response(_FINAL_RESPONSE)
             # Its verification would hold up a checkpoint, but nothing of a restart is in one.
             report = participant.readiness()
-            during_verify.append((report.ready, report.restarts, len(await participant.export(None))))
+            during_verify.append(
+                (report.ready, report.restarts, len(await participant.export(None, checkpoint_id="c")))
+            )
             return _mock_response(kwargs["json"] | {"reward": 1.0})
 
         server_client.post = AsyncMock(side_effect=post)
@@ -1976,7 +2073,7 @@ async def _session_after_two_activations() -> tuple[str, dict]:
     for question in ("first?", "second?"):
         assert client.post("/ng-rollout/rollout/v1/responses", json={"input": question}).status_code == 200
     session_id = seed.json()["agent_session_id"]
-    return session_id, (await server.export_agent_sessions([session_id]))[session_id]
+    return session_id, (await server.export_agent_sessions([session_id], checkpoint_id="c"))[session_id]
 
 
 async def _restore_and_activate(session_id: str, session: dict, boundary: dict | None) -> list[str]:
@@ -2134,7 +2231,7 @@ class TestCheckpointAcrossModelCalls:
         await _until(lambda: calls)
         # A second checkpoint while the restored activation waits on its model call.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c2")))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c2")))
         reply.set()
         await asyncio.wait_for(activation, 5)
@@ -2169,7 +2266,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(held.wait(), 5)
         ready_with_the_reply = participant.ready()
         committed = await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         result = await asyncio.wait_for(activation, 5)
 
@@ -2206,7 +2303,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(reading_body.wait(), 5)
         # The agent server prepares after the headers arrived, while the body is still held.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c1") | {"deadline_ts": time.time() + 1}))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         model_server_resumed.set()
         result = await asyncio.wait_for(activation, 5)
@@ -2872,7 +2969,7 @@ async def test_an_indexed_session_reply_and_its_replay_carry_no_trajectory_and_n
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         # A caller that sends no index, such as the UserSim environment server, still reads the trajectory.
         unindexed = await http.post(path, json={"input": "q"})
-    exported = await server.export_agent_sessions([_SESSION_ID])
+    exported = await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c")
 
     assert original.status_code == 200 and "_ng_trajectory" not in original.json()
     assert replayed.content == original.content
@@ -2893,7 +2990,7 @@ async def test_an_indexed_reply_is_kept_unserialized_until_a_replay_or_an_export
         original = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         kept = server._session_state(_SESSION_ID).completed_reply["response"]
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
-    exported = (await server.export_agent_sessions([_SESSION_ID]))[_SESSION_ID]["completed_reply"]
+    exported = (await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c"))[_SESSION_ID]["completed_reply"]
 
     # The normal path keeps the response object; nothing is dumped until a replay or an export.
     assert isinstance(kept, NeMoGymResponse)
@@ -2982,7 +3079,7 @@ class _WeatherResources(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict:
         return {session_id: self.calls[session_id] for session_id in session_ids if session_id in self.calls}
 
     async def restore_session_states(self, states: dict) -> None:

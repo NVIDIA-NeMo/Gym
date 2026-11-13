@@ -488,6 +488,72 @@ class TestVerify:
         assert result.reward == 1.0
 
 
+class TestRewardMode:
+    """reward_mode chooses the training reward; the rubric metrics are the same in every mode."""
+
+    @staticmethod
+    def _server(config: GdpPdfConfig, **overrides: Any) -> GdpPdfResourcesServer:
+        return GdpPdfResourcesServer(
+            config=config.model_copy(update=overrides), server_client=MagicMock(spec=ServerClient)
+        )
+
+    @staticmethod
+    def _one_of_three() -> GdpPdfVerifyRequest:
+        return _verify_request(
+            "The cap is $5M.", criteria=[_criterion(1, "a"), _criterion(2, "b"), _criterion(3, "c")]
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_is_mean_criteria(self, server: GdpPdfResourcesServer) -> None:
+        _mock_judge(server, _scored_content("1"), _scored_content("0"))
+        result = await server.verify(self._one_of_three())
+        assert result.reward_mode == "mean_criteria"
+        assert result.reward == approx(1 / 3)
+
+    @pytest.mark.asyncio
+    async def test_strict_pass_rewards_only_all_pass(self, config: GdpPdfConfig) -> None:
+        server = self._server(config, reward_mode="strict_pass")
+        _mock_judge(server, _scored_content("1"), _scored_content("0"))
+        result = await server.verify(self._one_of_three())
+        assert result.reward == 0.0
+        assert result.reward_mode == "strict_pass"
+        assert result.all_pass == 0.0
+        assert result.mean_criterion_pass == approx(1 / 3)
+
+        _mock_judge(server, _scored_content("1"))
+        assert (await server.verify(self._one_of_three())).reward == 1.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("alpha", [0.0, 0.5, 0.8, 1.0])
+    async def test_mixed_weights_all_pass_by_alpha(self, config: GdpPdfConfig, alpha: float) -> None:
+        server = self._server(config, reward_mode="mixed", mixed_reward_alpha=alpha)
+        _mock_judge(server, _scored_content("1"), _scored_content("0"))
+        result = await server.verify(self._one_of_three())
+        assert result.reward == approx((1 - alpha) / 3)
+        assert result.all_pass == 0.0
+        assert result.mean_criterion_pass == approx(1 / 3)
+
+        _mock_judge(server, _scored_content("1"))
+        assert (await server.verify(self._one_of_three())).reward == approx(1.0)
+
+    def test_mixed_alpha_defaults_to_0_5(self, config: GdpPdfConfig) -> None:
+        assert config.mixed_reward_alpha == 0.5
+
+    @pytest.mark.asyncio
+    async def test_empty_answer_scores_zero_in_every_mode(self, config: GdpPdfConfig) -> None:
+        for mode in ("mean_criteria", "strict_pass", "mixed"):
+            server = self._server(config, reward_mode=mode)
+            judge = _mock_judge(server, _scored_content("1"))
+            result = await server.verify(_verify_request("", criteria=[_criterion(1, "a")]))
+            assert result.reward == 0.0
+            assert judge.await_count == 0
+
+    @pytest.mark.parametrize("bad", [{"reward_mode": "equivalence"}, {"mixed_reward_alpha": 1.5}])
+    def test_rejects_unknown_mode_and_out_of_range_alpha(self, config: GdpPdfConfig, bad: dict) -> None:
+        with raises(ValueError):
+            GdpPdfConfig(**(config.model_dump() | bad))
+
+
 class TestParseCriterionResult:
     """Pure-function tests for the strict JSON parser, mirroring upstream's own
     ``_parse_criterion_result`` test coverage."""
@@ -757,6 +823,30 @@ class TestPrepare:
         assert [r["verifier_metadata"]["task_id"] for r in written] == ["t1", "t2"]
         assert written[0]["verifier_metadata"]["document_manifest"] == "documents/t1/manifest.json"
         assert written[0]["verifier_metadata"]["source_pdf"] == "media/pdfs/a.pdf"
+
+    def test_opencode_puts_document_path_in_user_message(self, monkeypatch, tmp_path: Path) -> None:
+        from benchmarks.gdp_pdf import prepare_opencode
+
+        rendered = []
+        self._patch_hf(monkeypatch, [self._source_row("t1", "a.pdf")], [], rendered)
+        monkeypatch.setattr(prepare_opencode, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(prepare_opencode, "MEDIA_DIR", tmp_path / "media")
+        monkeypatch.setattr(prepare_opencode, "DOCUMENTS_DIR", tmp_path / "documents")
+        row = json.loads(prepare_opencode.prepare().read_text())
+        assert row["responses_create_params"]["input"] == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"The document is available at `/workspace/document.pdf`.\n\n{PROMPT}",
+                    }
+                ],
+            }
+        ]
+        assert row["verifier_metadata"]["prompt"] == PROMPT
+        assert row["verifier_metadata"]["criteria"][0]["criterion"] == "Says the thing."
+        assert rendered == []
 
     def test_limit_truncates_the_task_list(self, monkeypatch, tmp_path: Path) -> None:
         downloaded: list = []

@@ -19,12 +19,15 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
+import nemo_gym.artifacts.exporters._evalrdl_worker as _evalrdl_worker
 import nemo_gym.artifacts.exporters.isolated as isolated
 from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportState
@@ -103,6 +106,10 @@ class _Uploads:
 class Client:
     def __init__(self, url=None, token=None, **kwargs):
         self.uploads = _Uploads(url)
+
+
+def upload_plan(path, label=None):
+    return [{"label": label or Path(path).name, "dir": str(path), "files": [], "unreadable": [], "bytes": 0}]
 """
 
 
@@ -162,7 +169,12 @@ class TestConfig:
         config = EvalRDLExportConfig(rollouts_jsonl_fpath=Path("r.jsonl"))
 
         assert (config.label, config.tags, config.meta, config.url) == (None, [], {}, None)
-        assert (config.parallel, config.wait, config.timeout, config.requirement) == (4, True, 1800, "evalrdl")
+        assert (config.parallel, config.wait, config.timeout, config.requirement) == (
+            4,
+            True,
+            1800,
+            "evalrdl>=0.0.241",
+        )
 
     def test_command_line_containers_become_plain_python(self) -> None:
         overrides = OmegaConf.from_dotlist(["rollouts_jsonl_fpath=r.jsonl", "meta.k=v", "meta.n=3"])
@@ -226,7 +238,7 @@ class TestConfig:
         assert load_run_exporter_class("evalrdl") is EvalRDLExporter
         artifacts = _make_run(tmp_path)
 
-        assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl",)
+        assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl>=0.0.241",)
         assert _exporter(artifacts, tmp_path, requirement="evalrdl==1.2.3").required_packages() == ("evalrdl==1.2.3",)
 
 
@@ -446,7 +458,7 @@ class TestUpload:
         call = _sdk_call(fake_sdk)
         assert (call["url"], call["label"], call["meta"], call["tags"]) == (None, None, None, [])
         assert (call["parallel"], call["wait"], call["timeout"]) == (4, True, 1800)
-        assert fake_sdk["requested"] == [("evalrdl",)]
+        assert fake_sdk["requested"] == [("evalrdl>=0.0.241",)]
 
     @pytest.mark.parametrize(
         ("mode", "state", "exit_code"),
@@ -468,6 +480,24 @@ class TestUpload:
         result = _exporter(artifacts, tmp_path).export(artifacts)
 
         assert (result.state, result.exit_code) == (state, exit_code)
+
+    @pytest.mark.parametrize("planned", [["/run/a", "/run/b"], ["/run/a"]], ids=["split", "nested"])
+    def test_a_directory_the_sdk_would_not_upload_whole_is_refused_before_anything_is_sent(
+        self, monkeypatch: MonkeyPatch, planned: list[str]
+    ) -> None:
+        api = ModuleType("evalrdl.sdk.api")
+        api.RdlError = api.IntakeRefused = Exception
+        api.Client = Mock()
+        api.upload_plan = lambda path, label=None: [{"dir": d} for d in planned]
+        monkeypatch.setitem(sys.modules, "evalrdl", ModuleType("evalrdl"))
+        monkeypatch.setitem(sys.modules, "evalrdl.sdk", ModuleType("evalrdl.sdk"))
+        monkeypatch.setitem(sys.modules, "evalrdl.sdk.api", api)
+
+        result = _evalrdl_worker.run({"run_dir": "/run"})
+
+        assert (result["state"], result["exit_code"]) == ("failed", 1)
+        assert result["detail"]["upload_dirs"] == planned
+        api.Client.assert_not_called()
 
     def test_a_committed_upload_reports_the_run_it_created(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
         artifacts = _make_run(tmp_path)
@@ -564,12 +594,14 @@ def test_the_real_sdk_still_has_the_interface_the_worker_calls(tmp_path: Path) -
     )
     check = """
 import inspect
-from evalrdl.sdk.api import Client, IntakeRefused, RdlError
+from pathlib import Path
+from evalrdl.sdk.api import Client, IntakeRefused, RdlError, upload_plan
 upload = inspect.signature(Client(url="stg", token=False).uploads.upload)
 wanted = {"label", "tags", "meta", "parallel", "wait", "timeout"}
 missing = wanted - set(upload.parameters)
 assert not missing, f"upload() no longer takes {missing}"
 assert issubclass(IntakeRefused, RdlError)
+assert [unit["dir"] for unit in upload_plan(".")] == [str(Path(".").resolve())]
 """
     completed = subprocess.run([str(python), "-c", check], capture_output=True, text=True, check=False, cwd=tmp_path)
 

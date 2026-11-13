@@ -17,14 +17,20 @@
 
 A Gym component that hands a model URL to a client puts the request's identity in the path::
 
-    /ng-rollout/<capture key>[/ng-agent-instance/<name>][/training-token-capture][/ng-trace/<traceparent>]/v1/...
+    /ng-rollout/<capture key>[/ng-agent-instance/<name>][/training-token-capture]
+        [/ng-sampling/<values>][/ng-trace/<traceparent>]/v1/...
 
-The segments appear in that fixed order. A path may also carry only ``/ng-trace/<traceparent>``.
+The segments appear in that fixed order. A path may also carry only ``/ng-sampling/<values>``, only
+``/ng-trace/<traceparent>``, or both.
 ``resolve`` reads the prefix and ``encode`` builds it. Readers that still parse the path by hand are moving
 onto this module.
 
 An agent instance name is ``<agent kind>[.<n>]``, for example ``assistant``, ``judge`` or ``debater.1``.
 The name never equals a segment literal or ``v1``, so a missing name cannot swallow the next segment.
+
+The ``/ng-sampling/`` value is a training framework's sampling values for the call, or ``null`` for a caller it
+does not train; ``nemo_gym.core.model_call_sampling`` encodes and checks it. Like an agent instance name, it never
+equals a segment literal or ``v1``.
 
 On a Gym server, ``TraceContextPathMiddleware``, the outermost layer that reads the path, resolves it and
 shares the result through ``scope["state"]``; inner middleware reads it there instead of parsing again.
@@ -37,14 +43,25 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, TRACE_CONTEXT_PATH_SEGMENT
+from nemo_gym.config.config_types import (
+    MODEL_SAMPLING_PATH_SEGMENT,
+    ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    TRACE_CONTEXT_PATH_SEGMENT,
+)
 
 
 AGENT_INSTANCE_PATH_SEGMENT = "ng-agent-instance"
 # ``\Z`` rather than ``$``: ``$`` also matches before a final newline.
 AGENT_INSTANCE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)?\Z")
 _SEGMENT_LITERALS = frozenset(
-    {ROLLOUT_PATH_PREFIX, AGENT_INSTANCE_PATH_SEGMENT, TOKEN_CAPTURE_PATH_SEGMENT, TRACE_CONTEXT_PATH_SEGMENT}
+    {
+        ROLLOUT_PATH_PREFIX,
+        AGENT_INSTANCE_PATH_SEGMENT,
+        TOKEN_CAPTURE_PATH_SEGMENT,
+        MODEL_SAMPLING_PATH_SEGMENT,
+        TRACE_CONTEXT_PATH_SEGMENT,
+    }
 )
 # A name equal to one of these would read as the segment that should have followed it.
 RESERVED_AGENT_INSTANCE_NAMES = _SEGMENT_LITERALS | {"v1"}
@@ -82,13 +99,15 @@ def agent_kind_of(agent_instance: str) -> str:
 class CorrelationContext:
     """The identity a request path carries.
 
-    ``capture_key`` is ``None`` for a trace-only path. ``agent_instance`` is ``None`` when the path names
-    no agent instance, as in a single-agent episode.
+    ``capture_key`` is ``None`` for a path without a rollout prefix. ``agent_instance`` is ``None`` when the path
+    names no agent instance, as in a single-agent episode. ``model_sampling`` is the ``/ng-sampling/`` value, or
+    ``None`` when the path carries none.
     """
 
     capture_key: str | None = None
     agent_instance: str | None = None
     token_capture: bool = False
+    model_sampling: str | None = None
     trace_parent: str | None = None
 
     def __post_init__(self) -> None:
@@ -98,6 +117,13 @@ class CorrelationContext:
             raise ValueError("an agent instance or the training segment requires a capture key")
         if self.agent_instance is not None:
             validate_agent_instance(self.agent_instance)
+        # Checked as an agent instance name is: a missing value must not read the next segment as one.
+        if self.model_sampling is not None and (
+            not self.model_sampling
+            or "/" in self.model_sampling
+            or self.model_sampling in RESERVED_AGENT_INSTANCE_NAMES
+        ):
+            raise ValueError(f"invalid model sampling value {self.model_sampling!r}")
         if self.trace_parent is not None and not TRACEPARENT_PATTERN.match(self.trace_parent):
             raise ValueError(f"invalid traceparent {self.trace_parent!r}")
 
@@ -115,6 +141,8 @@ def encode(context: CorrelationContext) -> str:
             prefix += f"/{AGENT_INSTANCE_PATH_SEGMENT}/{context.agent_instance}"
         if context.token_capture:
             prefix += f"/{TOKEN_CAPTURE_PATH_SEGMENT}"
+    if context.model_sampling is not None:
+        prefix += f"/{MODEL_SAMPLING_PATH_SEGMENT}/{context.model_sampling}"
     if context.trace_parent is not None:
         prefix += f"/{TRACE_CONTEXT_PATH_SEGMENT}/{context.trace_parent}"
     return prefix
@@ -133,7 +161,7 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
     segments = path.split("/")
     # segments[0] is the empty string before the leading slash.
     index = 1
-    capture_key = agent_instance = trace_parent = None
+    capture_key = agent_instance = model_sampling = trace_parent = None
     token_capture = False
 
     def value_after(literal: str) -> str:
@@ -152,6 +180,9 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
             index += 1
     elif segments[index] == AGENT_INSTANCE_PATH_SEGMENT:
         raise CorrelationPathError(f"{AGENT_INSTANCE_PATH_SEGMENT} segment without a preceding capture key", path)
+    if index < len(segments) and segments[index] == MODEL_SAMPLING_PATH_SEGMENT:
+        model_sampling = value_after(MODEL_SAMPLING_PATH_SEGMENT)
+        index += 2
     if index < len(segments) and segments[index] == TRACE_CONTEXT_PATH_SEGMENT:
         trace_parent = value_after(TRACE_CONTEXT_PATH_SEGMENT)
         index += 2
@@ -166,6 +197,7 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
             capture_key=capture_key,
             agent_instance=agent_instance,
             token_capture=token_capture,
+            model_sampling=model_sampling,
             trace_parent=trace_parent,
         )
     except ValueError as error:

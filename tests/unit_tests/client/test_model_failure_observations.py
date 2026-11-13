@@ -381,33 +381,60 @@ async def test_a_forwarded_gym_failure_stays_the_cause_and_no_attempt_is_added(m
 
 async def test_a_recovered_response_timeout_keeps_its_confirmed_upload_observation(monkeypatch):
     calls = 0
+    responses_started = 0
+    uploads = []
+    first_upload = asyncio.Event()
+    release_first_response = asyncio.Event()
 
     async def endpoint(request):
         nonlocal calls
         calls += 1
+        uploads.append(await request.json())
         if calls == 1:
-            await asyncio.sleep(0.08)
+            first_upload.set()
+            await release_first_response.wait()
         return web.json_response({})
+
+    class TimeoutAfterUpload(aiohttp.ClientResponse):
+        async def start(self, connection):
+            nonlocal responses_started
+            responses_started += 1
+            if responses_started == 1:
+
+                async def timeout_read():
+                    await first_upload.wait()
+                    raise TimeoutError("controlled response timeout after upload")
+
+                # Keep aiohttp's response path real; fail its external read after the server receives the upload.
+                with monkeypatch.context() as boundary:
+                    boundary.setattr(connection.protocol, "read", timeout_read)
+                    return await super().start(connection)
+            return await super().start(connection)
 
     app = web.Application()
     app.router.add_post("/responses", endpoint)
-    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+    async with TestServer(app) as server, aiohttp.ClientSession(response_class=TimeoutAfterUpload) as session:
         monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
         monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
-        model = NeMoGymAsyncOpenAI(
-            api_key="test", base_url=str(server.make_url("/")), max_connection_retries=2, request_timeout_seconds=0.04
-        )
-        with RequestFailureLog.capture() as log:
-            response = await model._request(
-                method="POST", url=str(server.make_url("/responses")), json={"input": "fixture"}
-            )
-            assert response.status == 200
-            await response.read()
-            report = log.reply_report(None)
-    assert calls == 2 and report.failure_id is None
+        model = NeMoGymAsyncOpenAI(api_key="test", base_url=str(server.make_url("/")), max_connection_retries=2)
+        try:
+            async with asyncio.timeout(30):  # Bound stuck I/O, not the intended first-attempt timeout.
+                with RequestFailureLog.capture() as log:
+                    response = await model._request(
+                        method="POST", url=str(server.make_url("/responses")), json={"input": "fixture"}
+                    )
+                    assert response.status == 200
+                    await response.read()
+                    report = log.reply_report(None)
+        finally:
+            release_first_response.set()
+    assert calls == responses_started == 2 and report.failure_id is None
+    assert uploads == [{"input": "fixture"}, {"input": "fixture"}]
     [attempt] = report.events.values()
+    assert attempt.boundary is FailureBoundary.MODEL and attempt.failure_kind == MODEL_REQUEST_ERROR
     assert attempt.details.request_upload_complete is True
     assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert attempt.foreign_error.exception_type == "TimeoutError"
     assert attempt.operation_id and attempt.attempt_id
     assert FailureHeader.decode(FailureHeader.encode(report)) == report
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+import os
 import shutil
 import signal
 import sys
@@ -241,14 +242,35 @@ async def test_real_timeout_reaps_renderer(tmp_path):
     music_server = server(score_timeout_seconds=1.0)
     music_server._abc2midi = str(executable)
     result = await music_server.verify(request(ABC))
-    assert result.mask_sample
-    assert result.failure_kind == "mimo_music:scorer_timeout"
     pid_text, scratch_dir = marker.read_text().splitlines()
     pid = int(pid_text)
-    # An orphan may briefly be a zombie awaiting init; it must not be running.
     status = Path(f"/proc/{pid}/stat")
-    assert not status.exists() or status.read_text().split()[2] == "Z"
-    assert not Path(scratch_dir).exists()
+
+    def renderer_stat():
+        try:
+            return status.read_text().rsplit(") ", 1)[1].split()
+        except FileNotFoundError:
+            return None
+
+    initial_stat = renderer_stat()
+    start_time = initial_stat[19] if initial_stat else None
+    deadline = asyncio.get_running_loop().time() + 5
+    try:
+        assert result.mask_sample
+        assert result.failure_kind == "mimo_music:scorer_timeout"
+        # Waiting for the scorer does not synchronize its renderer's SIGKILL exit.
+        while (stat := renderer_stat()) and stat[19] == start_time and stat[0] != "Z":
+            assert asyncio.get_running_loop().time() < deadline, f"Renderer {pid} is still {stat[0]}"
+            await asyncio.sleep(0.01)
+        assert not Path(scratch_dir).exists()
+    finally:
+        # Guard failure cleanup against PID reuse during the wait.
+        stat = renderer_stat()
+        if stat and stat[0] != "Z" and stat[19] == start_time:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize(

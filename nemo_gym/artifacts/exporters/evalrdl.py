@@ -65,7 +65,8 @@ class EvalRDLExportConfig(RunExportConfig):
         default=None, description="EvalRDL service: `prod`, `stg` or a URL. Defaults to the SDK's own choice."
     )
     requirement: str = Field(
-        default="evalrdl", description="pip requirement for the EvalRDL SDK, for example a pinned version."
+        default="evalrdl>=0.0.241",
+        description="pip requirement for the EvalRDL SDK, for example a pinned version. 0.0.241 adds `upload_plan`.",
     )
 
     @field_validator("tags", "meta", mode="before")

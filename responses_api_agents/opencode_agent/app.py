@@ -464,7 +464,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     report_agent_sandbox_oom: bool = False
-    # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
+    # Connection and per-call timeout of a sandbox session's MCP tool grants. Unset, OpenCode connects within 30 s
+    # and each call gets the MCP SDK's 60 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Sandbox sessions only. Absolute sandbox paths of OpenCode plugin files that the sandbox owner staged,
@@ -490,6 +491,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
     # of a compaction is counted as a step too.
     return_session_trajectory: bool = True
+    # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
+    # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
+    # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
+    # or tools.
+    session_project_config: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -1828,6 +1834,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
+        if self.config.session_project_config:
+            del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
         error = None
         export = {}
         failure = None

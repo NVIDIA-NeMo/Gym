@@ -62,9 +62,11 @@ def agent(monkeypatch):
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
 
-    monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
-    )
+    def resolve_model_base_url(*args, trained=True):
+        # As in a run that carries sampling values: a role the framework does not train gets null.
+        return f"http://model:8000/ng-rollout/episode-a1{'' if trained else '/ng-sampling/null'}/v1"
+
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", resolve_model_base_url)
     return result
 
 
@@ -1062,6 +1064,8 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     agent.server_client.post.assert_not_called()
     payload = state.upload_json.await_args.args[1]
     assert payload["model_base_url"] == "http://model:8000/ng-rollout/episode-a1/v1"
+    # Compression is a side call no training framework trains, so it keeps its own sampling.
+    assert payload["compression_model_base_url"] == "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
 
 
 @pytest.mark.parametrize(
