@@ -68,10 +68,17 @@ The per-attempt and total verification budgets also cover sandbox setup and arti
 
 The verifier applies the model patch in a pristine task image, runs the task's unchanged `tests/test.sh`,
 and records its `reward.txt` as the authoritative binary grade. A genuine test-script timeout scores zero.
-A missing verdict, failed verifier execution or lost artifact read stays inconclusive, is retried on a fresh
+A missing verdict, provider/wrapper execution failure or artifact transport failure stays inconclusive, is retried on a fresh
 sandbox and is masked as `verifier_error` when retries are exhausted. Agent sandbox loss or lost patch
 capture remains a typed failure. Redis state leaked by an agent test run is removed before verification;
 other V1 image repairs and Go prefetch are disabled.
+
+Task-internal dependency or parser failures can also make upstream `test.sh` write zero. Those zeros remain
+scored failures: its binary reward does not distinguish them from candidate compile/test failures. Empty test
+reports and network-error text alone cannot safely trigger masking because candidate code can produce either.
+Inspect verifier artifacts and independent gold-patch controls when diagnosing such failures; do not interpret
+an unmasked zero as proof that infrastructure was healthy. The five example rollouts provide representative
+smoke evidence, not a locked full-642/HARD-51 baseline or benchmark certification. Both presets remain unverified.
 
 ## Run and verifier controls
 

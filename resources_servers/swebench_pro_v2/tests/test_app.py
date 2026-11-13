@@ -16,6 +16,7 @@
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +80,31 @@ def make_server(**overrides: object) -> SWEBenchProV2ResourcesServer:
         | overrides
     )
     return SWEBenchProV2ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_uvicorn_worker_can_import_the_v2_application() -> None:
+    # Use a fresh interpreter, as Uvicorn does, so collection's cached module cannot supply the app.
+    script = """
+from fastapi import FastAPI
+from uvicorn.importer import import_from_string
+
+from nemo_gym.utils.server_process import set_is_nemo_gym_fastapi_entrypoint, set_is_nemo_gym_fastapi_worker
+from resources_servers.swebench_pro.app import SWEBenchProResourcesServer
+
+application = FastAPI()
+constructed = []
+
+def build_application(cls):
+    constructed.append(cls.__name__)
+    return application
+
+SWEBenchProResourcesServer.run_webserver = classmethod(build_application)
+set_is_nemo_gym_fastapi_worker()
+set_is_nemo_gym_fastapi_entrypoint("resources_servers/swebench_pro_v2/app.py")
+assert import_from_string("resources_servers.swebench_pro_v2.app:app") is application
+assert constructed == ["SWEBenchProV2ResourcesServer"]
+"""
+    subprocess.run([sys.executable, "-c", script], check=True, timeout=60)
 
 
 def test_workspace_preserves_the_pinned_task_files_and_patch() -> None:

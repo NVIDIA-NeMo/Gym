@@ -137,13 +137,21 @@ async def test_a_lost_artifact_read_does_not_turn_a_reward_into_a_model_verdict(
 
 
 @pytest.mark.asyncio
-async def test_model_test_output_cannot_reclassify_an_upstream_verdict(tmp_path: Path) -> None:
-    files = artifacts() | {"/logs/verifier/run-script-stdout.txt": "ERROR: Failed to apply test patch"}
+@pytest.mark.parametrize("reward", ["0", "1"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+async def test_model_test_output_cannot_reclassify_an_upstream_verdict(
+    tmp_path: Path, reward: str, stream: str
+) -> None:
+    files = artifacts(reward=reward, output='{"tests": []}') | {
+        f"/logs/verifier/run-script-{stream}.txt": (
+            "ERROR: Failed to apply test patch\nTemporary failure in name resolution\n"
+        )
+    }
 
     result = await run_verification(ArtifactSandbox(files), inputs(), tmp_path, timeout_s=60)
 
     assert result.completed
-    assert result.resolved
+    assert result.resolved is (reward == "1")
 
 
 class LocalVerifierSandbox:
