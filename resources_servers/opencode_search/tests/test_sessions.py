@@ -1243,7 +1243,9 @@ def test_an_export_copy_that_fails_keeps_no_file_and_changes_no_grade(
     if failure in listings:
         monkeypatch.setattr(AsyncSandbox, "exec", AsyncMock(return_value=listings[failure]))
     else:
-        monkeypatch.setattr("resources_servers.opencode_search.app._EXPORT_COPY_TIMEOUT_S", 0.5)
+        if failure == "download_hangs":
+            # Lowered for this case alone, so the others, which list and copy on the local provider, never race it.
+            monkeypatch.setattr("resources_servers.opencode_search.app._EXPORT_COPY_TIMEOUT_S", 0.5)
         real_download = AsyncSandbox.download
         downloads: list[str] = []
 
