@@ -11,6 +11,9 @@ output_container_fpath: null
 
 python_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
 
+vllm:
+  branch: bxyu/v0.32.0-dwdpnvfp4-rlrefit
+
 vllm_router:
   branch: bxyu/nemo-rl-pd
 
