@@ -357,6 +357,14 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
     assert client.calls[2][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
 
 
+async def test_a_request_that_skips_token_capture_activates_the_agent_without_the_training_tag() -> None:
+    environment_server, client = _environment_server(token_capture=True)
+
+    await environment_server.run_request(_request().model_copy(update={"skip_token_capture": True}))
+
+    assert client.calls[2][1] == "/ng-rollout/rollout-a2/v1/responses"
+
+
 async def test_lost_resources_seed_response_closes_caller_assigned_session() -> None:
     environment_server, client = _environment_server()
     client.fail_path = "/seed_session"
