@@ -3,7 +3,6 @@
 
 """Select input rows by the task id each row carries."""
 
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 
@@ -12,6 +11,7 @@ from pydantic import JsonValue
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
+from nemo_gym.utils.task_ids import task_ids_digest  # noqa: F401  (re-exported: the selection's digest)
 
 
 def row_task_id(row: Mapping[str, JsonValue]) -> str | None:
@@ -52,11 +52,6 @@ def select_task_rows(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence
     selected = set(task_ids)
     _require_repeated_rows_to_be_identical(rows, _first_row_of_each_task(rows), selected)
     return [index for index, row in enumerate(rows) if row_task_id(row) in selected]
-
-
-def task_ids_digest(task_ids: Sequence[str]) -> str:
-    """The sha256 of the selected ids, sorted and unique, one per line: the same set always gives the same digest."""
-    return hashlib.sha256("\n".join(sorted(set(task_ids))).encode()).hexdigest()
 
 
 def _require_task_id_in_every_row(rows: Sequence[Mapping[str, JsonValue]]) -> None:

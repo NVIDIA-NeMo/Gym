@@ -74,8 +74,9 @@ Before you submit, check the config has:
    repeats. A smoke that must stay in one allocation also sets `resumable: {max_retries: 0, max_walltime:
    <the walltime>}`. A named, versioned subset runs with `run: {task_ids_fpath: <file, one id per line>}`
    (or `task_ids: [...]`) instead: it keeps every copy of the named tasks, the run writes
-   `rollouts_task_selection.json` (source, ids, sha256), resume and recover keep it, and the inspect labels
-   the score a subset score (`task_selection`).
+   `rollouts_task_selection.json` (source, ids, sha256) when it starts, resume and recover keep it, and the
+   inspect (`task_selection`), the MLflow run (`gym_task_selection=subset`) and `gym eval compare` label the
+   score a subset score.
 4. From a machine that is not the login node: `compute.cluster.hostname`, and every `runtime:` credential
    in `compute.cluster.forward_env`; only listed names reach the job. Site `#SBATCH` directives go in
    `compute.cluster.extra_args` without leading dashes (`{qos: <qos>, exclude: <node>}`).

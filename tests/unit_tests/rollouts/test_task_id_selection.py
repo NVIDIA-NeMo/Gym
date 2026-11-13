@@ -22,7 +22,12 @@ from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.data.task_selection import task_ids_digest
-from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import (
+    RolloutCollectionConfig,
+    RolloutCollectionHelper,
+    _start_or_resume_store,
+)
+from nemo_gym.rollouts.rollout_recovery import RunManifest
 
 
 # A prepared benchmark writes its repeat count as copies of each row: two copies of each of three tasks.
@@ -33,7 +38,14 @@ ROWS = [
 ]
 
 
-def run_config(tmp_path: Path, **selection) -> RolloutCollectionConfig:
+# The servers the rows run on, as the run's global config names them.
+SERVERS = {
+    "my_agent": {"responses_api_agents": {"simple_agent": {"model_server": {"name": "policy_model"}}}},
+    "policy_model": {"responses_api_models": {"vllm_model": {"model": "demo-model"}}},
+}
+
+
+def run_config(tmp_path: Path, *, resume: bool = False, **selection) -> RolloutCollectionConfig:
     source = tmp_path / "input.jsonl"
     source.write_text("".join(json.dumps(row) + "\n" for row in ROWS))
     return RolloutCollectionConfig(
@@ -41,18 +53,39 @@ def run_config(tmp_path: Path, **selection) -> RolloutCollectionConfig:
         input_jsonl_fpath=str(source),
         output_jsonl_fpath=str(tmp_path / "results" / "rollouts.jsonl"),
         num_repeats=1,
+        resume_from_cache=resume,
         **selection,
     )
 
 
+def record_path(tmp_path: Path) -> Path:
+    return tmp_path / "results" / "rollouts_task_selection.json"
+
+
 def record(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "results" / "rollouts_task_selection.json").read_text())
+    return json.loads(record_path(tmp_path).read_text())
 
 
-def test_task_ids_run_every_copy_of_the_named_tasks_and_record_them(tmp_path: Path) -> None:
+def start(tmp_path: Path, config: RolloutCollectionConfig) -> None:
+    """Start or resume the run as the collector does: its inputs prepared, checked and recorded by the store."""
+
+    def prepare_inputs(selection):
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config, selection)
+        return rows, RunManifest.create(Path(config.input_jsonl_fpath), rows, config.model_dump(), SERVERS)
+
+    with _start_or_resume_store(Path(config.output_jsonl_fpath), config, prepare_inputs):
+        pass
+
+
+def test_task_ids_run_every_copy_of_the_named_tasks(tmp_path: Path) -> None:
     rows = RolloutCollectionHelper._preprocess_rows_from_config(None, run_config(tmp_path, task_ids=["c", "a"]))
 
     assert [row["task_id"] for row in rows] == ["a", "a", "c", "c"]
+
+
+def test_a_fresh_subset_run_records_its_selection(tmp_path: Path) -> None:
+    start(tmp_path, run_config(tmp_path, task_ids=["c", "a"]))
+
     assert record(tmp_path) == {
         "source": "task_ids",
         "tasks": 2,
@@ -64,17 +97,56 @@ def test_task_ids_run_every_copy_of_the_named_tasks_and_record_them(tmp_path: Pa
 
 def test_a_task_id_file_selects_like_the_inline_list_and_names_its_file(tmp_path: Path) -> None:
     ids = tmp_path / "subset_v1.txt"
-    ids.write_text("b\n\n c \n")
+    ids.write_text("# subset v1\nb\n\n c \n  # retired: a\n")
+    config = run_config(tmp_path, task_ids_fpath=str(ids))
 
-    rows = RolloutCollectionHelper._preprocess_rows_from_config(None, run_config(tmp_path, task_ids_fpath=str(ids)))
+    rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+    start(tmp_path, config)
 
     assert [row["task_id"] for row in rows] == ["b", "b", "c", "c"]
     assert record(tmp_path)["source"] == str(ids)
     assert record(tmp_path)["task_ids_sha256"] == task_ids_digest(["b", "c"])
 
 
+def test_computing_the_rows_writes_nothing(tmp_path: Path) -> None:
+    # Read paths (the run summary, a resume check) compute the expected rows too: they must not touch the record.
+    record_path(tmp_path).parent.mkdir(parents=True)
+    record_path(tmp_path).write_text('{"saved": true}')
+
+    RolloutCollectionHelper._preprocess_rows_from_config(None, run_config(tmp_path, task_ids=["b"]))
+    RolloutCollectionHelper._preprocess_rows_from_config(None, run_config(tmp_path))
+
+    assert record(tmp_path) == {"saved": True}
+
+
+@pytest.mark.parametrize("resumed", [{"task_ids": ["b"]}, {}])
+def test_a_refused_resume_keeps_the_saved_record(tmp_path: Path, resumed: dict) -> None:
+    start(tmp_path, run_config(tmp_path, task_ids=["a"]))
+    saved = record(tmp_path)
+
+    with pytest.raises(ConfigError, match="semantic settings differ"):
+        start(tmp_path, run_config(tmp_path, resume=True, **resumed))
+
+    assert record(tmp_path) == saved
+
+
+def test_an_accepted_resume_keeps_the_saved_record(tmp_path: Path) -> None:
+    ids = tmp_path / "subset.txt"
+    ids.write_text("a\n")
+    start(tmp_path, run_config(tmp_path, task_ids_fpath=str(ids)))
+    saved = record_path(tmp_path).read_bytes()
+
+    start(tmp_path, run_config(tmp_path, resume=True, task_ids_fpath=str(ids)))
+
+    assert record_path(tmp_path).read_bytes() == saved
+
+
+def test_inline_ids_hydra_read_as_numbers_or_booleans_are_ids(tmp_path: Path) -> None:
+    # Hydra reads an unquoted `7` in `+task_ids=[7]` as an int and `true` as a bool.
+    assert run_config(tmp_path, task_ids=[7, True, "x"]).task_ids == ["7", "true", "x"]
+
+
 def test_a_numeric_inline_id_matches_an_id_stored_as_a_number(tmp_path: Path) -> None:
-    # Hydra reads an unquoted `7` in `+task_ids=[7]` as a number.
     source = tmp_path / "input.jsonl"
     source.write_text(
         "".join(json.dumps({"problem_id": n, "responses_create_params": {"input": "q"}}) + "\n" for n in (7, 8))
@@ -111,13 +183,12 @@ def test_a_missing_task_id_file_stops_the_run(tmp_path: Path) -> None:
         )
 
 
-def test_a_run_of_every_task_removes_a_selection_record_an_earlier_run_left(tmp_path: Path) -> None:
-    RolloutCollectionHelper._preprocess_rows_from_config(None, run_config(tmp_path, task_ids=["a"]))
+def test_a_fresh_run_of_every_task_removes_a_record_an_earlier_run_left(tmp_path: Path) -> None:
+    start(tmp_path, run_config(tmp_path, task_ids=["a"]))
 
-    rows = RolloutCollectionHelper._preprocess_rows_from_config(None, run_config(tmp_path))
+    start(tmp_path, run_config(tmp_path))
 
-    assert len(rows) == len(ROWS)
-    assert not (tmp_path / "results" / "rollouts_task_selection.json").exists()
+    assert not record_path(tmp_path).exists()
 
 
 @pytest.mark.parametrize(
@@ -127,6 +198,8 @@ def test_a_run_of_every_task_removes_a_selection_record_an_earlier_run_left(tmp_
         ({"task_ids": ["a"], "task_ids_fpath": "ids.txt"}, "Set only one of task_ids, task_ids_fpath and limit"),
         ({"task_ids_fpath": "ids.txt", "limit": 2}, "Set only one of task_ids, task_ids_fpath and limit"),
         ({"task_ids": []}, "task_ids is empty"),
+        ({"task_ids_fpath": ""}, "task_ids_fpath is empty"),
+        ({"task_ids": [1e3]}, "was read as a number"),
     ],
 )
 def test_one_selection_at_a_time(tmp_path: Path, selection: dict, message: str) -> None:

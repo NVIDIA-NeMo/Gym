@@ -1500,7 +1500,12 @@ COMMANDS = {
             _comma_list_flag(
                 "task-ids", "task_ids", "Only run these task ids (comma-separated): a subset.", metavar="ID[,ID...]"
             ),
-            _value_flag("task-ids-file", "task_ids_fpath", "File of task ids to run, one per line.", quote=True),
+            _value_flag(
+                "task-ids-file",
+                "task_ids_fpath",
+                "File of task ids to run, one per line (# comments allowed).",
+                quote=True,
+            ),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
             _bool_flag(
                 "interleave-repeats",
