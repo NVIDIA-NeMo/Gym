@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the real verifier with isolated renderer and judge transports."""
 
+import base64
 import hashlib
 import io
 import json
@@ -419,6 +420,40 @@ async def test_overlarge_answer_is_model_zero(server: CodingTrainingServer) -> N
         result = await server.verify(http_request(), request("<svg/>"))
     assert not result.mask_sample and result.reward == 0
     renderer.assert_not_called()
+
+
+def noise_png() -> bytes:
+    stream = io.BytesIO()
+    Image.effect_noise((64, 64), 64).convert("RGB").save(stream, format="PNG")
+    return stream.getvalue()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("benchmark", "template"),
+    [
+        ("mmsvg_img2svg", '<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,{b64}"/></svg>'),
+        ("design2code_full", '<html><body><img src="data:image/png;base64,{b64}"></body></html>'),
+        ("chart2code", 'import atexit\nREFERENCE = bytes.fromhex("{hex}")\natexit.register(print)'),
+        ("chart2code", 'import base64\nREFERENCE = base64.b64decode("""\n{wrapped}\n""")'),
+        ("chart2code", "import base64\nREFERENCE = base64.b64decode(\n{literals}\n)"),
+    ],
+)
+async def test_answer_carrying_image_bytes_is_model_zero(server, benchmark, template) -> None:
+    image = noise_png()
+    encoded = base64.b64encode(image).decode()
+    wrapped = "\n".join(encoded[i : i + 76] for i in range(0, len(encoded), 76))
+    literals = "\n".join(f'    "{encoded[i : i + 76]}"' for i in range(0, len(encoded), 76))
+    text = template.format(b64=encoded, hex=image.hex(), wrapped=wrapped, literals=literals)
+    with (
+        patch.object(CodingTrainingServer, "_renderer") as renderer,
+        patch.object(CodingTrainingServer, "_judge") as judge,
+    ):
+        result = await server.verify(http_request(), request(text, benchmark=benchmark))
+    assert result.reward == 0 and not result.mask_sample and result.evaluation_completed
+    assert result.failure_kind == "mm_coding_training:invalid_artifact"
+    renderer.assert_not_called()
+    judge.assert_not_called()
 
 
 @pytest.mark.asyncio

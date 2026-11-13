@@ -181,8 +181,11 @@ fails setup rather than producing a model zero.
 The harness writes `answer.py`, `answer.svg`, `answer.tex` or `answer.html`.
 Verification captures a bounded UTF-8 regular file, never a symlink or prose
 substitute, and grades that source in a fresh isolated verifier sandbox.
-The source must be self-contained. The reference image cannot be embedded as
-the answer. Missing/invalid artifacts are measured zeros; inconclusive capture,
+The source must be self-contained. A source with 1024 or more characters of
+base64 or hex data, as an embedded image has, scores as an invalid artifact.
+Pieces of 32 or more characters split over lines or string literals count as
+one block. This check blocks the usual ways to embed the reference image, not
+every way. Missing/invalid artifacts are measured zeros; inconclusive capture,
 renderer or judge failures are masked with `evaluation_completed=false`.
 Completed grades and model zeros explicitly set `evaluation_completed=true`.
 

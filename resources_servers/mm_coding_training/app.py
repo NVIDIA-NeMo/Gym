@@ -40,7 +40,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import qualified_type_name
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
-from resources_servers.mm_coding_training.extraction import extract_answer
+from resources_servers.mm_coding_training.extraction import embeds_image_data, extract_answer
 from resources_servers.mm_coding_training.quality import Quality, QualityVerifier, ScoringInput, final_reward
 from resources_servers.mm_coding_training.remote_renderer import LANGUAGES, RemoteRenderer, image_uri
 from resources_servers.mm_coding_training.task_data import CodingTask, TaskData
@@ -375,6 +375,11 @@ class CodingTrainingServer(SimpleResourcesServer):
         body.source_artifact = source
         body.source_sha256 = result.source_sha256
         body.evaluation_completed = False
+        if embeds_image_data(source):
+            # A rendered copy of the input image is not a solved task.
+            result.failure_kind = "mm_coding_training:invalid_artifact"
+            result.evaluation_completed = True
+            return observe_programmatic_grading(lambda: result)
         async with self._verification_slots:
             stage = "reference"
             try:
