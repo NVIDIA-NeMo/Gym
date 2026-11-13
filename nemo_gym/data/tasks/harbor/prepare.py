@@ -977,7 +977,7 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     source). The other top-level keys of the file and the configs it includes are the agent's
     ``benchmark_settings``, such as the shipped ``harbor_environment_server`` instance's settings, which also apply
     to a harness ``--agent-type`` swaps in; keys only a config that defines the agent instance contributes (the
-    harness's shipped config) stay with that harness. Another resources or environment server instance, in the file
+    harness's shipped config, not an included Harbor-backed benchmark) stay with that harness. Another resources or environment server instance, in the file
     or any config it includes, would start beside the taskset's and is refused. ``harbor_target`` is read from the
     file itself: a config whose includes set it but which does not is refused, so a variant of a Harbor-backed
     preset repeats it rather than falling through to the composed-server path.
@@ -1045,13 +1045,16 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     if server_settings is not None and not isinstance(server_settings, dict):
         raise ValueError(f"{path}: `{ENVIRONMENT_SERVER_INSTANCE}` must be a mapping of the server's settings")
     # A key only the harness's shipped config sets (a config that also defines the agent instance) is the harness's,
-    # not the benchmark's; every other key, from the file or an include, travels with whichever harness runs.
+    # not the benchmark's; every other key, from the file or an include, travels with whichever harness runs. An
+    # included Harbor-backed benchmark (it sets `harbor_target`) also defines the agent, but its settings are the
+    # benchmark's: a variant that includes a preset keeps the preset's server settings.
+    harnesses = [entry for entry in included if agents[0] in entry and HARBOR_TARGET_KEY not in entry]
+    benchmark_sources = [config, *(entry for entry in included if agents[0] not in entry or HARBOR_TARGET_KEY in entry)]
     harness_only = {
         key
-        for entry in included
-        if agents[0] in entry
+        for entry in harnesses
         for key in entry
-        if key not in config and not any(key in other for other in included if agents[0] not in other)
+        if not any(key in source for source in benchmark_sources)
     }
     settings = {
         key: value

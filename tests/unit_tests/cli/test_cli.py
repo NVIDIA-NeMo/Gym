@@ -2152,6 +2152,34 @@ class TestListEnvironments:
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
 
+    @pytest.mark.parametrize(
+        ("kind", "harbor_target", "usage"),
+        [
+            ("benchmark", "terminal_bench_4", "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model"),
+            (
+                "environment",
+                "terminal_bench_4",
+                "gym eval run terminal_bench_4 --agent <harness> --sandbox <provider> --model-type vllm_model",
+            ),
+            ("benchmark", None, "gym env start --benchmark tb4 --model-type vllm_model"),
+        ],
+    )
+    def test_inspect_shows_how_a_harbor_backed_entry_runs(
+        self, monkeypatch: MonkeyPatch, capsys, kind, harbor_target, usage
+    ) -> None:
+        """`gym env start` does not compose a Harbor-backed entry's environment server; `gym eval run` does."""
+        entry = replace(self._ALPHA, name="tb4", kind=kind, harbor_target=harbor_target)
+        self._mock_catalog(monkeypatch, overrides={"component_name": "tb4", "json": True}, entries=(entry,))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {"domain": "agent", "description": "", "value": None, "datasets": []},
+        )
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out)["usage_example"] == usage
+
     def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"component_name": "alfa"}, entries=(self._ALPHA,))
 
