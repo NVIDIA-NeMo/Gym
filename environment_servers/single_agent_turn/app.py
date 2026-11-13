@@ -614,6 +614,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
                     sandbox_access=seed.sandbox_access,
+                    agent_context=request.task.task_input.agent_seed_context,
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(agent_create_http_response)

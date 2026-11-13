@@ -260,14 +260,20 @@ class RunFile(BaseModel):
     # excluded so the report references the run rather than embedding its input.
     entries_by_agent: Dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
     sources: List["RunSource"] = Field(default_factory=list)
+    # The run's task selection record (`rollouts_task_selection.json`) when it ran a subset of the tasks by id.
+    task_selection: Optional[Dict[str, Any]] = None
 
     @computed_field
     @property
     def label(self) -> str:
-        """Short display name for the run: the directory its rollouts live in."""
+        """Short display name for the run: the directory its rollouts live in, marked when it ran a subset."""
         if self.sources:
             return f"pooled ({len(self.sources)} sources)"
-        return self.rollouts_jsonl_fpath.parent.name or self.rollouts_jsonl_fpath.stem
+        name = self.rollouts_jsonl_fpath.parent.name or self.rollouts_jsonl_fpath.stem
+        if self.task_selection is None:
+            return name
+        digest = self.task_selection.get("task_ids_sha256")
+        return f"{name} [subset {digest[:12] if isinstance(digest, str) else 'unknown'}]"
 
     @computed_field
     @property
