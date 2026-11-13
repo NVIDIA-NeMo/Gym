@@ -20,7 +20,7 @@ from pathlib import Path
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import BenchmarkDatasetConfig, DatasetConfig, ModelServerRef, ResourcesServerRef
 from responses_api_agents.nooa_agent.invocation import (
     NOOAInvocationAdapter as NOOAInvocationAdapter,
 )
@@ -43,6 +43,9 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
 
     model_config = ConfigDict(extra="forbid")
 
+    datasets: list[DatasetConfig | BenchmarkDatasetConfig] | None = Field(
+        default=None, description="Dataset discovery metadata."
+    )
     resources_server: ResourcesServerRef | None = Field(
         default=None,
         description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",

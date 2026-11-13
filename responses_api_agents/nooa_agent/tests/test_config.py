@@ -84,6 +84,14 @@ def test_agent_config_rejects_unknown_fields() -> None:
     assert error["loc"] == ("max_step",)
 
 
+def test_agent_config_accepts_and_validates_dataset_metadata() -> None:
+    assert agent_config().datasets is None
+    config = agent_config(datasets=[{"name": "harbor", "type": "benchmark", "jsonl_fpath": "tasks.jsonl"}])
+    assert config.datasets[0].jsonl_fpath == Path("tasks.jsonl")
+    with pytest.raises(ValidationError, match="jsonl_fpath"):
+        agent_config(datasets=[{"name": "harbor", "type": "benchmark"}])
+
+
 def test_agent_config_names_policy_call_budget_explicitly() -> None:
     assert agent_config().max_policy_calls is None
     assert agent_config(max_policy_calls=None).max_policy_calls is None
