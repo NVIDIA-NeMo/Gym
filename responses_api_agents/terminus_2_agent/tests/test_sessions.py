@@ -394,7 +394,16 @@ _BODY = NeMoGymResponseCreateParamsNonStreaming(input="solve it", metadata={"age
 class _Activation:
     """A seeded session whose sandbox execution returns ``output`` without a sandbox."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, output: dict | None = None, **config) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        output: dict | None = None,
+        *,
+        deadline_receipt: bool | None = None,
+        **config,
+    ) -> None:
+        """``deadline_receipt`` is whether the supervisor's receipt records its deadline; by default only a result
+        that ended at its wall time has one."""
         self.agent = _agent(**config)
         monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", _model_url)
         self.seed = _seed()
@@ -412,7 +421,16 @@ class _Activation:
         async def execute(payload: dict, *, timeout: float, close_timeout: float) -> dict:
             self.payloads.append({**payload, "timeout": timeout})
             await self.release.wait()
-            return output if output is not None else _output()
+            result = output if output is not None else _output()
+            timed_out = result.get("stop_reason") == "wall_time" if deadline_receipt is None else deadline_receipt
+            if timed_out:
+                self.state.session.cleanup = {
+                    "timed_out": True,
+                    "return_code": 143,
+                    "cleanup_confirmed": True,
+                    "error": None,
+                }
+            return result
 
         self.state.execute = execute
         self.agent._session_records["session"] = _AgentSessionRecord(state=self.state, episode_id=self.seed.episode_id)
@@ -719,6 +737,42 @@ class TestActivation:
         assert response.usage is None
         assert "model_usage_unavailable" in {gap.code for gap in closed.agent_observations.gaps}
 
+    async def test_usage_is_unknown_when_the_result_has_no_usage_accounting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The runner's report of its own crash carries no usage counts, though model calls may have run.
+        output = _output(stop_reason="error", error="Boom", error_type="RuntimeError", error_kind="harness_error")
+        del output["calls_without_usage"]
+        activation = _Activation(monkeypatch, output)
+
+        response = await activation.respond()
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
+
+        assert response.usage is None
+        [gap] = [gap for gap in closed.agent_observations.gaps if gap.code == "model_usage_unavailable"]
+        assert gap.detail == "the runner reported no usage accounting"
+
+    async def test_a_sigterm_from_the_task_is_no_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The runner saved `wall_time` on a SIGTERM, but the supervisor's receipt shows no deadline: a task command
+        # such as `pkill python3` sent it.
+        activation = _Activation(
+            monkeypatch, _output(stop_reason="wall_time", finished_naturally=False), deadline_receipt=False
+        )
+
+        response = await activation.respond()
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
+
+        assert (response.status, response.metadata["stop_reason"], response.error) == (
+            "incomplete",
+            "terminated",
+            None,
+        )
+        assert '"timed_out": false' in response.metadata["terminus_2"]
+        [invocation] = [record for record in closed.agent_observations.records if isinstance(record, AgentInvocation)]
+        assert (invocation.status, invocation.stop_reason, invocation.error_type) == ("incomplete", "terminated", None)
+        [sandbox] = [record for record in closed.agent_observations.records if isinstance(record, SandboxObservation)]
+        assert sandbox.outcome == "completed"
+
     async def test_a_provider_timeout_keeps_partial_work_after_a_confirmed_deadline(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -880,7 +934,8 @@ class FakeSandbox:
     """Files in memory below the real SandboxSession; the supervised launch plays the runner.
 
     ``runner`` decides what the launched runner does: "complete" saves a result and exits; "dies_early" is ended
-    by a rollout stop before it installs its SIGTERM handler, so it saves nothing; "blocks" runs until a stop or
+    by a rollout stop or its deadline before it installs its SIGTERM handler, so it saves nothing; "crashes" exits
+    on its own without saving anything; "blocks" runs until a stop or
     expiry marker arrives, then saves its turns as the real runner's handler does.
     """
 
@@ -957,6 +1012,9 @@ class FakeSandbox:
                     _output(stop_reason=reason, finished_naturally=False)
                 )
                 receipt(timed_out=True)
+            elif self.runner == "crashes":
+                # The runner fails on its own before it saves anything; the supervisor stopped nothing.
+                receipt(return_code=1)
             else:  # dies_early: SIGTERM's default action, before the runner's handler exists, saves nothing.
                 receipt(return_code=143, timed_out=True)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
@@ -1052,8 +1110,21 @@ class TestSandboxLifecycle:
         assert (response.status, response.metadata["stop_reason"], response.error) == ("incomplete", "wall_time", None)
         assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
 
-    async def test_a_runner_that_saved_nothing_without_a_stop_is_still_an_error(self, wired: SimpleNamespace) -> None:
+    async def test_a_deadline_before_the_runner_saves_anything_ends_as_a_timeout(self, wired: SimpleNamespace) -> None:
         wired.sandbox = FakeSandbox(runner="dies_early")
+        agent, seed, request = await self._seeded(wired)
+        running = asyncio.create_task(agent.responses(request, _BODY))
+        await asyncio.wait_for(wired.sandbox.launched.wait(), 10)
+
+        # The supervisor's own deadline ends the runner while it still imports Harbor; no rollout stop was sent.
+        wired.sandbox.ended.set()
+        response = await asyncio.wait_for(running, 30)
+
+        assert (response.status, response.metadata["stop_reason"], response.error) == ("incomplete", "wall_time", None)
+        assert "ng_rollout_stop" not in response.metadata
+
+    async def test_a_runner_that_saved_nothing_without_a_stop_is_still_an_error(self, wired: SimpleNamespace) -> None:
+        wired.sandbox = FakeSandbox(runner="crashes")
         agent, seed, request = await self._seeded(wired)
         running = asyncio.create_task(agent.responses(request, _BODY))
         await asyncio.wait_for(wired.sandbox.launched.wait(), 10)

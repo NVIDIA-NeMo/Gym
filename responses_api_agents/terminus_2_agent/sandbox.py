@@ -55,7 +55,7 @@ _TERMINAL_PROBE = (
 
 
 def _stopped_without_output() -> dict[str, JsonValue]:
-    """The result of a run a rollout stop ended before the runner saved anything; graded like a timeout."""
+    """The result of a run its deadline or a rollout stop ended before the runner saved anything; graded as such."""
     return {
         "stop_reason": "wall_time",
         "trajectory": {"steps": []},
@@ -239,9 +239,11 @@ class Terminus2SandboxSession(AgentSessionState):
         try:
             output = json.loads(await read_text(self.session.sandbox, path=path))
         except Exception as error:
-            if self.session.expired and await self._output_absent():
-                # A rollout stop ended the runner before it could save anything (it was still importing Harbor).
-                LOG.warning("Terminus 2 saved no result before a rollout stop ended it; reporting an empty run")
+            cleanup = self.session.cleanup
+            if cleanup is not None and cleanup["timed_out"] and await self._output_absent():
+                # The supervisor's deadline or a rollout stop ended the runner before it could save anything: it was
+                # still importing Harbor, before its signal handler was installed.
+                LOG.warning("Terminus 2 saved no result before its deadline or a rollout stop; reporting an empty run")
                 return _stopped_without_output()
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Terminus 2 sandbox runner exited without output: {logs[-4000:]}") from error

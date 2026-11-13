@@ -19,8 +19,8 @@ import pytest
 from tests.session_harness_profiles import check_hle_seed
 
 
-@pytest.mark.parametrize("pairing", [True, False], ids=["with_override", "without_override"])
-async def test_hle_seed_reaches_the_agents_own_sandbox_only_with_the_pairing_override(
-    pairing: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("transports", [None, ["direct_http"]], ids=["as_shipped", "direct_http_granted"])
+async def test_hle_seed_reaches_the_agents_own_sandbox_unless_a_direct_http_grant_is_required(
+    transports: list[str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await check_hle_seed("terminus_2_agent", pairing, monkeypatch)
+    await check_hle_seed("terminus_2_agent", transports, monkeypatch)

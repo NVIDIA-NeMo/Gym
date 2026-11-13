@@ -33,7 +33,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from harbor.models.agent.context import AgentContext
 from openai.types.responses import ResponseError
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -102,6 +102,9 @@ _STATUS_BY_STOP_REASON: dict[str, Literal["completed", "incomplete"]] = {
     "wall_time": "incomplete",
     "cancelled": "incomplete",
     "terminal_exited": "incomplete",
+    # A SIGTERM from inside the task, such as `pkill python3`, ended the runner; like an exited terminal, the task's
+    # own commands ended the run.
+    "terminated": "incomplete",
 }
 _SANDBOX_OUTCOME_BY_STOP_REASON = {"wall_time": "timeout", "cancelled": "cancelled"}
 
@@ -177,6 +180,17 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+
+    @field_validator("reasoning_effort", "max_thinking_tokens")
+    @classmethod
+    def _refuse_unapplied_settings(cls, value: Any, info: Any) -> Any:
+        # Harbor applies these only to the LiteLLM client it builds itself; Gym's Model Server client never sees them.
+        if value is not None:
+            raise ValueError(
+                f"Terminus 2 cannot apply {info.field_name}; leave it null and set the request's reasoning or the "
+                "Model Server's settings instead"
+            )
+        return value
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -297,7 +311,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         instruction: str,
         api_base: str,
-    ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool, str | None]:
+    ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool, str | None, dict[str, Any]]:
+        """Run Terminus on the Gym host; the last item is the model-usage accounting of ``NemoGymLLM``."""
         logs_dir = self._logs_dir()
         temporary_workspace: Optional[Path] = None
         try:
@@ -327,7 +342,12 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             flags = {"context_length_exceeded": agent.context_length_exceeded}
             llm = getattr(agent, "_llm", None)
             terminal_response_id = llm.last_response_id if isinstance(llm, NemoGymLLM) else None
-            return trajectory, context, flags, timed_out, agent.finished_naturally, terminal_response_id
+            accounting = {
+                # A call cancelled by the timeout stays counted, so its unknown usage keeps the total unknown.
+                "calls_without_usage": llm.calls_without_usage if isinstance(llm, NemoGymLLM) else None,
+                "cached_usage_known": llm.cached_usage_known if isinstance(llm, NemoGymLLM) else False,
+            }
+            return trajectory, context, flags, timed_out, agent.finished_naturally, terminal_response_id, accounting
         finally:
             if not self.config.keep_logs:
                 shutil.rmtree(logs_dir, ignore_errors=True)
@@ -344,9 +364,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         timed_out: bool,
         finished_naturally: bool,
         terminal_response_id: str | None,
-        usage_known: bool = True,
+        usage_known: bool,
+        cached_usage_known: bool,
     ) -> NeMoGymResponse:
-        """Convert a Terminus-2 trajectory and its context into a Responses API result."""
+        """Convert a Terminus-2 trajectory and its context into a Responses API result.
+
+        Usage is reported only when every model call had a usage record. Harbor keeps no reasoning-token counts, and
+        cache counts only when every response reported them; neither becomes a measured zero.
+        """
         output_items = trajectory_to_responses(trajectory)
         if not output_items:
             output_items = [
@@ -389,9 +414,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             store=True,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=cached_tokens if cached_usage_known else None
+                ),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
                 total_tokens=input_tokens + output_tokens,
             )
             if usage_known
@@ -659,12 +686,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="reasoning_token_usage_unavailable", invocation_id=invocation_id))
             if not output.get("cached_usage_known", False):
                 gaps.append(ObservationGap(code="cached_token_usage_unavailable", invocation_id=invocation_id))
-            if output.get("calls_without_usage"):
+            calls_without_usage = output.get("calls_without_usage")
+            if calls_without_usage != 0:
                 gaps.append(
                     ObservationGap(
                         code="model_usage_unavailable",
                         invocation_id=invocation_id,
-                        detail=f"{output['calls_without_usage']} model responses had no usage",
+                        detail=f"{calls_without_usage} model responses had no usage"
+                        if calls_without_usage
+                        else "the runner reported no usage accounting",
                     )
                 )
             return AgentObservationBundle(source="terminus2", records=records, gaps=gaps)
@@ -730,6 +760,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 observe_failure(state.provider_wait_failure)
                 output = {**output, "stop_reason": "wall_time"}
         duration_ms = (monotonic() - started) * 1000
+        cleanup = state.session.cleanup
+        if output.get("stop_reason") == "wall_time" and not (cleanup and cleanup["timed_out"]):
+            # The runner reads any SIGTERM without a close request as its deadline, but the supervisor did not stop
+            # it: a task command, such as `pkill python3`, did. That is no timeout.
+            output = {**output, "stop_reason": "terminated"}
 
         stop_reason = self._stop_reason(output)
         status = self._status(output)
@@ -742,14 +777,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             timed_out=stop_reason == "wall_time",
             finished_naturally=bool(output.get("finished_naturally")),
             terminal_response_id=output.get("terminal_response_id"),
-            # Pending, failed, or partially accounted attempts make aggregate usage unknown.
-            usage_known=not output.get("calls_without_usage"),
+            # Pending, failed, or partially accounted attempts make aggregate usage unknown, and so does a result
+            # without the count, such as the runner's report of its own crash.
+            usage_known=output.get("calls_without_usage") == 0,
+            cached_usage_known=bool(output.get("cached_usage_known", False)),
         )
-        if response.usage is not None:
-            # Harbor does not retain reasoning counts. Missing cache details must not become measured zeros.
-            response.usage.output_tokens_details.reasoning_tokens = None
-            if not output.get("cached_usage_known", False):
-                response.usage.input_tokens_details.cached_tokens = None
         state.observations = self._observations(
             state,
             output,
@@ -818,9 +850,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             self._rollout_id(request),
         )
         async with self.sem:
-            trajectory, context, flags, timed_out, finished_naturally, terminal_response_id = await self._run_terminus(
-                body, instruction, api_base
-            )
+            (
+                trajectory,
+                context,
+                flags,
+                timed_out,
+                finished_naturally,
+                terminal_response_id,
+                accounting,
+            ) = await self._run_terminus(body, instruction, api_base)
         return self._response(
             body,
             trajectory=trajectory,
@@ -829,6 +867,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             timed_out=timed_out,
             finished_naturally=finished_naturally,
             terminal_response_id=terminal_response_id,
+            usage_known=accounting["calls_without_usage"] == 0,
+            cached_usage_known=accounting["cached_usage_known"],
         )
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:

@@ -24,7 +24,8 @@ JSON (or XML) reply and reads the terminal back. It uses no function calling.
 | Agent session without `sandbox_access`, with `sandbox_provider` set | Inside a sandbox the agent starts from `sandbox_provider` and `sandbox_config`. | Close stops the sandbox. |
 | `/v1/responses` without a session, and `/run` | On the Agent Server host, in a temporary workspace (or `workspace_root`). | The agent removes its workspace and logs. |
 
-Agent sessions run with `num_workers: 1`, the default. A sandbox failure never falls back to the host.
+Agent sessions keep each session's state in the worker that seeded it, and Gym routes the session's later requests
+to that worker; `concurrency` applies per worker. A sandbox failure never falls back to the host.
 
 ### Agent sessions
 
@@ -62,14 +63,18 @@ The response status says how the run ended:
 | --- | --- | --- |
 | Terminus confirmed completion | `completed` | `completed` |
 | `max_turns` reached, time limit, rollout stop, the terminal exited | `incomplete` | `max_turns`, `wall_time`, `wall_time`, `terminal_exited` |
+| Close during the run | `incomplete` | `cancelled` |
+| A task command, such as `pkill python3`, sent the runner SIGTERM | `incomplete` | `terminated` |
 | Context overflow that summarization could not resolve | `incomplete` | `context_limit` |
 | Model request rejected or failed, other harness error | `failed`, with `ng_agent_outcome` | `error` |
+| A stop reason this adapter does not know | `failed`, with `ng_agent_outcome` | the reason the runner saved |
 
-A rollout stop that arrives before the runner saved anything, during seed or while the runner starts, ends the run
-as an empty `wall_time` run. A failed response names `model_request_error` with the model's HTTP status,
+A rollout stop or the time limit that arrives before the runner saved anything, during seed or while the runner
+starts, ends the run as an empty `wall_time` run. Only the supervisor's receipt makes a SIGTERM a time limit. A failed response names `model_request_error` with the model's HTTP status,
 `model_transport_error`, `agent_invalid_output` (a reply cut off at the output limit), or `unknown`, and the
-Environment Server's outcome policy decides whether to verify, retry or fail the episode. Usage is reported only
-when every model response carried it.
+Environment Server's outcome policy decides whether to verify, retry or fail the episode. In both execution modes,
+usage is reported only when every model response carried it, and a model call cancelled by the time limit leaves it
+unknown. Reasoning-token counts are always unknown, because Harbor keeps none.
 
 ## Configuration
 
@@ -107,7 +112,10 @@ across model calls. Previously it reused this value as
 Model Server. The agent's `model_info.max_output_tokens` still describes the model's output limit to Terminus;
 it is not a shared generation budget. Other sampling controls and model-server limits are unchanged.
 
-`model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command.
+`model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command. `reasoning_effort` and
+`max_thinking_tokens` must stay `null`: Harbor applies them only to the LiteLLM client it builds itself, which this
+agent replaces with Gym's Model Server client, so the agent refuses to start with either set. Set the request's
+`reasoning` instead.
 `record_terminal_session` applies only on the host path. `collect_rollout_details` returns token IDs and log
 probabilities; in a sandbox they come back in the runner's result file, which the task's commands could also write,
 so treat them as evaluation evidence only.
@@ -124,17 +132,8 @@ Terminus on the Gym host. Terminus derives the sandbox's lifetime from its own t
 `sandbox_config` keys under the profile's own instance name,
 `terminus_2_agent.responses_api_agents.terminus_2_agent.sandbox_config`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422.
 
 ### Smoke-test on Terminal-Bench 2.1
 
@@ -186,8 +185,11 @@ The agent converts the Terminus-2 trajectory to Responses API messages and prese
 - The tmux server uses the default socket under `/tmp/tmux-<uid>`; a task that runs its own tmux server shares it.
 - Sandbox runs are tested on glibc images; musl images are untested. Installing `tmux` at setup needs root and
   network access.
-- A task command such as `pkill python` or `pkill -f '\.py'` can end the runner. SIGTERM is recorded as
-  `wall_time`; SIGKILL leaves no result, and the activation fails as an infrastructure error.
+- A task command such as `pkill python` or `pkill -f '\.py'` can end the runner. SIGTERM ends the run as
+  `terminated`, graded with the turns taken so far; SIGKILL leaves no result, and the activation fails as an
+  infrastructure error.
+- A completion Terminus confirms while the runner is closing its model client, at the same moment as the time limit,
+  can be saved as `wall_time`.
 - A model call still in flight at the deadline ends the run as `wall_time`, and the run is graded.
 - The runner's result file (status, stop reason, token IDs) is writable by task commands, so treat it as
   evaluation evidence only.

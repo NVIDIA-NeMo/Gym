@@ -157,9 +157,12 @@ class StandaloneTerminus2(Terminus2):
     async def _handle_llm_interaction(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
         """Track Terminus-2's consecutive two-response completion handshake."""
         result = await super()._handle_llm_interaction(*args, **kwargs)
-        if result[1]:
+        _, is_task_complete, feedback = result[:3]
+        if is_task_complete:
             self._consecutive_completion_claims = getattr(self, "_consecutive_completion_claims", 0) + 1
-        else:
+        elif "ERROR:" not in (feedback or ""):
+            # Harbor skips a reply it could not parse without clearing a pending completion claim, so a claim, an
+            # unparseable reply and a second claim still complete the task.
             self._consecutive_completion_claims = 0
         return result
 

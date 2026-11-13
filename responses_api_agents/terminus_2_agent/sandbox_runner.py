@@ -162,10 +162,9 @@ async def _run(payload: dict[str, Any], output_path: Path) -> dict[str, Any]:
         if stop_reason is None:
             raise
     finally:
-        loop.remove_signal_handler(signal.SIGTERM)
-        # Removing the handler restores the default action, which would end the runner before it writes the result.
-        # Nothing is started after this point, so no child inherits the ignored signal.
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # A late signal changes nothing once the run has ended. Replacing the handler, rather than removing it, never
+        # restores the default action, which would end the runner before it saves the result below.
+        loop.add_signal_handler(signal.SIGTERM, lambda: None)
     # The tmux terminal and the commands running in it, such as a service, stay up after the runner ends, also after
     # a deadline, rollout stop or close, until the sandbox's owner stops the sandbox, as in Harbor. They remain
     # available to verification.
@@ -182,7 +181,10 @@ async def _run(payload: dict[str, Any], output_path: Path) -> dict[str, Any]:
         else:
             # Harbor ends the loop when the terminal session is gone.
             stop_reason = "terminal_exited"
-    return result(stop_reason)
+    output = result(stop_reason)
+    # Saved while the event loop still handles SIGTERM: closing the loop restores the signal's default action.
+    _write_atomic(output_path, output)
+    return output
 
 
 def main() -> int:
@@ -194,7 +196,7 @@ def main() -> int:
         return 2
     input_path, output_path = map(Path, sys.argv[1:])
     try:
-        output = asyncio.run(_run(json.loads(input_path.read_text()), output_path))
+        asyncio.run(_run(json.loads(input_path.read_text()), output_path))
     except BaseException as error:
         _write_atomic(
             output_path,
@@ -208,7 +210,6 @@ def main() -> int:
             },
         )
         return 1
-    _write_atomic(output_path, output)
     return 0
 
 
