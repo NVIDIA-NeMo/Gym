@@ -60,6 +60,8 @@ exclude-dependencies = [
     "alibabacloud-tea-openapi",
     "alibabacloud-tea-util",
     "volcengine-python-sdk",
+    "paddleocr",
+    "paddlepaddle",
 ]
 
 [pip]

@@ -2412,6 +2412,12 @@ class TestCli:
             "miniswe_sandboxed_agent",
             "opencode_sandboxed_agent",
             "pi_sandboxed_agent",
+            "browsecomp_agent",
+            "pool_agent",
+            "claude_code_agent",
+            "kilocode_agent",
+            "stirrup_agent",
+            "nooa_agent",
             "terminus_2_agent",
         ],
     )

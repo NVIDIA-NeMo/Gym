@@ -134,12 +134,15 @@ def main() -> int:
                 )
     except (subprocess.CalledProcessError, ValueError):
         print("::warning::Could not link individual artifacts; use the workflow artifacts page.")
-    payload = p0_check(harnesses, artifacts=artifacts, sha=os.environ["GITHUB_SHA"], artifact_urls=artifact_urls)
+    event_sha = os.environ["GITHUB_SHA"]
+    tested_sha = os.environ.get("TESTED_SHA") or event_sha
+    payload = p0_check(harnesses, artifacts=artifacts, sha=tested_sha, artifact_urls=artifact_urls)
+    payload["head_sha"] = event_sha
     payload["details_url"] = run_url
     payload["external_id"] = f"harness-conformance-p0-{run_id}-{attempt}"
     output = payload["output"]
     output["summary"] += f"\n\n[Probe summaries and downloadable evidence]({run_url})."
-    setup_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo}/blob/{os.environ['GITHUB_SHA']}/scripts/harness_conformance/README.md#run-diagnostic-probes"
+    setup_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo}/blob/{tested_sha}/scripts/harness_conformance/README.md#run-diagnostic-probes"
     output["summary"] += f" [Local setup instructions]({setup_url})."
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as handle:
         handle.write(f"## {CHECK_NAME}\n\n{output['title']}\n\n{output['summary']}\n")

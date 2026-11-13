@@ -66,7 +66,8 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
         assert settings.model_server.name == "policy_model"
     environment = get_first_server_config_dict(config, HLE_ENVIRONMENT)
     assert environment.agent_server.name == composed
-    assert list(environment.resources_tool_transports) == []
+    # HLE's judge serves no tools, so its Environment Server sets no transports and grants none.
+    assert list(environment.get("resources_tool_transports", [])) == []
     # Sandboxes reach the model server at the caller's address; the head server and the agent stay on loopback.
     assert config.head_server.host == "127.0.0.1"
     assert settings.host == "127.0.0.1"

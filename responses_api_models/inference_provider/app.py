@@ -36,6 +36,7 @@ from nemo_gym.core import (
     current_rollout_id,
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -63,6 +64,8 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
         )
         self._converter = ChatCompletionsConverter(
             return_token_id_information=False,
@@ -88,6 +91,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
             responses_create_params=body,
             chat_completion=chat_completion_response,
         )
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return response.model_copy(update={"created_at": int(time())})
 
     async def chat_completions(

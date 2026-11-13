@@ -4,8 +4,8 @@
 # Swappable profile for benchmarks whose Resources server supplies no sandbox, such as HLE.
 # The unset resources_server name makes Gym compose this agent onto the benchmark's own agent
 # instance; each session then creates its own sandbox through the `sandbox` provider, which must
-# reach the model server by address. Supply the sandbox image. A benchmark whose Environment Server
-# sends a direct_http grant, such as HLE, also needs `resources_tool_transports: []` (see README).
+# reach the model server by address. Supply the sandbox image. The agent refuses a required
+# direct_http grant, so pair it with benchmarks whose Resources server serves no tools, such as HLE.
 use_absolute_ip: true
 # The head server's config endpoint is unauthenticated, so keep it off the address sandboxes reach.
 head_server:
@@ -30,6 +30,10 @@ claude_code_agent:
       # Sandbox sessions require an exact CLI version.
       claude_code_version: "2.1.108"
       sandbox_provider: sandbox
+      # Grade what the model knows: the sandbox reaches only the model server, as with the deprecated agents.
+      # Claude takes no tool grants. The CLI is uploaded from the Agent Server, so setup needs no sandbox
+      # network, but the image must include bash.
+      network_access: model_only
       # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
       sandbox_config:
         image: ???

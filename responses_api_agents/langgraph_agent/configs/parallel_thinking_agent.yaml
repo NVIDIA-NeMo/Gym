@@ -1,7 +1,6 @@
 parallel_thinking_agent:
   responses_api_agents:
     langgraph_agent:
-      num_workers: 1
       entrypoint: parallel_thinking_agent.py
       resources_server: null
       model_server:

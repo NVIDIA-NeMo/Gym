@@ -86,6 +86,7 @@ from nemo_gym.trajectory import (
     SandboxObservation,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.terminus_2_agent.llm import NemoGymLLM, chat_completion_params
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 from responses_api_agents.terminus_2_agent.sandbox import Terminus2SandboxSession
@@ -893,3 +894,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     Terminus2Agent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = Terminus2Agent.run_webserver()  # noqa: F401

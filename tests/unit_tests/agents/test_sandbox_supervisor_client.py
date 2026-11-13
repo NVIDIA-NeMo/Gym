@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, shell_assignments
 from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_PHASE_COUNT,
     CLEANUP_RECEIPT_FILE,
@@ -31,7 +33,7 @@ from nemo_gym.agents.utils.supervisor_client import (
 )
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox.utils import download_bytes, read_text, upload_bytes, upload_text
 
 
 class LocalSandbox:
@@ -66,6 +68,28 @@ async def test_file_transport_keeps_contents_out_of_shell(session):
     assert await read_text(sandbox, path=path) == payload
     Path(path).write_bytes(b"partial output\xff\n")
     assert await read_text(sandbox, path=path) == "partial output\ufffd\n"
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_text_transfer_writes_utf8_and_reads_line_endings_as_newlines(session):
+    sandbox, session_dir = session
+    path = str(session_dir / "prompt.txt")
+    text = "caf\u00e9 \u2713 \u56fe\n"
+    await upload_text(sandbox, path=path, text=text)
+    assert Path(path).read_bytes() == text.encode("utf-8")
+    assert await read_text(sandbox, path=path) == text
+    Path(path).write_bytes(b"windows\r\nprogress\rdone\n")
+    assert await read_text(sandbox, path=path) == "windows\nprogress\ndone\n"
+
+
+async def test_byte_transfer_keeps_binary_contents_unchanged(session):
+    sandbox, session_dir = session
+    sandbox.exec = AsyncMock(side_effect=AssertionError("file transfer must not invoke a shell"))
+    path = str(session_dir / "image.png")
+    payload = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+    await upload_bytes(sandbox, path=path, data=payload)
+    assert Path(path).read_bytes() == payload
+    assert await download_bytes(sandbox, path=path) == payload
     sandbox.exec.assert_not_awaited()
 
 
@@ -208,13 +232,50 @@ async def test_stop_reaches_running_supervisor_through_the_stop_file(session, tm
     assert (session_dir / "checkpoint").read_text() == "saved\n"
 
 
-# Starts a non-Python tool, like an agent CLI, and waits for it.
-_RUNNER = """
-import pathlib, subprocess, sys
-tool = subprocess.Popen(["sleep", "60"])
-pathlib.Path(sys.argv[1]).write_text(str(tool.pid))
-tool.wait()
-"""
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+async def test_stop_claiming_after_the_guard_still_fences_the_launch(session, tmp_path):
+    # The guard is only a fast path. A stop can claim the launch after the guard passes,
+    # and then `ln -s` alone must keep the supervisor from starting.
+    sandbox, session_dir = session
+    shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    reached, release = gate / "reached", gate / "release"
+    # Hold the launch shell at its `bash -n` check, which runs between the guard and `ln -s`.
+    shim = gate / "bash"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = -n ]; then touch {quote(str(reached))}; i=0; '
+        f"while [ ! -e {quote(str(release))} ]; do i=$((i + 1)); [ $i -gt 6000 ] && exit 1; sleep 0.01; done; fi\n"
+        f'exec {quote(shutil.which("bash"))} "$@"\n'
+    )
+    shim.chmod(0o755)
+    command = supervised_launch_command(
+        session_dir=str(session_dir),
+        command=["touch", str(session_dir / "started")],
+        timeout=5,
+        cleanup_timeout=1,
+    )
+    launch = asyncio.create_task(sandbox.exec(f"PATH={quote(str(gate))}:$PATH; {command}", timeout_s=60))
+    try:
+        async with asyncio.timeout(60):
+            while not reached.exists():
+                if launch.done():
+                    pytest.fail(f"launch finished before its bash -n check: {launch.result()}")
+                await asyncio.sleep(0.01)
+        assert not (session_dir / LAUNCH_CLAIM_FILE).is_symlink()
+        receipt = await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(tmp_path), timeout=5, harness="test"
+        )
+    finally:
+        release.touch()
+        launched = await asyncio.wait_for(launch, 60)
+    assert launched.return_code == 0, launched.stderr
+    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+    assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+    assert not (session_dir / OUTPUT_LOG_FILE).exists()
+    assert not (session_dir / "started").exists()
 
 
 def _parent(pid: int) -> int:
@@ -229,19 +290,27 @@ def _alive(pid: int) -> bool:
 
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("pgrep") is None, reason="Linux /proc and pgrep")
-async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(session, tmp_path):
+async def test_kills_by_interpreter_name_miss_the_supervisor_and_runner(session, tmp_path):
     """pgrep matches exactly as pkill and killall would, without signalling anything on this host."""
     sandbox, session_dir = session
     shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
-    runner = session_dir / "sandbox_runner"
-    runner.write_text(_RUNNER)
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, session_dir / HARNESS_RUNNER_FILE)
     tool_pid_file = session_dir / "tool.pid"
+    params = {
+        "cwd": str(session_dir),
+        "command": ["bash", "-c", f"echo $$ > {quote(str(tool_pid_file))}; exec sleep 60"],
+        "stdin": "/dev/null",
+        "stdout": str(session_dir / "stdout.log"),
+        "stderr": str(session_dir / "stderr.log"),
+        # In events mode the runner stays and starts the tool as its child.
+        "events": str(session_dir / "events.jsonl"),
+    }
+    (session_dir / "params.sh").write_text(shell_assignments(params))
     command = supervised_launch_command(
         session_dir=str(session_dir),
-        command=[sys.executable, "-I", str(runner), str(tool_pid_file)],
+        command=["bash", str(session_dir / HARNESS_RUNNER_FILE), str(session_dir / "params.sh")],
         timeout=60,
         cleanup_timeout=1,
-        stdlib_runner=True,
     )
     launch = asyncio.create_task(sandbox.exec(command, timeout_s=90))
     try:
@@ -258,12 +327,11 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(s
         assert harness_supervisor == supervisor_pid or str(harness_supervisor) in (
             Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split()
         )
-        # The supervisor is bash; the runner runs through a link to the base interpreter.
-        for pid, name in ((supervisor_pid, "bash"), (harness_supervisor, "bash"), (runner_pid, "gym-runner")):
-            assert Path(f"/proc/{pid}/comm").read_text().strip() == name
+        # The supervisor and the runner are bash scripts.
+        for pid in (supervisor_pid, harness_supervisor, runner_pid):
+            assert Path(f"/proc/{pid}/comm").read_text().strip() == "bash"
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
             assert "python" not in cmdline and ".py" not in cmdline, cmdline
-        assert Path(f"/proc/{runner_pid}/exe").resolve() == Path(sys.executable).resolve()
         # pkill -f python3 / python / "python3 -" / "\.py"; pkill python; killall python3 (an exact name).
         for args in (
             ["-f", "python3"],
@@ -320,7 +388,12 @@ async def test_terminal_negative_receipt_preserves_failure_without_signalling_a_
 async def test_stop_surfaces_terminal_negative_receipt_created_after_initial_check(session):
     sandbox, session_dir = session
     receipt_path = session_dir / CLEANUP_RECEIPT_FILE
-    receipt = {"cleanup_confirmed": False, "return_code": -9, "timed_out": True, "error": "descendants remain"}
+    receipt = {
+        "cleanup_confirmed": False,
+        "return_code": 128 + signal.SIGKILL,
+        "timed_out": True,
+        "error": "descendants remain",
+    }
     assert not receipt_path.exists()
 
     async def stop(*args, **kwargs):

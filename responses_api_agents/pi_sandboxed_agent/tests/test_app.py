@@ -216,13 +216,15 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
     if failure:
         sandbox.exec.side_effect = [
             SimpleNamespace(return_code=0, error_type=None),
-            TimeoutError() if failure == "timeout" else SimpleNamespace(return_code=137, error_type=None),
+            SimpleNamespace(return_code=124, error_type="timeout")
+            if failure == "timeout"
+            else SimpleNamespace(return_code=137, error_type=None),
         ]
     if recover:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed
-        assert result.pi_exit_code == (137 if failure == "exit" else None)
-        assert result.pi_error_type == ("TimeoutError" if failure == "timeout" else None)
+        assert result.pi_exit_code == (137 if failure == "exit" else 124)
+        assert result.pi_error_type == ("timeout" if failure == "timeout" else None)
         tool = next(r for r in result.ng_agent_observations.records if isinstance(r, ToolCallObservation))
         assert tool.started_at == 10 and tool.completed_at == 11
         assert (Path(result.pi_results_dir) / "events.jsonl").read_text().endswith(tail)
@@ -238,7 +240,7 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
     assert _RUN.get() is None
 
 
-@pytest.mark.parametrize("failure", ["exit", "timeout", "timeout_result", "timeout_exit", "export", "cancel", "judge"])
+@pytest.mark.parametrize("failure", ["exit", "timeout_result", "timeout_exit", "export", "cancel", "judge"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure, cleanup_fails):
     server, sandbox = agent
@@ -249,8 +251,6 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
             SimpleNamespace(return_code=0, error_type=None),
             SimpleNamespace(return_code=137, error_type=None),
         ]
-    elif failure == "timeout":
-        sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), TimeoutError()]
     elif failure in {"timeout_result", "timeout_exit"}:
         sandbox.exec.side_effect = [
             SimpleNamespace(return_code=0, error_type=None),
@@ -262,7 +262,7 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
         sandbox.exec.side_effect = asyncio.CancelledError()
     else:
         server.server_client.post.side_effect = [response({}), RuntimeError("judge unavailable")]
-    if failure in {"exit", "timeout", "timeout_result", "timeout_exit"}:
+    if failure in {"exit", "timeout_result", "timeout_exit"}:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed
         observation = next(r for r in result.ng_agent_observations.records if isinstance(r, SandboxObservation))
@@ -396,3 +396,208 @@ async def test_terminal_stop_controls_scoring_without_observations(
     receipt = json.loads((Path(result.pi_results_dir) / "generation.json").read_text())
     assert receipt["pi_failed"] is failed and receipt["response"]["output"]
     assert receipt["response"]["status"] == result.response.status
+
+
+def _provider_event(kind="provider_unavailable", **kwargs):
+    from nemo_gym.sandbox import sandbox_failure
+
+    return sandbox_failure(operation="exec", failure_kind=kind, sandbox_id="box", provider="opensandbox", **kwargs)
+
+
+def _sandbox_event_of(raised):
+    """The agent route failure's provider cause, checked through the serialized report as a reader sees it."""
+    from nemo_gym.core import AGENT_ROUTE_FAILED, FailureHeader, NgFailureEvent, failure_report_for
+
+    assert raised.failure_kind == AGENT_ROUTE_FAILED and (raised.boundary, raised.stage) == ("agent", "agent")
+    cause = raised.__cause__
+    assert isinstance(cause, NgFailureEvent) and cause.boundary == "sandbox"
+    report = failure_report_for(raised)
+    assert report.failure_id == raised.event_id
+    assert report.events[raised.event_id].cause_id == cause.event_id
+    assert set(report.events) == {raised.event_id, cause.event_id}
+    wire = FailureHeader.encode(report)
+    assert FailureHeader.NAME in wire
+    return cause, report.events[cause.event_id]
+
+
+@pytest.mark.parametrize(
+    "outcome, kind, reason",
+    [
+        (RuntimeError("provider unavailable"), "provider_request_failed", None),
+        (TimeoutError("command status request timed out"), "provider_io_timeout", None),
+        (SimpleNamespace(return_code=-1, error_type=None), "provider_command_outcome_unknown", None),
+        (
+            SimpleNamespace(return_code=1, error_type="sandbox_error"),
+            "provider_command_outcome_unknown",
+            "sandbox_error",
+        ),
+    ],
+)
+async def test_untyped_provider_failure_is_a_typed_provider_event_and_never_verified(agent, outcome, kind, reason):
+    from nemo_gym.core import NgFailureEvent
+
+    server, sandbox = agent
+    sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), outcome]
+    with pytest.raises(NgFailureEvent) as raised:
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    cause, event = _sandbox_event_of(raised.value)
+    assert cause.failure_kind == event.failure_kind == kind
+    # Provider identity and the provider's own reason are typed details, not part of either failure_reason.
+    assert (event.details.provider, event.details.sandbox_id) == ("opensandbox", "box")
+    assert event.details.provider_status_reason == reason
+    # A -1 sentinel or an error type is no observed process exit.
+    assert event.details.exit_code is None
+    assert "opensandbox" not in raised.value.failure_reason and "opensandbox" not in event.failure_reason
+    assert raised.value.failure_reason == "Agent operation agent.sandbox_exec failed: NgFailureEvent"
+    assert server.server_client.post.await_count == 1  # seed only: the verifier is not called
+    sandbox.stop.assert_awaited_once()
+    assert _RUN.get() is None
+
+
+async def test_a_raised_provider_timeout_keeps_its_exception_as_the_cause_chain(agent):
+    from nemo_gym.core import NgFailureEvent
+
+    server, sandbox = agent
+    timeout = TimeoutError("command status request timed out")
+    sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), timeout]
+    with pytest.raises(NgFailureEvent) as raised:
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    assert raised.value.__cause__.__cause__ is timeout
+
+
+async def test_a_typed_provider_failure_is_chained_once_and_not_renormalized(agent):
+    from nemo_gym.core import NgFailureEvent
+
+    server, sandbox = agent
+    typed = _provider_event(http_status=503)
+    sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), typed]
+    with pytest.raises(NgFailureEvent) as raised:
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    cause, event = _sandbox_event_of(raised.value)
+    assert cause is typed and event.failure_kind == "provider_unavailable" and event.http_status == 503
+    assert server.server_client.post.await_count == 1
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_a_returned_command_deadline_is_still_graded(agent):
+    server, sandbox = agent
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        SimpleNamespace(return_code=124, error_type="timeout"),
+    ]
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    assert result.pi_failed and result.pi_error_type == "timeout" and not result.mask_sample
+    assert server.server_client.post.await_count == 2
+
+
+async def test_a_configured_rule_counts_a_provider_failure_as_a_zero_and_the_result_says_so(agent):
+    from nemo_gym.core import RequestFailureLog, StageOutcomePolicyConfig
+    from nemo_gym.core.outcome_policy import is_policy_counted_zero
+
+    server, sandbox = agent
+    server.config = server.config.model_copy(
+        update={
+            "outcome_policy": StageOutcomePolicyConfig(
+                by_stage={"agent": {"by_failure_kind": {"provider_io_timeout": "count_as_zero"}}}
+            )
+        }
+    )
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        TimeoutError("status request timed out"),
+    ]
+    with RequestFailureLog.capture() as log:
+        result = await server.run(SimpleNamespace(cookies={}), request_body())
+    row = result.model_dump()
+    assert (row["reward"], row["mask_sample"], row["failure_kind"]) == (0.0, False, "provider_io_timeout")
+    assert row["failure_outcome_action"] == "count_as_zero" and row["failure_outcome_attribution"] == "evaluation"
+    assert is_policy_counted_zero(row)
+    # The counted failure is recorded with its provider cause, and the verifier saw an empty answer.
+    kinds = {event.failure_kind for event in log.report.events.values()}
+    assert kinds == {"agent_route_failed", "provider_io_timeout"}
+    # The selected zero is applied locally: the verifier is not called again on an empty answer.
+    assert server.server_client.post.await_count == 1
+    assert row["pi_failed"] and row["pi_exit_code"] is None
+    # A provider timeout is not Pi's own deadline.
+    observation = next(r for r in result.ng_agent_observations.records if isinstance(r, SandboxObservation))
+    assert observation.outcome == "failed" and observation.error_type is None
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_the_default_policy_counts_an_agent_stage_oom_as_a_zero(agent):
+    server, sandbox = agent
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        _provider_event("provider_oom_killed"),
+    ]
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, "provider_oom_killed")
+    assert result.failure_outcome_action == "count_as_zero"
+    assert result.failure_outcome_attribution is not None
+
+
+@pytest.mark.parametrize(
+    "verifier_error",
+    [None, RuntimeError("verifier unavailable")],
+    ids=["masked_verifier", "verifier_exception"],
+)
+async def test_a_selected_zero_does_not_depend_on_a_second_grading_call(agent, verifier_error):
+    from nemo_gym.core.outcome_policy import is_policy_counted_zero
+
+    server, sandbox = agent
+
+    async def post(**kwargs):
+        if kwargs["url_path"] != "/verify":
+            return response({})
+        if verifier_error is not None:
+            raise verifier_error
+        return response(kwargs["json"] | {"reward": 0.0, "mask_sample": True, "failure_kind": "verifier_error"})
+
+    server.server_client.post = AsyncMock(side_effect=post)
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        _provider_event("provider_oom_killed"),
+    ]
+    sandbox.stop.side_effect = RuntimeError("cleanup unavailable")
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    row = result.model_dump()
+    assert is_policy_counted_zero(row)
+    assert (row["failure_kind"], row["failure_outcome_action"]) == ("provider_oom_killed", "count_as_zero")
+    assert row["failure_outcome_attribution"] is not None
+    assert row["_ng_failure_events"] and row["_ng_failure_id"]
+    assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
+
+
+async def test_an_unexpected_exec_exception_text_never_reaches_the_failure_report(agent):
+    from nemo_gym.core import NgFailureEvent, failure_report_for
+
+    marker = "SYNTHETIC_PRIVATE_BODY_MARKER"
+    server, sandbox = agent
+    sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), RuntimeError(marker)]
+    with pytest.raises(NgFailureEvent) as raised:
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    cause, event = _sandbox_event_of(raised.value)
+    assert event.foreign_error.exception_type == "RuntimeError" and event.foreign_error.message == ""
+    assert isinstance(cause.__cause__, RuntimeError)
+    report = failure_report_for(raised.value)
+    assert marker not in json.dumps(report.model_dump(mode="json")) + json.dumps(cause.to_record())
+    assert marker not in json.dumps(raised.value.to_record())
+
+
+def test_the_agent_stage_policy_supports_only_fail_and_count_as_zero():
+    from pydantic import ValidationError
+
+    from nemo_gym.core import StageOutcomePolicyConfig
+
+    with pytest.raises(ValidationError, match="fail and count_as_zero"):
+        PiSandboxedAgentConfig(
+            name="pi",
+            host="127.0.0.1",
+            port=9000,
+            entrypoint="app.py",
+            resources_server={"type": "resources_servers", "name": "grader"},
+            model_server={"type": "responses_api_models", "name": "model"},
+            sandbox_provider="sandbox",
+            sandbox_config={},
+            outcome_policy=StageOutcomePolicyConfig(by_stage={"agent": {"default_action": "retry"}}),
+        )

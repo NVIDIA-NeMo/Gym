@@ -21,16 +21,29 @@ import json
 import random
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from aiohttp import ClientPayloadError, ClientResponseError
 from PIL import Image
 
 from nemo_gym.agents.utils import verify_call
-from nemo_gym.client import ServerClient
+from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import AGENT_ROUTE_FAILED, FailureBoundary, NeMoGymResponse, RequestFailureLog
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    FailureBoundary,
+    FailureEvent,
+    FailureHeader,
+    FailureReport,
+    ModelFailureDetails,
+    NeMoGymResponse,
+    NgFailureEvent,
+    RequestFailureLog,
+    SdkErrorDetails,
+)
 from responses_api_agents.gdp_pdf_agent import app as gdp_pdf_agent_app
 from responses_api_agents.gdp_pdf_agent.app import (
     DocumentDelivery,
@@ -757,29 +770,64 @@ class TestRun:
         assert result.mask_sample is False
         assert result.failure_kind is None
 
-    @requires_example_manifest
-    async def test_unrelated_failure_is_not_retried_but_scores_zero(self) -> None:
-        # An unclassified, non-auth error (e.g. a rare vLLM-side multimodal-processor bug) must
-        # not take the whole evaluation run down over one document -- it becomes a graceful
-        # terminal failure instead of propagating, same as a terminal input-limit.
-        agent = _agent(strip_images_from_output=False)
+    async def test_a_failed_policy_call_is_not_a_model_zero(self, tmp_path) -> None:
+        """5xx, 429 and 401/403 replies and transport errors leave typed through the agent boundary: nothing is
+        scored, so the row is masked and retried by Collection instead of becoming the model's zero."""
+        for error in (_error("out of memory", status=500), _error("slow down", status=429), _error("no", status=401)):
+            agent, manifest = _text_only_agent(tmp_path / str(error.status))
+            agent.server_client.post = AsyncMock(return_value=SimpleNamespace(cookies={}, data={}))
+            with pytest.raises(ClientResponseError) as raised:
+                await _run_with_episodes(agent, manifest, [error])
+            assert raised.value.status == error.status
+            assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == ["/seed_session"]
+
+    async def test_a_confirmed_policy_timeout_is_typed_as_the_policys(self, tmp_path) -> None:
+        operation_id = uuid4().hex
+        attempts = [
+            FailureEvent(
+                boundary=FailureBoundary.MODEL,
+                failure_kind="model_request_error",
+                failure_reason=MODEL_RESPONSE_TIMEOUT_REASON,
+                operation="model_request",
+                operation_id=operation_id,
+                attempt_id=uuid4().hex,
+                details=ModelFailureDetails(request_upload_complete=True),
+                foreign_error=SdkErrorDetails(exception_type="TimeoutError", message=""),
+            )
+            for _ in range(3)
+        ]
+        report = FailureReport(failure_id=attempts[-1].event_id, events={e.event_id: e for e in attempts})
+        error = ClientResponseError(
+            None, (), status=500, message="upstream failure", headers=FailureHeader.encode(report)
+        )
+        error.response_content = b"timed out"
+        agent, manifest = _text_only_agent(tmp_path)
+        agent.server_client.post = AsyncMock(return_value=SimpleNamespace(cookies={}, data={}))
+
+        with pytest.raises(NgFailureEvent) as raised:
+            await _run_with_episodes(agent, manifest, [error])
+
+        assert (raised.value.failure_kind, raised.value.operation) == (
+            "model_policy_response_timeout",
+            "agent.policy_request",
+        )
+
+    async def test_a_real_input_limit_still_scores_zero(self, tmp_path) -> None:
+        agent, manifest = _text_only_agent(tmp_path, min_dpi=140)
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},
                 data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
             )
         )
-        with (
-            patch.object(GdpPdfAgent, "_create_episode", side_effect=_error("out of memory")) as call,
-            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
-            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
-            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
-        ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
-        assert call.await_count == 1
-        assert result.reward == 0.0
-        assert result.response.output == []
-        assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_http_500"
+
+        async def episode(*args, **kwargs):
+            raise _error("maximum context length")
+
+        result = await _run_with_episodes(agent, manifest, episode)
+
+        assert (result.reward, result.mask_sample) == (0.0, False)
+        assert result.failure_reason == "GDP.pdf terminal input limit: context"
 
     async def test_auth_and_rate_limit_errors_still_raise(self) -> None:
         # These are systemic, not per-document -- every other row would fail identically, so
@@ -794,28 +842,6 @@ class TestRun:
         ):
             await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
-
-    @requires_example_manifest
-    async def test_non_client_response_exceptions_also_score_zero(self) -> None:
-        # Any other exception type (not just ClientResponseError) must be equally contained --
-        # e.g. a JSON decode error or an assertion deep inside an upstream library.
-        agent = _agent(strip_images_from_output=False)
-        agent.server_client.post = AsyncMock(
-            side_effect=lambda **kw: SimpleNamespace(
-                cookies={},
-                data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
-            )
-        )
-        with (
-            patch.object(GdpPdfAgent, "_create_episode", side_effect=AssertionError("Expected a cached item")) as call,
-            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
-            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
-            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
-        ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
-        assert call.await_count == 1
-        assert result.reward == 0.0
-        assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_AssertionError"
 
     @requires_example_manifest
     async def test_images_are_stripped_from_the_result_when_enabled(self) -> None:
@@ -944,6 +970,65 @@ class TestRun:
         assert result.mask_sample is True
         assert failure.failure_kind == AGENT_ROUTE_FAILED
         assert failure.operation == "verify"
+
+
+class TestMaskFailedAttempts:
+    """mask_failed_attempts keeps attempts without a gradable answer out of training, never out of evaluation."""
+
+    async def _run(
+        self, tmp_path: Path, episode: Any, *, verify_raises: bool = False, **config: Any
+    ) -> SimpleAgentVerifyResponse:
+        agent, manifest = _text_only_agent(tmp_path, **config)
+
+        async def post(**kw: Any) -> SimpleNamespace:
+            if kw["url_path"] == "/verify" and verify_raises:
+                raise RuntimeError("judge outage")
+            return SimpleNamespace(
+                cookies={}, data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {}
+            )
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        return await _run_with_episodes(agent, manifest, episode)
+
+    async def test_off_by_default_so_evaluation_counts_the_zero(self, tmp_path: Path) -> None:
+        result = await self._run(tmp_path, _error("maximum context length", status=400))
+        assert result.reward == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason == "GDP.pdf terminal input limit: context"
+        assert "mask_sample" not in (result.model_extra.get("instance_config") or {})
+
+    @pytest.mark.parametrize(
+        ("error", "kind"),
+        [
+            (_error("maximum context length", status=400), "model_context_limit"),
+            (_error("payload too large", status=413), "model_request_error"),
+        ],
+    )
+    async def test_masks_an_attempt_whose_input_never_fit(
+        self, tmp_path: Path, error: ClientResponseError, kind: str
+    ) -> None:
+        result = await self._run(tmp_path, error, mask_failed_attempts=True)
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == kind
+        assert result.model_extra["instance_config"]["mask_sample"] is True
+        assert result.failure_reason.startswith("GDP.pdf terminal input limit: ")
+
+    async def test_a_failed_verification_is_masked_either_way(self, tmp_path: Path) -> None:
+        for mask in (False, True):
+            result = await self._run(
+                tmp_path / str(mask), [(_response(), None, {}, {})], verify_raises=True, mask_failed_attempts=mask
+            )
+            assert result.reward == 0.0
+            assert result.mask_sample is True
+            assert result.failure_kind is not None
+
+    async def test_leaves_a_graded_answer_alone(self, tmp_path: Path) -> None:
+        result = await self._run(tmp_path, [(_response(), None, {}, {})], mask_failed_attempts=True)
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason is None
 
 
 class TestStripImageBlocks:

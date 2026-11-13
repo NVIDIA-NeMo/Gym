@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The definitions every package and every environment shares: Responses API types, episode identity, and failure kinds."""
+"""The definitions every package and every environment shares: Responses API types, episode identity, failure kinds,
+and images in tool replies."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -23,9 +24,13 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.core.episode_context import (
         current_rollout_id,
+        current_rollout_skips_token_capture,
+        current_session_key,
         current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
         rollout_context,
+        skip_token_capture_context,
+        skips_token_capture,
         verifier_invocation_context,
     )
     from nemo_gym.core.episode_types import (
@@ -52,6 +57,7 @@ if TYPE_CHECKING:
         MODEL_TRANSPORT_ERROR,
         PROVIDER_IO_TIMEOUT,
         PROVIDER_OOM_KILLED,
+        PROVIDER_REQUEST_FAILED,
         PROVIDER_STATUS_UNAVAILABLE,
         PROVIDER_UNAVAILABLE,
         SESSION_EXPIRED,
@@ -86,10 +92,26 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
+    from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
+    from nemo_gym.core.model_call_sampling import (
+        MODEL_SAMPLING_HEADER,
+        MODEL_SAMPLING_NULL,
+        ModelCallSampling,
+        current_model_sampling_segment,
+        encode_model_sampling,
+        model_call_sampling_config,
+        model_sampling_context,
+        model_sampling_from_run_body,
+        model_sampling_path_segment,
+    )
+    from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
     from nemo_gym.core.outcome_policy import (
+        OutcomeAction,
         OutcomeDecision,
+        OutcomePolicyConfig,
         StageOutcomePolicyConfig,
         StagePolicyConfig,
+        choose_action,
         choose_stage_outcome,
     )
     from nemo_gym.core.responses_api_types import (
@@ -142,6 +164,7 @@ if TYPE_CHECKING:
         NeMoGymSummary,
         accumulate_response_usage,
     )
+    from nemo_gym.core.tool_output_images import TOOL_OUTPUT_IMAGES_KEY, ToolOutputImage, split_tool_output_images
     from nemo_gym.core.typed_exceptions import (
         NgFailureEvent,
         agent_route_failure,
@@ -154,6 +177,11 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "MediaFile": "media",
+    "UnsupportedContentError": "media",
+    "split_text_and_media": "media",
+    "OperationTiming": "operation_timing",
+    "TimingBoundary": "operation_timing",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
     "AGENT_LIMIT": "failure_kinds",
     "AGENT_ROUTE_FAILED": "failure_kinds",
@@ -188,8 +216,11 @@ _PUBLIC_API = {
     "MODEL_CONTEXT_LIMIT": "failure_kinds",
     "MODEL_POLICY_RESPONSE_TIMEOUT": "failure_kinds",
     "MODEL_REQUEST_ERROR": "failure_kinds",
+    "MODEL_SAMPLING_HEADER": "model_call_sampling",
+    "MODEL_SAMPLING_NULL": "model_call_sampling",
     "MODEL_TRANSPORT_ERROR": "failure_kinds",
     "MaterializedTask": "episode_types",
+    "ModelCallSampling": "model_call_sampling",
     "ModelFailureDetails": "failure_records",
     "SandboxFailureDetails": "failure_records",
     "NeMoGymChatCompletion": "responses_api_types",
@@ -235,8 +266,11 @@ _PUBLIC_API = {
     "NeMoGymResponseUsage": "responses_api_types",
     "NeMoGymSummary": "responses_api_types",
     "NgFailureEvent": "typed_exceptions",
+    "OutcomeAction": "outcome_policy",
+    "OutcomePolicyConfig": "outcome_policy",
     "PROVIDER_IO_TIMEOUT": "failure_kinds",
     "PROVIDER_OOM_KILLED": "failure_kinds",
+    "PROVIDER_REQUEST_FAILED": "failure_kinds",
     "PROVIDER_STATUS_UNAVAILABLE": "failure_kinds",
     "PROVIDER_UNAVAILABLE": "failure_kinds",
     "REQUIRED_TOKEN_METADATA_FIELDS": "responses_api_types",
@@ -248,22 +282,36 @@ _PUBLIC_API = {
     "SdkErrorDetails": "failure_records",
     "StreamFailureReportReader": "failure_transport",
     "TOKEN_METADATA_FIELDS": "responses_api_types",
+    "TOOL_OUTPUT_IMAGES_KEY": "tool_output_images",
     "TaskId": "episode_types",
+    "ToolOutputImage": "tool_output_images",
     "VERIFIER_ERROR": "failure_kinds",
     "accumulate_response_usage": "responses_api_types",
     "agent_route_failure": "typed_exceptions",
+    "choose_action": "outcome_policy",
+    "current_model_sampling_segment": "model_call_sampling",
     "current_rollout_id": "episode_context",
+    "current_rollout_skips_token_capture": "episode_context",
+    "current_session_key": "episode_context",
     "current_verifier_invocation_id": "episode_context",
+    "encode_model_sampling": "model_call_sampling",
     "failure_report_for": "typed_exceptions",
     "is_namespaced": "failure_kinds",
     "is_registered": "failure_kinds",
     "maybe_rollout_id_from_run_body": "episode_context",
+    "model_call_sampling_config": "model_call_sampling",
+    "model_sampling_context": "model_call_sampling",
+    "model_sampling_from_run_body": "model_call_sampling",
+    "model_sampling_path_segment": "model_call_sampling",
     "observe_failure": "failure_transport",
     "rebuild_failure": "typed_exceptions",
     "reply_failure_report": "failure_transport",
     "report_for_current_request": "failure_transport",
     "rollout_context": "episode_context",
     "sdk_error_details": "typed_exceptions",
+    "skip_token_capture_context": "episode_context",
+    "skips_token_capture": "episode_context",
+    "split_tool_output_images": "tool_output_images",
     "validate_failure_kind": "failure_kinds",
     "verifier_invocation_context": "episode_context",
 }

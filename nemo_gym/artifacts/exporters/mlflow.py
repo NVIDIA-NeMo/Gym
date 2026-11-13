@@ -36,7 +36,13 @@ from mlflow.utils.validation import (
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.artifacts.exporters import run_failed
-from nemo_gym.artifacts.exporters.base import BaseExporter, _artifact_version, _live_run_id, _write_marker_atomically
+from nemo_gym.artifacts.exporters.base import (
+    BaseExporter,
+    _artifact_version,
+    _live_run_id,
+    _upload_intent,
+    _write_marker_atomically,
+)
 from nemo_gym.artifacts.exporters.metrics import (
     _ELISION_MARKER as _ELISION_MARKER,
 )
@@ -311,8 +317,7 @@ class MLflowExporter(BaseExporter):
             return
         if self._delivery_failed or run_failed():
             raise RuntimeError("Live tracking delivery failed; no completion receipt was written.")
-        if not UploadRolloutsConfigMixin.model_validate(self.global_config_dict).upload_rollouts:
-            return
+        upload = UploadRolloutsConfigMixin.model_validate(self.global_config_dict).upload_rollouts
         client, run_id = self._active()
         marker = artifacts.export_done_fpath(self.name)
         if marker.exists():
@@ -330,17 +335,20 @@ class MLflowExporter(BaseExporter):
             saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath))
             if self._delivered_config_digest != self._payload_digest(saved_config):
                 raise RuntimeError("Delivered configuration differs from the final saved configuration.")
-            from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
+            if upload != _upload_intent(OmegaConf.create(saved_config)).upload_rollouts:
+                raise RuntimeError("Live upload setting differs from the final saved configuration.")
+            if upload:
+                from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
-            with artifacts.rollouts_jsonl_fpath.open("rb") as stream:
-                rows = (orjson.loads(line) for line in stream if line.strip())
-                expected = Counter(
-                    self._payload_digest(_rollout_for_export(row))
-                    for row in rows
-                    if not row.get(NG_DISPATCH_DRAINED_KEY)
-                )
-            if not expected or self._delivered_rollouts != expected:
-                raise RuntimeError("Acknowledged rollout payloads do not match the final saved output.")
+                with artifacts.rollouts_jsonl_fpath.open("rb") as stream:
+                    rows = (orjson.loads(line) for line in stream if line.strip())
+                    expected = Counter(
+                        self._payload_digest(_rollout_for_export(row))
+                        for row in rows
+                        if not row.get(NG_DISPATCH_DRAINED_KEY)
+                    )
+                if not expected or self._delivered_rollouts != expected:
+                    raise RuntimeError("Acknowledged rollout payloads do not match the final saved output.")
             run = client.get_run(run_id)
             if run.info.run_id != run_id:
                 raise RuntimeError("Tracking service returned a different run.")
@@ -376,7 +384,7 @@ class MLflowExporter(BaseExporter):
                         "version": 1,
                         "run_id": run_id,
                         "artifacts": version,
-                        "uploaded_rollouts": True,
+                        "uploaded_rollouts": upload,
                         "rollout_projection_version": 1,
                     }
                 ).decode(),

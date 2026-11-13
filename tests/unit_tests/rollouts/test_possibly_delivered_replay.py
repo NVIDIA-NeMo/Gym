@@ -182,6 +182,8 @@ def test_a_judge_failure_resume_leaves_to_recovery_is_counted_and_named(tmp_path
     assert coverage["stopped_not_retried"] == 1 and coverage["retryable"] == 1
     # It is one of the final failures resume does not run again, now named apart from terminal ones.
     assert coverage["failed_final"] == 1 and coverage["failed_not_final"] == 1
+    # Only the retryable one is open: the stopped one is final for resume, so open cannot stay above zero forever.
+    assert coverage["open"] == 1
 
 
 @pytest.mark.parametrize("failure_class", ["judge_failed", "judge_invalid", "judge_unparseable"])
