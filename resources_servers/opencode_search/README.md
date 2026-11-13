@@ -152,8 +152,9 @@ The session pairing repeats the relay pairing's settings; `benchmarks/browsecomp
 model sees differently. On this server's side:
 
 * **Plugins and their settings.** This server stages them in the lent sandbox (`episode_sandbox_files`,
-  `episode_sandbox_env`). On the relay, `opencode_sandboxed_agent` uploads them and passes their settings
-  to OpenCode.
+  `episode_sandbox_env`): each file is uploaded once, when the sandbox starts, and nothing reads it back.
+  On the relay, `opencode_sandboxed_agent` uploads them, reads each back, trying up to 3 times, and passes
+  their settings to OpenCode.
 * **How a run ended.** Verify reads it from the plugin log. On the relay, the agent reads its run output
   and sends the ending in the verify body. Neither agent sends an `agent_timed_out` ending, so neither
   pairing masks a run that ran out of time: both grade what it produced.
@@ -174,7 +175,11 @@ model-server block. Episode sessions use these settings, each off by default:
   and `/tmp`; the seed creates it.
 * `episode_sandbox_files` maps absolute sandbox paths to files relative to the Gym root, read at startup
   and staged in each lent sandbox. Stage under `/tmp`, which every image has: a provider need not create
-  parent directories.
+  parent directories. Each file is uploaded once, when the sandbox starts (`SandboxSpec.files`); an upload
+  that fails stops the sandbox, and the seed answers 500, a non-terminal episode failure that a resume
+  retries. Nothing reads the files back or checks their digests in each episode; the BrowseComp scripted
+  smoke checks them once. A file missing at the agent's seed is refused by `opencode_agent` with a
+  terminal 422, and one that arrives but does not load is refused at verify by the plugin-log check (422).
 * `episode_sandbox_env` is the lent sandbox's environment, over `sandbox_config.env`; an empty value sets
   nothing. Supply secrets from an overlay. With `exa_cache_root` set, `NEMO_GYM_EXA_BASE_URL` defaults to
   this server's `/mcp` proxy, so the server needs an address the sandbox reaches; on loopback it refuses
