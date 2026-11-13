@@ -216,6 +216,8 @@ class TokenCaptureConfig(BaseModel):
         block = self.token_id_capture
         if block.allow_system_suffix and block.parent_resolution != "source_history":
             raise ValueError("allow_system_suffix requires parent_resolution=source_history")
+        if block.allow_system_suffix and block.external_staging_backend != "vllm_worker":
+            raise ValueError("allow_system_suffix requires external_staging_backend=vllm_worker")
         # dynamo_worker is NeMo RL's vLLM engine behind Dynamo's frontend; the dialect measures through a chat call.
         if block.parent_resolution == "source_history" and (
             not block.external_staging or block.external_staging_backend not in ("vllm_worker", "dynamo_worker")
