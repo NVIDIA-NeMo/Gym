@@ -304,12 +304,13 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         activation: Activation | None = None,
+        step_limit_owned_by_caller: bool = False,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         # Only the legacy /run route is supported: every episode needs the session /seed_session opens on the resources
         # server. The agent is not in AGENT_SESSION_AGENT_TYPES, so config composition relays it through /run; an
         # agent session reaching here anyway is refused. `resources_prefix` and `activation` are not session marks:
         # /run sets them too when Gym's rollout checkpointing is on. simple_agent's run() and responses() refuse
-        # execute_tools=false.
+        # execute_tools=false. `step_limit_owned_by_caller` is set only in an agent session, so it stays false here.
         if in_session or tool_access is not None:
             raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
         cfg = self.config
