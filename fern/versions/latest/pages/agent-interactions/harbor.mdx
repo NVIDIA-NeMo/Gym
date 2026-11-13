@@ -128,6 +128,7 @@ Pass the file with `--config <file>`, or set one key with
 | `sandbox_ready_timeout_s` | `900` | Bound on one sandbox start. |
 | `image_pull_retries` | `2` | Retries of a sandbox start that failed on an image pull. |
 | `sandbox_provider_options` | `{}` | Provider options for every sandbox. |
+| `agent_model_servers`, `agent_allowed_hosts` | `[]` | The hosts a restricted agent sandbox allows so the harness reaches its model: Gym servers by name (such as `policy_model`, at a sandbox-reachable address) and further host names. A task with a restricted agent rule fails at seed without one. See [Task settings](/main/data/task-folders/task-folder-format#task-settings). |
 | `sandbox_metadata` | `{benchmark: harbor}` | Metadata added to every sandbox. |
 | `sandbox_resources_override` | none | Replaces only the task resources it names (`cpu`, `memory_mib`, `disk_gib`), except in Compose sidecars. |
 | `enforce_task_timeouts` | `true` | Bound each episode, from when the sandbox is ready, by its task's agent, collect-hook and verifier timeouts plus `harness_setup_allowance_s`, `verifier_grace_s`, 30 s per hook and a separate verifier's sandbox start (and any overlay build). A multi-step task sums them per step, plus step setup and health checks. The episode stays within `default_episode_timeout_seconds` unless a multi-step task needs more. `false` uses the default alone and refuses a multi-step task that does not fit in it with one sandbox start. |

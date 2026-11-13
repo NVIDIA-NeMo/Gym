@@ -274,6 +274,8 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_mode: Literal["shared", "separate", "mixed"] | None = None
     # The network the verifier ran under (the task's `[verifier].network_mode`, "public" when unset).
     verifier_network: str | None = None
+    # The rule the agent's sandbox was created under (`[agent].network_mode`, else `[environment]`'s).
+    agent_network: str | None = None
     turns: list[HarborTurnResult] | None = None
     turn_reward_strategy: Literal["mean", "final"] | None = None
     turns_without_verifier_result: int | None = None
@@ -347,6 +349,12 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     cleanup_timeout_seconds: PositiveFloat = 180
     sandbox_ttl_slack_s: float = Field(default=900, ge=0)
     sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
+    # The hosts the harness in the sandbox calls its model on, allowed in the agent's sandbox of a task whose agent
+    # rule restricts the network (a dataset with `restricted_agent_network`), as Harbor's `--allow-agent-host`:
+    # the Gym server instances it calls (such as `policy_model`), by the host of their URL, which must be
+    # sandbox-reachable (`use_absolute_ip`), and further hosts it calls directly (an external model endpoint).
+    agent_model_servers: list[str] = Field(default_factory=list)
+    agent_allowed_hosts: list[str] = Field(default_factory=list)
     sandbox_metadata: dict[str, str] = Field(default_factory=dict)
     # Replaces the task's declared cpus, memory_mb and storage_mb when set (keys: cpu, memory_mib, disk_gib).
     # Used to run a benchmark at fixed resources, for example to compare against another server.
@@ -948,6 +956,7 @@ class HarborEnvironmentServer(
             **outcome,
             ng_agent_observations=agent_observations,
             ng_trajectory=agent_trajectory,
+            agent_network=session.task.config.agent_network_mode,
         )
         self._trace_score(session.task.task_id, episode_key, result)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=result)
@@ -1606,6 +1615,7 @@ class HarborEnvironmentServer(
             else (ran.agent_observations if sessions == 1 else None),
             ng_trajectory=handle.trajectory if handle is not None else (ran.trajectory if sessions == 1 else None),
             verifier_mode=_turns_verifier_mode(results),
+            agent_network=task.config.agent_network_mode,
             turns=results,
             turn_sessions="continue" if continued else "fresh",
             turn_reward_strategy=strategy,
@@ -1861,8 +1871,16 @@ class HarborEnvironmentServer(
             verifier_network_policy = self._verifier_network_policy(task)
         except ValueError as exc:
             raise HTTPException(422, f"Task {task.task_id!r} [verifier] network policy: {exc}") from exc
+        # The agent's own rule becomes its sandbox's policy at creation (a dataset with `restricted_agent_network`):
+        # a provider, a deployment or a Compose task that cannot carry it, or a harness left without a route to its
+        # model, fails here, before any sandbox.
+        try:
+            agent_network_policy = self._agent_network_policy(task)
+        except ValueError as exc:
+            raise HTTPException(422, f"Task {task.task_id!r} [agent] network policy: {exc}") from exc
         shared_turns = [turn.name for turn in task.turns if not self._turn_separate(task, turn)]
-        if verifier_network_policy is not None and (not separate or shared_turns):
+        # A shared verifier grades under the agent's restricted policy, which the loader checked against its own rule.
+        if verifier_network_policy is not None and (not separate or shared_turns) and agent_network_policy is None:
             raise HTTPException(
                 422,
                 f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox"

@@ -74,6 +74,14 @@ A numeric user is looked up by name in the image first. A bare numeric `USER` wi
 integer user ID on Docker and on OpenSandbox's plain exec; other providers, and OpenSandbox's PTY and bash sessions,
 need a named user. A `uid:gid` pair runs only on Docker.
 
+`network_mode` and `allowed_hosts` (in `[agent]`, else inherited from `[environment]`) restrict the agent's network:
+`no-network`, or `allowlist` with `allowed_hosts`. Gym runs such a task only when its dataset sets
+`restricted_agent_network = true` in its `[gym]` table and the task has no `[[steps]]`. The agent's sandbox is then
+created under the rule, on OpenSandbox only, with the hosts the harness calls its model on also allowed (the server's
+`agent_model_servers` and `agent_allowed_hosts`). Setup runs under the same rule, a narrower network than Harbor's
+public setup, so a task whose setup needs the network fails at seed, as an infrastructure failure, not a score. An
+`[environment]` restriction with `[agent] network_mode = "public"` is refused.
+
 ### [verifier]
 
 | Key | Default | What it does |
@@ -84,7 +92,7 @@ need a named user. A `uid:gid` pair runs only on Docker.
 | `environment_mode` | `shared` | `shared` runs `test.sh` in the agent's sandbox, `separate` in a fresh one. |
 | `environment` | none | A `[verifier.environment]` table with the keys of `[environment]`. Selects separate mode. |
 | `collect` | `[]` | `[[verifier.collect]]` hooks, run before `test.sh` and any artifact collection: `command`, `service` (`main`), `timeout_sec` (`60`) and `user` (unset: the service's default, in `main` the task's agent user). A hook that fails, times out or names a missing service only logs a warning; one the sandbox cannot run masks the sample. |
-| `network_mode`, `allowed_hosts` | `public`, none | `no-network`, or `allowlist` with `allowed_hosts`. Needs OpenSandbox and separate mode, on every step of a multi-step task. An allowlist fails at seed if the deployment's `network_policy` denies by default. |
+| `network_mode`, `allowed_hosts` | `public`, none | `no-network`, or `allowlist` with `allowed_hosts`. Needs OpenSandbox and separate mode, on every step of a multi-step task. An allowlist fails at seed if the deployment's `network_policy` denies by default. With `restricted_agent_network`, a rule in `[verifier.environment]` counts as this one (the two must not differ). A shared verifier grades in the agent's sandbox, so under a restricted agent rule (see `[agent]`) it must be restricted too, its allowlist naming only hosts the agent's allows. |
 
 ### [solution]
 
@@ -122,6 +130,7 @@ memory_mb = 4096
 | `domain` | none | One of Gym's domain values, such as `coding`. |
 | `verified` | `false` | Whether the rewards were baselined and reviewed. |
 | `source` | none | The hub reference a committed entry under `environments/harbor/` is pulled from. |
+| `restricted_agent_network` | `false` | Admits tasks whose `[agent]` or `[environment]` `network_mode` restricts the agent's network. See `[agent]` above. |
 
 None of these keys enters a task digest.
 
@@ -198,7 +207,8 @@ publishing refuses Python verifiers that read `response` or grade in separate mo
 ### Current limitations
 
 - Windows and TPU tasks are not supported.
-- Network restrictions apply only to a verifier in separate mode, on OpenSandbox.
+- Network restrictions apply only on OpenSandbox: to a verifier in separate mode, and to the agent of a task without
+  steps or Compose file in a dataset with `restricted_agent_network`.
 - Compose tasks run only on OpenSandbox.
 - A task that seeds the agent with a transcript (`trajectory.json`, or `steps/<first step>/trajectory.json` in a
   multi-step task) runs only with the oracle.
@@ -213,7 +223,7 @@ When no task loads at all, it prints the error instead of a table and exits 2.
 | --- | --- |
 | Missing files | No `instruction.md` (single-step), no `tests/` folder (single-step, without a dataset `verifier.py`), or a step with no `steps/<name>/` folder, `instruction.md` there, or `test.sh` in its own or the task's `tests/`. A folder without `task.toml` is never refused: Gym searches it for task folders. |
 | Missing images | A build-mode Dockerfile, base image or `tests/Dockerfile` with no record from prepare, or a separate verifier with no image. |
-| Unsupported settings | Windows, TPU, network restrictions outside separate-mode `[verifier]`, or a shared verifier with its own environment. |
+| Unsupported settings | Windows, TPU, network restrictions outside separate-mode `[verifier]` (and the agent's rule, with `restricted_agent_network`), or a shared verifier with its own environment. |
 | Invalid values | A malformed `task.toml` or override, a bad `inputs` entry, an MCP server without an endpoint, or an artifact whose source is `/` or under `/tests` or `/logs/verifier`, whose path has a `..` part, or whose `destination` is absolute. |
 | Dataset settings | `type = "example"`, a harness outside `allowed_agents` (without `--allow-unsupported-pairing`), or a `[gym.tasks]` table naming no task. These stop the whole command. |
 
