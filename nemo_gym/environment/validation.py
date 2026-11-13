@@ -39,6 +39,7 @@ from nemo_gym.environment.manifest import (
     EnvironmentKind,
     EnvironmentManifest,
     ManifestDataset,
+    PromptSource,
     dump_manifest,
     load_manifest,
     resolve_manifest_config_path,
@@ -840,19 +841,31 @@ def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManife
         )
 
 
-def _task_datasets(manifest: EnvironmentManifest) -> set[tuple[str, str]]:
-    datasets = {(dataset.type.value, dataset.jsonl_fpath) for dataset in manifest.datasets}
-    tasks = {dataset for dataset in datasets if dataset[0] != DatasetKind.EXAMPLE.value}
-    return tasks or datasets
+def _task_datasets(manifest: EnvironmentManifest) -> tuple[ManifestDataset, ...]:
+    """The datasets a setup shares with its target: the task datasets, or every dataset of an environment that
+    declares only examples."""
+    tasks = tuple(dataset for dataset in manifest.datasets if dataset.type != DatasetKind.EXAMPLE)
+    return tasks or tuple(manifest.datasets)
+
+
+def _task_files(manifest: EnvironmentManifest) -> set[tuple[str, str]]:
+    return {(dataset.type.value, dataset.jsonl_fpath) for dataset in _task_datasets(manifest)}
+
+
+def _prompt_templates(manifest: EnvironmentManifest) -> tuple[str | None, set[tuple[str, str | None]]]:
+    """The benchmark's own prompt: its standard template and the template each task dataset declares."""
+    datasets = {(dataset.jsonl_fpath, dataset.prompt_config) for dataset in _task_datasets(manifest)}
+    return manifest.standard_prompt_config, datasets
 
 
 def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifest) -> None:
     """Check that a setup or protocol names a manifest it can belong to.
 
     A setup runs its target's tasks and scoring with another harness or runtime, so both declare the same kind,
-    task datasets, resources server and grading mode. A protocol scores a benchmark's tasks under other rules, so
-    its target is a benchmark's main manifest. Whether a protocol's tasks match is left to review, because a
-    protocol may run its own prepared copy of the data.
+    task datasets, resources server and grading mode. When both build prompts from templates, they also declare the
+    same templates: a harness may add its own instructions, but the benchmark's template is part of its rules. A
+    protocol scores a benchmark's tasks under other rules, so its target is a benchmark's main manifest. Whether a
+    protocol's tasks match is left to review, because a protocol may run its own prepared copy of the data.
     """
     field, target_name = (
         ("setup_of", manifest.setup_of) if manifest.setup_of is not None else ("protocol_of", manifest.protocol_of)
@@ -868,6 +881,11 @@ def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifes
     if not target_path.is_file():
         raise EnvironmentValidationError(f"{field} '{target_name}' has no manifest at {target_path}.")
     target = load_manifest(target_path)
+    if target.name != target_name:
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' must be written as the name the manifest at {target_path} declares, "
+            f"'{target.name}'."
+        )
     if target.kind != manifest.kind:
         raise EnvironmentValidationError(
             f"{field} '{target_name}' is a {target.kind.value}, but this manifest is a {manifest.kind.value}."
@@ -878,14 +896,22 @@ def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifes
         )
     if field == "protocol_of":
         return
-    if _task_datasets(manifest) != _task_datasets(target):
+    if _task_files(manifest) != _task_files(target):
         raise EnvironmentValidationError(
-            f"setup_of '{target_name}' runs other task datasets; a config with other tasks is its own environment."
+            f"setup_of '{target_name}' runs other task datasets; a config with other tasks is its own environment. "
+            f"If you changed a config both manifests use, run `gym env validate --sync` on '{target_name}' first."
         )
     if (manifest.resources_server, manifest.grading_mode) != (target.resources_server, target.grading_mode):
         raise EnvironmentValidationError(
             f"setup_of '{target_name}' scores with another resources server or grading mode; "
             "declare protocol_of for a benchmark scored under other rules."
+        )
+    if manifest.prompt_source == target.prompt_source == PromptSource.TEMPLATE and (
+        _prompt_templates(manifest) != _prompt_templates(target)
+    ):
+        raise EnvironmentValidationError(
+            f"setup_of '{target_name}' uses another prompt template; "
+            "declare protocol_of for a benchmark prompted under other rules."
         )
 
 
