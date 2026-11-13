@@ -682,7 +682,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             NeMoGymEasyInputMessage(role="system", content=self._retrieval_system_prompt),
             NeMoGymEasyInputMessage(role="user", content=prompt),
         ]
-        if retrieval_params.max_output_tokens is None:
+        if retrieval_params.max_output_tokens is None and self.config.retrieval_max_output_tokens is not None:
             retrieval_params.max_output_tokens = self.config.retrieval_max_output_tokens
 
         llm_response = await self.server_client.post(
