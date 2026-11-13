@@ -404,6 +404,57 @@ class TestResolveServerDir:
         rel = Path("resources_servers/arc_agi")
         assert _resolve_server_dir(rel) == PARENT_DIR / rel
 
+    def test_refuses_a_local_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # NVIDIA-NeMo/Gym#4725: a local server dir without requirements.txt silently resolved to the installed one.
+        local = tmp_path / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(
+            ConfigError, match=r"contains server code but no requirements.txt or pyproject.toml, so Gym would use"
+        ):
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+
+    def test_a_local_data_copy_without_server_code_still_resolves_to_the_installed_server(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Data paths such as resources_servers/<env>/data/example.jsonl resolve by name, so a local data copy
+        # beside a built-in server name is legitimate and must not be mistaken for a server.
+        data = tmp_path / "resources_servers" / "arc_agi" / "data"
+        data.mkdir(parents=True)
+        (data / "example.jsonl").write_text("{}\n", encoding="utf-8")
+        # A helper script or package marker beside the data is not a server entrypoint.
+        (data.parent / "__init__.py").write_text("", encoding="utf-8")
+        (data.parent / "prepare_data.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_a_local_server_without_install_marker_and_no_installed_one_resolves_locally(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "resources_servers" / "only_here"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/only_here")) == local
+
+    def test_refuses_a_search_dir_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # --search-dir and NEMO_GYM_EXTRA_ROOTS roots outrank cwd and the install root, so they get the same check.
+        search_dir = tmp_path / "search"
+        local = search_dir / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(search_dir))
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ConfigError, match="contains server code") as error:
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+        assert f"Server directory {local} contains" in str(error.value)
+
     def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
@@ -2285,3 +2336,76 @@ def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
         RunHelper().start(None)
     initialize.assert_not_called()
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("verifier_error", [False, True])
+def test_server_data_validation_checks_manifest_verifiers(
+    monkeypatch: MonkeyPatch, tmp_path: Path, verifier_error: bool
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo"
+    server_dir.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    entries = [
+        EnvironmentCatalogEntry(
+            name=name,
+            config_path=tmp_path / name / "config.yaml",
+            path=tmp_path / name,
+            manifest_path=tmp_path / name / "manifest.yaml",
+            resources_server="demo",
+        )
+        for name in ("benchmark_a", "benchmark_b")
+    ]
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    validation = MagicMock(return_value=SimpleNamespace(datasets=()))
+    monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validation)
+    verifier = MagicMock(side_effect=RuntimeError("bad verifier") if verifier_error else None)
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    if verifier_error:
+        with raises(RuntimeError, match="bad verifier"):
+            nemo_gym.cli.env._validate_data_single(config)
+    else:
+        nemo_gym.cli.env._validate_data_single(config)
+        assert verifier.call_count == 2
+        for entry in entries:
+            validation.assert_any_call(entry.manifest_path, entry.config_path, validate_datasets=False)
+            verifier.assert_any_call(entry, update_expected=False, validation=validation.return_value)
+
+
+@pytest.mark.parametrize("legacy_artifact", [None, "example_metrics.json", "example_rollouts.jsonl"])
+def test_server_data_validation_keeps_legacy_contract(
+    monkeypatch: MonkeyPatch, tmp_path: Path, legacy_artifact: str | None
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo/data"
+    server_dir.mkdir(parents=True)
+    (server_dir / "example.jsonl").write_text("{}\n" * 5)
+    monkeypatch.chdir(tmp_path)
+    entries = ()
+    if legacy_artifact:
+        (server_dir / legacy_artifact).write_text("{}\n" * 5)
+        # Neither partial legacy artifacts nor invalid metrics may bypass legacy validation.
+        if legacy_artifact == "example_metrics.json":
+            (server_dir / "example.jsonl").write_text("{}\n" * 4)
+        entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    message = (
+        "Expected 5 examples" if legacy_artifact == "example_metrics.json" else "must run the example data validation"
+    )
+    with raises(AssertionError, match=message):
+        nemo_gym.cli.env._validate_data_single(config)
+
+
+def test_manifest_server_data_validation_rejects_conflict_artifacts(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "resources_servers/demo/data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "example-conflict.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    verifier = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    with raises(AssertionError, match="Found conflicting paths"):
+        nemo_gym.cli.env._validate_data_single(config)
+    verifier.assert_not_called()
