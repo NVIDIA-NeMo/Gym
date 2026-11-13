@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import orjson
@@ -807,6 +807,14 @@ def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifes
     if catalog_directory is None:
         raise EnvironmentValidationError(
             f"{field} '{target_name}' is looked up in benchmarks/ or environments/, and {manifest_path} is in neither."
+        )
+    # A link is a name in this catalog, not a path: `../outside` would otherwise load a manifest outside the catalog
+    # that declares the same string, and the name check below would pass.
+    written = PurePosixPath(target_name)
+    if written.is_absolute() or ".." in written.parts or written.as_posix() != target_name:
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' must be written as the name of a manifest under {catalog_directory.name}/, "
+            "not as a path."
         )
     target_path = catalog_directory / target_name / "manifest.yaml"
     if not target_path.is_file():

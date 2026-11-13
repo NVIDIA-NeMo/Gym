@@ -1097,6 +1097,19 @@ def test_a_link_is_written_as_the_targets_declared_name(absolute: bool, tmp_path
         validate_environment(_linked_manifest(tmp_path, setup_of=written))
 
 
+@pytest.mark.parametrize("absolute", [False, True], ids=["parent-relative", "absolute"])
+def test_a_link_cannot_reach_a_manifest_outside_the_catalog(absolute: bool, tmp_path: Path) -> None:
+    # The manifest outside benchmarks/ declares exactly the string the link uses, so comparing names alone passes.
+    main_path = _asset(tmp_path, kind="benchmark")
+    written = str(tmp_path / "outside") if absolute else "../outside"
+    outside = tmp_path / "outside/manifest.yaml"
+    outside.parent.mkdir()
+    outside.write_text(dump_manifest(load_manifest(main_path).model_copy(update={"name": written})), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="must be written as the name"):
+        validate_environment(_linked_manifest(tmp_path, protocol_of=written))
+
+
 def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> None:
     # An environment declares only example datasets, so those are what a setup must share.
     main_path = _asset(tmp_path)
