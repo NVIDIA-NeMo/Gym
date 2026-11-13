@@ -410,8 +410,10 @@ def test_configured_patches_match_the_pinned_task_scripts(subfolder: str, task: 
         ("echo '========== 2 failed, 1 passed in 0.10s =========='; exit 1", True, True),
         ("echo '========== 2 failed, 1 passed in 0.10s =========='; exit 1", False, False),
         ("echo 'curl: (6) Could not resolve host: astral.sh' >&2; exit 6", True, False),
+        # A failing summary with a zero exit: the script below then exits before writing reward.txt.
+        ("echo '========== 2 failed, 1 passed in 0.10s =========='; exit 0", True, False),
     ],
-    ids=["pytest-failed", "switch-off", "no-pytest-summary"],
+    ids=["pytest-failed", "switch-off", "no-pytest-summary", "zero-exit"],
 )
 async def test_set_e_exit_after_failing_pytest_is_graded_zero(
     monkeypatch, tmp_path: Path, failing_step: str, score_switch: bool, graded: bool
@@ -423,6 +425,7 @@ async def test_set_e_exit_after_failing_pytest_is_graded_zero(
         "set -euo pipefail\n"
         f"bash -c {quote(failing_step)}\n"
         "_EXIT_CODE=$?\n"
+        '[ "$_EXIT_CODE" -ne 0 ] || exit 0\n'
         f"echo $(( _EXIT_CODE == 0 )) > {quote(str(verifier_dir))}/reward.txt\n"
     )
 
@@ -476,6 +479,17 @@ async def test_set_e_exit_after_failing_pytest_is_graded_zero(
         ("=== no tests ran in 0.01s ===", False),
         ("=== 1 failed in 0.1s ===\n=== 4 passed in 1.0s ===", False),
         ("curl: (6) Could not resolve host: astral.sh", False),
+        # pytest -q prints the summary without borders.
+        ("F\n1 failed, 2 passed in 0.10s", True),
+        ("E\n1 error in 0.06s", True),
+        ("3 passed in 0.10s", False),
+        ("Prepared 2 packages in 1.20s\n", False),
+        # --color=yes and CRLF line endings.
+        (
+            "\x1b[31m===== \x1b[31m\x1b[1m2 failed\x1b[0m, \x1b[32m1 passed\x1b[0m\x1b[31m in 0.10s\x1b[0m\x1b[31m =====\x1b[0m",
+            True,
+        ),
+        ("===== 1 failed in 0.10s =====\r\n", True),
     ],
 )
 def test_pytest_reported_failure(output: str, expected: bool) -> None:
@@ -530,6 +544,19 @@ async def test_verifier_infrastructure_failure_is_masked(tmp_path: Path, failing
     assert result.failure_kind == "verifier_error"
     assert result.failure_reason
     assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_timed_out_test_run_with_a_failing_pytest_summary_stays_ungraded(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            return _ok(stdout="===== 1 failed in 0.10s =====", return_code=124, error_type="timeout")
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.evaluation_completed is False and result.reward_from_pytest_summary is False
 
 
 @pytest.mark.asyncio

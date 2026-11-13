@@ -157,12 +157,17 @@ def _verifier_failure_reason(cause: BaseException) -> str:
 
 
 # pytest's closing line, e.g. "==== 17 failed, 3 passed in 12.34s ====" or "== 1 error in 0.50s (0:00:00) ==".
-_PYTEST_SUMMARY = re.compile(r"^=+ (?P<counts>[^=\n]*?) in [\d.]+s(?: \([^)\n]*\))? =+[ \t]*$", re.MULTILINE)
+# pytest -q prints it without the "=" borders: "1 failed, 2 passed in 0.10s".
+_PYTEST_SUMMARY = re.compile(
+    r"^(?:=+ )?(?P<counts>\d+ \w+(?:, \d+ \w+)*|no tests ran) in [\d.]+s(?: \([^)\n]*\))?(?: =+)?[ \t]*$",
+    re.MULTILINE,
+)
+_TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def pytest_reported_failure(output: str) -> bool:
     """Whether the last pytest summary line in ``output`` counts failed tests or errors."""
-    summaries = _PYTEST_SUMMARY.findall(output)
+    summaries = _PYTEST_SUMMARY.findall(_TERMINAL_ESCAPE.sub("", output).replace("\r", ""))
     return bool(summaries) and re.search(r"\b\d+ (failed|errors?)\b", summaries[-1]) is not None
 
 
@@ -738,12 +743,14 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             except Exception:
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
-                # test.sh returned without a readable reward.txt, typically because a failing pytest ended it
-                # under set -e before it wrote one. A failing pytest summary is a verdict on the model: grade 0.
+                # test.sh exited without a readable reward.txt, typically because a failing pytest ended it under
+                # set -e before it wrote one. A failing pytest summary is a verdict on the model: grade 0. A timed-out
+                # run did not exit, so its partial output says nothing about the test run and it stays ungraded.
                 if (
                     failure_cause is None
                     and self.config.score_pytest_failures_without_reward
                     and eval_result.return_code != 0
+                    and getattr(eval_result, "error_type", None) is None
                     and pytest_reported_failure(test_output)
                 ):
                     evaluation_completed = True
