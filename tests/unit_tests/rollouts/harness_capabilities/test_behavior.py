@@ -8,7 +8,13 @@ import json
 
 import pytest
 
-from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.rollouts.harness_capabilities.behavior import (
+    _terminal_error_reported,
+    inspect_behavior,
+    model_checks,
+    tool_checks,
+)
 from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -46,6 +52,30 @@ def test_canonical_behavioral_checks_use_the_independent_witness(behavior_episod
     issues = failed_model_checks(raw, witness["attempts"])
     assert issues
     assert issues <= {"model.saved_exchanges", "model.response_metadata", "model.token_counts"}
+
+
+@pytest.mark.parametrize(
+    "outcome,status,reported",
+    [
+        # The kind and status the model's own failure is reported with.
+        ({"failure_kind": "model_request_error", "status_code": 400}, 400, True),
+        ({"failure_kind": "model_request_error", "status_code": 503}, 503, True),
+        ({"failure_kind": "model_request_error", "status_code": 400}, 503, False),
+        # The kind of a request the endpoint refused as invalid, an HTTP 400 and no other status.
+        ({"failure_kind": "model_request_rejected"}, 400, True),
+        ({"failure_kind": "model_request_rejected"}, 503, False),
+    ],
+)
+def test_terminal_error_outcome_must_match_the_witnessed_status(outcome, status, reported):
+    attempts = [{"status_code": status, "response": {"error": {"message": "controlled failure"}}}]
+    responses = [
+        {
+            "status": "failed",
+            "error": {"message": f"HTTP {status}: controlled failure"},
+            "metadata": {AGENT_OUTCOME_METADATA_KEY: json.dumps(outcome)},
+        }
+    ]
+    assert _terminal_error_reported(attempts, responses, status) is reported
 
 
 def test_canonical_error_response_cannot_invent_an_id():

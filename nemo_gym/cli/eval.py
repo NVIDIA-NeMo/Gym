@@ -94,6 +94,7 @@ from nemo_gym.data.tasks.harbor.prepare import (
     _has_override,
     _listed,
     build_run,
+    harness_output_limit,
     prepare_target,
     resolve_agent,
     resolve_sandbox_config,
@@ -1584,6 +1585,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         agent = resolve_agent(agent_name)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
+        harness_output_limit(overrides, agent)
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     if agent.impl_name == ORACLE_AGENT:

@@ -81,6 +81,7 @@ from nemo_gym.data.tasks.harbor.manifest import (
     report_rewrite,
 )
 from nemo_gym.data.tasks.harbor.materialize import (
+    agent_instance,
     run_config,
     write_rows,
 )
@@ -116,6 +117,11 @@ USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY = "absolute_ip_server_types"
 SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
+# `--max-output-tokens` sets `responses_create_params.max_output_tokens`, which a materialized task row cannot take:
+# the harness sends its own requests. A task-folder run hands the value to the harness's own output limit instead,
+# for harnesses whose config declares one (OpenCode, Pi, Kilo, OpenClaw).
+MAX_OUTPUT_TOKENS_OVERRIDE = "responses_create_params.max_output_tokens"
+HARNESS_OUTPUT_LIMIT_FIELD = "max_output_tokens"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -170,6 +176,8 @@ class AgentSelection:
     impl_name: str
     # The harness calls the model server from inside the task sandbox (see ``runs_in_sandbox``).
     runs_in_sandbox: bool = False
+    # The harness's config declares ``max_output_tokens`` (see ``declares_config_field``).
+    has_output_limit: bool = False
 
 
 def _write_skipped(output_dir: Path, errors: dict[str, HarborTaskError]) -> None:
@@ -872,6 +880,53 @@ def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
     return False
 
 
+def declares_config_field(impl_name: str, impl_config: Any, field: str) -> bool:
+    """Whether a class in the harness's entrypoint declares ``field`` (``field: int = ...``), read from source."""
+    import ast
+
+    config = impl_config if isinstance(impl_config, dict) else {}
+    entrypoint = config.get("entrypoint") or "app.py"
+    for root in component_search_roots():
+        path = root / "responses_api_agents" / impl_name / entrypoint
+        if not path.is_file():
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            return False
+        return any(
+            isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and item.target.id == field
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            for item in node.body
+        )
+    return False
+
+
+def harness_output_limit(overrides: list[str], agent: AgentSelection) -> int | None:
+    """The ``--max-output-tokens`` value for the harness's own limit, or ``None`` when the command sets none.
+
+    Raises ``ValueError`` for a value that is not a positive integer, or for a harness with no such setting. The
+    command line merges the last override of a key last, and puts a flag's translation before the raw overrides, so
+    the effective limit is the last one given.
+    """
+    value = _override_value(list(reversed(overrides)), MAX_OUTPUT_TOKENS_OVERRIDE)
+    if value is None or agent.impl_name == ORACLE_AGENT:
+        return None
+    try:
+        limit = int(value)
+    except ValueError:
+        limit = 0
+    if limit <= 0:
+        raise ValueError(f"--max-output-tokens must be a positive integer; got {value!r}")
+    if not agent.has_output_limit:
+        raise ValueError(
+            f"--max-output-tokens: {agent.impl_name} has no `{HARNESS_OUTPUT_LIMIT_FIELD}` setting, so its "
+            "output limit cannot be set for a task-folder run; set the limit in the harness's own config"
+        )
+    return limit
+
+
 def select_tasks(
     tasks: list[HarborTask], exclude: list[str], only: list[str] | None = None
 ) -> tuple[list[HarborTask], list[tuple[str, str]]]:
@@ -933,6 +988,7 @@ def resolve_agent(agent: str) -> AgentSelection:
         instance_name=instances[0],
         impl_name=impls[0],
         runs_in_sandbox=runs_in_sandbox(impls[0], impls_config[impls[0]]),
+        has_output_limit=declares_config_field(impls[0], impls_config[impls[0]], HARNESS_OUTPUT_LIMIT_FIELD),
     )
 
 
@@ -995,6 +1051,10 @@ def build_run(
     dataset = prepared.dataset
     if agent.impl_name == ORACLE_AGENT and dataset.allowed_agents is not None:
         dataset = dataset.model_copy(update={"allowed_agents": None})
+    agent_overrides = dict(AGENT_OVERRIDES.get(agent.impl_name) or {})
+    output_limit = harness_output_limit(overrides, agent)
+    if output_limit is not None:
+        agent_overrides[HARNESS_OUTPUT_LIMIT_FIELD] = output_limit
     config = run_config(
         taskset=prepared.taskset,
         folder=prepared.folder,
@@ -1002,7 +1062,7 @@ def build_run(
         rows_path=prepared.rows_path,
         agent_instance_name=agent.instance_name,
         agent_impl=agent.impl_name,
-        agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
+        agent_overrides=agent_overrides or None,
         dataset_digest=prepared.dataset_digest,
         dataset_toml_digest=prepared.dataset_toml_digest,
         dataset=dataset,
@@ -1022,7 +1082,22 @@ def build_run(
         config_paths.append(resolve_sandbox_config(sandbox))
     # Later config files win: explicit user overlays must follow component/provider defaults.
     tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
-    tokens += [token for token in overrides if not token.startswith("+agent_name=")]
+    if output_limit is not None:
+        # A config-file overlay loads after the generated YAML above and would replace the limit there; a command-line
+        # override is merged last, so the requested limit wins over an overlay's value. It comes before the raw
+        # overrides below, as every translated flag does, so an explicit override of the generated agent's own limit
+        # still wins over the flag.
+        tokens.append(
+            f"++{agent_instance(prepared.taskset)}.responses_api_agents.{agent.impl_name}."
+            f"{HARNESS_OUTPUT_LIMIT_FIELD}={output_limit}"
+        )
+    tokens += [
+        token
+        for token in overrides
+        if not token.startswith("+agent_name=")
+        # The harness got the limit above; the collector refuses request overrides for task rows.
+        and token.lstrip("+").partition("=")[0] != MAX_OUTPUT_TOKENS_OVERRIDE
+    ]
     if not _has_override(tokens, "split"):
         tokens.append(f"+split={split}")
     return config_path, tokens

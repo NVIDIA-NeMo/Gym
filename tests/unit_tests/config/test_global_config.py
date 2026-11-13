@@ -3835,8 +3835,65 @@ def test_absolute_ip_reports_unusable_hostname(monkeypatch, resolved):
         else MagicMock(return_value=resolved)
     )
     monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", resolver)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_default_route_address", lambda: None)
     with raises(ConfigError, match="default_host=.*reachable from the sandbox"):
         GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))
+
+
+@mark.parametrize("resolved", [None, "127.0.1.1", "127.0.0.1"])
+def test_absolute_ip_falls_back_to_the_default_route_address(monkeypatch, resolved):
+    from socket import gaierror
+
+    # A laptop: the hostname has no DNS entry (macOS `*.local`) or maps to loopback (Debian/Ubuntu's 127.0.1.1).
+    resolver = (
+        MagicMock(side_effect=gaierror("hostname does not resolve"))
+        if resolved is None
+        else MagicMock(return_value=resolved)
+    )
+    monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", resolver)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_default_route_address", lambda: "192.168.1.23")
+    config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))
+    assert config.head_server.host == "192.168.1.23"
+
+
+def test_absolute_ip_prefers_a_resolvable_hostname_over_the_default_route(monkeypatch):
+    monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", MagicMock(return_value="10.1.2.3"))
+    route = MagicMock(return_value="192.168.1.23")
+    monkeypatch.setattr(nemo_gym.config.global_config, "_default_route_address", route)
+    config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))
+    assert config.head_server.host == "10.1.2.3"
+    route.assert_not_called()
+
+
+class TestDefaultRouteAddress:
+    class _Probe:
+        def __init__(self, local=None, error=None):
+            self.local, self.error, self.connected = local, error, None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def connect(self, address):
+            if self.error is not None:
+                raise self.error
+            self.connected = address
+
+        def getsockname(self):
+            return (self.local, 40000)
+
+    def test_returns_the_routed_local_address(self, monkeypatch):
+        probe = self._Probe(local="192.168.1.23")
+        monkeypatch.setattr(nemo_gym.config.global_config, "socket", lambda *_: probe)
+        assert nemo_gym.config.global_config._default_route_address() == "192.168.1.23"
+        assert probe.connected == ("192.0.2.1", 9)
+
+    @mark.parametrize("probe", [_Probe(error=OSError("Network is unreachable")), _Probe(local="127.0.0.1")])
+    def test_returns_none_without_a_usable_route(self, monkeypatch, probe):
+        monkeypatch.setattr(nemo_gym.config.global_config, "socket", lambda *_: probe)
+        assert nemo_gym.config.global_config._default_route_address() is None
 
 
 class TestAbsoluteIpServerTypes:

@@ -32,7 +32,7 @@ from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
-from socket import gethostbyname, gethostname, socket
+from socket import AF_INET, SOCK_DGRAM, gethostbyname, gethostname, socket
 from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
@@ -542,6 +542,27 @@ def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
         return Requirement(req_str).specifier.contains(Version(version), prereleases=True)
     except Exception:
         return True
+
+
+def _advertisable(address: str) -> bool:
+    """Whether ``address`` can name this host to a sandbox: not loopback, not unspecified."""
+    parsed = ip_address(address)
+    return not (parsed.is_loopback or parsed.is_unspecified)
+
+
+def _default_route_address() -> Optional[str]:
+    """This host's address on the interface its default route uses, or ``None`` without one.
+
+    Connecting a UDP socket sends nothing; it only selects the route and the local address the kernel would use.
+    The target is a documentation address (TEST-NET-1), so no real host is named.
+    """
+    try:
+        with socket(AF_INET, SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            address = probe.getsockname()[0]
+    except OSError:
+        return None
+    return address if _advertisable(address) else None
 
 
 class GlobalConfigDictParser(BaseModel):
@@ -1717,17 +1738,22 @@ Found global config dict yaml:
                 "only when the caller shares the servers' network namespace."
             )
             try:
-                default_host = gethostbyname(hostname)
-            except OSError as exc:
-                raise ConfigError(
-                    f"Cannot resolve host {hostname!r} for use_absolute_ip=true. {address_hint}"
-                ) from exc
-            address = ip_address(default_host)
-            if address.is_loopback or address.is_unspecified:
-                raise ConfigError(
-                    f"Host {hostname!r} resolves to {default_host}, which cannot advertise this host to a sandbox. "
-                    f"{address_hint}"
-                )
+                resolved = gethostbyname(hostname)
+            except OSError:
+                resolved = None
+            if resolved is not None and _advertisable(resolved):
+                default_host = resolved
+            else:
+                # Laptops and desktops: a macOS `*.local` name often has no DNS entry, and Debian/Ubuntu map the
+                # hostname to 127.0.1.1. The address of the interface the default route leaves through is what a
+                # local container (Docker's bridge) or another machine reaches this host on.
+                default_host = _default_route_address()
+                if default_host is None:
+                    found = "does not resolve" if resolved is None else f"resolves to {resolved}"
+                    raise ConfigError(
+                        f"Host {hostname!r} {found}, and no non-loopback address was found on the default route, "
+                        f"so use_absolute_ip=true cannot advertise this host to a sandbox. {address_hint}"
+                    )
         # `absolute_ip_server_types` scopes the resolved address to the servers a sandbox must reach (a Harbor run
         # names the model server): the head server, whose unauthenticated config endpoint returns the merged
         # config, and every other server stay on loopback as without `use_absolute_ip`. An explicit

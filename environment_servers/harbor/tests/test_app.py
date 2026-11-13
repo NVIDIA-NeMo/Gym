@@ -1387,8 +1387,13 @@ class TestAgentStage:
 
     @pytest.mark.parametrize(
         ("outcome", "terminal"),
-        [('{"failure_kind":"unknown"}', False), ('{"failure_kind":"model_transport_error"}', False), ("{", True)],
-        ids=["unknown-retried", "transport-retried", "malformed-failed"],
+        [
+            ('{"failure_kind":"unknown"}', False),
+            ('{"failure_kind":"model_transport_error"}', False),
+            ('{"failure_kind":"model_request_rejected"}', True),
+            ("{", True),
+        ],
+        ids=["unknown-retried", "transport-retried", "rejected-request-failed", "malformed-failed"],
     )
     async def test_failed_agent_response_is_not_scored(self, tmp_path, monkeypatch, outcome, terminal):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)

@@ -66,6 +66,7 @@ from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     MODEL_TRANSPORT_ERROR,
     MediaFile,
     NeMoGymEasyInputMessage,
@@ -143,6 +144,8 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
+# Set by the adapter on the result it classifies: an earlier assistant turn of this run completed without error.
+_ANSWERED_BEFORE_KEY = "_ng_answered_before"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -561,6 +564,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             return AgentOutcome(failure_kind="unknown")
         data = error.get("data") or {}
         status = data.get("statusCode")
+        if status == 400 and not native_result.get(_ANSWERED_BEFORE_KEY):
+            # OpenCode reports a context overflow as its own error (above). A 400 on a run whose model never
+            # answered is a request the endpoint refuses as invalid, such as max_tokens above the model's cap: the
+            # run's configuration, not the model, is at fault. After real work, a 400 stays a graded request error.
+            return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if status is None and data.get("isRetryable") is True:
@@ -1594,7 +1602,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
-        deadline = started + timeout
+        # The deadline is a time on the event loop's clock, which `asyncio.timeout_at` and the session's `execute` read;
+        # it need not equal `monotonic()` (uvloop on macOS), and a deadline taken from `monotonic()` is already expired.
+        deadline = asyncio.get_running_loop().time() + timeout
         failure: BaseException | None = None
         try:
             async with asyncio.timeout_at(deadline):
@@ -1845,8 +1855,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 if deadline is None:
                     # A first activation's budget starts once it holds a slot, as Pi's does: staging spends it,
-                    # and OpenCode runs for what remains.
-                    deadline = monotonic() + timeout
+                    # and OpenCode runs for what remains. On the event loop's clock, as `execute` reads it.
+                    deadline = asyncio.get_running_loop().time() + timeout
                 await state.execute(
                     payload,
                     media=media,
@@ -2068,7 +2078,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             response = response.model_copy(
                 update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
             )
-        return self.report_outcome(response, native_result)
+
+        def answered_turn(message: Mapping[str, Any]) -> bool:
+            return bool(not message.get("error") and message.get("finish"))
+
+        # The export holds only this activation's messages, so earlier activations' answers are kept on the session.
+        # Imported prefix messages are not in the export and never count as answers.
+        answered = state.model_answered or any(answered_turn(message) for message in assistants[:-1])
+        state.model_answered = state.model_answered or any(answered_turn(message) for message in assistants)
+        return self.report_outcome(response, {**native_result, _ANSWERED_BEFORE_KEY: answered})
 
 
 if __name__ == "__main__":

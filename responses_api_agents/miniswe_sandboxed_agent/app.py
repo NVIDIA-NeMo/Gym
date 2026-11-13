@@ -463,7 +463,11 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 try:
                     if seed.termination is None:
                         timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
-                        deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
+                        # `timeout_at` reads the event loop's clock, which need not match `time.monotonic()` (uvloop
+                        # on macOS), so the setup deadline is always on the loop's clock.
+                        deadline = (
+                            state.setup_deadline or asyncio.get_running_loop().time() + self.config.setup_timeout_sec
+                        )
                         async with asyncio.timeout_at(deadline):
                             workdir = state.workdir
                             if workdir is None:
@@ -518,6 +522,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         else "infrastructure_error",
                         detail=f"{type(exc).__name__}: {exc}",
                     )
+                    if isinstance(exc, TimeoutError) and not agent_started:
+                        LOGGER.warning(
+                            f"mini-SWE setup for session {seed.session_id} did not finish within "
+                            f"setup_timeout_sec={self.config.setup_timeout_sec}",
+                            exc_info=exc,
+                        )
                     if not isinstance(exc, TimeoutError):
                         failure = agent_route_failure(
                             exc, operation="harness.run", stage="agent" if agent_started else "seed"
@@ -669,7 +679,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         try:
             if not cancelled and seed.termination is None:
                 setup_started_at = now()
-                setup_deadline = monotonic() + self.config.setup_timeout_sec
+                setup_deadline = asyncio.get_running_loop().time() + self.config.setup_timeout_sec
                 result.agent_timings["agent_setup"] = {"started_at": setup_started_at}
                 async with asyncio.timeout_at(setup_deadline):
                     provider = create_provider(resolve_provider_config(seed.sandbox_provider))

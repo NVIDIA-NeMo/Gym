@@ -799,6 +799,7 @@ failed responses after closing the agent:
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
 | Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
+| `model_request_rejected` (the endpoint refused the request as invalid, such as an output limit above the model's cap; OpenCode reports a non-overflow 400 this way) | No | No |
 | Other failures, including 401/403/404 or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing

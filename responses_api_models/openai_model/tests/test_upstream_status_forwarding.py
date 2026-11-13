@@ -47,7 +47,7 @@ def _route_reply(server: SimpleModelServer):
     return TestClient(app, raise_server_exceptions=False).post("/v1/responses", json={"input": "hi"})
 
 
-@pytest.mark.parametrize("status", [401, 403, 429])
+@pytest.mark.parametrize("status", [400, 401, 403, 429])
 def test_the_responses_route_forwards_the_upstream_status_and_body(status) -> None:
     reply = _route_reply(_model_server(status, b'{"error": "rejected"}'))
 
@@ -55,7 +55,7 @@ def test_the_responses_route_forwards_the_upstream_status_and_body(status) -> No
     assert "rejected" in reply.text
 
 
-@pytest.mark.parametrize("status", [400, 500, 503])
+@pytest.mark.parametrize("status", [500, 503])
 def test_other_upstream_statuses_stay_a_500_of_the_route(status) -> None:
     assert _route_reply(_model_server(status, b"{}")).status_code == 500
 

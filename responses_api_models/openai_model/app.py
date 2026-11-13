@@ -205,12 +205,13 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
     propagate_upstream_http_status_codes: frozenset[int] = Field(
-        default_factory=lambda: frozenset({401, 403, 429}),
+        default_factory=lambda: frozenset({400, 401, 403, 429}),
         description=(
             "Upstream HTTP error statuses returned to the caller with that status "
             "and the provider's error body, instead of HTTP 500. A status that "
             "upstream_retry_policy retries until it is exhausted still returns "
-            "HTTP 500. The default forwards a rejected credential (401, 403) and a rate limit (429), "
+            "HTTP 500. The default forwards a rejected request (400), a rejected credential (401, 403) and a "
+            "rate limit (429), "
             "so a caller names the real cause; an empty set keeps the historical generic exception behavior."
         ),
     )

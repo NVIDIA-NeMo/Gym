@@ -190,6 +190,9 @@ class OpenCodeSandboxSession(AgentSessionState):
     declares_image_input: bool = False
     harness_session_id: str | None = None
     message_ids: list[str] = field(default_factory=list)
+    # Whether an earlier activation of this session already got a completed, error-free model turn; the export of a
+    # later activation omits those messages.
+    model_answered: bool = False
     system_instructions: str | None = None
     activation_log: str = ""
     activation_observations: AgentObservationBundle | None = None

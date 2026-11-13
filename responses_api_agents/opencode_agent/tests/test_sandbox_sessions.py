@@ -628,6 +628,25 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     agent.server_client.post.assert_not_called()
 
 
+def test_first_activation_deadline_is_on_the_event_loop_clock(setup, monkeypatch):
+    """`asyncio.timeout_at` reads the event loop's clock, which uvloop on macOS runs apart from `time.monotonic()`.
+    With `monotonic()` far behind it, a deadline taken from `monotonic()` is already expired, and the activation times
+    out before OpenCode starts."""
+    from time import monotonic
+
+    agent, sandbox = setup
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: monotonic() - 10_000)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert sandbox.launch.called
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
 @pytest.mark.parametrize("owned", [False, True])
 @pytest.mark.parametrize("origin_stage", [None, "agent", "seed", "verification"])
 def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_session(setup, owned, origin_stage):
@@ -2490,13 +2509,48 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     response = await task
     assert response.status == "failed"
     assert response.error.message == (f"HTTP {status}: provider error" if status is not None else "provider error")
-    expected = (
-        {"failure_kind": "unknown"}
-        if status is None
-        else {"failure_kind": "model_request_error", "status_code": status}
-    )
+    if status is None:
+        expected = {"failure_kind": "unknown"}
+    elif status == 400:
+        # A non-overflow 400 is a request the endpoint refused; it fails the attempt instead of being graded.
+        expected = {"failure_kind": "model_request_rejected"}
+    else:
+        expected = {"failure_kind": "model_request_error", "status_code": status}
     assert json.loads(response.metadata["ng_agent_outcome"]) == expected
+    if status == 400:
+        from nemo_gym.agents import OutcomeAction, agent_outcome_policy
+
+        assert agent_outcome_policy(response) == OutcomeAction.FAIL
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("answered_earlier", [False, True])
+async def test_rejected_request_is_not_inferred_after_an_earlier_activation_answered(setup, answered_earlier):
+    """A continued session's export omits earlier activations' messages, so the session itself must remember that the
+    model already answered; otherwise a later 400 on the first model call of a new activation reads as an initial
+    rejection and ends a run that already produced an answer."""
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {"name": "APIError", "data": {"statusCode": 400, "message": "provider error"}}
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request = Request(
+        {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}}
+    )
+    seeded = await agent.seed_agent_session(request, seed())
+    state = agent._require_agent_session(seeded.agent_session_id)
+    state.model_answered = answered_earlier
+    task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(sandbox.started.wait(), 2)
+    response = await task
+    assert json.loads(response.metadata["ng_agent_outcome"]) == (
+        {"failure_kind": "model_request_error", "status_code": 400}
+        if answered_earlier
+        else {"failure_kind": "model_request_rejected"}
+    )
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
 
 
 @pytest.mark.parametrize("message", [None, "", {"responseBody": "private-body"}])
