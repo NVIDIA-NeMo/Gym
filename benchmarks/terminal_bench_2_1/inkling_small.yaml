@@ -7,8 +7,11 @@
 # mounts from task terminals, which needs that tmux binary, and without it every rollout fails with
 # "Private terminal requires tmux".
 # Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small.sh
+# This recipe stays on the terminal_bench_2_1 resources server's legacy_agent relay (terminus_2_legacy_agent.yaml):
+# its rows are pinned to one task revision and append a note to each instruction, and the Harbor rows of
+# terminus_2.yaml carry the published instruction only.
 config_paths:
-  - benchmarks/terminal_bench_2_1/terminus_2.yaml
+  - benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 terminal_bench_2_1_terminus_2_sandboxed_agent:

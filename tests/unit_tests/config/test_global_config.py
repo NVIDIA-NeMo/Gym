@@ -3027,9 +3027,9 @@ class TestComposeUnboundAgent:
         return self._parse(DictConfig({"config_paths": list(paths)}))
 
     def test_shipped_terminus_template_replaces_a_benchmarks_agent(self) -> None:
-        """`--benchmark terminal_bench_2_1/opencode --agent-type terminus_2_sandboxed_agent` swaps the harness."""
+        """`--benchmark terminal_bench_2_1/opencode_legacy_agent --agent-type terminus_2_sandboxed_agent` swaps the harness."""
         config = self._parse_config_paths(
-            "benchmarks/terminal_bench_2_1/opencode.yaml",
+            "benchmarks/terminal_bench_2_1/opencode_legacy_agent.yaml",
             "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
         )
         agents = {
