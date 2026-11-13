@@ -1,12 +1,13 @@
 ---
 name: run-and-babysit-eval
 description: >
-  Take a NeMo Gym evaluation from a ready config to a trusted result: submit it, let the resumable
-  Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
-  run with `gym eval resubmit --recover`, check health and the acceptance gates, and decide when to
-  stop a chain or start a fresh run. Use when a working Gym config exists; with no config yet,
-  compose it first with add-model-eval-config. Not for building a benchmark or harness (use
-  add-benchmark or add-harness). Triggered by: "run the eval", "run evaluations on model Y on
+  Take a NeMo Gym evaluation from a request to a trusted result: compose the eval config when none
+  exists (by following add-model-eval-config, in the same task), submit it, let the resumable Slurm
+  chain continue through walltime limits, preemption and node loss, inspect and recover the run with
+  `gym eval resubmit --recover`, check health and the acceptance gates, and decide when to stop a
+  chain or start a fresh run. The entry point for "run evaluations on model Y on benchmark Z", with
+  or without a ready config. Not for building a benchmark or harness (use add-benchmark or
+  add-harness). Triggered by: "run the eval", "run evaluations on model Y on
   benchmark Z with serving params X", "submit this benchmark", "the job timed out", "the chain
   stopped", "resume the run", "recover the run", "is the run done", "inspect the run", "gate the
   score", "restart the evaluation".
@@ -26,6 +27,7 @@ contain those pages, so read them in the Gym repository.
 
 ## How to act
 
+0. **No config yet: compose it** (section 0) in the same task; the user does not call a second skill.
 1. **Submit pinned and resumable** (section 1), a small smoke first.
 2. **Inspect, never guess** (section 3): read `decision.action` and `gate_task.status`.
 3. **Do the one action the table names** (section 4): run the same command without `--inspect`, or add the
@@ -34,6 +36,19 @@ contain those pages, so read them in the Gym repository.
 4. **Never** use plain `gym eval resubmit`, edit a run's files, or regenerate a saved answer.
 5. **Done** only when the inspect says `SUCCESS` (section 6). Report the health, the corrections of
    section 7 and every operator action with its reason.
+
+## 0. No config yet: compose it
+
+A request such as "run evaluations on model Y on benchmark Z with serving params X" often comes without a
+config. Then write it yourself before section 1: read [add-model-eval-config](../add-model-eval-config/SKILL.md)
+and follow its sections 1 to 5 (the model card, the policy service with the serving params the request gives,
+the reasoning toggle, each benchmark's own config from `benchmarks/<name>/`, validation without GPUs). A
+quantized export of a model that also runs unquantized follows its section 9. Ask the user only for what that
+skill says to ask for (the cluster and its login host, the account and partition, the images, the checkpoint
+path, the output directory), never for a second skill to be run. Its smoke (section 6) is the smoke of
+section 1 here; then continue with section 1. A config the user hands you is used as it is: do not re-derive
+its model settings. A deployment handed over as a `services.policy` block is used as it is too
+(add-model-eval-config, section 2).
 
 ## 1. Submit
 
@@ -72,7 +87,11 @@ Before you submit, check the config has:
    budget (for example 3 x `compute.cluster.walltime`), not one job's.
 3. A small smoke first: `run: {limit: 5, num_repeats: 1}`. `--limit` counts tasks, so rows = tasks ×
    repeats. A smoke that must stay in one allocation also sets `resumable: {max_retries: 0, max_walltime:
-   <the walltime>}`.
+   <the walltime>}`. A named, versioned subset runs with `run: {task_ids_fpath: <file, one id per line>}`
+   (or `task_ids: [...]`) instead: it keeps every copy of the named tasks, the run writes
+   `rollouts_task_selection.json` (source, ids, sha256) when it starts, resume and recover keep it, and the
+   inspect (`task_selection`), the MLflow run (`gym_task_selection=subset`) and `gym eval compare` label the
+   score a subset score.
 4. From a machine that is not the login node: `compute.cluster.hostname`, and every `runtime:` credential
    in `compute.cluster.forward_env`; only listed names reach the job. Site `#SBATCH` directives go in
    `compute.cluster.extra_args` without leading dashes (`{qos: <qos>, exclude: <node>}`).
@@ -149,7 +168,14 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
 - **`UNKNOWN`** with "nothing was read or decided" is a reader that did not run (reason on stderr), not a
   run fault; fix the reason and rerun the identical inspect; `NEMO_GYM_REMOTE_READER_SRUN` takes extra
   srun args if it needs a partition or QOS, and `NEMO_GYM_REMOTE_READER_TIMEOUT_S` raises its time bound
-  (300 to 14400 s; by default it grows with the size of the rollout files).
+  (300 to 14400 s; by default it grows with the size of the rollout files). A big store needs memory
+  (`--mem=<size>` in `NEMO_GYM_REMOTE_READER_SRUN`; on a login node the reader ends with `MemoryError`) and more
+  time than a tool call that is cut at about 10 minutes allows: start the inspect or the recovery detached
+  (`setsid nohup <command> > <log> 2>&1 &`) and poll the log. If a large-store reader still stalls or times out
+  after one retry with the 14400 s bound and more memory, report the store size, command and reader diagnostics
+  as a suspected Gym reader issue, and say the run is blocked on the reader. If inspection reports "saved rows
+  are unreadable", check the named files' read permissions and storage errors before attributing the failure
+  to Gym. Never report either condition as "nothing to recover".
 - **Exit code**: 0 only when `gate_task.status` is `SUCCESS`. A dispatching call exits 1 when it carries
   a score, MLflow or health-limit option, and a call handed to a queue can exit 0 while the gate still
   reads `RESUMING`: read `ok`, `dispatched` and `job_id` from the JSON line, not the exit code.
@@ -171,12 +197,22 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
 - `gate_task.failures` (response failures: `truncated`, `empty`, `malformed`; trial failures by cause:
   `request`, `judge`, `sandbox`, `harness`, `timeout`, `allocation` (a rollout in flight at repeated ends
   of its allocation), `other`; `output_budget_refits`: model calls sent again with a lowered output budget;
+  `repetition_stops`: policy calls the serving engine stopped for repetition, the model's own loops, scored
+  as answered and never a failure;
   `agent_adaptations`: what an agent adapted on its own, for example a GDP-PDF input-limit rejection),
   `trial_counts` (`observed_healthy`,
   `unhealthy`, `unobserved`: unobserved trials are unverified, not healthy), `scored_samples`,
   `omitted_samples`, `score`, `errors`, `warnings`, `retry_budget` (`infra` and `attempts`, each with its
   `configured` cap and recorded `extension`), `observed_grading_recovery` (counts of recovered grading
   attempts; null when there are none), `health_verdict`, and `mlflow_delivery`.
+
+Run accounting and rollout quality are two things to read. Run accounting (`run.artifacts.healthy` and
+`unhealthy_reasons` in `quality_summary.json`) counts expected, completed, missing and failed rollouts; a failure
+counts whatever its cause, so a counted model zero is a failure row and can reach a configured failure limit.
+Rollout quality (`run.verdicts`, per-rollout `findings`, task flags such as `task_no_successful_model_calls`)
+says how far to trust each measurement and fails nothing. Accept or promote a smoke or a run only on the
+recovery gate's `gate_task.status` and `evaluation_health.status` from `--recover --inspect`, as in section 6;
+a healthy accounting with every rollout measured can still be `UNVERIFIED`.
 
 Where the evidence lives, relative to the run directory: `gym-job.json` (the submission record),
 `resolved-config.yaml`, the journals (`walltime-extension-journal.jsonl`, `repin-journal.jsonl`,
@@ -193,6 +229,10 @@ read it, do not edit it. `quality_summary.json` and `rollouts_aggregate_metrics.
 submitting user only (mode 0600) in the runs read: as another user, say they are unreadable rather than absent.
 
 ## 4. Act on the decision
+
+When the operator has asked you to complete or recover a run, inspect it and, if no continuation is live,
+run the recovery the decision permits in the same turn and babysit it. Keep an intentionally stopped run
+stopped unless the operator asks to continue it. A STOP that needs an owner's approval or a fix still waits.
 
 Plain `gym eval resubmit` without `--recover` resets the budgets and the per-rollout attempt allowance:
 it is not a substitute for any row below. Every row is the same command as the inspect, without
@@ -211,8 +251,10 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (N above the recorded limit, 0 for none; 600 s unless the benchmark's `run` sets it). |
 | STOP typed `driver_install_failed` (the installer's error is quoted; `logs/driver-<job id>.log` has the rest) | Fix the cause (the ref, the network, the image), then `--recover`. |
 | STOP typed `provider_credentials_rejected` (the sandbox provider answered 401 or 403) | Fix the credentials, then `--recover`. |
+| FAILED, the driver log ends `ValueError: Environment server must return an episode result or failure.` (or `InvalidRolloutResult`), the chain did not continue | A server replied in a shape the collector cannot use. It is deterministic: retrying cannot help. Fix the server or the benchmark pairing (the benchmark config names which server), optionally set `+route_failures_to_sidecar=true` to keep the other tasks' results while diagnosing, then `gym eval submit` again. Never `--recover`. |
+| STOP typed `environment_protocol_violation` (the first results of one environment server were all replies the collector cannot use) | Same: fix the server or the benchmark pairing, then `gym eval submit` again. Never `--recover`. |
 | STOP typed `collection_resume_refused`, or a **semantic** configuration difference (data, limits, repeats, model, sampling, judge or grading) | Usually a fresh run (section 8). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"` (records the reason and the user; never bypasses corrupt history). Operational differences (timeouts, retries, ports, concurrency, paths, tracking) resume by themselves with a warning. If the saved fingerprint no longer matches, continue at the run's own pin and report it; a resume on a newer Gym can be refused after setup, which costs an allocation. |
-| STOP: a resumed segment saved no rollout (its walltime was shorter than setup plus one rollout) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
+| STOP: a resumed segment saved no rollout (its walltime was shorter than setup plus one rollout) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, when the partition allows a longer segment. Each segment requests the smaller of `--max-walltime` and the partition's MaxTime (`walltime_plan` shows `each segment requests ...`), and the recovery keeps the recorded partition: a raise past MaxTime lifts only the chain cap, so a segment that saved no rollout twice at MaxTime will do it again. Then submit a new run on a partition with a longer MaxTime (the compute pool's `partition` in the submit document), and raise `compute.<cluster>.walltime` above setup plus one rollout. If the benchmark sets `resumable.max_walltime`, make sure that chain cap permits the full segment too. Changing the partition alone does not raise the requested walltime. Follow section 8, keep the old run directory and name it in the report, because nothing links the two runs; when earlier segments saved no rollout there is nothing to lose. |
 | The chain's walltime cap is spent, or the chain's accounting is unknown (a requeued segment) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime; journaled. For unknown accounting the explicit budget is what continues it, optionally with `--extend-retries`. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |
 | The infra-retry budget is spent | `--recover --extend-retries N`; the spent count is kept; journaled. It raises infra retries only, not the per-row attempt cap. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |
 | Rows used every attempt (`exhausted`, `max_rollout_attempts`) | `--recover --extend-attempts N`. Only rollouts the Store would run again are reopened (infrastructure failures, allocation cuts); a model failure or a saved result never is. Recorded in `artifacts/rollouts_attempt_extension`. |
@@ -325,9 +367,13 @@ recover(job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_
 
 A run can be healthy and still score low: that is the model or its deployment. Fix the deployment and run
 again, not the evaluation. For the evaluation itself, only `num_repeats` and the client parallelism
-(`--concurrency`) may change from the command line or a benchmark's `run`; a smoke run also sets `limit`
-(section 1). Never change the benchmark, the judge, or its token budgets and timeouts, which are the
-evaluation's identity. The model section is yours
+(`--concurrency`) may change from the command line or a benchmark's `run`, and `num_repeats` only upward.
+The benchmark's own count is `num_repeats` in its `benchmarks/<name>/manifest.yaml`; `--resolve-only`
+shows only an override. A run with fewer repeats than that, or with `limit`, is a smoke (section 1):
+report its score as a smoke, never as the benchmark's score. A score on part of the tasks needs a named,
+versioned subset and is reported under its name and version; with no such subset, report no benchmark
+score. Never change the benchmark, the judge, or
+its token budgets and timeouts, which are the evaluation's identity. The model section is yours
 ([add-model-eval-config](../add-model-eval-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
 the call sets `--policy-timeout-counts-as-model false` (for a self-hosted evaluation that owns its
@@ -369,12 +415,18 @@ report yourself.
   SkillsBench keep nothing typed about it.
 - **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
   names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept that
-  zero. Other sandbox deaths there are `infrastructure_error` and are retried. In SkillsBench a sandbox
-  that dies mid-trial is `harbor_failed` and is retried, not scored; it scores 0 only when it ended at the
-  agent deadline with no test result.
-- **SkillsBench agent timeouts.** The row is final and scored. Many are zeros without a verifier result
-  (the sandbox was discarded before verification, or the verifier produced nothing). Report the score over
-  the rows the verifier graded beside the headline score.
+  zero. Other sandbox deaths there are `infrastructure_error` and are retried. On SkillsBench's OpenHands
+  path (`skillsbench/harbor*`) a sandbox that dies mid-trial is `harbor_failed` and is retried, not scored;
+  it scores 0 only when it ended at the agent deadline with no test result. On the `harbor` environment
+  server a sandbox lost before the reward is read is an infrastructure failure (`mask_sample`), not a score.
+- **SkillsBench agent timeouts.** On the OpenHands path the row is final and scored. Many are zeros
+  without a verifier result (the sandbox was discarded before verification, or the verifier produced
+  nothing). Report the score over the rows the verifier graded beside the headline score. On the `harbor`
+  environment server a harness that returns at the task's `[agent].timeout_sec` is verified and scored as
+  usual, and the timeout signal is the harness's own: mini-SWE records
+  `response.metadata.miniswe_termination = "timeout"`. Such a row carries no failure kind, neither
+  `agent_timeout` nor `agent_limit` (the iteration cap), so don't count timeouts by kind or from reward 0. An
+  episode that overruns the task's whole budget fails with `harbor:task_deadline` and is retried.
 - **AutomationBench rows that ended on a serving timeout or a 5xx.** They are graded on the partial world.
   Count them from `rollout_error` before you publish a score; its `kind_candidate` is a candidate
   (`http_5xx`, `http_429`, `timeout`, `connection`, among others), and the verifier's own time limit leaves no
@@ -423,6 +475,8 @@ still written by the next segment's guard, with its own remedy.
 - [ ] `trial_counts` and `quality_summary.json` were read: unobserved and unhealthy counts are explained.
 - [ ] Any `resumed across operational drift` settings are listed with the result.
 - [ ] Each correction of section 7 that applies is in the report with its count.
+- [ ] A score reported as the benchmark's comes from all its tasks at no fewer than its `num_repeats`
+  (`manifest.yaml`); a smoke or subset score is labelled as one.
 - [ ] The run is final on its receipts: `rollouts_coverage.json` says complete, the export receipt
   `rollouts_mlflow_export_done` is current and `gate_task.mlflow_delivery.state` is `verified` (or
   `not_required`, with `mlflow_tracking_required: false` set on purpose), and `.gym_chain_incomplete` is

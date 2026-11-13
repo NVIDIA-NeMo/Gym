@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from enum import StrEnum
 from functools import cache
 from typing import Annotated, Literal
@@ -108,6 +109,9 @@ ENVIRONMENT_PROTOCOL_VIOLATION = "environment_protocol_violation"
 JUDGE_FAILED = "judge_failed"
 JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
+# Verification was skipped by configuration (a smoke mode): a masked result of this kind is complete and is never
+# re-judged or rerun; the run is UNVERIFIED by construction.
+JUDGE_SKIPPED = "judge_skipped"
 
 # --- provider: sandboxes, browsers, containers ----------------------------------------- #
 # The kind describes provider evidence; the event's boundary identifies its caller-facing API.
@@ -146,7 +150,7 @@ PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 # current user container; an unattributed lifecycle OOMKilled reason alone is insufficient.
 # Exit 137, message text, historical container state and sidecar OOMs are insufficient.
 PROVIDER_OOM_KILLED = "provider_oom_killed"
-# The provider answered HTTP 401 or 403: the sandbox credentials were refused.
+# The provider answered HTTP 401 or 403: the credentials were refused (a sandbox provider's, or the grading API's).
 PROVIDER_CREDENTIALS_REJECTED = "provider_credentials_rejected"
 
 # --- resources session ------------------------------------------------------------------ #
@@ -172,6 +176,9 @@ COHORT_INCOMPLETE = "cohort_incomplete"
 SERVER_SPINUP_TIMEOUT = "server_spinup_timeout"
 # The driver step of an orchestrated job could not install Gym (the uv installer, the checkout or the package install).
 DRIVER_INSTALL_FAILED = "driver_install_failed"
+# A benchmark's data preparation (its script, its dependencies or its isolated environment) failed; the next
+# segment would fail the same way, so a job chain stops instead of retrying it.
+ENVIRONMENT_PREPARE_FAILED = "environment_prepare_failed"
 # Collection refused to resume saved rollouts whose input and configuration identity does not verify.
 COLLECTION_RESUME_REFUSED = "collection_resume_refused"
 # A rollout was in flight when its allocation ended (a walltime cut, a preemption, a node failure or a driver that
@@ -231,6 +238,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
+        JUDGE_SKIPPED,
         *PROVIDER_FAILURE_KINDS,
         SESSION_LOST,
         SESSION_EXPIRED,
@@ -243,6 +251,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         COHORT_INCOMPLETE,
         SERVER_SPINUP_TIMEOUT,
         DRIVER_INSTALL_FAILED,
+        ENVIRONMENT_PREPARE_FAILED,
         COLLECTION_RESUME_REFUSED,
         ROLLOUT_ALLOCATION_ENDED,
         AGENT_ROUTE_FAILED,
@@ -517,6 +526,24 @@ def is_evaluation_side(name: str, *, config: FailureClassificationConfig | None 
 def is_gate_derived(name: str) -> bool:
     """Whether ``name`` is a class the acceptance gate derives from saved rows (``GATE_DERIVED_KINDS``)."""
     return name in GATE_DERIVED_KINDS
+
+
+QUOTA_RESET_REGEX = r"resets at (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC)"
+_QUOTA_RESET_PATTERN = re.compile(QUOTA_RESET_REGEX)
+
+
+def quota_reset_text(reason: object) -> str | None:
+    """The UTC time a ``provider_quota_exhausted`` reason names (``resets at YYYY-MM-DD HH:MM UTC``), else None."""
+    match = _QUOTA_RESET_PATTERN.search(reason) if isinstance(reason, str) else None
+    return match.group(1) if match else None
+
+
+def quota_reset_unix(reason: object) -> float | None:
+    """``quota_reset_text`` as a unix time, else None."""
+    text = quota_reset_text(reason)
+    if text is None:
+        return None
+    return datetime.strptime(text, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc).timestamp()
 
 
 def is_registered(name: str) -> bool:

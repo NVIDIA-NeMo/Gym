@@ -31,11 +31,13 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 def _import_class(dotted_path: str) -> type:
@@ -65,6 +67,7 @@ class SessionState(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     env: Any  # The OpenEnv Environment instance
+    initialized: bool = True
     accumulated_reward: float = 0.0
     step_count: int = 0
     done: bool = False
@@ -75,13 +78,15 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
 
     config: OpenEnvResourcesServerConfig
+    # Keyed by the session cookie's SESSION_ID_KEY, which a typed seed binds to its resources_session_id.
     _sessions: Dict[str, SessionState] = {}
     _env_class: Any = None
     _action_class: Any = None
     _is_mcp: bool = False
 
     def model_post_init(self, context: Any) -> None:
-        """Initialize private attributes: session store and dynamically imported classes."""
+        """Initialize private attributes: session stores and dynamically imported classes."""
+        super().model_post_init(context)
         self._sessions = {}
         self._env_class = _import_class(self.config.env_class)
         self._action_class = _import_class(self.config.action_class)
@@ -149,14 +154,14 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         return mapping.get(json_type, str)
 
     def _make_mcp_handler(self, tool_name: str, request_model: type):
-        """Create a POST handler for an MCP tool."""
+        """Create a POST handler for an MCP tool.
+
+        Tool handlers take no session lock: nothing between _open_session and the reward update awaits, so verify and
+        close (which release under session_lock) cannot interleave. A handler that awaits must take the lock.
+        """
 
         async def handler(request: Request, body: request_model) -> dict:
-            session_id = request.session[SESSION_ID_KEY]
-            session = self._sessions.get(session_id)
-            if session is None:
-                return {"error": "No active session. Call /seed_session first.", "result": None}
-
+            session = self._open_session(request)
             if session.done:
                 return {"error": "Episode has ended.", "result": None}
 
@@ -180,11 +185,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
 
     async def _handle_step(self, request: Request, body: dict) -> dict:
         """Handle non-MCP step calls by constructing the Action and calling env.step()."""
-        session_id = request.session[SESSION_ID_KEY]
-        session = self._sessions.get(session_id)
-        if session is None:
-            return {"error": "No active session. Call /seed_session first.", "result": None}
-
+        session = self._open_session(request)
         if session.done:
             return {"error": "Episode has ended.", "result": None}
 
@@ -202,23 +203,35 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
 
         return obs.model_dump() if hasattr(obs, "model_dump") else {"result": str(obs)}
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
-        """Create a new environment instance, call reset(), and store session state.
-
-        Calls env.reset() directly with only the configured reset_kwargs, because
-        some OpenEnv environments don't accept the extra seed/episode_id kwargs
-        that reset_async() injects.
-        """
+    def _open_session(self, request: Request) -> SessionState:
+        """The session a tool call names, or a 404 if it was never seeded or has already ended."""
         session_id = request.session[SESSION_ID_KEY]
-        env = self._env_class()
-        initial_obs = env.reset(**self.config.reset_kwargs)
-        initial_reward = float(initial_obs.reward) if initial_obs.reward is not None else 0.0
-        self._sessions[session_id] = SessionState(
-            env=env,
-            accumulated_reward=initial_reward,
-            done=initial_obs.done,
-        )
-        return BaseSeedSessionResponse()
+        session = self._sessions.get(session_id)
+        if session is None or not session.initialized or self.session_is_verified(session_id):
+            raise ResourcesSessionLostError("No active OpenEnv session for this request. Call /seed_session first.")
+        return session
+
+    def has_session_state(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        return session is not None and session.initialized
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Reset an environment while keeping its handle reachable if construction fails."""
+        # Publish before reset: the base releases partial state on failure and retains ownership if close fails.
+        # reset_async adds seed/episode_id kwargs that not every OpenEnv environment accepts.
+        session = SessionState(env=self._env_class(), initialized=False)
+        self._sessions[session_id] = session
+        initial_obs = session.env.reset(**self.config.reset_kwargs)
+        session.accumulated_reward = float(initial_obs.reward) if initial_obs.reward is not None else 0.0
+        session.done = initial_obs.done
+        session.initialized = True
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Close live or partly reset environments, retaining the handle if cleanup fails."""
+        session = self._sessions.get(session_id)
+        if session is not None and hasattr(session.env, "close"):
+            session.env.close()
+        self._sessions.pop(session_id, None)
 
     # TODO(ahmadki): Reward accumulation strategy needs a revisit.
     #
@@ -232,19 +245,23 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     # Works correctly for: terminal-only rewards (chess, coding), zero rewards
     # (echo MCP), and true per-step deltas (maze).
     async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        """Return accumulated reward, close the environment, and clean up session state."""
+        """Release the environment and retain only its reward for a bounded verification retry window."""
         session_id = request.session[SESSION_ID_KEY]
-        session = self._sessions.get(session_id)
-
-        reward = 0.0
-        if session is not None:
-            reward = session.accumulated_reward
-            if hasattr(session.env, "close"):
-                session.env.close()
-            del self._sessions[session_id]
-
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        async with self.verifying(session_id) as verification:
+            if verification.is_lost:
+                return BaseVerifyResponse(
+                    **(body.model_dump() | lost_session_verification("No active OpenEnv session to verify"))
+                )
+            if verification.is_live:
+                reward = self._sessions[session_id].accumulated_reward
+                verification.retain(reward)
+            else:
+                reward = verification.retained
+            return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
 if __name__ == "__main__":
     OpenEnvResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OpenEnvResourcesServer.run_webserver()  # noqa: F401

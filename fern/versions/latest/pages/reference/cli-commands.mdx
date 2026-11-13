@@ -239,7 +239,7 @@ To see which agent harness a benchmark composes with, inspect it with `gym list 
 | Option | Description |
 | --- | --- |
 | `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
-| `--json` | Output the benchmark list as JSON. |
+| `--json` | Output the benchmark list as JSON, including the [catalog path fields](#gym-list-environments). |
 
 ```bash
 gym list benchmarks
@@ -260,7 +260,7 @@ List the manifest-first catalog unioned with legacy environment and benchmark co
 | `--domain`, `--modality`, `--licensing` | Filter by catalog metadata. |
 | `--status experimental\|no-manifest` | Filter by the experimental annotation or missing manifest. |
 | `--lifecycle active\|deprecated` | Filter by lifecycle. |
-| `--json` | Output catalog entries as JSON. |
+| `--json` | Output catalog entries as JSON, including the path fields described below and each entry's `resources_server` and `agent_server` (see below). |
 
 ```bash
 gym list environments
@@ -268,6 +268,25 @@ gym list environments calendar        # inspect one environment
 gym list environments --kind benchmark --domain math
 gym list environments --json | jq '.[].name'
 ```
+
+The JSON output includes three path fields:
+
+- `path`: the entry's directory. Multiple entries can share this directory, so it is not a unique identifier.
+- `config_path`: the entry's config file. Use this field to locate the config; it is not necessarily inside `path`.
+- `manifest_path`: the entry's `manifest.yaml`, or `null` when the entry has no manifest.
+
+All non-null paths are absolute with symlinks resolved. A path reached through a symlink therefore uses its target's location in the output.
+For example, the config for `aalcr/config_v1_1` is `benchmarks/aalcr/config_v1_1.yaml`, beside its entry directory `benchmarks/aalcr/config_v1_1/`.
+
+The inspect view and `--json` report server **implementation names**, such as `simple_agent`, rather than config instance names, such as `demo_agent`. This differs from `agent_name` in `gym list benchmarks --json`, which identifies an instance.
+
+Names come from the manifest when present. Otherwise Gym resolves the config's server wiring. Resolution still requires an unambiguous dataset owner and agent, but skips manifest-only dataset checks such as requiring a benchmark preparation script.
+
+For agent-owned datasets, Gym follows the dataset's taskset route, the explicit flat-row route (`environment_routing_mode: legacy` with `environment_server_name`), or the unique Environment Server fronting the agent. Session-based Environment Servers supply their own resources binding; `legacy_agent` relays use the agent's binding. Resource-owned datasets retain their selected owner. Ambiguous routes, routes selecting different resources, or routes without a resources binding leave the resources field unknown.
+
+If resolution fails, Gym falls back to the implementation names written directly in the file, separately for each server kind and only when exactly one distinct name is present. A server that remains unknown is omitted from inspect output and `null` in `--json`; Gym does not pick the first of several names.
+
+Resolving configs without manifests adds work to `--json` listing. Table output and the Python `discover_environment_catalog()` function retain lightweight discovery: entries without manifests still have `None` for their `resources_server` and `agent_server` attributes. The CLI views resolve names separately without updating those objects.
 
 ### `gym list agents`
 
@@ -325,7 +344,7 @@ Without a type, the command searches the unified environment and benchmark catal
 | --- | --- |
 | `[<type>]` | Optional component type: `benchmarks`, `environments`, `agents`, `models`, or `resources-servers`. |
 | `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
-| `--json` | Output matches as JSON. |
+| `--json` | Output matches as JSON. Environment and benchmark matches include the [catalog path fields](#gym-list-environments). |
 
 ```bash
 gym search math                       # environments and benchmarks matching "math"
@@ -341,19 +360,20 @@ gym search models vllm --json
 Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Registry.
 
 <Note>
-HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
+HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/jsonl/download-huggingface) for HF authentication details.
 </Note>
 
 ### `gym dataset init`
 
 Scaffold a dataset in the Harbor task format: `dataset.toml` with a `[gym]` table and one task with an
-instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+instruction, a verifier and a reference solution. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
 | `NAME` | Dataset name as `org/name`; a bare name is written as `local/<name>`. The folder is the name without the org and must not exist yet. |
 | `--root DIR` | Where to create the folder (default: current directory). |
 | `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+| `--parameterized` | Write a template folder instead: `dataset.toml`, `task.toml`, `instruction.template.md`, `tasks.jsonl`, `task_data.py`, a Python verifier (`tests/verifier.py`) and `solution/answer.template.md`. Prepare renders one task per row. |
 
 ```bash
 gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
@@ -367,7 +387,7 @@ dataset digest. Nothing is prepared, built or run. The fetch is the
 one `gym eval run` and `gym dataset validate` make for a `harbor:` target, so a folder that was edited by hand,
 left by an interrupted fetch of another version, or written for another package is refused in the same words;
 a second pull of an unchanged dataset downloads nothing and says so. Refer to
-[Harbor Tasks](/main/data/harbor-tasks#gym-dataset-pull-and-committed-entries).
+[Pulled datasets](/main/reference/task-folder-storage#pulled-datasets).
 
 | Option | Description |
 | --- | --- |
@@ -387,7 +407,7 @@ is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollo
 names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
 so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
 1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
-selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+selected task had a solution to run. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
@@ -404,6 +424,28 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 gym dataset validate my-dataset --sandbox opensandbox
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
 gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed entry, after `gym dataset pull terminal_bench_4`
+```
+
+### `gym dataset publish`
+
+Write a Gym-authored dataset as plain Harbor task folders that run under Harbor as they are. Template rows are
+expanded into task folders, each single-step task's Python verifier is wrapped in a `tests/test.sh`, each
+`solution/answer.md` becomes a `solution/solve.sh`, and `dataset.toml` is written without its `[gym]` table, or not
+at all when nothing else is left. The publish is refused if a Python verifier's `verify` takes `response`, if the
+verifier would grade in separate verifier mode, if two task folders share a `[task].name`, or if a published path is
+a symbolic link. It is also refused if a task's fields fail the dataset's `TaskData`, or if the rest of
+`dataset.toml` has no `[dataset]` table with an `org/name` `name`. Only the task folders and `dataset.toml` are
+published; a dataset-level `verifier.py` is copied into the shim of each task it grades. When the `harbor` package
+is installed, Harbor's own format check runs over every folder first; a refused publish leaves nothing under `--output`.
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A dataset folder, a task folder, or a parameterized template folder. |
+| `--harbor` | Required: publish in Harbor's task format. |
+| `--output DIR` | A new or empty folder outside the dataset, for the task folders. Required. |
+
+```bash
+gym dataset publish --harbor my-qa --output ./published/my-qa
 ```
 
 ### `gym dataset upload`
@@ -827,10 +869,14 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Such a run needs `--agent <harness>`: a folder under `responses_api_agents/`, given as `NAME` or `NAME/FLAVOR` (such as `hermes_agent`). It starts its own servers (`--no-serve` is refused) and writes under `results/harbor/<taskset>/`, or under `results/harbor/validation/<taskset>/` with `--agent harbor_oracle_agent`, which runs `gym dataset validate`. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks) for the layout and to [Task Folder Files and Storage](/main/reference/task-folder-storage) for what it writes.
 
 | Option | Description |
 | --- | --- |
+| `TARGET` | A task folder, folder of task folders, `harbor:` reference or committed entry name, as above. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). Task targets only. Without it, `env.yaml` or a `--config` file must supply the `sandbox:` block, or every episode fails at seed. |
+| `--only-tasks PATTERNS`, `--exclude-tasks PATTERNS` | Comma-separated task names or globs to run or to leave out. Task targets only. |
+| `--skip-unloadable` | Run the tasks that load and record the rest in `skipped.json`. Without it, a task that does not load stops the run before any server starts. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--environment NAME` | Load the named environment config. Repeatable. |
@@ -845,6 +891,8 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
+| `--task-ids ID[,ID...]` | Run only these tasks of the input, selected by the id each row stores (`task_id`, `problem_id` or `instance_id`), with every copy of each. A subset run: when the run starts, the selection is written to `rollouts_task_selection.json` beside the output; resume keeps it; `gym eval resubmit --recover --inspect`, the MLflow run (tag `gym_task_selection=subset` with `gym_task_ids_sha256`) and `gym eval compare` label the score a subset score. Ids Hydra reads as numbers lose a leading zero or an exponent: quote them or use `--task-ids-file`. Not with `--limit`. |
+| `--task-ids-file PATH` | As `--task-ids`, from a file with one task id per line; blank lines and lines starting with `#` are skipped. Use it for a named, versioned subset. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--interleave-repeats` | Start repeats round by round (every task's first rollout, then every task's second) rather than each task's back to back. Use it when a task is heavy on the machine running it, for example when its sandbox loads large data, to spread its repeats over the run. This is best effort: repeats still overlap when the concurrency is high or rollouts are long. GDPVal's multistage orchestrator rebuilds its stage rows per task and does not keep this order. Maps to legacy `+interleave_repeats=true`. |
 | `--prompt-config` | Prompt template YAML to apply. |
@@ -1007,7 +1055,7 @@ gym eval resubmit GYM_JOB_ID BENCHMARK [options]
 | `--acknowledge-failed-judge-jobs`, `--acknowledge-reason TEXT` | With `--recover`: after the last two judge-only jobs ended without settling a saved answer, allow exactly one more; journaled in `judge-job-acknowledgement-journal.jsonl`. |
 | `--score-key JSON`, `--score-agent NAME`, `--score-environment NAME` | With `--recover`: the metric path in the aggregate (a JSON list) and the entry it is read from, by `agent_ref.name` and `_ng_environment_server`. Without them the score gate reports the score as unavailable. |
 | `--mlflow-run-id ID`, `--mlflow-status STATUS` | With `--recover`: an MLflow run and the terminal status you read from the server. They perform no export. |
-| `--max-unhealthy-fraction F` | With `--recover`: the per-rollout health criterion, reported in warnings; it does not change the verdict. |
+| `--max-unhealthy-fraction F` | With `--recover`: the rollout quality criterion, reported in warnings; it does not change the verdict. |
 | `--max-response-failure-fraction F`, `--max-trial-failure-fraction F` | With `--recover`: reported under `criteria` with `applied: false`; they do not change the verdict. |
 | `--policy-timeout-counts-as-model true\|false` | With `--recover`: whether a policy-model response timeout is the model's fault (default `true`). |
 
@@ -1125,7 +1173,7 @@ service stops accepting an old client, the export fails and names the environmen
 | `+wait=true\|false` | Wait for EvalRDL's verdict on the upload. Defaults to `true`. |
 | `+timeout=SECONDS` | How long to wait for the verdict. Defaults to `1800`. |
 | `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
-| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl`. |
+| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl>=0.0.241`. |
 
 The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. With
 `+wait=false` the run counts as `succeeded` once EvalRDL has stored it, and the upload token is in the result. When
@@ -1238,7 +1286,7 @@ See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) f
 
 Compare a baseline eval run against a candidate run and write a report.
 
-The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Each run's separate confidence intervals remain the recorded 95% intervals. For eligible metrics with at least two finite repeat-level values on each side and recorded cross-repeat means, the command also computes a two-sided unpaired Welch confidence interval for candidate minus baseline, at 95% by default. Use `--confidence-level` to change the delta confidence level; the JSON report records it in the top-level `confidence_level` field. The command does not issue a pass/fail verdict.
+The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Each side's separate intervals stay at 95%: recorded intervals for a single run, recomputed intervals for pooled repeats. For eligible metrics with at least two finite repeat-level values on each side and cross-repeat means, the command also computes a two-sided unpaired Welch confidence interval for candidate minus baseline, at 95% by default. Use `--confidence-level` to change the delta confidence level; the JSON report records it in the top-level `confidence_level` field. The command does not issue a pass/fail verdict.
 
 See [Compare Results](/main/evaluation/compare-results) for the evaluation workflow and interpretation of the confidence interval.
 
@@ -1246,13 +1294,17 @@ See [Compare Results](/main/evaluation/compare-results) for the evaluation workf
 | --- | --- |
 | `--baseline PATH` | Baseline run's rollouts JSONL. Its `*_aggregate_metrics.json` sibling is what gets read. |
 | `--candidates PATH[,PATH...]` | Candidate run's rollouts JSONL. Comma-separated; one candidate is supported today. |
+| `--baseline-runs PATH[,PATH...]` | Pool independent baseline runs into one repeat sample. Use instead of `--baseline`. |
+| `--candidate-runs PATH[,PATH...]` | Pool independent candidate runs into one repeat sample. Use instead of `--candidates`. |
 | `--baseline-agg-metrics PATH` | Baseline's aggregate-metrics JSON, when it is not the sibling of `--baseline`. |
-| `--candidates-agg-metrics PATH[,PATH...]` | Candidates' aggregate-metrics JSON, in `--candidates` order, when not siblings of `--candidates`. |
-| `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
-| `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
-| `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
+| `--baseline-runs-agg-metrics PATH[,PATH...]` | Aggregate overrides in `--baseline-runs` order, one per source. |
+| `--candidates-agg-metrics PATH[,PATH...]` | Candidate aggregate overrides in `--candidates` or `--candidate-runs` order, one per source. |
+| `--agent NAME` | Agent to compare in every source on both sides. Defaults to every agent present in all sources. |
+| `--baseline-agent NAME` | Agent to read from every baseline source. Takes precedence over `--agent`; use `--baseline-agents` for different names per source. |
+| `--baseline-agents NAME[,NAME...]` | Agent to read from each pooled baseline source, in `--baseline-runs` order. |
+| `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate source, in `--candidates` or `--candidate-runs` order. Takes precedence over `--agent`. |
 | `--confidence-level FLOAT` | Confidence level for delta intervals as a fraction strictly between `0` and `1` (default: `0.95`). For example, `0.90` requests 90%. |
-| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the candidate rollouts JSONL. |
+| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the last candidate source, so `--candidate-runs` order affects the default. Use a dedicated directory for pooled reports. |
 | `--report-format` | `md`, `json`, or `both` (default). |
 
 ```bash
@@ -1268,7 +1320,11 @@ Writes into the output directory:
 | `compare_report.md` | Human-readable report. |
 | `compare_report.json` | Machine-readable result (`schema_version` `"1"`). |
 
-If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `--baseline-agg-metrics` / `--candidates-agg-metrics`.
+To pool runs, use `--baseline-runs b1/rollouts.jsonl,b2/rollouts.jsonl --candidate-runs c1/rollouts.jsonl,c2/rollouts.jsonl,c3/rollouts.jsonl --output-dir results/pooled-comparison`. Each repeat contributes one observation to a single Welch comparison; source run means and confidence interval endpoints are not averaged. Either side can use its single-run option. Quality metrics require complete scored repeat estimates in every source; completion-token metrics retain their available observations and report missing accounting. Current single-repeat aggregates have no quality repeat estimates, so collect at least two scored repeats per source before pooling. Whole-run-only metrics cannot be pooled this way. See [Pool independent runs](/main/evaluation/compare-results#pool-independent-runs) for assumptions and examples.
+
+For pooled JSON sides, the ordered `sources` list contains the complete provenance. Top-level rollout and aggregate paths identify the first source for compatibility. Reports in an existing output directory are replaced.
+
+If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or supply aggregate files with `--baseline-agg-metrics` for `--baseline`, `--baseline-runs-agg-metrics` for `--baseline-runs`, and `--candidates-agg-metrics` for either candidate option.
 
 ### `gym eval compare-suite`
 
@@ -1283,14 +1339,14 @@ gym eval compare-suite \
 
 | Option | Description |
 | --- | --- |
-| `--suite PATH` | Required YAML defining metrics and one baseline/candidate run pair per model and benchmark. |
+| `--suite PATH` | Required YAML defining metrics and a baseline/candidate pair per model and benchmark. Either side accepts one source mapping or a nonempty list of independent runs whose repeats are pooled. |
 | `--confidence-level FRACTION` | Two-sided confidence level, strictly between zero and one. Defaults to `0.90`. |
 | `--output-dir DIR`, `-o` | Report directory; defaults to the suite YAML's directory. |
 | `--report-format` | `md`, `json`, or `both` (default). |
 
 Run paths and optional agent or environment-server selectors come from the suite YAML. See [Compare Results](/main/evaluation/compare-results#compare-a-benchmark-suite) for a complete multi-model suite YAML, source options, theoretical metric bounds, normalization, equal weighting, statistical assumptions, and coverage/exclusion behavior.
 
-Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
+Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
 
 ### `gym eval reverify`
 

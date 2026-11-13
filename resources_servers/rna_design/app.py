@@ -50,6 +50,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLocks,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.rna_design.verifier_fixture import create_server, invoke
 
@@ -297,7 +298,7 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
                 **base,
                 reward=0.0,
                 mask_sample=True,
-                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_kind=failure_kinds.SESSION_LOST,
                 failure_reason="no campaign for this session",
             )
         try:
@@ -311,7 +312,7 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
                 **base,
                 reward=0.0,
                 mask_sample=True,
-                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_kind=failure_kinds.VERIFIER_ERROR,
                 failure_reason=reply["error"],
             )
         result = reply["result"]
@@ -362,3 +363,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     RnaDesignResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = RnaDesignResourcesServer.run_webserver()  # noqa: F401

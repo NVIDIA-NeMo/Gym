@@ -43,10 +43,6 @@ from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRe
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HLE_ENVIRONMENT = "hle_equivalence_llm_judge_environment_server"
-# The override each adapter README gives for HLE: its judge grants the agent no tools.
-HLE_PAIRING = {
-    HLE_ENVIRONMENT: {"environment_servers": {"single_agent_turn_legacy": {"resources_tool_transports": []}}}
-}
 IMAGE = "registry.example.invalid/sandbox:1"
 # Values for the harness settings a restricted profile requires (`???`): a restricted sandbox cannot download the
 # harness, so the image carries its runtime or binary.
@@ -86,12 +82,12 @@ def compose_profile_on_hle(
     agent: str,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    pairing: bool = True,
+    transports: list[str] | None = None,
     image: bool = True,
     required: bool = True,
     cli_args: tuple = (),
 ) -> DictConfig:
-    """Compose the agent's benchmark profile onto HLE, with the README's override unless `pairing` is False."""
+    """Compose the agent's benchmark profile onto HLE as shipped, or with `transports` set on HLE's Environment Server."""
     monkeypatch.chdir(REPO_ROOT)
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
     composed = f"hle_equivalence_llm_judge_{agent}"
@@ -120,7 +116,17 @@ def compose_profile_on_hle(
                     "policy_base_url": "http://unused.invalid/v1",
                     "policy_api_key": "unused",
                     "policy_model_name": "test-model",
-                    **(HLE_PAIRING if pairing else {}),
+                    **(
+                        {
+                            HLE_ENVIRONMENT: {
+                                "environment_servers": {
+                                    "single_agent_turn_legacy": {"resources_tool_transports": transports}
+                                }
+                            }
+                        }
+                        if transports is not None
+                        else {}
+                    ),
                 }
             ),
         )
@@ -186,21 +192,22 @@ async def seed_through_hle(
     return seeds[-1], (replies[-1] if replies else None), bool(sandbox_requests)
 
 
-async def check_hle_seed(agent: str, pairing: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Seed the composed agent through HLE's Environment Server, with or without the README's override.
+async def check_hle_seed(agent: str, transports: list[str] | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seed the composed agent through HLE's Environment Server, as shipped or with `transports` set on it.
 
-    With it, the seed carries no grants and the agent goes on to create its own sandbox. Without it, the seed carries
-    HLE's required direct_http grant, which no session harness can use, so the agent refuses it with a 422.
+    As shipped, HLE's judge serves no tools, so the seed carries no grants and the agent goes on to create its own
+    sandbox. With `direct_http`, the seed carries a required grant no session harness can use, and the agent refuses
+    it with a 422.
     """
-    config = compose_profile_on_hle(agent, monkeypatch, pairing=pairing)
+    config = compose_profile_on_hle(agent, monkeypatch, transports=transports)
     seed, reply, created_sandbox = await seed_through_hle(agent, config, monkeypatch)
     assert seed["sandbox_access"] is None
-    if pairing:
+    if transports is None:
         assert seed["tool_accesses"] == []
         # The agent accepts the seed and goes on to create its own sandbox.
         assert created_sandbox, reply and reply.text
     else:
-        # HLE's judge grants its Resources server over direct HTTP, which no session harness can use.
+        # A pairing whose Environment Server grants direct HTTP access, which no session harness can use.
         assert [(access["kind"], access["name"], access["required"]) for access in seed["tool_accesses"]] == [
             ("direct_http", "hle_equivalence_llm_judge_resources_server.direct_http", True)
         ]

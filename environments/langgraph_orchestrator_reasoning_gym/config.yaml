@@ -10,7 +10,6 @@ reasoning_gym:
 langgraph_orchestrator_reasoning_gym_agent:
   responses_api_agents:
     langgraph_agent:
-      num_workers: 1
       entrypoint: orchestrator_agent.py
       resources_server:
         type: resources_servers

@@ -250,7 +250,7 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | `ready_timeout_s` | Time to wait for sandbox readiness. |
 | `workdir` | Default working directory for `exec()` calls. |
 | `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
-| `files` | Text files to upload at startup, keyed by remote target path. |
+| `files` | Files to upload at startup, keyed by remote target path. A `str` value is written as UTF-8 text and a `bytes` value is written unchanged. |
 | `metadata` | String metadata for tracing, debugging, and backend labels. Providers may normalize values for their runtime. |
 | `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
 | `entrypoint` | Optional container entrypoint override. |
@@ -273,14 +273,18 @@ Unknown resource keys raise a `ValueError`, which catches config drift early.
 
 ## Startup Files and File Transfer
 
-Use `files` for small text files that should exist before the first command runs:
+Use `files` for small files that should exist before the first command runs.
+A `str` value is written as UTF-8 text, and a `bytes` value, such as an image, is written unchanged:
 
 ```python
+from pathlib import Path
+
 spec = SandboxSpec(
     image="ghcr.io/example/eval-image:py312",
     workdir="/workspace",
     files={
         "/workspace/input.txt": "hello\n",
+        "/workspace/figure.png": Path("figure.png").read_bytes(),
     },
 )
 ```
@@ -293,6 +297,32 @@ await sandbox.download("/workspace/log.txt", output_path)
 ```
 
 `upload()` and `download()` operate on files. If you need structured values, serialize them locally before uploading and parse the downloaded file locally after the sandbox command completes.
+
+To move in-memory content into or out of a sandbox that is already running, use `upload_bytes()` and `download_bytes()`, or `upload_text()` and `read_text()` for UTF-8 text, from `nemo_gym.sandbox`.
+They go through `upload()` and `download()`, so the content never passes through a shell:
+
+```python
+from nemo_gym.sandbox import download_bytes, upload_bytes, upload_text
+
+await upload_bytes(sandbox, path="/workspace/figure.png", data=image_bytes)
+await upload_text(sandbox, path="/workspace/notes.md", text="# Notes\n")
+plot = await download_bytes(sandbox, path="/workspace/plot.png")
+```
+
+For media in a prompt, `nemo_gym.core.split_text_and_media` decodes a message's content into its text and its media files.
+`stage_media()` writes each file to `/tmp/nemo-gym-media/<sha256>.<extension>`, named by its content, and returns the sandbox paths to pass to a harness, in order.
+Every rollout of a task then gets the same paths, and so the same prompt.
+The sandbox's default user creates the directory, and each file is uploaded under a unique name, readable by every user, then renamed onto its path. Sessions that share a sandbox can stage the same image at once and never read a partly written file.
+Sessions do not delete staged files, because another session may be reading them. A sandbox with its own `/tmp` drops them when it is destroyed. The local provider, and Apptainer without `--contain`, use the host's `/tmp`, where the files stay until the host clears it.
+`stage_media()` raises `SandboxUnavailableError` when the provider cannot run a staging command, such as on a timeout, and `SandboxTransferError` when a command fails inside the sandbox.
+
+```python
+from nemo_gym.core import split_text_and_media
+from nemo_gym.sandbox import stage_media
+
+text, media = split_text_and_media(message.content)
+paths = await stage_media(sandbox, media)
+```
 
 ## Status and Cleanup
 

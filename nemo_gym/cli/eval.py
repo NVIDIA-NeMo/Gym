@@ -123,10 +123,10 @@ from nemo_gym.eval.eval_plan import (
     eval_plan_json_schema,
     write_eval_plan,
 )
-from nemo_gym.orchestration.server_supervisor import RunHelper
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -861,8 +861,7 @@ def _collect_and_rejudge(
     except IncompleteEvaluationError as rejected:
         if not config.require_complete or _terminated:
             raise
-        _rejudge_saved_judge_failures(global_config_dict, output, config)
-        if not _saved_run_complete(output):
+        if not _rejudge_saved_judge_failures(global_config_dict, output, config, complete_only=True):
             raise _settled_rejection(output, rejected) from None
         return
     _rejudge_saved_judge_failures(global_config_dict, output, config)
@@ -920,14 +919,22 @@ def _saved_run_complete(output: Path) -> bool:
 
 
 def _rejudge_saved_judge_failures(
-    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any, *, aggregate: bool = True
-) -> None:
+    global_config_dict: DictConfig | Mapping[str, Any],
+    output: Path,
+    collection_config: Any,
+    *,
+    aggregate: bool = True,
+    complete_only: bool = False,
+) -> bool:
     """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
 
     Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``), and at the
     start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
+    ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
+    incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
+    (always False without ``complete_only``).
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -937,16 +944,22 @@ def _rejudge_saved_judge_failures(
         run_config = OmegaConf.to_container(global_config_dict, resolve=True)
     else:
         run_config = dict(global_config_dict)
+    scored = 0
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
     except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
-        return
-    if not scored:
-        return
-    print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
+    # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
+    # not a normal return, decides whether its metrics are rebuilt.
+    complete = complete_only and _saved_run_complete(output)
+    if not scored and not complete:
+        return complete
+    if scored:
+        print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
-        return
+        return complete
+    if complete_only and not complete:
+        return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
             run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
@@ -958,6 +971,7 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+    return complete
 
 
 class _SettledHealthSettings(RunHealthConfig):
@@ -1161,12 +1175,25 @@ def collect_rollouts():  # pragma: no cover
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
     global_config = get_global_config_dict()
     config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
-    asyncio.run(rah.run_from_config(config))
+    # Like a standalone collection, a standalone aggregation sets up its own telemetry, so the merged run's summary
+    # reaches OpenTelemetry as well as an experiment tracker.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config))
+    init_telemetry(server_name="driver", server_type="driver")
+    try:
+        asyncio.run(rah.run_from_config(config))
+    finally:
+        shutdown_telemetry()
 
 
 def health_check_rollouts(
@@ -1943,13 +1970,18 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sys.exit(1)
 
 
-def eval_status(target: str, *, json_output: bool = False) -> None:
-    """Print saved progress for a run directory or a locally indexed Gym job ID.
+def eval_status(
+    target: str,
+    *,
+    json_output: bool = False,
+    job_artifact_dirs: Callable[[str], dict[str, Path] | None],
+) -> None:
+    """Print saved progress for a run directory or, through `job_artifact_dirs`, a Gym job ID.
 
-    Submitted job artifacts must be visible on the current filesystem. This command
-    reads saved progress and does not contact a scheduler or a remote host.
+    `job_artifact_dirs` is required: it maps a target that is not a run directory with status files to each benchmark's
+    artifacts directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
+    command reads saved progress and does not contact a scheduler or a remote host.
     """
-    from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord, local_index_dir
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
 
     def status_files(directory: Path) -> list[Path]:
@@ -1980,26 +2012,24 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
     path = Path(target)
     if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
         raise NotADirectoryError(f"Run directory expected: {target}")
-    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
     files = status_files(path) if path.is_dir() else []
     exports: dict[str, dict[str, dict[str, Any]]] = {}
     if files:
         statuses = {str(file): json.loads(file.read_text()) for file in files}
         exports = {str(file): export_facts(file) for file in files}
-    elif record_path.is_file():
-        record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    else:
+        artifact_dirs = job_artifact_dirs(target)
+        if artifact_dirs is None:
+            raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
         statuses = {}
-        for benchmark in record.benchmarks:
-            directory = Path(benchmark.job_dir) / "artifacts"
+        for benchmark, directory in artifact_dirs.items():
             files = status_files(directory)
             if not files:
-                statuses[benchmark.benchmark] = {"status": "unavailable", "path": str(directory)}
+                statuses[benchmark] = {"status": "unavailable", "path": str(directory)}
             for file in files:
-                name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
+                name = benchmark if len(files) == 1 else f"{benchmark}/{file.name}"
                 statuses[name] = json.loads(file.read_text())
                 exports[name] = export_facts(file)
-    else:
-        raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
     if json_output:
         print(
             json.dumps(

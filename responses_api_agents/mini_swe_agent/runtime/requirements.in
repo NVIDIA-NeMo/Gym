@@ -1,0 +1,7 @@
+# mini-SWE's native runtime inside the task sandbox, for agent sessions. The agent server's own environment
+# (pyproject.toml) keeps the SWE-Gym fork that /run uses. LiteLLM's Responses adapter imports MCP v2 types even
+# for ordinary function tools, so this runtime carries MCP v2; the task-local MCP CLI uses the same runtime.
+# requirements.txt locks the full closure: after changing this file, regenerate it with the command in its header.
+mini-swe-agent==2.4.6
+litellm[mcp]==1.106.0
+mcp==2.2.0

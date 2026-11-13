@@ -71,19 +71,24 @@ from nemo_gym.environment.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
     discover_environment_catalog,
+    manifest_workloads_for_server,
     read_environment_details,
     resolve_catalog_entry,
 )
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
-from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.orchestration.server_supervisor import (
+from nemo_gym.environment.validation import (
+    EnvironmentValidationReport,
+    resolve_config_servers,
+    validate_environment,
+)
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
+from nemo_gym.server_runtime.server_status import StatusCommand
+from nemo_gym.server_runtime.supervisor.server_supervisor import (
     RunHelper,
     _configured_servers,
     _resolve_server_dir,
 )
-from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
-from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
-from nemo_gym.server_runtime.server_status import StatusCommand
+from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -249,6 +254,21 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if test_config.dir_path.parts[0] != "resources_servers":
         return
 
+    # A server that only manifest workloads use carries verifier fixtures instead of the legacy five-row rollout
+    # artifacts (see manifest_workloads_for_server). Exercise every workload sharing it, offline and without requiring
+    # its full dataset to be downloaded on CI workers.
+    manifest_entries = manifest_workloads_for_server(
+        test_config.dir_path.name, test_config.resolved_dir_path, discover_environment_catalog()
+    )
+    if manifest_entries:
+        conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
+        assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
+        for entry in manifest_entries:
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
+            _run_manifest_verifier(entry, update_expected=False, validation=validation)
+        print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
+        return
+
     # Check that the required examples and example metrics are present. Read from the resolved dir
     # (built-ins live under the install root) while messages reference the relative entrypoint.
     example_fpath = test_config.resolved_dir_path / "data/example.jsonl"
@@ -349,6 +369,7 @@ def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Po
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+@exit_cleanly_on_config_error
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -460,6 +481,7 @@ Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_disp
         exit(1)
 
 
+@exit_cleanly_on_config_error
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -1161,10 +1183,11 @@ def _inspect_environment(
     ):
         if value:
             details[label] = value
-    if parsed["resources_servers"]:
-        details["resources servers"] = ", ".join(parsed["resources_servers"])
-    if parsed["agent"]:
-        details["agent"] = parsed["agent"]
+    resources_server, agent_server = _entry_servers(entry, parsed)
+    if resources_server:
+        details["resources servers"] = resources_server
+    if agent_server:
+        details["agent"] = agent_server
     if parsed["datasets"]:
         details["datasets"] = ", ".join(parsed["datasets"])
 
@@ -1187,7 +1210,32 @@ def _inspect_environment(
     )
 
 
+def _entry_servers(
+    entry: EnvironmentCatalogEntry, details: Optional[Dict[str, object]] = None
+) -> Tuple[Optional[str], Optional[str]]:
+    """The resources server and agent an entry runs with, as the catalog views show them.
+
+    The manifest says when there is one. Otherwise the config's runtime routes select the servers. A
+    config that needs values only a run supplies, such as a judge model server, or that is malformed does not
+    resolve; then the names written in the config file are used, each only when the file names exactly one, since a
+    file naming several does not say which one runs. ``details`` is the config's ``read_environment_details``
+    result when the caller has it.
+    """
+    if entry.manifest_path is not None:
+        return entry.resources_server, entry.agent_server
+    resolved = resolve_config_servers(entry.config_path)
+    if resolved is not None:
+        return resolved
+    details = details or read_environment_details(entry.config_path)
+    resources_servers, agents = set(details["resources_servers"]), set(details["agents"])
+    return (
+        next(iter(resources_servers)) if len(resources_servers) == 1 else None,
+        next(iter(agents)) if len(agents) == 1 else None,
+    )
+
+
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
+    resources_server, agent_server = _entry_servers(entry)
     payload = {
         "name": entry.name,
         "kind": entry.kind,
@@ -1199,6 +1247,12 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "modality": entry.modality,
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
+        # Absolute, like the agent inspect view, so an entry found under any search root can be located.
+        "path": str(entry.path.resolve()),
+        "config_path": str(entry.config_path.resolve()),
+        "manifest_path": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
+        "resources_server": resources_server,
+        "agent_server": agent_server,
     }
     if entry.status is None:
         payload.pop("status")

@@ -33,10 +33,11 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.core.failure_kinds import ENVIRONMENT_PREPARE_FAILED
 from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.eval.eval_plan import EvalPlan, PlanBenchmark, PlanGym, build_eval_plan
-from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,28 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     )
 
 
+class PreparationFailedError(RuntimeError):
+    """A benchmark's data preparation failed in its own code or environment.
+
+    Not resumable: the CLI exits with ``stop_exit_code`` (76) and records the kind for the guard of a job chain's
+    next segment, which would fail the same way.
+    """
+
+    stop_exit_code = 76
+    failure_kind = ENVIRONMENT_PREPARE_FAILED
+
+    def __init__(self, module: str, action: str, reason: str) -> None:
+        self._init_args = (module, action, reason)
+        super().__init__(
+            f"EVAL STOPPED: data preparation failed for {module} ({action}: {reason}); another attempt cannot "
+            "succeed until the preparation is fixed. Fix it, then continue with gym eval resubmit --recover."
+        )
+
+    def __reduce__(self):
+        # RuntimeError pickles only its message, so a preparation worker's error could not be rebuilt in the parent.
+        return (type(self), self._init_args)
+
+
 def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
@@ -91,10 +114,15 @@ def _multiprocess_benchmark_prepare_fn(args):
             config=config,
         )
         return
-    from nemo_gym.cli._prepare_worker import load_preparer
+    from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
     module = load_preparer(prepare_module_path)
-    output_fpath = module.prepare(**prepare_script_args)
+    try:
+        output_fpath = module.prepare(**prepare_script_args)
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise PreparationFailedError(prepare_module_path, "prepare", f"{type(exc).__name__}: {exc}") from exc
     expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
     if output_fpath.absolute() != expected_output_fpath:
         raise ConfigError(
@@ -133,7 +161,7 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
 
 def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
     """Use explicit dependency arguments as before, or sync an isolated locked project."""
-    from nemo_gym.cli._locked_env import sync_environment
+    from nemo_gym.server_runtime.supervisor._locked_env import sync_environment
 
     dataset = benchmark_config.dataset
     if dataset.prepare_dependencies:
@@ -168,8 +196,8 @@ def _run_isolated_prepare(
     """Keep preparer stdout visible and pass structured results over a separate file."""
     from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, maybe_get_global_config_dict
 
-    # The worker script is a module of `nemo_gym.cli`, which stays where it is; locate it without importing it here.
-    worker = Path(importlib.util.find_spec("nemo_gym.cli._prepare_worker").origin)
+    # The worker script is a module of `nemo_gym.server_runtime.supervisor`; locate it without importing it here.
+    worker = Path(importlib.util.find_spec("nemo_gym.server_runtime.supervisor._prepare_worker").origin)
     if module.endswith(".py"):
         root = Path(module).parent
     else:
@@ -186,32 +214,35 @@ def _run_isolated_prepare(
         )
         serialized_args = OmegaConf.to_container(args, resolve=True) if OmegaConf.is_config(args) else args
         options.write_text(json.dumps(serialized_args, default=_prepare_json_default))
-        subprocess.run(
-            [
-                str(python),
-                str(worker),
-                "--root",
-                str(root.absolute()),
-                "--module",
-                module,
-                "--action",
-                action,
-                "--expected",
-                str(expected.absolute()),
-                "--args-file",
-                str(options),
-                "--result",
-                str(result),
-            ],
-            check=True,
-            env=os.environ
-            | {
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
-                "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
-                "VIRTUAL_ENV": str(python.parent.parent),
-                "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
-            },
-        )
+        try:
+            subprocess.run(
+                [
+                    str(python),
+                    str(worker),
+                    "--root",
+                    str(root.absolute()),
+                    "--module",
+                    module,
+                    "--action",
+                    action,
+                    "--expected",
+                    str(expected.absolute()),
+                    "--args-file",
+                    str(options),
+                    "--result",
+                    str(result),
+                ],
+                check=True,
+                env=os.environ
+                | {
+                    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
+                    "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
+                    "VIRTUAL_ENV": str(python.parent.parent),
+                    "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
+                },
+            )
+        except subprocess.CalledProcessError as exc:
+            raise PreparationFailedError(module, action, f"exit status {exc.returncode}") from exc
         return json.loads(result.read_text())
 
 
@@ -222,6 +253,15 @@ def _prepare_json_default(value: Any) -> Any:
     if OmegaConf.is_config(value):
         return OmegaConf.to_container(value, resolve=True)
     raise TypeError(f"Cannot serialize preparation value of type {type(value).__name__}")
+
+
+def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    """The rows of a JSONL file, one per newline-terminated line.
+
+    ``str.splitlines()`` also breaks at U+2028, U+0085, vertical tab and form feed, which a JSON string may hold
+    unescaped, so it would cut a row in the middle of a string.
+    """
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
 
 
 def datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
@@ -330,7 +370,7 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
                 already_prepared.append(benchmark_config)
                 continue
         else:
-            from nemo_gym.cli._prepare_worker import load_preparer
+            from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
             module = load_preparer(prepare_module_path)
             if not hasattr(module, "prepare"):
@@ -375,7 +415,7 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
         raise ConfigError(errors_to_print)
 
     # Prepare after all validations pass
-    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:  # pragma: no cover
+    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:
         with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
             results = pool.imap_unordered(_multiprocess_benchmark_prepare_fn, validated)
             list(tqdm(results, total=len(validated)))
@@ -412,7 +452,7 @@ def plan_for_config(
     benchmark = benchmarks[0]
 
     prepare_datasets([benchmark], prepare_config)
-    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    rows = read_jsonl_rows(benchmark.dataset.jsonl_fpath)
     return build_eval_plan(
         rows,
         benchmark=PlanBenchmark(

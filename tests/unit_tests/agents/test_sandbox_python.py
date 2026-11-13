@@ -177,6 +177,24 @@ def test_the_runtime_directory_is_keyed_by_its_inputs(monkeypatch) -> None:
     )
 
 
+def test_an_adapter_lock_replaces_the_agent_environment_pins_and_keys_the_runtime(monkeypatch) -> None:
+    def runtime(constraints: tuple[str, ...]) -> SandboxPythonRuntime:
+        return SandboxPythonRuntime(
+            harness="mini-swe",
+            requirements=("mini-swe-agent==2.4.6",),
+            import_check="import x",
+            constraints=constraints,
+        )
+
+    monkeypatch.setattr(sandbox_python, "_agent_environment_pins", lambda: ("litellm==1.74.15",))
+    locked = runtime(("litellm==1.106.0", "mcp==2.2.0"))
+    assert locked.pins == ("litellm==1.106.0", "mcp==2.2.0")
+    assert locked.directory != runtime(("litellm==1.106.1", "mcp==2.2.0")).directory
+    # The server's own environment no longer shapes a runtime that brings its own lock.
+    monkeypatch.setattr(sandbox_python, "_agent_environment_pins", lambda: ("litellm==9.9.9",))
+    assert runtime(("litellm==1.106.0", "mcp==2.2.0")).directory == locked.directory
+
+
 @pytest.fixture
 def host(monkeypatch, tmp_path):
     """A host whose uv records each install and writes a module into the target."""
@@ -262,6 +280,20 @@ async def test_the_adapter_overrides_reach_the_host_install(host) -> None:
             harness="stirrup", requirements=("stirrup==0.1.12",), import_check="import x"
         ).directory
     )
+
+
+async def test_the_adapter_lock_reaches_the_host_install_as_its_constraints(host) -> None:
+    runtime = SandboxPythonRuntime(
+        harness="mini-swe",
+        requirements=("mini-swe-agent==2.4.6",),
+        import_check="import x",
+        constraints=("litellm==1.106.0", "mcp==2.2.0"),
+    )
+
+    await runtime._site_packages_archive(SandboxPlatform("x86_64", "gnu", 35))
+
+    # The host fixture's environment pins openai and pillow; the adapter's lock replaces them.
+    assert host.installs[0].constraints == "litellm==1.106.0\nmcp==2.2.0\n"
 
 
 async def test_the_host_build_requires_uv(host, monkeypatch) -> None:

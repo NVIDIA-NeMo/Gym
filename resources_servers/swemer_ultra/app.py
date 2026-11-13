@@ -35,12 +35,15 @@ from pathlib import Path
 from time import time
 from traceback import format_exc
 from typing import Any
+from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -55,16 +58,21 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
+    CaptureCommandError,
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 from resources_servers.swemer_ultra.verification import (
     VerificationInputs,
     VerificationResult,
@@ -86,6 +94,8 @@ class SwemerUltraResourcesServerConfig(BaseResourcesServerConfig):
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 1200
+    # None disables disk logs. Set an output directory to retain per-task, per-attempt logs.
+    verification_log_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
@@ -130,6 +140,7 @@ class SwemerUltraVerifyRequest(SwemerUltraInstanceRequest, BaseVerifyRequest):
 
 
 class SwemerUltraVerifyResponse(BaseVerifyResponse):
+    verification_log_dir: str | None = None
     evaluation_completed: bool
     resolved: bool
     patch_applied: bool
@@ -153,7 +164,7 @@ class SwemerUltraVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SwemerUltraResourcesServer(SimpleResourcesServer):
+class SwemerUltraResourcesServer(SandboxSessionResourcesServer):
     config: SwemerUltraResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -175,7 +186,12 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
         )
 
     async def _create_sandbox(
-        self, body: SwemerUltraInstanceRequest, files: dict[str, str] | None = None
+        self,
+        body: SwemerUltraInstanceRequest,
+        files: dict[str, str] | None = None,
+        *,
+        session_id: str | None = None,
+        verifier_session_id: str | None = None,
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -210,16 +226,12 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         sandbox = AsyncSandbox(provider_config)
+        if session_id is not None:
+            self._session_id_to_sandbox[session_id] = sandbox
+        if verifier_session_id is not None:
+            self._verifier_sandboxes[verifier_session_id] = sandbox
         await sandbox.start(spec)
         return sandbox
-
-    async def _stop_sandbox(self, sandbox: AsyncSandbox | None) -> None:
-        if sandbox is None:
-            return
-        try:
-            await sandbox.stop()
-        except Exception:
-            print("Failed to stop Swemer-ultra sandbox", format_exc(), file=sys.stderr)
 
     async def _ensure_git_repo(self, sandbox: AsyncSandbox, workdir: str) -> None:
         """Some images ship with no git history at all. Init one fresh, but only when missing, so
@@ -250,36 +262,44 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
             return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
-        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
+        """Capture the agent's patch per ``config.patch_capture_mode``, leaving cleanup to the session lifecycle."""
         from resources_servers.swemer_ultra.verification import drop_patch_sections
 
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
-        try:
-            return await capture_model_patch(
-                original_sandbox,
-                workdir,
-                base_commit,
-                mode=self.config.patch_capture_mode,
-                pristine_untracked=pristine_untracked,
-                drop_sections=drop_patch_sections,
-            )
-        finally:
-            await self._stop_sandbox(original_sandbox)
+        original_sandbox = self._session_id_to_sandbox[session_id]
+        pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
+        return await capture_model_patch(
+            original_sandbox,
+            workdir,
+            base_commit,
+            mode=self.config.patch_capture_mode,
+            pristine_untracked=pristine_untracked,
+            drop_sections=drop_patch_sections,
+        )
 
     async def seed_session(
-        self, request: Request, body: SwemerUltraSeedSessionRequest
-    ) -> SwemerUltraSeedSessionResponse:
-        """Start the instance's image so an agent can work in it."""
+        self, request: Request, body: SwemerUltraSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SwemerUltraSeedSessionResponse | ResourcesSeedSessionResponse:
+        """Seed an episode session or the existing agent-run sandbox-handle response."""
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, SwemerUltraInstanceRequest)
         session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        self._session_id_to_base_commit.pop(session_id, None)
+        async with self._locked_task_session(session_id) as record:
+            if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
+            await self._stop_task_sandbox(session_id)
+            try:
+                await self._start_task_sandbox(session_id, body)
+                sandbox = self._session_id_to_sandbox[session_id]
+                response = SwemerUltraSeedSessionResponse(sandbox_handle=str(sandbox.sandbox_id), workdir=body.workdir)
+            except BaseException:
+                await self._stop_failed_seed_sandbox(session_id)
+                raise
+            return response
 
-        # Mirror files here too, not just the verification sandbox: an agent building/testing its
-        # own changes hits the same Maven Central rate limit otherwise.
+    async def _start_task_sandbox(self, session_id: str, body: SwemerUltraInstanceRequest) -> str:
+        self._forget_task_sandbox_state(session_id)
         sandbox = await self._create_sandbox(
-            body, files=mirror_files(maven_settings=self.config.overwrite_maven_settings)
+            body, files=mirror_files(maven_settings=self.config.overwrite_maven_settings), session_id=session_id
         )
         await self._ensure_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
@@ -288,34 +308,95 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
         await prepare_git_for_commits(sandbox, body.workdir, "swemer_ultra")
 
         head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
-        self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()
+        if (
+            head_result.error_type is not None
+            or head_result.return_code != 0
+            or not (head_result.stdout or "").strip()
+        ):
+            raise RuntimeError("Task sandbox did not produce a base commit")
+        self._session_id_to_base_commit[session_id] = head_result.stdout.strip()
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, body.workdir
         )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return SwemerUltraSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id), workdir=body.workdir)
+        return body.workdir
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_base_commit.pop(session_id, None)
+
+    def _incomplete_response(
+        self, body: SwemerUltraVerifyRequest, reason: str, **fields: Any
+    ) -> SwemerUltraVerifyResponse:
+        return SwemerUltraVerifyResponse.model_validate(
+            body.model_dump()
+            | {
+                "reward": 0.0,
+                "evaluation_completed": False,
+                "mask_sample": True,
+                "failure_kind": VERIFIER_ERROR,
+                "failure_reason": reason,
+                "resolved": False,
+                "patch_applied": False,
+                "test_results": None,
+                "test_output": "",
+                "error": reason,
+                "eval_sandbox_start_time_taken": 0.0,
+                "patch_verification_time_taken": 0.0,
+            }
+            | fields
+        )
 
     async def verify(self, request: Request, body: SwemerUltraVerifyRequest) -> SwemerUltraVerifyResponse:
+        """Serialize verification with close and reuse the saved episode verdict on retries."""
+        return await self.verify_task_sandbox_session(
+            request,
+            body,
+            verify=lambda: self._verify(request, body),
+            lost_response=lambda reason, kind: self._incomplete_response(
+                body, reason, **lost_session_verification(reason, failure_kind=kind)
+            ),
+            allow_seedless=self.config.is_verifying_golden_patch,
+        )
+
+    async def _verify(self, request: Request, body: SwemerUltraVerifyRequest) -> SwemerUltraVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         extraction_error = None
         mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
-            base_commit = self._session_id_to_base_commit.pop(session_id, "")
-            if not base_commit:
-                capture = PatchCapture.static("", mode, "none")
-                extraction_error = "Failed to extract model patch: no base commit recorded (seed_session did not run for this session)"
-            else:
+
+            async def capture_or_fallback() -> tuple[PatchCapture, str | None, bool]:
                 try:
-                    capture = await self._extract_model_patch(session_id, body.workdir, base_commit)
+                    capture = await self._extract_model_patch(
+                        session_id, body.workdir, self._session_id_to_base_commit[session_id]
+                    )
+                    return capture, None, False
+                except CaptureCommandError as exc:
+                    # A real git failure can reflect a repository damaged by the agent. Keep its empty-patch
+                    # grading behavior; unavailable execution belongs to the infrastructure denominator.
+                    incomplete = exc.error_type is not None or not isinstance(exc.return_code, int)
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", incomplete
                 except Exception as exc:
-                    capture = PatchCapture.static("", mode, "none")
-                    extraction_error = f"Failed to extract model patch: {exc}"
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", True
+
+            capture, extraction_error, capture_incomplete = await self.capture_task_sandbox_patch(
+                session_id, capture_or_fallback
+            )
+            await self.stop_task_sandbox_after_capture(session_id)
+            if capture_incomplete:
+                # An unavailable patch is not evidence that the agent submitted an empty patch.
+                return self._incomplete_response(
+                    body, extraction_error, **capture.response_fields(self.config.include_model_patch_in_response)
+                )
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = Path(__file__).parent / "logs" / body.instance_id
+        log_dir = (
+            self.config.verification_log_dir / f"instance-{quote(body.instance_id, safe='')}" / uuid4().hex
+            if self.config.verification_log_dir is not None
+            else None
+        )
 
         files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -333,14 +414,14 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
             sandbox: AsyncSandbox | None = None
             started = time()
             try:
-                sandbox = await self._create_sandbox(body, files=files)
+                sandbox = await self._create_sandbox(body, files=files, verifier_session_id=session_id)
                 start_time_taken = time() - started
                 verification_started = time()
                 result = await run_verification(
                     sandbox=sandbox,
                     inputs=inputs,
                     timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir,
+                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -355,7 +436,8 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
                     error=f"Verification failed: {exc}",
                 )
             finally:
-                await self._stop_sandbox(sandbox)
+                if not result.completed and attempt < attempts:
+                    await self._stop_verifier_sandbox(session_id)
             if result.completed:
                 break
             if attempt < attempts:
@@ -372,6 +454,12 @@ class SwemerUltraResourcesServer(SimpleResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
+                "verification_log_dir": str(log_dir) if log_dir is not None else None,
+                **(
+                    {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
+                    if not result.completed
+                    else {}
+                ),
                 "resolved": result.resolved,
                 "patch_applied": result.patch_applied,
                 "instance_id": body.instance_id,

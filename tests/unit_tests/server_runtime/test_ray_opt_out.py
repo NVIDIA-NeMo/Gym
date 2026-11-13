@@ -15,10 +15,10 @@ import nemo_gym.server_runtime.base_server
 import nemo_gym.server_runtime.ray_support
 from nemo_gym import PARENT_DIR
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
-from nemo_gym.orchestration.server_supervisor import _ray_server_names
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_class_flag
 from nemo_gym.server_runtime.ray_support import _connect_server_to_ray, _declared_ray_enabled, entrypoint_ray_enabled
+from nemo_gym.server_runtime.supervisor.server_supervisor import _ray_server_names
 
 
 WITH_CLUSTER = OmegaConf.create({"ray_head_node_address": "10.0.0.1:6379"})
@@ -52,6 +52,10 @@ INHERITED_RAY_DECLARATIONS = {
     ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
+    # Serves an external vLLM endpoint; app.py keeps Ray to launch vLLM locally.
+    ("responses_api_models/local_vllm_model/external_app.py", "LocalVLLMExternalModel"): False,
+    # Serves agent sessions only and refuses /run; app.py keeps Ray for the SWE-Gym /run path.
+    ("responses_api_agents/mini_swe_agent/sessions_app.py", "MiniSWESessionsAgent"): False,
 }
 
 
@@ -362,7 +366,7 @@ def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch, entrypoint)
     def unexpected_ray_check():
         pytest.fail("sandbox-only server must not check or initialize Ray")
 
-    monkeypatch.setattr("nemo_gym.orchestration.server_supervisor.ray_is_installed", unexpected_ray_check)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_supervisor.ray_is_installed", unexpected_ray_check)
     monkeypatch.setattr("nemo_gym.server_runtime.ray_support.initialize_ray", unexpected_ray_check)
     server = SimpleNamespace(
         top_level_path="code_gen",
@@ -370,3 +374,24 @@ def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch, entrypoint)
         entrypoint_fpath=Path(entrypoint),
     )
     assert _ray_server_names([server]) == []
+
+
+def test_local_vllm_model_starts_ray_only_for_the_local_launch_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_supervisor.ray_is_installed", lambda: True)
+
+    def server(name: str, entrypoint: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            top_level_path=name,
+            dir_path=PARENT_DIR / "responses_api_models/local_vllm_model",
+            entrypoint_fpath=Path(entrypoint),
+        )
+
+    # A missing entrypoint also reads as no declaration,
+    # so check that the file declares False before trusting the names below.
+    # The supervisor launches every server it does not name with RAY_ENABLE_AUTO_CONNECT=0.
+    # It starts no Ray cluster when it names no server.
+    assert entrypoint_ray_enabled(PARENT_DIR / "responses_api_models/local_vllm_model/external_app.py") is False
+    assert _ray_server_names([server("external_judge", "external_app.py")]) == []
+    assert _ray_server_names([server("external_judge", "external_app.py"), server("local_judge", "app.py")]) == [
+        "local_judge"
+    ]
