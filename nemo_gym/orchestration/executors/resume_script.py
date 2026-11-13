@@ -43,6 +43,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
+from nemo_gym.rollouts.rollout_recovery import ENDED_ALLOCATION_MANIFEST_ENV
 
 
 logger = logging.getLogger(__name__)
@@ -363,6 +364,8 @@ _gym_reconcile_requeue() {{
     if ! printf '%s\n' "$_output" | grep -qx '__GYM_CONTINUATION:retry' || [[ ! "$_total" =~ ^[0-9]{{1,15}}$ ]]; then
         _gym_requeue_stop "${{_reason:-the installed reader did not reconcile it}}"
     fi
+    _gym_ended=$(printf '%s\n' "$_output" | grep -m 1 '^{ended_allocation_manifest_env}=' || true)
+    export {ended_allocation_manifest_env}="${{_gym_ended#{ended_allocation_manifest_env}=}}"
     echo "Requeued chain reconciled: $_reason"
     # The resubmit lock, as gym eval resubmit takes it; one that is held belongs to someone else and stays.
     (set -C; : > "$OUTPUT_DIR/{resubmit_lock_name}") 2>/dev/null || _gym_requeue_stop "another resubmit holds the lock"
@@ -779,6 +782,8 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
         _gym_admission_reason=${{_gym_admission_reason#{continuation_reason_prefix}}}
         case "$_gym_admission" in
             __GYM_CONTINUATION:segment|__GYM_CONTINUATION:retry)
+                _gym_ended=$(printf '%s\n' "$_gym_admission_output" | grep -m 1 '^{ended_allocation_manifest_env}=' || true)
+                export {ended_allocation_manifest_env}="${{_gym_ended#{ended_allocation_manifest_env}=}}"
                 [[ "$_gym_admission" == __GYM_CONTINUATION:retry ]] && _gym_needs_retry=1 || _gym_needs_retry=0
                 [[ -z "$_gym_admission_reason" ]] || echo "Saved recovery evidence: $_gym_admission_reason" ;;
             # The installed reader could not run: no verdict on the saved artifacts, which an inspection reads again.
@@ -1114,6 +1119,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         ),
         admission_command=admission_command,
         continuation_reason_prefix=CONTINUATION_REASON_PREFIX,
+        ended_allocation_manifest_env=ENDED_ALLOCATION_MANIFEST_ENV,
         retry_extension_marker=RETRY_EXTENSION_MARKER,
         retry_extension_name=RETRY_EXTENSION_NAME,
         requeue_unknown_reason=REQUEUE_UNKNOWN_REASON,

@@ -39,6 +39,9 @@ from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
+    HARNESS_TERMINATION_UNCONFIRMED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
     FailureClassificationConfig,
 )
@@ -577,6 +580,7 @@ class RolloutRecords:
         # An unanswered reservation cannot erase an earlier outcome's stop decision.
         self.replay_blocked: set[str] = set()
         self.unresolved_dispatches: set[str] = set()
+        self.unresolved_failures: dict[str, list[RolloutRecord]] = {}
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
         # Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`).
         self.attempt_extension = 0
@@ -728,6 +732,14 @@ class RolloutRecords:
         )
         outcome = self.payloads[key]
         if (
+            key[0] in self.unresolved_failures
+            and key[1] == self.latest[key[0]]
+            and outcome.failure_class == ROLLOUT_ALLOCATION_ENDED
+            and key[0] not in self.manifest.pending_rejudge
+        ):
+            # The writer closed this reservation after allocation end; its diagnostic history remains intact.
+            self.unresolved_dispatches.discard(key[0])
+        if (
             outcome.saved_answer
             or outcome.final_zero
             or outcome.interruption_cause_unknown
@@ -781,6 +793,7 @@ class RolloutRecords:
                         state.check_run_identity(payload, legacy=import_legacy)
                         if key[1] == manifest.next_attempt.get(key[0], 0) - 1:
                             state.unresolved_dispatches.add(key[0])
+                            state.unresolved_failures.setdefault(key[0], []).append(record)
                     continue
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
@@ -922,7 +935,39 @@ class RolloutRecords:
             ) >= max_attempts
         return exhausted
 
-    def allocation_end_charges(self) -> list[dict]:
+    def allocation_end_diagnostics(self) -> set[str]:
+        """Unanswered diagnostics a writer may close as failures once their allocation is known to have ended."""
+        eligible = set()
+        for identity, diagnostics in self.unresolved_failures.items():
+            latest = self.latest[identity]
+            if (identity, latest) in self.payloads or identity in self.manifest.pending_rejudge:
+                continue
+            history = [
+                outcome for index in range(latest) if (outcome := self.payloads.get((identity, index))) is not None
+            ]
+            if any(
+                (outcome.failure_class is None and not outcome.masked_infrastructure)
+                or outcome.terminal
+                or outcome.saved_answer
+                or outcome.final_zero
+                or outcome.interruption_cause_unknown
+                for outcome in history
+            ):
+                continue
+            if all(
+                not (has_saved_generation(row) or keeps_partial_response(row))
+                and not has_recorded_grade(row)
+                and not row.get("_ng_failure_counts_as_zero")
+                and not row.get("_ng_failure_terminal")
+                and row.get("failure_outcome_action") not in {"fail", "count_as_zero", "verify"}
+                and (row.get("failure_kind") or row.get("_ng_failure_class"))
+                not in {HARNESS_TERMINATION_UNCONFIRMED, PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED}
+                for row in (record.read() for record in diagnostics)
+            ):
+                eligible.add(identity)
+        return eligible
+
+    def allocation_end_charges(self, *, close_diagnostics: bool = False) -> list[dict]:
         """The failure rows that charge a rollout for each later end of an allocation it was in flight in.
 
         A reserved attempt with no saved outcome was in flight when the allocation that made it ended: the writer that
@@ -931,19 +976,22 @@ class RolloutRecords:
         outcome stays as it is and each later one gets a non-terminal ``rollout_allocation_ended`` failure. Only an
         identity a resume would run again is charged; a finished, settled or blocked one is never touched. The count
         is derived from the manifest's reservations each time, so a saved charge is never charged again.
+        An unresolved route-failure diagnostic with no retained answer is closed at its existing reservation and
+        spends one failure attempt, including the first. It remains unscored and may run again within the cap.
         """
         if self.manifest.legacy_import:
             return []
         charges = []
+        diagnostics = self.allocation_end_diagnostics() if close_diagnostics else set()
         for identity, original in self.expected.items():
-            if not self._retryable(identity):
+            if identity not in diagnostics and not self._retryable(identity):
                 continue
             ended = [
                 index
                 for index in range(self.manifest.next_attempt.get(identity, 0))
                 if (identity, index) not in self.payloads
             ]
-            for index in ended[1:]:
+            for index in [self.latest[identity]] if identity in diagnostics else ended[1:]:
                 charges.append(
                     dict(original)
                     | {
@@ -953,6 +1001,11 @@ class RolloutRecords:
                         "_ng_failure_terminal": False,
                         "failure_kind": ROLLOUT_ALLOCATION_ENDED,
                         "_ng_failure_message": (
+                            f"attempt {index} has an unresolved route-failure diagnostic; its allocation ended "
+                            "without a saved answer, so it spends one infrastructure-failure attempt"
+                        )
+                        if identity in diagnostics
+                        else (
                             f"attempt {index} was in flight when its allocation ended; this rollout's first such end "
                             "re-ran for free and each later one spends an attempt"
                         ),

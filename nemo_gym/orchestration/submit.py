@@ -563,6 +563,11 @@ def _recover(
                 record,
                 benchmark,
                 keep_budget=True,
+                **(
+                    {"ended_allocation_manifest": decision.ended_allocation_manifest}
+                    if decision.ended_allocation_manifest
+                    else {}
+                ),
                 accounted_walltime_s=collected.accounted_walltime_s if collected is not None else None,
                 accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
                 # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.

@@ -144,6 +144,7 @@ from nemo_gym.orchestration.recovery import (
     select_managed_evidence,
     stopped_followup,
 )
+from nemo_gym.rollouts.rollout_recovery import ENDED_ALLOCATION_MANIFEST_ENV
 from nemo_gym.utils.gym_commit import installed_gym_commit
 from nemo_gym.utils.path_utils import attempt_extension_path_for
 
@@ -2218,6 +2219,7 @@ class SlurmExecutor(BaseExecutor):
         fresh_restart: bool = False,
         segment_walltime: str | None = None,
         rerun_masked: Mapping[str, Any] | None = None,
+        ended_allocation_manifest: str | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -2485,6 +2487,8 @@ class SlurmExecutor(BaseExecutor):
                             else []
                         ),
                         *restart_note,
+                        # The locked snapshot check above validates this admission before sbatch exports it.
+                        f"export {ENDED_ALLOCATION_MANIFEST_ENV}={shlex.quote(ended_allocation_manifest or '')}",
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),

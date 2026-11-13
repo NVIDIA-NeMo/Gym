@@ -744,6 +744,10 @@ def load_attempt_extension(output_fpath: str | Path) -> int:
         raise ConfigError(f"Cannot read the recorded attempt extension {path}: {error}") from error
 
 
+# Recovery passes the exact inspected manifest after confirming its owning allocation ended.
+ENDED_ALLOCATION_MANIFEST_ENV = "NEMO_GYM_ENDED_ALLOCATION_MANIFEST"
+
+
 def load_rerun_masked_approvals(output_fpath: str | Path) -> frozenset[tuple[int, int, int]]:
     """The masked results an operator approved to run again (`--rerun-masked-without-artifact`): each approved
     attempt as (task index, rollout index, attempt index); empty when none.
