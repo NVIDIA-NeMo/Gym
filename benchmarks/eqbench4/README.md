@@ -46,7 +46,9 @@ how the policy's mean gap to the models within three ranks of it moves. `eqbench
 `eqbench4_win_rate` is the mean comparison fraction. Claude Opus 4.8 also scores twelve neutral behavioural traits
 per conversation (`eqbench4_trait/<name>`, 0 to 10); they are informational and do not enter the reward or rating.
 
-**Run conditions.** Policy sampling comes from each row: `temperature: 0.7`, `max_output_tokens: 10000`. The persona
+**Run conditions.** Policy sampling comes from each row: `temperature: 0.7`, `max_output_tokens: 10000`, EQ-Bench
+4's settings for the evaluated model. Upstream's direct Anthropic backend sends no temperature, so the published
+Claude models ran at Anthropic's default of 1.0; reproduce a Claude entry with `--temperature 1.0`. The persona
 uses temperature 0.7 and 10,000 output tokens; the pairwise judges temperature 0.3 and 4,096 tokens; the trait judge
 temperature 0.7 and 16,000 tokens. Reasoning is minimal for Gemini, none for GPT-5.5, and Claude runs without
 extended thinking, as in EQ-Bench 4. There is no episode deadline: an episode is bounded by eight turns per side,
@@ -69,7 +71,7 @@ the score (the row is masked), whole, whenever it stopped:
 | The policy's prompt overflowed its context window (not asked again) | `model_context_limit` | Serve the policy with a longer context |
 | Seven policy replies cut at `max_output_tokens` before any visible text, often all reasoning | `eqbench4:policy_output_budget` | Raise the budget or lower reasoning effort |
 | A provider's content filter withheld the reply | `eqbench4:policy_content_filter` | Check the provider's filter |
-| Seven finished replies without visible text | `eqbench4:policy_empty_reply` | Inspect the policy's replies |
+| Seven finished replies without visible text | `eqbench4:policy_empty_reply` | Inspect the policy's replies. A server reasoning parser (such as vLLM's `--reasoning-parser nemotron_v3`) on a model that does not close `</think>` hides the whole reply as reasoning: serve without the parser and set `uses_reasoning_parser=false` on the policy |
 | The persona gave no usable reply in three attempts | `eqbench4:persona_failed` | Check the persona model |
 
 The agent logs a warning naming the scenario, turn and cause each time. After the run the aggregate metrics report
@@ -150,6 +152,10 @@ and 120 trait-judge calls.
 - Ratings and bootstrap intervals from the published comparisons match upstream's own solver
   (`compute_local_delta_percentile_bootstrap_ratings`) to 1e-12 Elo. The committed `results/elo_results.json` differs
   from re-fitting those comparisons by up to 1.4 Elo; upstream's code gives the same re-fit as Gym.
+- Claude Opus 4.6, evaluated end to end with the default persona and judges at `--temperature 1.0`, rates 1223.5
+  (95% interval 1207.9 to 1237.2), rank 13; its published rating is 1222.7 (1214.1 to 1231.6), rank 13. At the rows'
+  0.7 it rates 1197.2: compared with the same opponents in the same scenarios, its conversations score 0.034 lower
+  than the published ones at 0.7 and 0.002 lower at 1.0.
 
 ## Differences from EQ-Bench 4
 

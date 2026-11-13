@@ -147,6 +147,8 @@ class OpponentComparison(BaseModel):
 
 
 class EQBench4VerifyResponse(EQBench4VerifyRequest, BaseVerifyResponse):
+    # Whether the conversation was judged. A conversation left out of the score was never judged.
+    evaluation_completed: bool = True
     comparisons: list[OpponentComparison] = Field(default_factory=list)
     policy_turns: int = 0
     trait_scores: dict[str, float] | None = None
@@ -185,6 +187,7 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 policy_turns=policy_turns,
                 mask_sample=True,
+                evaluation_completed=False,
                 failure_kind="eqbench4:persona_failed",
                 failure_reason=body.conversation_error or "the persona simulator gave no valid reply",
             )
@@ -196,6 +199,7 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 policy_turns=policy_turns,
                 mask_sample=True,
+                evaluation_completed=False,
                 failure_kind=POLICY_STOP_FAILURE_KINDS[reason],
                 failure_reason=body.conversation_error or "the policy gave no visible reply",
             )

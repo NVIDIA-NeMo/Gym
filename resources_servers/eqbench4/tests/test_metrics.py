@@ -88,7 +88,8 @@ def test_dropped_conversations_and_alerts() -> None:
     assert dropped_conversation_alerts(metrics) == [
         "EQ-Bench 4: the policy stopped replying in 2 of 4 conversations (50.0%), which are left out of the score: "
         "output_budget 1 (raise max_output_tokens or lower the policy's reasoning effort); "
-        "empty_reply 1 (inspect the policy's replies in the rollouts).",
+        "empty_reply 1 (inspect the policy's replies in the rollouts; a server reasoning parser hides the whole reply "
+        "as reasoning when the model does not close </think>).",
         "EQ-Bench 4: the persona simulator gave no usable reply in 1 of 4 conversations (25.0%), which are left out "
         "of the score; check the persona model, which should be the leaderboard's for comparable ratings.",
     ]

@@ -32,7 +32,8 @@ When `trait_judge_model_server` is set, the trait judge scores the conversation'
 `trait_judge_error`.
 
 The response adds `comparisons` (per opponent: fraction, margins, and each judge reading with its verdicts and text),
-`policy_turns`, `trait_scores`, `trait_judge_text` and `trait_judge_error`.
+`policy_turns`, `trait_scores`, `trait_judge_text`, `trait_judge_error`, and `evaluation_completed`: true for a judged
+conversation, false for one left out of the score without judging.
 
 ## Metrics
 

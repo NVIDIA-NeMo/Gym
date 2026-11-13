@@ -141,7 +141,7 @@ async def test_policy_wins_both_orders_against_every_opponent(tmp_path: Path, mo
         "synthetic/second",
     ]
     assert [comparison.comparison_index for comparison in result.comparisons] == [0, 7]
-    assert result.policy_turns == 1 and not result.mask_sample
+    assert result.policy_turns == 1 and not result.mask_sample and result.evaluation_completed is True
     # The judge panel rotates by comparison index; both orders of one comparison use the same judge.
     assert sorted(call["server"] for call in judge.calls) == ["judge_one"] * 2 + ["judge_two"] * 2
     reading = result.comparisons[0].readings
@@ -207,6 +207,8 @@ async def test_persona_failure_is_masked_without_judging(tmp_path: Path, monkeyp
     assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "eqbench4:persona_failed")
     assert result.failure_reason == "persona turn 2: no <internal> section"
     assert not judge.calls and not result.comparisons
+    # Never judged, so no measurement was made.
+    assert result.evaluation_completed is False
 
 
 async def test_one_readable_order_decides_the_comparison(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,6 +250,7 @@ async def test_a_conversation_the_policy_stopped_is_left_out(
     assert result.policy_stop_reason == (reason or "empty_reply")
     assert result.failure_reason == "stopped" and result.policy_turns == 1
     assert not result.comparisons and not judge.calls
+    assert result.evaluation_completed is False
 
 
 def test_every_stop_reason_has_a_failure_kind() -> None:

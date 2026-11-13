@@ -7,11 +7,12 @@ Runs one EQ-Bench 4 roleplay conversation between the policy and a simulated per
 
 - The policy opens. Each policy turn uses that turn's system prompt from the row's `evaluated_system_prompts` and the
   dialogue so far; the first turn uses the row's `responses_create_params` as prepared (system prompt and opening
-  message). Policy calls go through the agent's own `/v1/responses`, so Gym captures them; their usage is summed into
-  the returned response.
+  message). Policy calls go through the agent's own `/v1/responses`, under the rollout's capture path.
 - The persona model (`persona_model_server`) answers each policy turn. It sees the row's `persona_system_prompt`,
   the conversation with the roles swapped, its own latest reply in full and earlier replies as dialogue only, and
-  `[Turn k of n]` before the policy's latest message. Persona calls are not policy calls and are not captured.
+  `[Turn k of n]` before the policy's latest message.
+- The returned response is the last policy reply. Its usage sums every model call of the conversation, the policy's
+  and the persona's, because Gym's rollout usage covers the rollout's whole invocation tree.
 - A persona reply must have a non-empty `<internal>` section and a non-empty `<dialogue>` without control tags.
   Otherwise the agent shows the reply back with `persona_correction_message` and asks again, up to
   `persona_max_attempts` replies; then the conversation ends as `persona_failed`. `<status>ended</status>` (or `end`,
@@ -26,6 +27,26 @@ Runs one EQ-Bench 4 roleplay conversation between the policy and a simulated per
 - Each side speaks at most `num_turns` times (eight in EQ-Bench 4), so a full conversation ends with the persona.
 
 The agent forwards `/aggregate_metrics` to its resources server, which holds the published comparisons the rating needs.
+
+## Trajectory record
+
+With model-call capture on (`++observability_enabled=true ++model_call_capture_dir=<absolute path>`), the result
+carries `ng_trajectory`, and a conversation that breaks off publishes the record so far with its failure. The record
+has two agent invocations:
+
+- **`root`, the policy.** Its status is `failed` when the policy stopped (with `stop_reason` set to the
+  `policy_stop_reason`), `incomplete` when the persona broke the conversation off, and `completed` otherwise.
+- **`persona`, the persona simulator.** Gym counts it as a second agent of the episode, as `nemo_user_sim` does its
+  simulated user. Its status is `failed` after an unusable reply in every attempt, and `completed` otherwise.
+
+Every model call is one turn of its speaker's invocation, retries of an empty or unusable reply included. A turn names
+its call by model server and response id, and holds the call's input and output. The judge calls belong to the
+resources server's verifier invocation. Turns carry no tool steps. `resolved` is null, with a `resolution_unavailable`
+gap, because the grade is a fraction. The record passes the `gym-p0/v1` evidence gate with `--no-tools`:
+
+```bash
+python scripts/inspect_harness_conformance.py --bundle <rollouts.jsonl> --output <dir> --no-tools
+```
 
 ## Configuration
 
