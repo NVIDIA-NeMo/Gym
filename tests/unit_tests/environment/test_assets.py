@@ -70,3 +70,29 @@ def test_an_old_folder_path_still_selects_when_no_entry_has_that_name(roots: tup
     assert _selected("suite/v1") == config.resolve()
     with pytest.raises(RegistryError, match="Unknown catalog entry"):
         _listed("suite/v1")
+
+
+@pytest.mark.parametrize("kind", ["benchmark", "environment"])
+@pytest.mark.parametrize("name", ["stable_id", "suite/stable_id"])
+def test_typo_suggestions_include_declared_ids(roots: tuple[Path, Path], kind: str, name: str) -> None:
+    _, later = roots
+    _write_manifest(later, f"{kind}s", "group/moved", _manifest(name, kind))
+
+    with pytest.raises(ValueError) as error:
+        asset_config_path(kind, name.removesuffix("id") + "if")
+
+    assert f"Did you mean `{name}`?" in str(error.value)
+
+
+@pytest.mark.parametrize("kind", ["benchmark", "environment"])
+def test_typo_suggestions_preserve_folder_aliases(roots: tuple[Path, Path], kind: str) -> None:
+    earlier, _ = roots
+    manifest = _write_manifest(earlier, f"{kind}s", "folder_alias", _manifest("stable_id", kind))
+    # Benchmark path discovery recognizes configs by their dataset declaration.
+    dataset_kind = "benchmark" if kind == "benchmark" else "example"
+    manifest.with_name("config.yaml").write_text(f"dataset:\n  type: {dataset_kind}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        asset_config_path(kind, "folder_aliaz")
+
+    assert "Did you mean `folder_alias`?" in str(error.value)

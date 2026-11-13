@@ -115,17 +115,19 @@ def asset_config_path(flag: str, value: str) -> str:
         return str(matches[0])
 
     # No match: build a "did you mean?" hint and the roots searched
-    if flag == "benchmark":
-        # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
-        # the generic one-level flavor/sibling search below can't see them.
-        # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
-        from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
+    if flag in _CATALOG_FLAGS:
+        from nemo_gym.environment.registry import _legacy_config_paths, declared_manifests
 
-        config_names = {
-            _benchmark_config_name(p.relative_to(root / parent))
-            for root in roots
-            for p in _benchmark_config_paths(root / parent)
-        }
+        # Suggest declared IDs as well as the folder/flavor aliases that remain selectable.
+        config_names: set[str] = set()
+        for root in roots:
+            tree = root / parent
+            if not tree.is_dir():
+                continue
+            config_names.update(manifest.name for _, manifest in declared_manifests(tree))
+            config_names.update(
+                name for name, _ in _legacy_config_paths(tree, "benchmark" if flag == "benchmark" else "environment")
+            )
         # A bare directory that only groups benchmarks (e.g. `livecodebench`) is not itself selectable, so point
         # at the config names under it; otherwise fall back to a fuzzy match across every token.
         under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
