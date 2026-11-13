@@ -4,9 +4,10 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: Prepares all 70 pinned Terminal-Bench-Science v0.1 tasks for mini-SWE 2.4.6 agent sessions and separate
-  offline verification. At most 68 tasks return rewards; two tasks whose working directory is / fail at seed and
-  are excluded from the default mean. Use terminal_bench_science/miniswe_legacy_agent for full task coverage.
+description: The pinned 70-task Terminal-Bench-Science v0.1 dataset in its Harbor task folders, run by mini-SWE 2.4.6
+  agent sessions through the Harbor environment server with separate no-network official verification. Two tasks
+  whose working directory is / are refused by mini-SWE at seed; use terminal_bench_science/miniswe_legacy_agent for
+  them.
 modality: text
 licensing: Apache-2.0
 authors:
@@ -18,16 +19,11 @@ reward:
   higher_is_better: true
 determinism: unknown
 config_path: ../miniswe.yaml
-dataset_owner: terminal_bench_science_miniswe_resources_server
-resources_server: terminal_bench_4
+harbor_target: terminal_bench_science
+resources_server: null
 agent_server: mini_swe_agent
-datasets:
-- name: terminal_bench_science
-  type: benchmark
-  jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
-  prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
-  num_repeats: 1
+datasets: []
 model_server: policy_model
 canonical_split: benchmark
-prompt_source: prepared
+prompt_source: agent
 lifecycle: active

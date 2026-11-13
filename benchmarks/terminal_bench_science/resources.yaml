@@ -1,27 +1,6 @@
 # Terminal-Bench-Science reuses the pinned Harbor-package runtime in
 # resources_servers/terminal_bench_4. Only the dataset pin, task images, and
 # artifact locations differ from benchmarks/terminal_bench_4/resources.yaml.
-
-# The provider block that harnesses borrowing the task sandbox through SandboxAccess (codex.yaml,
-# miniswe.yaml) reconnect through. It must reach the same OpenSandbox deployment as the resources
-# server's environment.sandbox_provider.
-terminal_bench_science_sandbox:
-  opensandbox:
-    connection:
-      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
-      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
-      protocol: http
-      use_server_proxy: true
-      transport_backend: aiohttp
-      tls_verify: false
-    operations:
-      # The harness's supervisor runs for the whole 8-hour budget: poll it instead of holding one stream.
-      background_exec: true
-      retries: 5
-      retry_delay_s: 5
-      retry_max_delay_s: 60
-      status_poll_timeout_s: 20
-
 terminal_bench_science:
   resources_servers:
     terminal_bench_4:

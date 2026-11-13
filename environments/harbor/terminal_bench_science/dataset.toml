@@ -1,0 +1,564 @@
+# Terminal-Bench-Science v0.1 on the Harbor task shape: the committed entry for the package-store dataset.
+# `gym dataset pull terminal_bench_science` fetches the source below into this folder (the task folders and
+# manifest.toml it writes are gitignored); `gym dataset validate terminal_bench_science` and
+# `gym eval run terminal_bench_science ...` then resolve the entry name to this folder.
+[gym]
+# Harbor's package store, v0.1 (70 tasks), pinned by the digest benchmarks/terminal_bench_science/manifest.json
+# records for the resources server's preset, so both paths run the same packages.
+source = "harbor:terminal-bench-science/terminal-bench-science@sha256:91531bf50016a7c64f6cc60794a17c64c6b2c14858a8ae0de39ca16f2abd611a"
+
+# The overrides below are the ones the resources server's preset applies (benchmarks/terminal_bench_science/README.md,
+# "Deviations from the packages").
+#
+# Verifier timeouts. finite-free-stam and gen-turan-paths rebuild the submission against a prebuilt Mathlib (about
+# 6 GB of .olean files) that a lazily pulled sandbox image can take longer than the packages' 600 s to read.
+# certified-sparse-regression's CPU-bound verifier took 4002 s of its 3600 s on the agent's 4 CPUs.
+#
+# Verifier CPUs and memory. 58 packages declare a separate [verifier.environment] without cpus or memory, which
+# Harbor leaves unlimited on Docker; a sandbox provider applies its own default instead (1 CPU, 2 GiB on
+# OpenSandbox), with which highdim-mediation-debiasing's reference solution loses its verifier. Those verifiers get
+# the task's agent allocation.
+#
+# Verifier network. Every package denies its verifier all egress with [verifier.environment] network_mode =
+# "no-network". Gym's loader applies a verifier restriction from [verifier].network_mode, as an egress policy on the
+# separate verifier's sandbox, and refuses one on [verifier.environment]; so each restriction is set on [verifier] and
+# the verifier environment is public. The verifier sandbox still has no egress (OpenSandbox only).
+
+[gym.tasks."3x2pt-inference".verifier]
+network_mode = "no-network"
+
+[gym.tasks."3x2pt-inference".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."ambient-rna-correction".verifier]
+network_mode = "no-network"
+
+[gym.tasks."ambient-rna-correction".verifier.environment]
+cpus = 4
+memory_mb = 12288
+network_mode = "public"
+
+[gym.tasks."amr-poisson-optimize".verifier]
+network_mode = "no-network"
+
+[gym.tasks."amr-poisson-optimize".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."animal-reid".verifier]
+network_mode = "no-network"
+
+[gym.tasks."animal-reid".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."ankle-mri-findings".verifier]
+network_mode = "no-network"
+
+[gym.tasks."ankle-mri-findings".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."baseline-free-localization".verifier]
+network_mode = "no-network"
+
+[gym.tasks."baseline-free-localization".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."betalactam-multimodal-transfer".verifier]
+network_mode = "no-network"
+
+[gym.tasks."betalactam-multimodal-transfer".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."cell-lineage-reconstruction".verifier]
+network_mode = "no-network"
+
+[gym.tasks."cell-lineage-reconstruction".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."certified-sparse-regression".verifier]
+timeout_sec = 7200.0
+network_mode = "no-network"
+
+[gym.tasks."certified-sparse-regression".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."cilia-segmentation".verifier]
+network_mode = "no-network"
+
+[gym.tasks."cilia-segmentation".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."clinical-metadata-recovery".verifier]
+network_mode = "no-network"
+
+[gym.tasks."clinical-metadata-recovery".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."cmb-cross-inference".verifier]
+network_mode = "no-network"
+
+[gym.tasks."cmb-cross-inference".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."dapi-he-alignment".verifier]
+network_mode = "no-network"
+
+[gym.tasks."dapi-he-alignment".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."diag-chipseq".verifier]
+network_mode = "no-network"
+
+[gym.tasks."diag-chipseq".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."dna-storage-codec".verifier]
+network_mode = "no-network"
+
+[gym.tasks."dna-storage-codec".verifier.environment]
+cpus = 1
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."duan-thesis".verifier]
+network_mode = "no-network"
+
+[gym.tasks."duan-thesis".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."eeg-erp-recovery".verifier]
+network_mode = "no-network"
+
+[gym.tasks."eeg-erp-recovery".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."energy-routing".verifier]
+network_mode = "no-network"
+
+[gym.tasks."energy-routing".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."finite-free-stam".verifier]
+timeout_sec = 1800.0
+network_mode = "no-network"
+
+[gym.tasks."finite-free-stam".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."foraging-cognitive-model".verifier]
+network_mode = "no-network"
+
+[gym.tasks."foraging-cognitive-model".verifier.environment]
+cpus = 4
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."frustrated-heisenberg-nqs".verifier]
+network_mode = "no-network"
+
+[gym.tasks."frustrated-heisenberg-nqs".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."gen-turan-paths".verifier]
+timeout_sec = 1800.0
+network_mode = "no-network"
+
+[gym.tasks."gen-turan-paths".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."genomic-model-ranking".verifier]
+network_mode = "no-network"
+
+[gym.tasks."genomic-model-ranking".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."geometric-pharmacophore-alignment".verifier]
+network_mode = "no-network"
+
+[gym.tasks."geometric-pharmacophore-alignment".verifier.environment]
+cpus = 4
+memory_mb = 2048
+network_mode = "public"
+
+[gym.tasks."guided-wave-localization".verifier]
+network_mode = "no-network"
+
+[gym.tasks."guided-wave-localization".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."hbv-calibration-1".verifier]
+network_mode = "no-network"
+
+[gym.tasks."hbv-calibration-1".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."highdim-mediation-debiasing".verifier]
+network_mode = "no-network"
+
+[gym.tasks."highdim-mediation-debiasing".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."hysteretic-aquifer-control".verifier]
+network_mode = "no-network"
+
+[gym.tasks."hysteretic-aquifer-control".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."inelastic-constitutive-discovery".verifier]
+network_mode = "no-network"
+
+[gym.tasks."inelastic-constitutive-discovery".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."inverse-lithography".verifier]
+network_mode = "no-network"
+
+[gym.tasks."inverse-lithography".verifier.environment]
+cpus = 1
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."inverse-waveguide-shape".verifier]
+network_mode = "no-network"
+
+[gym.tasks."inverse-waveguide-shape".verifier.environment]
+cpus = 1
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."koopman-mfg-id".verifier]
+network_mode = "no-network"
+
+[gym.tasks."koopman-mfg-id".verifier.environment]
+cpus = 4
+memory_mb = 12288
+network_mode = "public"
+
+[gym.tasks."leaky-bloch-meep".verifier]
+network_mode = "no-network"
+
+[gym.tasks."leaky-bloch-meep".verifier.environment]
+cpus = 4
+memory_mb = 15360
+network_mode = "public"
+
+[gym.tasks."linked-cell-suppression".verifier]
+network_mode = "no-network"
+
+[gym.tasks."linked-cell-suppression".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."localized-sspd-solver".verifier]
+network_mode = "no-network"
+
+[gym.tasks."localized-sspd-solver".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."longitudinal-clinical-agent".verifier]
+network_mode = "no-network"
+
+[gym.tasks."longitudinal-clinical-agent".verifier.environment]
+cpus = 1
+memory_mb = 2048
+network_mode = "public"
+
+[gym.tasks."masked-spherical-remap".verifier]
+network_mode = "no-network"
+
+[gym.tasks."masked-spherical-remap".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."mendota-ice-phenology".verifier]
+network_mode = "no-network"
+
+[gym.tasks."mendota-ice-phenology".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."microarch-modeling".verifier]
+network_mode = "no-network"
+
+[gym.tasks."microarch-modeling".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."mri-harmonization".verifier]
+network_mode = "no-network"
+
+[gym.tasks."mri-harmonization".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."nanoindentation-property-extraction".verifier]
+network_mode = "no-network"
+
+[gym.tasks."nanoindentation-property-extraction".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."navigation-sensor-calibration".verifier]
+network_mode = "no-network"
+
+[gym.tasks."navigation-sensor-calibration".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."neo-orbit-determination".verifier]
+network_mode = "no-network"
+
+[gym.tasks."neo-orbit-determination".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."noisy-blackbox-optimization".verifier]
+network_mode = "no-network"
+
+[gym.tasks."noisy-blackbox-optimization".verifier.environment]
+cpus = 4
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."ode-law-discovery".verifier]
+network_mode = "no-network"
+
+[gym.tasks."ode-law-discovery".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."onsager-ising-lean".verifier]
+network_mode = "no-network"
+
+[gym.tasks."onsager-ising-lean".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."ont-tn-qc".verifier]
+network_mode = "no-network"
+
+[gym.tasks."ont-tn-qc".verifier.environment]
+cpus = 4
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."protein-active-learning".verifier]
+network_mode = "no-network"
+
+[gym.tasks."protein-active-learning".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."qsm-reconstruction".verifier]
+network_mode = "no-network"
+
+[gym.tasks."qsm-reconstruction".verifier.environment]
+cpus = 4
+memory_mb = 2048
+network_mode = "public"
+
+[gym.tasks."rdkit-ic-constraints".verifier]
+network_mode = "no-network"
+
+[gym.tasks."rdkit-ic-constraints".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."reactor-safety-control".verifier]
+network_mode = "no-network"
+
+[gym.tasks."reactor-safety-control".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."regularized-game-proof".verifier]
+network_mode = "no-network"
+
+[gym.tasks."regularized-game-proof".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."rolling-shutter-oma".verifier]
+network_mode = "no-network"
+
+[gym.tasks."rolling-shutter-oma".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."rv-astrometry-fitting".verifier]
+network_mode = "no-network"
+
+[gym.tasks."rv-astrometry-fitting".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."si-fracture-fbc".verifier]
+network_mode = "no-network"
+
+[gym.tasks."si-fracture-fbc".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."small-area-equivalence".verifier]
+network_mode = "no-network"
+
+[gym.tasks."small-area-equivalence".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."sparse-network-assimilation".verifier]
+network_mode = "no-network"
+
+[gym.tasks."sparse-network-assimilation".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."spatial-cell-annotation".verifier]
+network_mode = "no-network"
+
+[gym.tasks."spatial-cell-annotation".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."spin-glass-groundstate".verifier]
+network_mode = "no-network"
+
+[gym.tasks."spin-glass-groundstate".verifier.environment]
+cpus = 4
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."stacking-disorder-diffraction".verifier]
+network_mode = "no-network"
+
+[gym.tasks."stacking-disorder-diffraction".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."stereo-dem-icesat2".verifier]
+network_mode = "no-network"
+
+[gym.tasks."stereo-dem-icesat2".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."supraglacial-lake-classification".verifier]
+network_mode = "no-network"
+
+[gym.tasks."supraglacial-lake-classification".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."symbolic-regression".verifier]
+network_mode = "no-network"
+
+[gym.tasks."symbolic-regression".verifier.environment]
+cpus = 1
+memory_mb = 2048
+network_mode = "public"
+
+[gym.tasks."tamp-skill-planning".verifier]
+network_mode = "no-network"
+
+[gym.tasks."tamp-skill-planning".verifier.environment]
+cpus = 4
+memory_mb = 16384
+network_mode = "public"
+
+[gym.tasks."tess-transit-vetting".verifier]
+network_mode = "no-network"
+
+[gym.tasks."tess-transit-vetting".verifier.environment]
+cpus = 2
+memory_mb = 4096
+network_mode = "public"
+
+[gym.tasks."traffic-flux-inversion".verifier]
+network_mode = "no-network"
+
+[gym.tasks."traffic-flux-inversion".verifier.environment]
+cpus = 2
+memory_mb = 2048
+network_mode = "public"
+
+[gym.tasks."tumor-immune-interface".verifier]
+network_mode = "no-network"
+
+[gym.tasks."tumor-immune-interface".verifier.environment]
+cpus = 2
+memory_mb = 8192
+network_mode = "public"
+
+[gym.tasks."variable-star-vetting".verifier]
+network_mode = "no-network"
+
+[gym.tasks."variable-star-vetting".verifier.environment]
+cpus = 2
+memory_mb = 2048
+network_mode = "public"
+
+[gym.tasks."virtual-baseline-localization".verifier]
+network_mode = "no-network"
+
+[gym.tasks."virtual-baseline-localization".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."xrd-multiphase-qpa".verifier]
+network_mode = "no-network"
+
+[gym.tasks."xrd-multiphase-qpa".verifier.environment]
+cpus = 4
+memory_mb = 8192
+network_mode = "public"

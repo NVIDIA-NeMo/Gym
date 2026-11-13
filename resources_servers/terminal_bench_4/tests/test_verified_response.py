@@ -8,7 +8,7 @@ import pytest
 
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.terminal_bench_4 import lifecycle
-from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer, _termination_from_response
+from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import AgentTermination, SandboxedVerifyRequest, SandboxedVerifyResponse
 
 
@@ -304,48 +304,6 @@ async def test_a_killed_agent_scores_zero_without_its_verifier(tmp_path, monkeyp
     assert (verified["reward"], verified["evaluation_completed"]) == (0.0, True)
     assert verified["infrastructure_error"] is None and verified["failure_reason"] is None
     assert "_ng_failure_class" not in verified
-
-
-async def test_a_mini_swe_runner_killed_mid_step_scores_zero_without_its_verifier(tmp_path, monkeypatch):
-    """mini_swe_agent reports a runner killed mid-step as an incomplete response; it ends the attempt as a kill on the
-    /run path does, while its wall-time stop is still verified."""
-    for step in ("download_dir", "collect", "run_verifier", "cleanup"):
-        monkeypatch.setattr(lifecycle, step, AsyncMock())
-
-    def response(termination: str) -> NeMoGymResponse:
-        return NeMoGymResponse(
-            id="resp",
-            created_at=0,
-            model="test-model",
-            object="response",
-            output=[],
-            parallel_tool_calls=True,
-            tool_choice="auto",
-            tools=[],
-            status="incomplete",
-            metadata={"mini_swe_termination": termination},
-        )
-
-    assert _termination_from_response(response("timeout")).reason == "timeout"
-    termination = _termination_from_response(response("killed"))
-    environment = SimpleNamespace(main=object(), closed=False, quiesce_agent=AsyncMock(), stop=AsyncMock())
-    session = SimpleNamespace(
-        termination=termination,
-        environment=environment,
-        result={},
-        diagnostics=[],
-        phase="verifying",
-        subphase=None,
-        persist=lambda: None,
-    )
-
-    await lifecycle.finalize_session(session, grade=True)
-
-    lifecycle.run_verifier.assert_not_awaited()
-    assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}, "source": "agent_killed"}
-    assert session.result["interrupted"]["reason"] == "agent_killed"
-    verified = _verified(tmp_path, session.result, termination, session.diagnostics)
-    assert (verified["reward"], verified["evaluation_completed"]) == (0.0, True)
 
 
 @pytest.mark.parametrize("status", [401, 403])

@@ -509,26 +509,19 @@ async def test_relative_workdir_fails_provisioning(harness, monkeypatch) -> None
 
 
 @pytest.mark.parametrize(
-    "status,details,metadata,reason",
+    "status,details,reason",
     [
-        ("completed", None, None, "completed"),
-        ("incomplete", None, None, "timeout"),
-        ("incomplete", {"reason": "max_output_tokens"}, None, "nonzero_exit"),
-        # mini-SWE's wall-time and step-limit stops are verified like any other incomplete run.
-        ("incomplete", None, {"mini_swe_termination": "timeout"}, "timeout"),
-        ("incomplete", None, {"mini_swe_termination": "LimitsExceeded"}, "timeout"),
-        # A runner killed mid-step goes to the killed-agent policy, which scores it zero without its verifier.
-        ("incomplete", None, {"mini_swe_termination": "killed"}, "killed"),
+        ("completed", None, "completed"),
+        ("incomplete", None, "timeout"),
+        ("incomplete", {"reason": "max_output_tokens"}, "nonzero_exit"),
         # An agent that died while its sandbox lives (codex_agent verify_after_agent_error).
-        ("failed", None, None, "nonzero_exit"),
+        ("failed", None, "nonzero_exit"),
     ],
 )
-async def test_termination_follows_the_agent_response_and_grading_still_runs(
-    harness, status, details, metadata, reason
-) -> None:
+async def test_termination_follows_the_agent_response_and_grading_still_runs(harness, status, details, reason) -> None:
     request = SimpleNamespace(session={})
     await harness.server.seed_session(request, harness.seed())
-    body = harness.verify_body(status, incomplete_details=details, metadata=metadata)
+    body = harness.verify_body(status, incomplete_details=details)
     verified = await harness.server.verify(request, harness.verify_request(body))
     assert verified.termination.reason == reason
     assert verified.evaluation_completed

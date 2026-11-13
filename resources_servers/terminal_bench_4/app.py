@@ -928,14 +928,10 @@ def _lost_session(body: ResourcesSessionVerifyRequest, reason: str, failure_kind
 
 
 def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
-    """Map a closed agent's final response onto TB4's termination record (grading still runs, except for a killed
-    agent, which scores zero as on the /run path)."""
+    """Map a closed agent's final response onto TB4's termination record (grading still runs)."""
     if response.status in (None, "completed"):
         return AgentTermination(reason="completed")
     if response.status == "incomplete":
-        if (response.metadata or {}).get("mini_swe_termination") == "killed":
-            # mini-SWE's runner died mid-step: by the agent's own command or an OOM kill.
-            return AgentTermination(reason="killed", detail="mini-SWE was killed mid-step")
         reason = response.incomplete_details.reason if response.incomplete_details else None
         if reason == "max_output_tokens":
             return AgentTermination(reason="nonzero_exit", detail="The final model call hit max_output_tokens")

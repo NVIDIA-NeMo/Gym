@@ -9,22 +9,27 @@ Every task is a Harbor package. Its agent works in a container with public netwo
 for up to 8 hours. A separate verifier container with no network then grades the declared
 artifacts.
 
-This benchmark reuses the pinned Harbor-package runtime in
-[`resources_servers/terminal_bench_4`](../../resources_servers/terminal_bench_4/README.md).
-Only the dataset pin, the task images and the run directories differ from Terminal-Bench 4.
-It does not use [`environment_servers/harbor`](../../environment_servers/harbor/README.md):
-that server rejects a separate verifier environment and restricted networking when it seeds a
-task, and every verifier here runs in its own container with no network.
+`terminal_bench_science/miniswe` runs the tasks on the generic
+[`environment_servers/harbor`](../../environment_servers/harbor/README.md) environment server,
+through the committed entry
+[`environments/harbor/terminal_bench_science`](../../environments/harbor/terminal_bench_science/README.md),
+as Terminal-Bench 4's mini-SWE preset does. The Codex presets and the deprecated `/run` preset
+(`miniswe_legacy_agent`) reuse the pinned Harbor-package runtime in
+[`resources_servers/terminal_bench_4`](../../resources_servers/terminal_bench_4/README.md); only
+the dataset pin, the task images and the run directories differ from Terminal-Bench 4. The
+sections from [Dataset pin](#dataset-pin) through [Compose tasks](#compose-tasks) describe that
+runtime; [Profile](#profile) says which of its settings the Harbor preset carries.
 
 ## Measurement contract
 
-`terminal_bench_science/miniswe` protocol `0.2.0` prepares all 70 pinned tasks, but its session
-harness supports at most 68 reward-bearing tasks. `ode-law-discovery` and
-`geometric-pharmacophore-alignment` fail at agent seed because their working directory is `/`.
-Those failures have no reward and are excluded from the default `mean/reward`, so the
-unadjusted mean is not a full 70-task leaderboard score. For full task coverage, use
-`terminal_bench_science/miniswe_legacy_agent` protocol `0.1.0`. Session and relay scores are
-separate measurements; the version change records the new adapter and its coverage limit.
+`terminal_bench_science/miniswe` protocol `0.2.0` runs all 70 pinned tasks through the Harbor
+environment server, but mini-SWE supports at most 68 reward-bearing tasks.
+`ode-law-discovery` and `geometric-pharmacophore-alignment` fail at agent seed because their
+working directory is `/`. Those failures have no reward and are excluded from the default
+`mean/reward`, so the unadjusted mean is not a full 70-task leaderboard score. For full task
+coverage, use `terminal_bench_science/miniswe_legacy_agent` protocol `0.1.0`. Harbor-path and
+relay scores are separate measurements; the version change records the new adapter and its
+coverage limit.
 
 A run is comparable with the [public leaderboard](https://www.terminal-bench-science.ai/) when
 it keeps these fixed:
@@ -33,7 +38,8 @@ it keeps these fixed:
   (Git tag `v0.1.0`), content hash
   `sha256:91531bf50016a7c64f6cc60794a17c64c6b2c14858a8ae0de39ca16f2abd611a`. `manifest.json`
   pins all 70 task packages by digest, and the resources server checks each package against its
-  digest before it allocates a sandbox ([Dataset pin](#dataset-pin)).
+  digest before it allocates a sandbox ([Dataset pin](#dataset-pin)). The Harbor entry pulls the
+  same dataset digest and checks each task folder against the content hash its pull recorded.
 - **Task contract.** Gym reads each pinned `task.toml` and `instruction.md` unchanged: the agent
   image built from `environment/`, its CPUs, memory, storage, time budget and declared
   artifacts, and a separate verifier image built from `tests/` with its own timeout.
@@ -43,7 +49,7 @@ it keeps these fixed:
   runs three trials per task, 210 in all (`++num_repeats=3`), and includes every trial in its
   denominator. Gym's default `mean/reward` includes only scored trials; count excluded
   failures as zero when comparing with the leaderboard, including the two unsupported
-  session tasks above. Partial credit is reported separately and never replaces the reward
+  mini-SWE tasks above. Partial credit is reported separately and never replaces the reward
   ([Scoring](#scoring)).
 - **Deviations.** A few deployment settings differ from the packages. Each is listed with its
   reason and its override in [Deviations from the packages](#deviations-from-the-packages).
@@ -59,10 +65,11 @@ The manifest also records the 70 task package digests. They match the
 `tasks/dataset.toml` of Git tag `v0.1.0` (commit `f81afac4`), and the resources server's
 content hash reproduces each of them from that tag.
 
-The `/run` profile's `prepare.py` writes identity rows only. The mini-SWE session and Codex
-profiles use `prepare_codex.py`, which also embeds each package's official instruction as the
-row's prompt. The resources server downloads each package and verifies its digest before it
-allocates a sandbox.
+The `/run` profile's `prepare.py` writes identity rows only. The Codex profiles use
+`prepare_codex.py`, which also embeds each package's official instruction as the row's prompt.
+The resources server downloads each package and verifies its digest before it allocates a
+sandbox. The mini-SWE preset needs neither script: `gym dataset pull terminal_bench_science`
+fetches the task folders, and the Harbor environment server reads each instruction from its folder.
 
 ## Images
 
@@ -278,7 +285,7 @@ The reward is the verifier's official binary `reward.txt`, and a trial passes on
 The official protocol is three trials per task, with reward averaged over all 210 trials. Like
 Terminal-Bench 4's profile, this one runs one trial per task; add `++num_repeats=3` for the
 leaderboard's repeat count. `mean/reward` reports the average over scored trials; the mini-SWE
-session preset still has the coverage limit described in the [Measurement contract](#measurement-contract).
+preset has the coverage limit described in the [Measurement contract](#measurement-contract).
 
 As on Terminal-Bench 4, a verifier timeout is an infrastructure failure and is left out of the
 default aggregates. The leaderboard's denominator counts every trial, so count such a trial as
@@ -300,14 +307,16 @@ default means; those diagnostic zeros do not add it to the denominator.
 
 ## Profile
 
-`terminal_bench_science/miniswe` (`miniswe.yaml`) runs mini-SWE 2.4.6 inside each task sandbox
-through the agent sessions of
-[`mini_swe_agent`](../../responses_api_agents/mini_swe_agent/README.md#agent-sessions). As with
-[Codex](#codex-in-the-task-sandbox), it is composed with the resources server and
-`single_agent_turn_legacy`, which seeds both, closes mini-SWE before grading, then closes the
-resources session. The resources server lends the task sandbox through `SandboxAccess`; grading,
-partial credit, artifacts and cleanup are the same as for Codex. Model calls go through Gym's
-model server and are captured; token IDs and logprobs are not (see the agent's README).
+`terminal_bench_science/miniswe` (`miniswe.yaml`) runs mini-SWE 2.4.6 through the
+[Harbor environment server](../../environment_servers/harbor/README.md) on the task folders of
+[`environments/harbor/terminal_bench_science`](../../environments/harbor/terminal_bench_science/README.md)
+(`gym dataset pull terminal_bench_science` fetches them). The server owns each task sandbox, its
+Compose group and the separate verifier, and lends the sandbox to
+[`mini_swe_agent`](../../responses_api_agents/mini_swe_agent/README.md#agent-sessions)'s agent
+session; each row carries the official instruction and the task's own agent budget. Model calls
+go through Gym's model server and are captured; token IDs and logprobs are not (see the agent's
+README). `--agent-type` runs another harness on the same tasks, with that harness's own shipped
+limits; only the episode bound and the server settings below carry over.
 
 The defaults follow Harbor's built-in `mini-swe-agent`:
 
@@ -328,29 +337,38 @@ Terminus-2 entries.
 
 How the profile runs:
 
-- **Prompt.** Rows carry the official instruction as their prompt. The profile uses the Codex
-  profile's rows, which `prepare_codex.py` writes (see below), and mini-SWE renders the
-  instruction with its `mini.yaml` templates.
+- **Prompt.** The Harbor environment server gives mini-SWE each task's `instruction.md`, which
+  mini-SWE renders with its `mini.yaml` templates. No rows are prepared.
+- **Images.** Each task's agent, verifier and sidecar images come from its Dockerfiles, built
+  and recorded when the dataset is prepared (see the entry's README); the resources server's
+  `tbsci_*_image` settings do not apply.
 - **Runtime.** The agent server uploads mini-SWE's pinned runtime into the task sandbox at seed,
   so the sandbox needs no PyPI access for it. It needs glibc 2.28 or newer and about 450 MB
   under `/tmp`; every v0.1 agent image is Debian or Ubuntu based, and none sets `[agent].user`.
-- **Run budget.** `++tbsci_agent_max_timeout_sec` is the run's wall-clock limit itself, as
-  `++tbsci_agent_timeout_sec` is for Codex: the session seed carries no task budget to cap it.
-  Its default, 28800 seconds, is every v0.1 task's budget. A larger value runs past the official
-  budget, unlike the `/run` profile, which takes the smaller of the two.
-- **Episode bound.** 46800 seconds (`++tbsci_episode_timeout_sec`), as for Codex: the runtime
-  installation, the 8-hour agent budget and the slowest verifier (12000 seconds).
+- **Run budget.** Each task's own 8-hour budget bounds the agent; `++tbsci_agent_max_timeout_sec`
+  can only shorten it.
+- **Episode bound.** 46800 seconds (`++tbsci_episode_timeout_sec`): harness setup (900
+  seconds, mini-SWE's install allowance), the 8-hour agent budget, the separate verifier's start
+  and the slowest verifier (12000 seconds).
+- **Verifier settings.** The entry's `dataset.toml` carries the verifier timeouts and the
+  verifier CPUs and memory from [Deviations from the packages](#deviations-from-the-packages),
+  and each package's no-network verifier restriction (see the entry's README).
+- **Deployment settings.** The preset sets the three sandbox labels from [Execution](#execution)
+  (`nemo.nvidia.com/resources: custom`, `nemo.nvidia.com/oom-kill: process`,
+  `nemo.nvidia.com/s3-hostpath: 'false'`) and the resources server's 1200-second readiness wait
+  for lazily pulled images. It does not raise the disk limit: each sandbox's limit is the
+  package's `storage_mb`, where the resources server's presets raise it to 100 GiB.
+- **Compose tasks.** The Harbor server starts the five Compose tasks' sidecars as separate
+  sandboxes without the resources server's per-task Compose settings; see the entry's README.
 - **Model address.** mini-SWE calls the model server from inside the sandbox at the address the
   Gym servers bind (see [Run](#run)); there is no separate sandbox-side URL.
-- **Split sandbox endpoints.** The resources server lends a sandbox through one provider block,
-  so `++tbsci_split_sandbox_endpoints=true` is refused at seed. No task needs a GPU: point
-  `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` at the CPU deployment.
 - **Working directory `/`.** `ode-law-discovery` and `geometric-pharmacophore-alignment` set no
   `WORKDIR`, so their agent starts in `/`. `mini_swe_agent` refuses a working directory that
-  contains its session directory under `/tmp`, so these two tasks fail at seed. Each is recorded
-  once in `rollouts_failures.jsonl` as a terminal `environment_server_failed` failure with no
-  reward, so it is left out of `mean/reward`. Count them as fails when you compare with the
-  leaderboard, or run them with `terminal_bench_science/codex` or the `/run` profile.
+  contains its session directory under `/tmp`, so these two tasks are refused at seed. Each is
+  recorded once in `rollouts_failures.jsonl` as a terminal failure with no reward, so it is left
+  out of `mean/reward`; their reference solutions pass on this path. Count them as fails when you
+  compare with the leaderboard, or run them with `terminal_bench_science/codex` or the `/run`
+  profile.
 
 ### `/run` profile
 
@@ -457,16 +475,42 @@ keys (provider name, update checks, analytics, history) do not change the reques
 
 ## Run
 
-The `gym` CLI does not read an env file, and `resources.yaml` falls back to `localhost` when
-`OPENSANDBOX_DOMAIN` is unset. Export the OpenSandbox credentials first:
+The `gym` CLI does not read an env file, and the sandbox provider block falls back to `localhost`
+when `OPENSANDBOX_DOMAIN` is unset. Export the OpenSandbox credentials first:
 
 ```sh
 export OPENSANDBOX_DOMAIN=... OPENSANDBOX_API_KEY=...
 ```
 
+mini-SWE runs inside each remote sandbox and calls Gym's model server from there, so the Gym
+servers must listen on an address the sandbox cell can reach. `++default_host` binds them to
+that address. `++use_absolute_ip=true` binds to `gethostbyname(gethostname())` instead, which
+is `127.0.1.1` on many Ubuntu hosts and unreachable from the cell. With the `/run` profile, if
+the cell reaches the model server only through a proxy, also set
+`++tbsci_sandbox_model_base_url=...`.
+
+### Harbor preset
+
+```sh
+gym dataset pull terminal_bench_science
+gym eval run --benchmark terminal_bench_science/miniswe --sandbox opensandbox \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
+  --model MODEL_NAME --output results/tbsci/rollouts.jsonl --concurrency 8 \
+  ++default_host=GYM_HOST_IP
+```
+
+The run prepares the pulled task folders first: it builds each task's agent, verifier and
+sidecar images and records them, unless they are already recorded (see the entry's
+[Images](../../environments/harbor/terminal_bench_science/README.md#images)). `--only-tasks` and
+`--exclude-tasks` select tasks. `gym dataset validate terminal_bench_science --sandbox
+opensandbox` runs every reference solution through the same separate verifier. The resources
+server's `tbsci_*` image, split-endpoint and verifier settings do not apply to this preset.
+
+### Resources-server presets
+
 With `++tbsci_split_sandbox_endpoints=true`, export `OPENSANDBOX_DOMAIN_CPU` and
 `OPENSANDBOX_API_KEY_CPU` instead. No task requests a GPU. Only the `/run` profile accepts split
-endpoints; the session profiles lend sandboxes through one provider block.
+endpoints; the Codex profiles lend sandboxes through one provider block.
 
 A run config keeps the model key off the command line and can hold the per-task image map.
 For example, `tbsci-run.yaml`:
@@ -478,8 +522,8 @@ tbsci_task_images:
 ```
 
 ```sh
-gym eval prepare --benchmark terminal_bench_science/miniswe
-gym eval run --benchmark terminal_bench_science/miniswe --split benchmark \
+gym eval prepare --benchmark terminal_bench_science/miniswe_legacy_agent
+gym eval run --benchmark terminal_bench_science/miniswe_legacy_agent --split benchmark \
   --config tbsci-run.yaml \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
   --model MODEL_NAME --output results/tbsci/rollouts.jsonl --concurrency 8 \
@@ -488,17 +532,10 @@ gym eval run --benchmark terminal_bench_science/miniswe --split benchmark \
   '++tbsci_verifier_image="REGISTRY/tbsci/{task}:tests-{digest}"'
 ```
 
-`gym eval prepare` writes the prompt-bearing rows with `prepare_codex.py`, which runs itself in
-the resources server's environment when Gym's lacks `pathspec` (see
-[Codex in the task sandbox](#codex-in-the-task-sandbox)). For the `/run` profile, use
-`--benchmark terminal_bench_science/miniswe_legacy_agent` in both commands.
-
-mini-SWE runs inside each remote sandbox and calls Gym's model server from there, so the Gym
-servers must listen on an address the sandbox cell can reach. `++default_host` binds them to
-that address. `++use_absolute_ip=true` binds to `gethostbyname(gethostname())` instead, which
-is `127.0.1.1` on many Ubuntu hosts and unreachable from the cell. With the `/run` profile, if
-the cell reaches the model server only through a proxy, also set
-`++tbsci_sandbox_model_base_url=...`.
+`gym eval prepare` writes the `/run` profile's identity rows with `prepare.py`. For Codex, use
+`--benchmark terminal_bench_science/codex` in both commands; its rows come from
+`prepare_codex.py`, which runs itself in the resources server's environment when Gym's lacks
+`pathspec` (see [Codex in the task sandbox](#codex-in-the-task-sandbox)).
 
 Preparation accepts these filters, which combine:
 

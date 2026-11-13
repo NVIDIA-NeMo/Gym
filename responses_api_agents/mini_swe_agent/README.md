@@ -72,10 +72,9 @@ must keep the older adapter until they have a supported migration path.
 
 - Terminal Bench 4 Harbor task folders (after `gym dataset pull terminal_bench_4`), in the sandbox the Harbor
   environment server lends.
-- Terminal-Bench-Science v0.1 ([`benchmarks/terminal_bench_science/miniswe.yaml`](../../benchmarks/terminal_bench_science/miniswe.yaml))
-  behind `single_agent_turn_legacy`, in the task sandbox the `terminal_bench_4` resources server lends. The seed
-  carries no task budget, so `sandbox_runner_timeout_seconds` is the run's limit. Its two tasks whose working
-  directory is `/` are refused (see that benchmark's README).
+- Terminal-Bench-Science v0.1 Harbor task folders (after `gym dataset pull terminal_bench_science`), in the sandbox
+  the Harbor environment server lends. Its two tasks whose working directory is `/` are refused (see that
+  benchmark's README).
 - `example_single_tool_call` behind `single_agent_turn_legacy` with `resources_tool_transports: [mcp]`, in a sandbox
   the agent starts.
 

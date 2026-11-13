@@ -11,12 +11,30 @@ config_paths:
   - responses_api_agents/codex_agent/configs/codex_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
+# The provider block Codex reconnects through to borrow the task sandbox. It must reach the same
+# OpenSandbox deployment as the resources server's environment.sandbox_provider.
+terminal_bench_science_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # Codex's supervisor runs for the whole 8-hour budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
 terminal_bench_science_codex_resources_server:
   _inherit_from: terminal_bench_science
   resources_servers:
     terminal_bench_4:
       description: Pinned Terminal-Bench-Science v0.1 tasks lent to sandbox-borrowing harnesses, with separate offline verification.
-      # Codex reconnects through this provider block (resources.yaml) to borrow the task sandbox.
       sandbox_provider_ref: terminal_bench_science_sandbox
       datasets:
         - name: terminal_bench_science

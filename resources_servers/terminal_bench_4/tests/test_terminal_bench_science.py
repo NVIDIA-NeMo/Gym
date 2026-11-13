@@ -893,7 +893,7 @@ def test_codex_rows_hand_off_only_once_and_only_without_pathspec(monkeypatch):
 
 
 def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_server():
-    config = _load_run_config(BENCHMARK_DIR / "codex.yaml")
+    config = OmegaConf.load(BENCHMARK_DIR / "codex.yaml")
     resources = config.terminal_bench_science_codex_resources_server.resources_servers.terminal_bench_4
     agent = config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent
     environment = config.terminal_bench_science_codex.environment_servers.single_agent_turn_legacy
@@ -907,45 +907,24 @@ def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_se
     assert (agent.verify_after_agent_error, agent.raise_oom_score_adj) == (True, True)
 
 
-def test_miniswe_profile_composes_borrowing_resources_mini_swe_and_the_environment_server():
-    config = _load_run_config(BENCHMARK_DIR / "miniswe.yaml")
-    resources = config.terminal_bench_science_miniswe_resources_server.resources_servers.terminal_bench_4
-    agent = config.terminal_bench_science_miniswe_agent.responses_api_agents.mini_swe_agent
-    environment = config.terminal_bench_science_miniswe.environment_servers.single_agent_turn_legacy
-    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
-    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
-    # The Codex profile's prompt-bearing rows: mini-SWE takes the task from the request's input messages.
-    (benchmark,) = resources.datasets
-    assert (benchmark.jsonl_fpath, benchmark.prepare_script, benchmark.num_repeats) == (
-        "benchmarks/terminal_bench_science/data/benchmark_codex.jsonl",
-        "benchmarks/terminal_bench_science/prepare_codex.py",
-        1,
-    )
-    assert agent.resources_server.name == "terminal_bench_science_miniswe_resources_server"
-    assert environment.resources_server.name == "terminal_bench_science_miniswe_resources_server"
-    assert environment.agent_server.name == "terminal_bench_science_miniswe_agent"
-    # Harbor's mini-swe-agent, as the relay profile: no step cap, 30-second commands, the 8-hour task budget.
-    assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (0, 30, 28800)
-    # As many runs as seeded task sessions, and time to collect an 8-hour trajectory at close.
-    seeded = config.terminal_bench_science.resources_servers.terminal_bench_4
-    assert agent.concurrency == seeded.max_concurrent_sessions == 8
-    assert agent.session_close_timeout_seconds == 300
-    # The episode bound covers the runtime installation, the 8-hour budget and the 12000-second verifier.
-    install = config.mini_swe_agent.responses_api_agents.mini_swe_agent.sandbox_install_timeout_seconds
-    assert environment.default_episode_timeout_seconds > install + 28800 + 12000
+def test_miniswe_profile_runs_the_harbor_entry_with_mini_swe():
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    benchmark = harbor_benchmark(BENCHMARK_DIR / "miniswe.yaml")
+    assert benchmark.target == "terminal_bench_science"
+    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent",) * 2
+    settings = OmegaConf.create(benchmark.agent.benchmark_settings)
+    harbor = settings.harbor_environment_server.environment_servers.harbor
+    # Harness setup, the 8-hour agent budget, the separate verifier's start and the 12000-second verifier.
+    assert harbor.default_episode_timeout_seconds > harbor.harness_setup_allowance_s + 28800 + 1200 + 12000
+    assert harbor.sandbox_metadata["nemo.nvidia.com/oom-kill"] == "process"
+    assert harbor.sandbox_metadata["nemo.nvidia.com/s3-hostpath"] == "false"
+    # The harness settings travel with the preset's mini_swe_agent block and take the tbsci_* overrides.
     capped = OmegaConf.merge(
-        config,
-        {
-            "tbsci_max_steps": 3,
-            "tbsci_step_timeout_sec": 60,
-            "tbsci_agent_max_timeout_sec": 900,
-            "tbsci_concurrency": 64,
-        },
+        OmegaConf.load(BENCHMARK_DIR / "miniswe.yaml"), {"tbsci_max_steps": 3, "tbsci_agent_max_timeout_sec": 900}
     )
-    agent = capped.terminal_bench_science_miniswe_agent.responses_api_agents.mini_swe_agent
-    assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (3, 60, 900)
-    seeded = capped.terminal_bench_science.resources_servers.terminal_bench_4
-    assert agent.concurrency == seeded.max_concurrent_sessions == 64
+    agent = capped.mini_swe_agent.responses_api_agents.mini_swe_agent
+    assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (3, 30, 900)
 
 
 # The README's vllm_model settings for Codex in front of a chat-completions server.
