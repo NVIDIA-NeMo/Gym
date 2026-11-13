@@ -80,7 +80,7 @@ judge_model:
 `external_app.py` also supports `num_workers > 1`, which `app.py` does not.
 For a busy judge, spreading request forwarding across workers can matter more than skipping Ray.
 
-`app.py` still accepts `base_url` and skips the local launch, but it joins Ray regardless, because Gym decides whether a server uses Ray from its entrypoint before reading the config.
+`app.py` still accepts `base_url` and skips the local launch, but it joins Ray regardless, because Gym decides whether a server uses Ray from its entrypoint class's `ray_enabled`, not from `base_url`.
 A config only changes when it selects `external_app.py`.
 If a launcher injects `base_url`, have it set the entrypoint in the same place:
 
