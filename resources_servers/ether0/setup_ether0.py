@@ -22,7 +22,7 @@ from tempfile import mkdtemp
 
 _REPO_URL = "https://github.com/Future-House/ether0"
 # The revision graders.py and local_oracles.py are written against.
-_REPO_REVISION = "b77e0d8eb06f62c8528da72bff22d4c7fee11371"
+_REPO_REVISION = "b77e0d8eb06f62c8528da72bff22d4c7fee11371"  # pragma: allowlist secret
 ETHER0_PATH = Path(__file__).parent / ".ether0"
 ETHER0_SRC_PATH = ETHER0_PATH / "src"
 ETHER0_REMOTES_SRC_PATH = ETHER0_PATH / "packages" / "remotes" / "src"
