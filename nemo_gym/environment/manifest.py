@@ -401,7 +401,7 @@ class EnvironmentManifest(_ManifestModel):
         default=None,
         description=(
             "The headline score: its exact key in the run's aggregate metrics, such as mean/reward or "
-            "pass@1[avg-of-4]/accuracy, not a display label."
+            "pass@1[avg-of-4]/accuracy, not a display label; unknown when it hasn't been established."
         ),
     )
     requirements: ManifestRequirements | None = None
