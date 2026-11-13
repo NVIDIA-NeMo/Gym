@@ -98,8 +98,10 @@ opencode_search_resources_server:              # instance name — how agents/CL
       judge_model_server:
         type: responses_api_models
         name: search_judge_model
-      # One attempt's budget. Gym's shared HTTP client has no timeout, so an unanswered judge
-      # call would otherwise hold its rollout until the job's wall clock.
+      # Bounds each request of the first judge attempt (call_judge sends up to three per
+      # attempt); judge_retry_timeout_seconds bounds those of each retry. Gym's shared HTTP
+      # client has no timeout, so an unanswered judge call would otherwise hold its rollout
+      # until the job's wall clock.
       judge_timeout_seconds: 300.0
       judge_responses_create_params:
         input: []
