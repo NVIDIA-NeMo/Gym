@@ -2155,7 +2155,6 @@ requires-dist = [
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.18" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.1.61" },
-    { name = "grpcio", marker = "extra == 'mfn'", specifier = ">=1.62.3" },
     { name = "httptools" },
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core" },
@@ -2166,9 +2165,8 @@ requires-dist = [
     { name = "mlflow", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
     { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
-    { name = "nemo-gym", extras = ["dev", "mfn", "mlflow", "ray", "sandbox", "wandb"], marker = "extra == 'all'" },
+    { name = "nemo-gym", extras = ["dev", "mlflow", "ray", "sandbox", "wandb"], marker = "extra == 'all'" },
     { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=4d045c03186b90afdc815db46b671f6a21bc7e98" },
-    { name = "numpy", marker = "extra == 'mfn'", specifier = ">=1.26.4" },
     { name = "omegaconf" },
     { name = "openai", specifier = "==2.45.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
@@ -2178,7 +2176,6 @@ requires-dist = [
     { name = "orjson", specifier = ">=3.11.6" },
     { name = "packaging", specifier = ">=24.2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
-    { name = "protobuf", marker = "extra == 'mfn'", specifier = ">=6.31,<7" },
     { name = "psutil" },
     { name = "pyarrow", marker = "extra == 'mlflow'", specifier = ">=23.0.1" },
     { name = "pyasn1", specifier = ">=0.6.4" },
@@ -2208,9 +2205,8 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.29.0" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
-    { name = "zstandard", marker = "extra == 'mfn'", specifier = ">=0.23.0" },
 ]
-provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "mfn", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
