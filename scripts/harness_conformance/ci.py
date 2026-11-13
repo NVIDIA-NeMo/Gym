@@ -11,7 +11,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.check_suites.github_actions import annotation_data, changed_paths, tested_sha, write_ci_result
+from scripts.check_suites.github_actions import (
+    COMPARE_BRANCH,
+    COMPARE_MODES,
+    CompareMode,
+    annotation_data,
+    changed_paths,
+    tested_sha,
+    write_ci_result,
+)
 
 from .feedback import failure_details, reproduction
 from .registry import HARNESSES
@@ -27,17 +35,14 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("nemo_gym/cli/", "nemo_gym/data/tasks/")) and path not in (
-            "nemo_gym/cli/__init__.py",
-            "nemo_gym/cli/utils.py",
-        ):
+        elif path.startswith(("nemo_gym/orchestration/", "nemo_gym/cli/", "nemo_gym/eval/", "nemo_gym/environment/")):
+            continue
+        elif path.startswith("nemo_gym/data/tasks/"):
             # Probes construct their own rows and call the collector directly.
-            # A change to either of these two still runs every harness.
             continue
         elif path.startswith(
             (
                 "nemo_gym/",
-                "responses_api_agents/shared/",
                 "environment_servers/legacy_agent/",
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
@@ -64,12 +69,19 @@ def select_harnesses(paths: list[str]) -> list[str]:
                     "environment_servers/",
                     "tests/",
                     "benchmarks/",
+                    "environments/",
+                    "docker/",
+                    ".agents/",
                     "fern/",
                     "docs/",
                 )
             )
             or ("/" not in path and path.endswith(".md"))
             or path in ("LICENSE", ".gitignore")
+            or (
+                path.startswith(".github/workflows/")
+                and path not in (".github/workflows/harness-conformance.yml", ".github/workflows/cicd-main.yml")
+            )
         ):
             continue
         else:
@@ -78,9 +90,9 @@ def select_harnesses(paths: list[str]) -> list[str]:
     return [name for name in HARNESSES if name in selected]
 
 
-def changed_harnesses(base: str, *, root: Path = ROOT) -> list[str]:
-    """Compare the entire branch since its merge base, including deleted/renamed paths."""
-    paths = changed_paths(base, root=root, subject="registered harnesses")
+def changed_harnesses(base: str, *, root: Path = ROOT, compare: CompareMode = COMPARE_BRANCH) -> list[str]:
+    """Select the harnesses affected by the paths changed from `base` (see `changed_paths`)."""
+    paths = changed_paths(base, root=root, subject="registered harnesses", compare=compare)
     return list(HARNESSES) if paths is None else select_harnesses(paths)
 
 
@@ -186,6 +198,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     select = commands.add_parser("select")
     select.add_argument("--base", default="")
+    select.add_argument("--compare", choices=COMPARE_MODES, default=COMPARE_BRANCH)
     install = commands.add_parser("install")
     install.add_argument("--harness", choices=HARNESSES, required=True)
     publish = commands.add_parser("report")
@@ -194,7 +207,7 @@ def main() -> None:
     publish.add_argument("--exit-code", type=int, required=True)
     args = parser.parse_args()
     if args.command == "select":
-        harnesses = changed_harnesses(args.base)
+        harnesses = changed_harnesses(args.base, compare=args.compare)
         print(f"Selected harnesses: {harnesses}")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
             handle.write(f"harnesses={json.dumps(harnesses)}\n")
