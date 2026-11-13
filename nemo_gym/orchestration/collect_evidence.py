@@ -432,29 +432,61 @@ unreadable = set()
 BIG_LINE = 16 << 20
 CHUNK = 4 << 20
 PRUNED_KEYS = (b"ng_trajectory", b"ng_agent_observations")
-# A string is elided only when it is longer than this and is not one the collector reads (KEPT_KEYS).
+# A string is elided only when it is longer than this and is not one the collector reads (KEPT_PATHS).
 ELIDE_ABOVE = 1024
 # Elided text is checked as JSON in pieces of about this size.
 VALIDATE = 1 << 20
 # A string the collector reads is never elided; one above this size is no identity or status, so the row fails loudly.
 KEPT_MAX = 1 << 20
-# Every key whose string value the collector projects from a pruned value (identities, statuses, kinds, names), at any
-# depth. A key not listed holds uninterpreted text (request input, tool output, conversation), which is elided.
-KEPT_KEYS = frozenset(
-    (
-        b"task_id rollout_id invocation_id parent_invocation_id status in_session verification_skipped "
-        b"error_type stop_reason model_call_id response_id model_ref type name call_id role verifier score "
-        b"verdict result_binding_sha256 operation_id kind outcome dependencies provider sandbox_id exit_code "
-        b"teardown_confirmed sandbox_observations grading_record grading_operations turn_no step_count "
-        b"tool_call_id tool_name code failure_id omitted events event_id boundary operation attempt_id "
-        b"cause_id failure_kind http_status stage final_attempt_id http_attempts transport_failures "
-        b"retry_wait_s request_elapsed_ms status_code upstream_status_code response_status error_category "
-        b"local_response_reason dialect finish_reason started_at latency_total_ms duration_ms"
-    ).split()
-)
+# The places in a pruned value whose string the collector projects (identities, statuses, kinds, names), as the keys
+# from the row down to the string, list levels left out. A string anywhere else is uninterpreted payload (request
+# input, tool output, conversation, even under a field that shares a name with one of these) and is elided when long.
+def kept_paths():
+    paths = set()
+
+    def add(prefix, names):
+        paths.update(tuple(part.encode() for part in prefix.split() + [name]) for name in names.split())
+
+    add("ng_trajectory", "task_id rollout_id")
+    ref = "type name"
+    for group, fields in (
+        ("invocations", "invocation_id status in_session verification_skipped error_type parent_invocation_id stop_reason"),
+        ("verifier_invocations", "invocation_id status failure_kind"),
+        ("turns", "invocation_id task_id rollout_id turn_no step_count"),
+        ("tool_calls", "invocation_id tool_call_id tool_name status error_type"),
+    ):
+        add("ng_trajectory " + group, fields)
+        if group != "tool_calls":
+            add("ng_trajectory " + group + " model_calls", "model_call_id response_id")
+            add("ng_trajectory " + group + " model_calls model_ref", ref)
+    add("ng_trajectory verifier_invocations grading_operations", "operation_id kind outcome result_binding_sha256")
+    for field in ("model_call_id", "response_id"):
+        add("ng_trajectory verifier_invocations grading_operations dependencies", field)
+    add("ng_trajectory verifier_invocations grading_operations dependencies model_ref", ref)
+    add("ng_trajectory verifier_invocations grading_record", "verifier score verdict result_binding_sha256")
+    add("ng_trajectory verifier_invocations sandbox_observations",
+        "role provider sandbox_id outcome exit_code teardown_confirmed error_type")
+    add("ng_trajectory gaps", "code")
+    add("ng_trajectory model_calls", "model_call_id started_at status_code upstream_status_code error_category")
+    add("ng_trajectory model_calls response output", "type role status call_id name")
+    add("ng_trajectory model_calls request input", "type call_id")
+    for call in ("model_calls", "model_calls response_metadata"):
+        base = "ng_trajectory " + call
+        add(base, "response_id status_code response_status error_category upstream_status_code local_response_reason "
+                  "dialect finish_reason")
+        add(base + " model_ref", ref)
+        add(base + " output_budget_refit", "requested_max_tokens window applied_max_tokens")
+        add(base + " model_operations", "operation_id outcome final_attempt_id failure_id http_attempts "
+                                        "transport_failures retry_wait_s request_elapsed_ms")
+        add(base + " failure_report", "failure_id omitted")
+        add(base + " failure_report events *", "event_id boundary operation operation_id attempt_id cause_id "
+                                               "failure_kind http_status stage")
+    return frozenset(paths)
+
+
+KEPT_PATHS = kept_paths()
 STRUCTURE = re.compile(rb'["{}\[\],:]')
 NESTED = re.compile(rb'["{}\[\]]')
-STRING_BODY = re.compile(rb'[^"\\]*(?:\\.[^"\\]*)*', re.S)
 HEX = frozenset(b"0123456789abcdefABCDEF")
 class Pruner:
     # Copies one JSON object in chunks, replacing each long string inside a PRUNED_KEYS value that the collector does
@@ -514,6 +546,16 @@ class Pruner:
             json.loads('"' + piece.decode("utf-8", "surrogatepass") + '"')
         except ValueError:
             self.invalid = True
+    def kept(self):
+        # Whether the string that starts here sits where the collector reads it. A key with an escape cannot be
+        # compared byte for byte, so its string is kept.
+        path = [key for key, kind in zip(self.keys, self.kinds) if kind == b"{"]
+        if any(key is None or b"\\" in key for key in path):
+            return True
+        for index in range(2, len(path)):
+            if path[index - 1] == b"events" and path[index - 2] == b"failure_report":
+                path[index] = b"*"
+        return tuple(path) in KEPT_PATHS
     def open_string(self, depth):
         # How the string that starts here is handled: a top-level key is captured, a string the collector reads is
         # copied, any other string inside a pruned value is elided when long.
@@ -523,7 +565,7 @@ class Pruner:
         if self.target:
             key = None if self.expect_key else self.keys[-1]
             self.size = 0
-            if self.expect_key or key is None or b"\\" in key or key in KEPT_KEYS:
+            if self.expect_key or key is None or self.kept():
                 self.mode = "keep"
             else:
                 self.mode, self.buffer, self.carry = "elide", b"", b""
@@ -537,15 +579,25 @@ class Pruner:
                     self.body(chunk[pos:pos + 1])
                     pos += 1
                     continue
-                end = STRING_BODY.match(chunk, pos).end()
+                # The closing quote is the first one not preceded by an odd run of backslashes. Found with find and a
+                # count back over the run, so a string full of escapes costs no state beyond the chunk.
+                end = chunk.find(b'"', pos)
+                while end != -1:
+                    start = end
+                    while start > pos and chunk[start - 1] == 0x5C:
+                        start -= 1
+                    if (end - start) % 2 == 0:
+                        break
+                    end = chunk.find(b'"', end + 1)
+                if end == -1:
+                    start = size
+                    while start > pos and chunk[start - 1] == 0x5C:
+                        start -= 1
+                    self.escape = (size - start) % 2 == 1
+                    self.body(chunk[pos:size])
+                    break
                 self.body(chunk[pos:end])
                 pos = end
-                if pos >= size:
-                    break
-                if chunk[pos] == 0x5C:
-                    self.escape, pos = True, pos + 1
-                    self.body(b"\\")
-                    continue
                 pos += 1
                 self.in_string = False
                 if self.mode == "elide":
@@ -591,7 +643,12 @@ class Pruner:
     def result(self, newline):
         # An invalid string makes the whole row invalid; its newline decides, as for a whole row, whether it is a
         # malformed record or a truncated last one.
-        return b"}" + (b"\n" if newline else b"") if self.invalid else b"".join(self.out)
+        if self.invalid:
+            return b"}" + (b"\n" if newline else b"")
+        data, self.out = b"".join(self.out), []
+        # A newline that ended an unfinished elided string is not in the copied text: keep it, so that a malformed
+        # record is not mistaken for a truncated last line.
+        return data + b"\n" if newline and not data.endswith(b"\n") else data
 def lines(fh, digest):
     # Each line with its number; a line longer than BIG_LINE comes back pruned. Every byte read goes into the digest.
     number = 0
@@ -612,6 +669,8 @@ def lines(fh, digest):
                 digest.update(line)
                 pruner.feed(line)
             line = pruner.result(last.endswith(b"\n"))
+            # The rebuilt row is the only copy that stays alive while it is parsed.
+            del pruner
         yield number, line
         number += 1
 def rows(name, skip=0):

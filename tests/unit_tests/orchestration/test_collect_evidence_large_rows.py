@@ -201,6 +201,7 @@ INVALID_STRINGS = {
     "truncated_utf8": b"x" * 2000 + b"\xe2\x82" + b"x" * 10,
     "raw_control_byte": b"x" * 2000 + b"\x01" + b"x" * 10,
     "raw_newline_in_string": b"x" * 2000 + b"\t" + b"x" * 10,
+    "raw_line_feed_in_string": b"x" * 2000 + b"\n" + b"x" * 10,
     "short_unicode_escape": b"x" * 2000 + b"\\u12" + b"x" * 10,
 }
 
@@ -243,3 +244,56 @@ def test_a_truncated_last_row_inside_an_elided_string_is_still_ignored(tmp_path:
     for swap in (WHOLE, PRUNED):
         collected = _collect(tmp_path, script=_script(swap))
         assert [row["_ng_task_index"] for row in collected["results"]] == [0]
+
+
+def _write_raw_rows(job: Path, rows: list[tuple[bytes, int]]) -> None:
+    """Scored rows from raw ``(trajectory prefix, filler MiB)`` pairs, the filler written in pieces."""
+    artifacts = job / "artifacts"
+    artifacts.mkdir(parents=True)
+    inputs = [{"_ng_task_index": task, "_ng_rollout_index": 0} for task in range(len(rows))]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(row) + "\n" for row in inputs))
+    (artifacts / "rollouts_failures.jsonl").write_text("")
+    with (artifacts / "rollouts.jsonl").open("wb") as out:
+        for task, (field, size) in enumerate(rows):
+            out.write(b'{"_ng_task_index": %d, "_ng_rollout_index": 0, "_ng_attempt_index": 0, "reward": 1.0, ' % task)
+            out.write(b'"response": {"id": "resp", "object": "response", "status": "completed", "output": []}, ')
+            out.write(b'"' + field + b'": {"calls": [{"started_at": 1.0, "blob": "')
+            for _ in range(size):
+                out.write(b"x" * MIB)
+            out.write(b'"}]}}\n')
+
+
+def test_an_oversized_row_outside_the_pruned_values_is_read_in_the_memory_the_whole_row_needs(tmp_path: Path) -> None:
+    # The bulk is in ng_model_call_capture, which pruning does not touch: the rebuilt row is the whole record, and the
+    # reader must not keep the pruner's copy of it alive while the record is parsed.
+    _write_raw_rows(tmp_path, [(b"ng_model_call_capture", 128)])
+    collected = _collect(tmp_path, address_limit=512 * MIB)
+    assert [row["_ng_task_index"] for row in collected["results"]] == [0]
+
+
+def test_an_escape_dense_string_is_scanned_in_bounded_memory(tmp_path: Path) -> None:
+    # 9 MiB of newlines is an ~18 MiB record: every escape must cost no state beyond the chunk itself.
+    _write_rows(tmp_path, [_trajectory("a", b"\\n" * (9 * MIB))])
+    collected = _collect(tmp_path, address_limit=512 * MIB)
+    assert [row["ng_trial_observations"]["task_id"] for row in collected["results"]] == ["a"]
+
+
+@pytest.mark.parametrize("key", ["code", "name", "status", "task_id", "model_call_id"])
+def test_a_payload_field_named_like_an_identity_is_not_capped_when_pruning_is_triggered(
+    tmp_path: Path, key: str
+) -> None:
+    # A tool output is uninterpreted payload: a field in it that shares a name with an identity the collector reads
+    # elsewhere is pruned like any other long string, however long.
+    big = b"x" * (2 * MIB)
+    trajectory = _trajectory("a", b"y").replace(
+        b'"output": "y"', b'"output": {"' + key.encode() + b'": "' + big + b'"}'
+    )
+    _write_rows(tmp_path, [trajectory, _trajectory("b", b"z")])
+    whole = _collect(tmp_path, script=_script(WHOLE))
+    pruned = _collect(tmp_path, script=_script(PRUNED))
+    assert pruned == whole
+
+
+def test_an_identity_above_the_cap_still_fails_loudly(tmp_path: Path) -> None:
+    _write_rows(tmp_path, [_trajectory("a", b"y" * 10), _trajectory("t" * (2 * MIB), b"z" * 3000)])
+    assert _run(tmp_path, script=_script(PRUNED)).returncode != 0
