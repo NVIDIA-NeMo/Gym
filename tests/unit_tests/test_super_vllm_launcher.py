@@ -1240,7 +1240,9 @@ sleep() { echo sleep >> events; SECONDS=$((SECONDS + 1)); }
                 for name in ("router-ready", "events"):
                     (Path(self.workdir) / name).unlink(missing_ok=True)
                 status, _, stderr = self.run_shell(
-                    stubs + setup + "\nprofile_delay=2\nprofile_port=8001\nsteps=20\ntrigger_prefill_profile\n",
+                    stubs
+                    + setup
+                    + "\nrole=prefill\nmin_running=\nprofile_delay=2\nprofile_port=8001\nsteps=20\ntrigger_profile\n",
                     env={"TEST_POST_STATUS": post_status},
                 )
                 self.assertEqual(status, 0 if post_status == "0" else 1, stderr)
@@ -1263,7 +1265,9 @@ curl() {
 sleep() { SECONDS=$((SECONDS + 1)); }
 """
         status, _, stderr = self.run_shell(
-            stubs + setup + "\nprofile_delay=0\nprofile_port=8001\nsteps=20\ntrigger_prefill_profile\n",
+            stubs
+            + setup
+            + "\nrole=prefill\nmin_running=\nprofile_delay=0\nprofile_port=8001\nsteps=20\ntrigger_profile\n",
         )
         self.assertEqual(status, 1, stderr)
         self.assertIn("Timed out waiting for http://node0:8000/health", stderr)
@@ -1399,7 +1403,7 @@ nsys() {
     while [[ ! -f trigger_started ]]; do "$TEST_SLEEP" 0.01; done
     return 17
 }
-trigger_prefill_profile() {
+trigger_profile() {
     trap 'touch trigger_stopped; exit 0' TERM
     touch trigger_started
     while true; do "$TEST_SLEEP" 0.01; done

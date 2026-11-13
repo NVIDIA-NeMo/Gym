@@ -91,6 +91,8 @@ MOONCAKE_EVICTION_COUNTERS = {
     for metric in ("successful_evictions", "attempted_evictions", "evicted_key_count", "evicted_size_bytes")
     for tier in ("", "_mem", "_nof")
 }
+# vLLM gauges also exported per data-parallel engine, alongside the replica total, to expose rank imbalance.
+VLLM_PER_ENGINE_GAUGES = {"num_requests_running", "num_requests_waiting"}
 # These SGLang gauges describe ratios or averages, not additive quantities.
 SGLANG_MEAN_GAUGES = {
     "token_usage",
@@ -226,6 +228,14 @@ class InferenceMetricsCollector:
                 key = f"{namespace}/{metric_replica}/{name}{suffix}"
                 series_key = f"{key}/{labels}"
                 result[key] = result.get(key, 0.0) + sample.value
+                if (
+                    family.type == "gauge"
+                    and namespace == "vllm"
+                    and name in VLLM_PER_ENGINE_GAUGES
+                    and sample.labels.get("engine")
+                ):
+                    engine_key = f"{key}/engine/{sample.labels['engine']}"
+                    result[engine_key] = result.get(engine_key, 0.0) + sample.value
                 if family.type == "gauge" and (
                     name == "kv_cache_usage_perc" or (namespace == "sglang" and name in SGLANG_MEAN_GAUGES)
                 ):
@@ -369,6 +379,14 @@ class InferenceMetricsCollector:
                 hits = metrics.get(f"{prefix}prefix_cache_hits_per_second{suffix}")
                 if hits is not None and value > 0:
                     metrics[f"{prefix}prefix_cache_hit_rate{suffix}"] = 100 * hits / value
+        # Share of CUDA graph token slots that are padding (`--cudagraph-metrics`), per runtime mode.
+        padded_prefix = f"{prefix}cudagraph_padded_tokens_per_second"
+        for key, padded in list(metrics.items()):
+            if key == padded_prefix or key.startswith(padded_prefix + "/"):
+                suffix = key[len(padded_prefix) :]
+                unpadded = metrics.get(f"{prefix}cudagraph_unpadded_tokens_per_second{suffix}")
+                if unpadded is not None and padded > 0:
+                    metrics[f"{prefix}cudagraph_padding_fraction{suffix}"] = 1 - unpadded / padded
 
     async def scrape(self, replica: str, url: HttpUrl) -> dict[str, float] | None:
         """Publish one replica sample; failures do not interrupt rollout collection."""
@@ -496,7 +514,8 @@ class InferenceMetricsCollector:
                     name = metric.split("/", 1)[0]
                     if namespace == "vllm" and (
                         name in PREFILL_DERIVED_METRICS
-                        or name in {"dbo_comm_overlap_fraction", "dbo_compute_overlap_fraction"}
+                        or name
+                        in {"dbo_comm_overlap_fraction", "dbo_compute_overlap_fraction", "cudagraph_padding_fraction"}
                     ):
                         continue  # Recompute from pooled sums/counts; never sum or average ratios.
                     if name == "cache_inventory":

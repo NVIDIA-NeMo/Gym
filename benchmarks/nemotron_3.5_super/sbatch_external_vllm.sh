@@ -8,6 +8,11 @@ set -euo pipefail
 # PROFILE_PREFILL=1 captures 20 worker steps, 300 seconds after router readiness.
 # PREFILL_PROFILE_STEPS, PREFILL_PROFILE_DELAY_SECONDS (or manual), and
 # PREFILL_PROFILE_DIR (default: results/nsys under SLURM_SUBMIT_DIR) override this.
+# Decode profiling uses the same settings with a DECODE prefix (PROFILE_DECODE=1,
+# DECODE_PROFILE_STEPS, ...). <ROLE>_PROFILE_MIN_RUNNING=N also waits, after the
+# delay, until the server has N running requests, so the capture lands under load.
+# <ROLE>_PROFILE_MODE=light swaps the detailed trace for a low-overhead one (CUDA API and
+# NVTX only, whole CUDA graphs instead of their nodes) to time CPU-side launches.
 # Detailed tracing adds overhead; use separate runs for throughput measurements.
 # API-triggered captures exclude startup/graph construction. For those call sites,
 # enable cuBLAS logging before launch or collect a separate startup trace.
@@ -392,6 +397,7 @@ if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.startup-plans-baked" ]];
 fi
 if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     PROFILE_PREFILL=0
+    PROFILE_DECODE=0
     export VLLM_ENABLE_STARTUP_PLAN=1
     # Keep every worker's runtime JIT output inside its named container. The
     # export step collects these libraries from all nodes and installs them as AOT.
@@ -515,7 +521,7 @@ cleanup_prefill_profile() {
     fi
 }
 
-trigger_prefill_profile() {
+trigger_profile() {
     local url="http://\$this_node_hostname:\$profile_port"
     local router_url="http://\${nodes[0]}:$ROUTER_SERVER_PORT"
     local deadline=\$(( SECONDS + $ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS ))
@@ -523,20 +529,33 @@ trigger_prefill_profile() {
     # router to report healthy workers before starting the profiling delay.
     until curl --noproxy '*' --silent --fail --max-time 5 "\$router_url/health" >/dev/null; do
         if (( SECONDS >= deadline )); then
-            echo "WARNING: Timed out waiting for \$router_url/health; no prefill profile captured." >&2
+            echo "WARNING: Timed out waiting for \$router_url/health; no \$role profile captured." >&2
             return 1
         fi
         sleep 1
     done
-    echo "Prefill profiling: router \$router_url ready; capturing in \$profile_delay seconds." >&2
+    echo "\$role profiling: router \$router_url ready; capturing in \$profile_delay seconds." >&2
     # Short sleeps let teardown cancel the trigger without leaving a long-lived sleep process.
     deadline=\$(( SECONDS + 10#\$profile_delay ))
     while (( SECONDS < deadline )); do sleep 1; done
+    if [[ -n "\$min_running" ]]; then
+        # Wait for real load so the capture lands in the busy window, not on idle steps.
+        echo "\$role profiling: waiting for at least \$min_running running requests on \$url." >&2
+        deadline=\$(( SECONDS + 3600 ))
+        until (( \$(curl --noproxy '*' --silent --max-time 5 "\$url/metrics" |
+            awk '/^vllm:num_requests_running[{ ]/ {s += \$NF} END {printf "%d", s}') >= min_running )); do
+            if (( SECONDS >= deadline )); then
+                echo "WARNING: \$url never reached \$min_running running requests; no \$role profile captured." >&2
+                return 1
+            fi
+            sleep 1
+        done
+    fi
     if curl --noproxy '*' --silent --show-error --fail --max-time 120 \
         -X POST "\$url/start_profile" >/dev/null; then
-        echo "Prefill profiling: capture started on \$url (worker-step limit: \$steps)." >&2
+        echo "\$role profiling: capture started on \$url (worker-step limit: \$steps)." >&2
     else
-        echo "WARNING: Could not start prefill profile on \$url; serving continues." >&2
+        echo "WARNING: Could not start \$role profile on \$url; serving continues." >&2
         return 1
     fi
 }
@@ -558,7 +577,7 @@ ensure_nsys() {
         echo "ERROR: Unsupported Nsight Systems architecture: \$arch." >&2
         return 1
     fi
-    echo "Prefill profiling: installing Nsight Systems CLI for Ubuntu \$VERSION_ID / \$arch." >&2
+    echo "Profiling: installing Nsight Systems CLI for Ubuntu \$VERSION_ID / \$arch." >&2
     # NVIDIA's devtools repository provides both the Arm SBSA and x86 CLI.
     # Install only in this worker's container; existing nsys installations are reused.
     if ! (
@@ -586,8 +605,6 @@ ensure_nsys() {
 }
 
 serve_prefill() {
-    local profile_port=\$1
-    shift
     if [[ -n "\${PREFILL_FLASHINFER_DUMP_DIR:-}" ]]; then
         export VLLM_FLASHINFER_DUMP_DIR="\$PREFILL_FLASHINFER_DUMP_DIR"
         # Validate vLLM's hook against the installed, unmodified FlashInfer.
@@ -596,30 +613,67 @@ serve_prefill() {
         set -- "\$@" --enforce-eager
         echo "FlashInfer capture: first 10 calls per API per worker in real forwards >16384 tokens; eager prefill; output=\$VLLM_FLASHINFER_DUMP_DIR" >&2
     fi
-    if [[ "\${PROFILE_PREFILL:-0}" != 1 ]]; then
+    serve_profiled prefill "\$@"
+}
+serve_decode() { serve_profiled decode "\$@"; }
+
+# Role-specific settings: PROFILE_<ROLE>, <ROLE>_PROFILE_STEPS, <ROLE>_PROFILE_DELAY_SECONDS,
+# <ROLE>_PROFILE_DIR and <ROLE>_PROFILE_MIN_RUNNING, where ROLE is PREFILL or DECODE.
+serve_profiled() {
+    local role=\$1 profile_port=\$2
+    shift 2
+    local prefix=\${role^^}
+    local enabled_var="PROFILE_\$prefix" steps_var="\${prefix}_PROFILE_STEPS"
+    local delay_var="\${prefix}_PROFILE_DELAY_SECONDS" dir_var="\${prefix}_PROFILE_DIR"
+    local running_var="\${prefix}_PROFILE_MIN_RUNNING"
+    if [[ "\${!enabled_var:-0}" != 1 ]]; then
         vllm serve "\$@"
         return
     fi
-    local steps="\${PREFILL_PROFILE_STEPS:-20}"
+    local steps="\${!steps_var:-20}"
     if [[ ! "\$steps" =~ ^[1-9][0-9]*\$ ]]; then
-        echo "ERROR: PREFILL_PROFILE_STEPS must be a positive integer." >&2
+        echo "ERROR: \$steps_var must be a positive integer." >&2
         return 1
     fi
-    local profile_delay="\${PREFILL_PROFILE_DELAY_SECONDS:-300}"
+    local profile_delay="\${!delay_var:-300}"
     if [[ "\$profile_delay" != manual && ! "\$profile_delay" =~ ^[0-9]+\$ ]]; then
-        echo "ERROR: PREFILL_PROFILE_DELAY_SECONDS must be a nonnegative integer or manual." >&2
+        echo "ERROR: \$delay_var must be a nonnegative integer or manual." >&2
         return 1
     fi
+    local min_running="\${!running_var:-}"
+    if [[ -n "\$min_running" && ! "\$min_running" =~ ^[1-9][0-9]*\$ ]]; then
+        echo "ERROR: \$running_var must be a positive integer." >&2
+        return 1
+    fi
+    local mode_var="\${prefix}_PROFILE_MODE"
+    local -a trace_args
+    case "\${!mode_var:-full}" in
+        full)
+            # Sample only this engine's GPU mask, including UUIDs and TP groups, so
+            # concurrent profilers do not all collect counters from the same GPUs.
+            trace_args=(--trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose
+                --nccl-trace=all --pytorch=functions-trace-shapes
+                --gpu-metrics-devices=cuda-visible
+                --sample=process-tree --cpuctxsw=none
+                --cudabacktrace=all --python-backtrace=cuda --python-sampling=true
+                --cuda-graph-trace=node) ;;
+        light)
+            # Low overhead for timing CPU-side launches: no backtraces, sampling or per-node graph tracing.
+            trace_args=(--trace=cuda,nvtx --sample=none --cpuctxsw=none --cuda-graph-trace=graph) ;;
+        *)
+            echo "ERROR: \$mode_var must be full or light." >&2
+            return 1 ;;
+    esac
     local api_worker=1 arg
     for arg in "\$@"; do
         if [[ "\$arg" == --headless ]]; then api_worker=0; fi
     done
     ensure_nsys || return 1
     if [[ "\$profile_delay" != manual ]] && (( api_worker )) && ! command -v curl >/dev/null 2>&1; then
-        echo "ERROR: Automatic prefill profiling requires curl in the vLLM container." >&2
+        echo "ERROR: Automatic \$role profiling requires curl in the vLLM container." >&2
         return 1
     fi
-    local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
+    local profile_dir="\${!dir_var:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
     mkdir -p "\$profile_dir"
     # Background coupled heads and independent engines own their profiler/trigger.
     # The parent shell owns router and Mooncake cleanup.
@@ -630,23 +684,16 @@ serve_prefill() {
     fi
     # Trace graph nodes and child TP workers. 'stop' ends collection without
     # shutting down the serving process; this captures one window per launch.
-    # Sample only this engine's GPU mask, including UUIDs and TP groups, so
-    # concurrent profilers do not all collect counters from the same GPUs.
-    VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
-        --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
-        --nccl-trace=all --pytorch=functions-trace-shapes \
-        --gpu-metrics-devices=cuda-visible \
-        --sample=process-tree --cpuctxsw=none \
-        --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
-        --trace-fork-before-exec=true --cuda-graph-trace=node \
+    VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile "\${trace_args[@]}" \
+        --trace-fork-before-exec=true \
         --capture-range=cudaProfilerApi --capture-range-end=stop \
-        --output "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p" \
+        --output "\$profile_dir/\$role-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p" \
         vllm serve "\$@" \
         --profiler-config "{\"profiler\":\"cuda\",\"max_iterations\":\$steps}" &
     profiler_pid=\$!
     # Coupled headless ranks are profiled through their tier's API head.
     if [[ "\$profile_delay" != manual ]] && (( api_worker )); then
-        trigger_prefill_profile &
+        trigger_profile &
         trigger_pid=\$!
     fi
     local status=0
@@ -920,7 +967,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         # the other decode nodes.
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+        serve_decode $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_DECODE_NODES \
@@ -931,7 +978,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
+        serve_decode $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_DECODE_NODES \
             --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
@@ -1004,8 +1051,8 @@ else
         engine_args+=(--tensor-parallel-size "\$tensor_parallel_size" --pipeline-parallel-size 1
             --data-parallel-size 1 --data-parallel-size-local 1 --api-server-count 1)
         # Install once before concurrent engines can race on the package manager.
-        if [[ "$VLLM_MODE" == pd && "\${PROFILE_PREFILL:-0}" == 1 ]] && \
-            (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        if [[ "$VLLM_MODE" == pd ]] && { { [[ "\${PROFILE_PREFILL:-0}" == 1 ]] && (( SLURM_PROCID < $NUM_PREFILL_NODES )); } ||
+            { [[ "\${PROFILE_DECODE:-0}" == 1 ]] && (( SLURM_PROCID >= $NUM_PREFILL_NODES )); }; }; then
             ensure_nsys || return 1
         fi
         for (( engine_index = 0; engine_index < \$engines_per_node; engine_index++ )); do
@@ -1026,6 +1073,8 @@ print(json.dumps(config))
             serve_command=(vllm serve)
             if [[ "$VLLM_MODE" == pd ]] && (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
                 serve_command=(serve_prefill "\$worker_port")
+            elif [[ "$VLLM_MODE" == pd ]]; then
+                serve_command=(serve_decode "\$worker_port")
             fi
             gpu_start=\$(( engine_index * tensor_parallel_size ))
             printf -v gpu_mask '%s,' "\${visible_gpus[@]:gpu_start:tensor_parallel_size}"
@@ -1161,7 +1210,7 @@ print(json.dumps(config))
         # Decode
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+        serve_decode $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
             \${decode_distributed_args[@]+"\${decode_distributed_args[@]}"} \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
