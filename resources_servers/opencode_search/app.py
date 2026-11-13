@@ -275,9 +275,11 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # Upstream, overridable so a run can be pinned to a frozen mirror.
     exa_upstream_url: str = "https://mcp.exa.ai/mcp"
 
-    # verify() needs only the saved response, question and ground truth — the sandbox is already
-    # gone by then and the judge call is pure — so a saved run can be re-graded offline under a
-    # different judge or prompt without re-running the model (gym eval reverify).
+    # STATELESS: a verify without the close-follows header that an Environment Server sends with an episode's verify,
+    # such as gym eval reverify's, grades only its body (question, ground truth, saved response), so a saved run can be
+    # re-graded under another judge or prompt without running the model again. Such a re-grade cannot reproduce a
+    # budget mask: the saved body carries no ending, and an episode's ending was read from the plugin log in its
+    # sandbox, which stopped with the episode (see README).
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # Sandbox the agent works in. One fixed image for every row: these tasks carry no
@@ -384,12 +386,14 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # BrowseComp answer is free text and string equality scores correct answers as wrong.
     judge_model_server: ModelServerRef
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
-    # Legacy ladder, copied field-for-field from the legacy stack's
-    # swe_agents/app.py:151-168. 1 initial attempt + 3 retries, a FIXED 30s sleep between them
-    # (that branch's comment records it replacing full-jitter exponential backoff on 09-03), and a
-    # shorter cap on retries so a dead endpoint costs ~300 + 3*(30+120) = ~12.5 min per rollout
-    # rather than the ~90 min our 15-attempt/300s-each schedule allowed. On a 4h wall where row
-    # completeness is already the binding constraint, that difference is the whole budget.
+    # The retry ladder: judge_max_attempts attempts, the first bounded by judge_timeout_seconds and each retry by the
+    # shorter judge_retry_timeout_seconds, a fixed judge_retry_delay_seconds apart rather than an exponential backoff,
+    # so a dead endpoint holds a rollout for a bounded time. Each attempt is one call_judge, which sends the request up
+    # to JUDGE_CALL_MAX_ATTEMPTS (3) times on a timeout, a lost connection or a 408, 429 or 5xx reply, with at most 2 s
+    # and then 4 s of backoff. With the defaults, a judge that never answers holds a rollout for
+    # (3*300 + 6) + 3*(3*120 + 6) + 3*30 = 2,094 s when each request is sent once. Gym's client also sends a timed-out
+    # or refused request again until global_aiohttp_internal_retry_budget_seconds (600 s by default) is spent, which
+    # stretches that to about two hours.
     judge_max_attempts: int = 4
     judge_retry_delay_seconds: float = 30.0
     judge_retry_timeout_seconds: float = 120.0
