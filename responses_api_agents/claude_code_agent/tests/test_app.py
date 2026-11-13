@@ -167,6 +167,8 @@ class TestBuildCommand:
         agent = _make_agent(
             allowed_tools="Bash,Read",
             disallowed_tools="Write",
+            tools="Bash,Read",
+            session_name="Conformance check",
             thinking="enabled",
             max_thinking_tokens=1024,
             max_turns=7,
@@ -174,6 +176,8 @@ class TestBuildCommand:
         cmd = agent._build_command("m", "x", system_prompt="be terse")
         assert cmd[cmd.index("--allowedTools") + 1] == "Bash,Read"
         assert cmd[cmd.index("--disallowedTools") + 1] == "Write"
+        assert cmd[cmd.index("--tools") + 1] == "Bash,Read"
+        assert cmd[cmd.index("--name") + 1] == "Conformance check"
         assert cmd[cmd.index("--thinking") + 1] == "enabled"
         assert cmd[cmd.index("--max-thinking-tokens") + 1] == "1024"
         assert cmd[cmd.index("--max-turns") + 1] == "7"
@@ -188,10 +192,11 @@ class TestBuildSettings:
         assert settings["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
         assert set(settings.keys()) == {"env"}
 
-    def test_user_settings_merged_preserving_telemetry(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("inline", [False, True])
+    def test_user_settings_merged_preserving_telemetry(self, tmp_path: Path, inline: bool) -> None:
         settings_file = tmp_path / "settings.json"
         settings_file.write_text(json.dumps({"env": {"FOO": "bar"}, "permissions": {"allow": ["Bash"]}}))
-        agent = _make_agent(settings=str(settings_file))
+        agent = _make_agent(settings=json.loads(settings_file.read_text()) if inline else str(settings_file))
         settings = agent._build_settings()
         # user env layered on top of telemetry defaults
         assert settings["env"]["FOO"] == "bar"

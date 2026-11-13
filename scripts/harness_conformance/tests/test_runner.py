@@ -13,8 +13,8 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _compaction_settings, _config
-from scripts.harness_conformance.provider import OpenClawProbe, Probe
+from scripts.harness_conformance.episode import HARNESSES, _config, _settings
+from scripts.harness_conformance.probes import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -110,17 +110,6 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
         getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
-
-
-@pytest.mark.parametrize("compaction", [False, True])
-def test_compaction_overrides_preserve_tool_timeout(tmp_path, compaction):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=9)
-    ports = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
-    config = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True, scenario=scenario)
-    agent = config["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]
-    assert agent["harness"] == {"step_limit": 13, "step_timeout_sec": 10}
-    ordinary = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True)
-    assert ordinary["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]["harness"]["step_limit"] == 6
 
 
 def test_session_runtime_does_not_require_host_cli(monkeypatch):
@@ -407,14 +396,34 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 
 
 @pytest.mark.parametrize("compaction", [True, False])
-def test_opencode_compaction_is_scripted_independently_of_request_text(tmp_path, compaction):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
-    settings = _compaction_settings("opencode", scenario)
-    probe = Probe(scenario, tmp_path, harness="opencode", **settings.probe_overrides)
+@pytest.mark.parametrize(
+    "harness,tool_steps,low_usage",
+    [("opencode", 2, 500), ("hermes", 14, 1000), ("stirrup", 14, 500), ("codex", 14, 500), ("kilocode", 14, 500)],
+)
+def test_compaction_is_scripted_independently_of_request_text(tmp_path, compaction, harness, tool_steps, low_usage):
+    scenario = dataclasses.replace(
+        SCENARIO["context_compaction"],
+        name="context_compaction" if compaction else "no_compaction",
+        compaction=compaction,
+        tool_steps=tool_steps,
+    )
+    settings = _settings(harness, tmp_path, 30, scenario)
+    if not compaction:
+        # This comparison is test-only; its replies are independent of compaction settings.
+        settings["probe_overrides"] = {
+            "responses": [
+                *[
+                    {"kind": "tool", "input_tokens": usage, "output_tokens": 8}
+                    for usage in [low_usage] * (tool_steps - 1) + [27000]
+                ],
+                {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+            ]
+        }
+    probe = Probe(scenario, tmp_path, harness=harness, **settings.probe_overrides)
     messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
-        for expected_usage in (500, 27000):
+        for expected_usage in [low_usage] * (tool_steps - 1) + [27000]:
             response = client.post("/v1/chat/completions", json=body).json()
             assert response["usage"]["prompt_tokens"] == expected_usage
             message = response["choices"][0]["message"]
@@ -432,7 +441,7 @@ def test_opencode_compaction_is_scripted_independently_of_request_text(tmp_path,
             messages.append({"role": "user", "content": probe.compaction_summary})
         final = client.post("/v1/chat/completions", json=body).json()
     assert final["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
-    assert len(probe.attempts) == 3 + int(compaction)
+    assert len(probe.attempts) == tool_steps + 1 + int(compaction)
     assert len(probe.compaction_response_ids) == int(compaction)
     assert probe.finished and not probe.violations
 
@@ -907,8 +916,7 @@ def test_checker_error_preserves_independent_ci_measurements(
     output = tmp_path / "table.mdx"
     ci_table.render_ci(artifacts=artifacts, commit=commit, output=output, run_url="https://example.com/run")
     count = len(scenarios) - 1
-    p1 = "—" if failed_scenario == "context_compaction" else '<Badge intent="launch" minimal>1/1</Badge>'
-    assert f'`pi` | <Badge intent="launch" minimal>{count}/{count}</Badge> | {p1} | —' in output.read_text()
+    assert f'`pi` | <Badge intent="launch" minimal>{count}/{count}</Badge> | 0 | 0 | 0 |' in output.read_text()
 
 
 def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatch):
@@ -925,7 +933,7 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("gate_tier", ["P0", "P1"])
-def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained_episode, monkeypatch, gate_tier):
+def test_compaction_runs_or_declares_failure_at_its_own_priority(retained_episode, monkeypatch, gate_tier):
     from scripts.harness_conformance import runner
 
     source, _ = retained_episode
@@ -951,13 +959,33 @@ def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained
     summary, code = run_suite(
         harnesses=list(HARNESSES), scenarios=scenarios, output=source / "run", timeout=1, gate_tier=gate_tier
     )
-    assert set(launched) == {(h, s.name) for h in HARNESSES for s in scenarios}
+    unsupported = {"simple", "miniswe_sandboxed"}
+    assert set(launched) == {
+        (h, s.name) for h in HARNESSES for s in scenarios if h not in unsupported or s.name != "context_compaction"
+    }
     assert code == (0 if gate_tier == "P0" else 1)
-    for row in summary["harnesses"].values():
+    from scripts.harness_conformance.rendering import scenario_counts, scenario_details
+
+    for harness, row in summary["harnesses"].items():
         assert row["verdict"] == ("fulfilled" if gate_tier == "P0" else "not_fulfilled")
         result = row["scenarios"][1]
-        assert result["p0_verdict"] == "fulfilled" and result["verdict"] == "not_fulfilled"
-        assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
+        assert result["verdict"] == "not_fulfilled"
+        if harness in unsupported:
+            assert result["exercised"] is False and result["execution"] == {"skipped": True}
+            assert result["model_attempts"] == 0 and result["evidence"] == {}
+            assert result["checks"][0]["id"] == "scenario.supported"
+            assert result["checks"][0]["status"] == "fail"
+            assert "does not implement compaction" in result["issues"][0]
+            assert scenario_counts([result]) == [
+                '<Badge intent="error" minimal>0/1</Badge>',
+                "0",
+                '<Badge intent="error" minimal>1</Badge>',
+                "0",
+            ]
+            assert "✗ (P1:✗) — not run: declared unsupported" in scenario_details([result])
+        else:
+            assert result["p0_verdict"] == "fulfilled"
+            assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
 
 
 def test_compaction_only_run_cannot_pass_an_empty_p0_gate(tmp_path):

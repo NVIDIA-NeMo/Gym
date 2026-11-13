@@ -9,10 +9,20 @@ position: 3
 ## Results
 
 These results are updated automatically from scripted model, tool, and verifier
-scenarios at the linked Gym revision. Each P0, P1, or P2 cell shows
-**passing scenarios / measured scenarios**; a dash means no applicable measurements
-are available. Green counts mean all measured scenarios pass; red counts mean at
-least one does not pass.
+scenarios at the linked Gym revision. **Scenarios passed** counts scenarios that
+pass **all applicable checks**, across P0, P1, and P2, divided by scenarios with
+applicable check results. Green means all pass; red means at least one fails.
+A dash means no applicable check results are available.
+
+Each failing scenario is counted once under its **first failing tier**: P0 before
+P1 before P2. For example, a scenario with passing P0 checks and failing P1 checks
+counts as a failed scenario under P1. The failure counts therefore add up to the
+number of scenarios that did not pass.
+
+The breakdown lists each scenario once: `tool_success: ✓ (P0:✓)` or
+`context_compaction: ✗ (P0:✓, P1:✗)`. A check failure includes missing or blocked
+evidence. These presentation results include every applicable check; the suite's
+CI gating policy is separate and unchanged.
 
 {/* BEGIN GENERATED TE TABLE */}
 
@@ -20,12 +30,10 @@ least one does not pass.
 
 {/* END GENERATED TE TABLE */}
 
-A scenario counts in a tier when it has applicable checks at that priority, and
-passes when all of those checks pass. A scenario can contribute to more than one
-tier; failures in one tier do not change another tier's count. Completed check
-results remain visible when a probe reports execution errors. Expand the details
-to see each harness's passing and not-passing scenarios by tier, followed by the
-full check matrix. Follow the linked CI results to investigate individual failures.
+Completed check results remain visible when a probe reports execution errors.
+Declared unsupported scenarios are marked as not run. Expand the details to see
+each scenario's overall result and check tiers, followed by the full check matrix.
+Follow the linked CI results to investigate individual failures.
 
 These measurements cover local execution. See
 [Rollout Evidence](/main/observability/rollout-evidence) for collection setup.

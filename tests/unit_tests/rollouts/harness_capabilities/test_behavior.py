@@ -48,7 +48,8 @@ def test_canonical_behavioral_checks_use_the_independent_witness(behavior_episod
     assert issues <= {"model.saved_exchanges", "model.response_metadata", "model.token_counts"}
 
 
-def test_canonical_error_response_cannot_invent_an_id():
+@pytest.mark.parametrize("mutation", ["response_id", "missing_error", "invented_zero"])
+def test_canonical_error_response_retains_exchange_and_unknowns(mutation):
     request = {"input": []}
     response = {"error": {"message": "prescribed HTTP 400"}}
     attempts = [{"request": request, "response": response, "status_code": 400}]
@@ -56,8 +57,15 @@ def test_canonical_error_response_cannot_invent_an_id():
     call = {"request": request, "response": response, "response_metadata": metadata}
     record = {"ng_trajectory": {"model_calls": [call]}}
     assert not failed_model_checks(record, attempts)
-    metadata["response_id"] = "invented"
-    assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+    if mutation == "response_id":
+        metadata["response_id"] = "invented"
+        assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+    elif mutation == "missing_error":
+        record["ng_trajectory"]["model_calls"] = []
+        assert "model.saved_exchanges" in failed_model_checks(record, attempts)
+    else:
+        call["token_stats"] = {"prompt_tokens": 0}
+        assert failed_model_checks(record, attempts) == {"model.token_counts"}
 
 
 @pytest.mark.parametrize(
@@ -133,18 +141,6 @@ def test_responses_incomplete_reason_matches_the_witness():
     assert not failed_model_checks(record, attempts)
     metadata["finish_reason"] = None
     assert failed_model_checks(record, attempts) == {"model.response_metadata"}
-
-
-def test_auxiliary_calls_are_required_in_canonical_exchange_comparison(behavior_episode):
-    record, witness = behavior_episode
-    auxiliary = copy.deepcopy(witness["attempts"][0])
-    witness["auxiliary_calls"] = [auxiliary]
-    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
-    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
-    assert checks["model.saved_exchanges"]["status"] == "fail"
-    record["ng_trajectory"]["model_calls"].append(copy.deepcopy(record["ng_trajectory"]["model_calls"][0]))
-    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
-    assert checks["model.saved_exchanges"]["status"] == "pass"
 
 
 def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):

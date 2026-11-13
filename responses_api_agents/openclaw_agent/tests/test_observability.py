@@ -4,6 +4,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
 from nemo_gym.trajectory import (
@@ -333,3 +335,110 @@ def _time_split(observations) -> tuple:
 def test_a_rollout_without_its_transcript_leaves_tool_time_unknown() -> None:
     """OpenClaw reports an empty history with `agent_transcript_unavailable`: that is not an empty tool history."""
     assert _time_split(build_openclaw_observations("0-0", [], [], transcript_available=False)) == (0.4, None, None)
+
+
+@pytest.mark.parametrize(
+    "log,reason,expected",
+    [
+        (
+            "embedded run auto-compaction complete: runId=run reason=overflow compactionCount=1 willRetry=true",
+            None,
+            "automatic",
+        ),
+        ("embedded run auto-compaction start: runId=run reason=overflow", None, None),
+        (
+            "embedded run auto-compaction complete: runId=run reason=overflow compactionCount=2 willRetry=true",
+            None,
+            None,
+        ),
+        (
+            "embedded run auto-compaction complete: runId=run reason=overflow compactionCount=1 willRetry=true",
+            "manual",
+            "manual",
+        ),
+    ],
+)
+def test_compaction_trigger_requires_completed_runtime_evidence(log, reason, expected):
+    bundle = build_openclaw_observations(
+        "session",
+        [],
+        [
+            {"type": "compaction", "summary": "summary", "reason": reason},
+        ],
+        transcript_available=True,
+        runtime_log=log,
+    )
+    assert _records(bundle, ContextCompactionObservation)[0].trigger == expected
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "other_owner", "ambiguous", "partial_summary", "after_event", "partial_usage"]
+)
+def test_compaction_joins_only_unique_owned_summary_calls(mutation):
+    from nemo_gym.trajectory import ModelCallRecord
+    from responses_api_agents.openclaw_agent.observability import reconcile_openclaw_calls
+
+    bundle = build_openclaw_observations(
+        "session",
+        [],
+        [
+            {
+                "type": "compaction",
+                "timestamp": 2,
+                "summary": "No prior history.\n\n---\n\n**Turn Context (split turn):**\n\nfull summary",
+            },
+        ],
+        transcript_available=True,
+    )
+    helper = ModelCallRecord(
+        model_call_id="summary-call",
+        client_session_id="session",
+        call_index=0,
+        response_id="summary-response",
+        model_ref=ModelServerRef(type="responses_api_models", name="model"),
+        request={"messages": []},
+        response={"choices": [{"message": {"content": "full summary"}}]},
+        status_code=200,
+        completed_at=1.5,
+        tokens_in=7,
+        tokens_out=2,
+        tokens_total=9,
+        cached_tokens=1,
+        tokens_reasoning=0,
+    )
+    failed = helper.model_copy(
+        update={
+            "model_call_id": "overflow",
+            "call_index": 1,
+            "response_id": None,
+            "status_code": 400,
+            "response": {"error": {}},
+            "tokens_in": None,
+            "tokens_out": None,
+            "tokens_total": None,
+        }
+    )
+    calls = [helper, failed]
+    if mutation == "other_owner":
+        helper.client_session_id = "another-session"
+    elif mutation == "ambiguous":
+        calls.append(helper.model_copy(update={"model_call_id": "duplicate", "call_index": 2}))
+    elif mutation == "partial_summary":
+        helper.response["choices"][0]["message"]["content"] = "summary"
+    elif mutation == "after_event":
+        helper.completed_at = 3
+    elif mutation == "partial_usage":
+        failed.tokens_in = 3
+    result, usage = reconcile_openclaw_calls(bundle, calls)
+    event = _records(result, ContextCompactionObservation)[0]
+    assert bool(event.model_calls) is (mutation in (None, "partial_usage"))
+    assert failed.tokens_out is None  # Reconciliation must not invent error usage.
+    if mutation == "partial_usage":
+        assert usage.input_tokens == 10 and usage.output_tokens == 2 and usage.total_tokens == 12
+    if mutation is None:
+        assert event.model_calls[0].model_call_id == "summary-call"
+        assert usage.input_tokens == 7 and usage.output_tokens == 2 and usage.total_tokens == 9
+        assert usage.input_tokens_details.cached_tokens is None
+        assert any(g.code == "model_call_usage_unavailable" for g in result.gaps)
+        again, _ = reconcile_openclaw_calls(result, calls)
+        assert len(_records(again, ContextCompactionObservation)[0].model_calls) == 1

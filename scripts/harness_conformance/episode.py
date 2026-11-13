@@ -101,7 +101,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
         },
         "crewai": {"harness_overrides": {"timeout": timeout}},
         "openclaw": {
-            "probe": ".provider:OpenClawProbe",
+            "probe": ".probes:OpenClawProbe",
             "harness_overrides": {"timeout": math.ceil(timeout)},
             "legacy": {"harness_overrides": {"workspace_root": workspace}},
         },
@@ -117,7 +117,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
             },
         },
         "nooa": {
-            "probe": ".nooa:NOOAProbe",
+            "probe": ".probes:NOOAProbe",
             "required_imports": ["scripts.harness_conformance.nooa"],
             "inherit_adapter_fields": ["nooa"],
             "harness_overrides": {
@@ -136,6 +136,8 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
                 "timeout": int(timeout),
                 "max_turns": 6,
                 "allowed_tools": "Bash",
+                "tools": "Bash",
+                "session_name": "Conformance check",
                 "thinking": "disabled",
             },
         },
@@ -174,7 +176,7 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
     }.get(harness, {})
     return OmegaConf.merge(
         {
-            "probe": ".provider:Probe",
+            "probe": ".probes:Probe",
             # Whether the episode runner must prepare a sandbox for the agent to borrow.
             "requires_sandbox": False,
             "requires_tmux": False,
@@ -194,18 +196,18 @@ def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
 
 
 def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
-    """Scenario-specific overrides, applied after constructing the base settings."""
+    """Harness overrides and scripted replies for the compaction scenario."""
     steps = scenario.tool_steps + 4
-    context = {"context_window": 32768 if scenario.compaction else 65536, "max_output_tokens": 8192}
+    context = {"context_window": 32768, "max_output_tokens": 8192}
     settings = {
-        "simple": {"harness_overrides": {"max_steps": steps}},
+        "simple": {"unsupported_reason": "Simple Agent does not implement compaction."},
         "opencode": {
             "harness_overrides": context,
             "probe_overrides": {
                 "responses": [
                     {"kind": "tool", "input_tokens": 500, "output_tokens": 8},
                     {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
-                    *([{"kind": "summary", "input_tokens": 500, "output_tokens": 11}] if scenario.compaction else []),
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
                     *[
                         {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
                         for _ in range(scenario.tool_steps - 2)
@@ -214,23 +216,157 @@ def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
                 ],
             },
         },
-        "pi": {"harness_overrides": context},
-        "codex": {"harness_overrides": {"model_context_window": 32768, "model_auto_compact_token_limit": 24000}},
-        "stirrup": {"harness_overrides": {"context_window_tokens": 32768}},
-        "hermes": {
-            "harness_overrides": {"compression_enabled": True, "compression_threshold": 0.1, "max_turns": steps}
+        "pi": {
+            "probe": ".probes:PiProbe",
+            "harness_overrides": context,
+            "probe_overrides": {
+                "tool_output_chars": 20000,
+                "responses": [
+                    *[{"kind": "tool", "input_tokens": 500, "output_tokens": 8} for _ in range(scenario.tool_steps)],
+                    {"kind": "context_overflow"},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
         },
-        "claude_code": {"harness_overrides": {"max_turns": steps}},
-        "miniswe_sandboxed": {"harness_overrides": {"harness": {"step_limit": steps}}},
+        "kilocode": {
+            "harness_overrides": {
+                **context,
+                "kilo_config": {"compaction": {"auto": True}},
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
+        "openclaw": {
+            "harness_overrides": {"context_window": 131072, "max_output_tokens": 8192},
+            "probe_overrides": {
+                "context_window": 131072,
+                "command_padding_chars": 12000,
+                "responses": [
+                    *[{"kind": "tool", "input_tokens": 500, "output_tokens": 8} for _ in range(scenario.tool_steps)],
+                    {"kind": "context_overflow"},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
+        "codex": {
+            "harness_overrides": {
+                "model_context_window": 32768,
+                "model_auto_compact_token_limit": 24000,
+                "request_max_retries": 0,
+                "stream_max_retries": 0,
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
+        "stirrup": {
+            "harness_overrides": {
+                "context_window_tokens": 32768,
+                "agent_max_turns": steps,
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
+        "hermes": {
+            "harness_overrides": {
+                "compression_enabled": True,
+                "context_length": 32768,
+                "compression_threshold": 0.5,
+                "max_turns": steps,
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 1000, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
+        "claude_code": {
+            "harness_overrides": {
+                "max_turns": steps,
+                "settings": {
+                    "autoCompactWindow": 100000,
+                    "autoMemoryEnabled": False,
+                    "promptSuggestionEnabled": False,
+                    "env": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096"},
+                },
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 90000, "output_tokens": 8},
+                    {"kind": "summary", "input_tokens": 500, "output_tokens": 11},
+                    {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+                ],
+            },
+        },
+        "miniswe_sandboxed": {"unsupported_reason": "Mini-SWE does not implement compaction."},
         "terminus_2_sandboxed": {
             "harness_overrides": {
                 "max_turns": steps,
-                "enable_summarize": scenario.compaction,
+                "enable_summarize": True,
                 "model_context_limit": 32768,
+                "proactive_summarization_threshold": 8000,
+            },
+            "probe_overrides": {
+                "responses": [
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 1)
+                    ],
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    # Harbor summarizes, asks handoff questions, then answers them.
+                    *[{"kind": "summary", "input_tokens": 500, "output_tokens": 11} for _ in range(3)],
+                    *[{"kind": "final", "input_tokens": 100, "output_tokens": 8} for _ in range(2)],
+                ],
             },
         },
     }.get(harness, {})
     return OmegaConf.create(settings)
+
+
+def _settings(harness: str, directory: Path, timeout: float, scenario: Scenario | None = None) -> DictConfig:
+    settings = _base_settings(harness, directory, timeout)
+    scenario_settings = {"context_compaction": _compaction_settings}.get(getattr(scenario, "name", None))
+    if scenario_settings is not None:
+        settings = OmegaConf.merge(settings, scenario_settings(harness, scenario))
+    return settings
 
 
 def _config(
@@ -249,9 +385,7 @@ def _config(
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
     defaults = OmegaConf.load(defaults_path)[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
-    settings = _base_settings(harness, directory, timeout)
-    if scenario is not None and scenario.compaction is not None:
-        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    settings = _settings(harness, directory, timeout, scenario)
     for module_name in settings.get("required_imports", []):
         importlib.import_module(module_name)
     mode = settings["session" if use_agent_sessions else "legacy"]
@@ -325,9 +459,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    settings = _base_settings(harness, directory, timeout)
-    if scenario.compaction is not None:
-        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    settings = _settings(harness, directory, timeout, scenario)
     probe_module, probe_name = settings.probe.split(":")
     probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
     probe = probe_cls(scenario, directory, harness=harness, **settings.get("probe_overrides", {}))

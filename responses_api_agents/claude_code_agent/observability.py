@@ -21,6 +21,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.trajectory import (
@@ -211,7 +212,7 @@ def _compaction(event: dict[str, Any], invocation_id: str) -> ContextCompactionO
     return ContextCompactionObservation(
         invocation_id=invocation_id,
         observed_at=_timestamp(event.get("timestamp")),
-        trigger=trigger if isinstance(trigger, str) else None,
+        trigger="automatic" if trigger == "auto" else trigger if isinstance(trigger, str) else None,
         tokens_before=_integer(metadata, "tokensBefore", "preTokens"),
         tokens_after=_integer(metadata, "tokensAfter", "postTokens"),
         outcome=_compaction_outcome(
@@ -783,3 +784,48 @@ def associate_claude_code_compaction_calls(
         if gap.code != "compaction_model_call_reference_unavailable" or gap.invocation_id in unresolved
     ]
     return result
+
+
+def captured_claude_code_usage(
+    bundle: AgentObservationBundle, calls: list[ModelCallRecord]
+) -> NeMoGymResponseUsage | None:
+    """Total uniquely resolved invocation calls, including helpers, without counting unrelated calls."""
+    if any(isinstance(record, ContextCompactionObservation) and not record.model_calls for record in bundle.records):
+        return None
+    references = [
+        reference
+        for record in bundle.records
+        if isinstance(record, AgentInvocation)
+        for reference in record.model_calls
+    ]
+    resolved = set()
+    for reference in references:
+        matches = [
+            index
+            for index, call in enumerate(calls)
+            if (
+                reference.model_call_id == call.model_call_id
+                if reference.model_call_id
+                else reference.model_ref == call.model_ref and reference.response_id == call.response_id
+            )
+        ]
+        if len(matches) != 1:
+            return None
+        resolved.add(matches[0])
+    if not resolved or any(
+        calls[index].tokens_in is None or calls[index].tokens_out is None or calls[index].tokens_total is None
+        for index in resolved
+    ):
+        return None
+    return NeMoGymResponseUsage.sum_from_list(
+        [
+            NeMoGymResponseUsage(
+                input_tokens=calls[index].tokens_in,
+                output_tokens=calls[index].tokens_out,
+                total_tokens=calls[index].tokens_total,
+                input_tokens_details={"cached_tokens": calls[index].cached_tokens},
+                output_tokens_details={"reasoning_tokens": calls[index].tokens_reasoning},
+            )
+            for index in resolved
+        ]
+    )
