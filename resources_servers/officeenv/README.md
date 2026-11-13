@@ -164,6 +164,13 @@ the row, so these episodes need rows in the `tools` exposure with the default to
 separator; a seed whose tools differ from what the endpoint serves fails with 400
 (`unsupported_exposure`).
 
+## Sandboxed harnesses
+
+`resources_servers/officeenv_sandbox` runs these episodes for coding-agent harnesses (Pi, Codex CLI, mini-SWE,
+OpenCode, OpenClaw, Terminus 2): its server subclasses this one and lends each episode session a sandbox, with
+OfficeEnv's file content moved through the sandbox's workspace instead of the conversation. Its README covers the
+images, configs and options.
+
 ## Verification
 
 `/verify` grades the final state of the rollout's session and releases it. Besides `reward` (a
