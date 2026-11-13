@@ -545,7 +545,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
-    # Speak the Dynamo frontend's dialect (ai-dynamo >= 1.5.1), with NeMo RL's engine behind it. The frontend
+    # Speak the dialect of a Dynamo frontend (ai-dynamo >= 1.5.1) that runs NeMo RL's chat engine. The frontend
     # rejects unknown request fields and drops unknown response fields, so NeMo RL's fields ride in `nvext` under
     # their native names: one `nemo_rl:gym:<JSON object>` entry in every request's `nvext.annotations`, and the
     # `nvext.nemo_rl` object on the response, lifted to where the native server puts each field. Echoed
@@ -1078,7 +1078,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             except (ValueError, NotImplementedError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             if self.config.dynamo_frontend:
-                # The Dynamo frontend has no /tokenize, so the engine measures the chat call itself:
+                # The Dynamo frontend has no /tokenize, so NeMo RL's chat engine measures the chat call:
                 # `ng_measure` asks it for the prompt length only, returned in nvext.nemo_rl.
                 add_dynamo_gym_extras(processed, {"ng_measure": True})
                 response = await client.create_chat_completion(

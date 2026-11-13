@@ -60,17 +60,17 @@ def validate_framework_context_options(request_payload: dict[str, Any]) -> None:
 # defensively alongside ``TOKEN_FIELDS`` so it never reaches the agent hop.
 _MEGATRON_TRANSPORT_FIELDS = ("compact_prompt_token_ids",)
 
-# The Dynamo frontend accepts only OpenAI fields plus ``nvext``, and forwards ``nvext.annotations`` to the
-# engine. NeMo RL's request fields (``ng_capture``, ``required_prefix_token_ids``, ``ng_measure``) therefore ride
-# under their native names in one annotation, ``"nemo_rl:gym:<JSON object>"``. Every Gym request carries it,
-# empty when no field applies, so the engine can tell Gym's calls from NeMo RL's own.
+# The Dynamo frontend accepts only OpenAI fields plus ``nvext``, and hands ``nvext.annotations`` to NeMo RL's
+# chat engine, which runs inside it. NeMo RL's request fields (``ng_capture``, ``required_prefix_token_ids``,
+# ``ng_measure``) therefore ride under their own names in one annotation, ``"nemo_rl:gym:<JSON object>"``.
+# Every Gym request carries it, empty when no field applies: that chat engine refuses a chat call without it.
 DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX = "nemo_rl:gym:"
 # The engine returns its call result as this ``nvext`` object, under the native vLLM server's field names.
 _DYNAMO_CALL_RESULT_FIELD = "nemo_rl"
 # Dynamo's router reads session affinity only from this header.
 DYNAMO_SESSION_ID_HEADER = "x-dynamo-session-id"
-# Dynamo's frontend forwards only an error's status and message, so the engine acknowledges a refused capture
-# call (natively ``CAPTURE_REFUSAL_HEADER``) at the end of the message.
+# Dynamo's frontend forwards only an error's status and message, so NeMo RL acknowledges a refused capture
+# call (``CAPTURE_REFUSAL_HEADER`` on its vLLM server) at the end of the message.
 _DYNAMO_CAPTURE_REFUSAL = re.compile(rf" \[{re.escape(CAPTURE_REFUSAL_HEADER)}: ([^\]]+)\]\Z")
 
 
@@ -107,7 +107,7 @@ def pop_dynamo_call_result(response_payload: dict[str, Any]) -> dict[str, Any] |
 
 
 def dynamo_capture_refusal_suffix(model_call_id: str) -> str:
-    """What the engine behind Dynamo's frontend appends to the error message of a capture call it refused."""
+    """What NeMo RL appends, through Dynamo's frontend, to the error message of a capture call it refused."""
     return f" [{CAPTURE_REFUSAL_HEADER}: {model_call_id}]"
 
 
@@ -541,9 +541,9 @@ class DynamoWorkerCaptureHandler(_BaseExternalCaptureHandler):
         choice_count = request_payload.get("n")
         if choice_count is not None and choice_count != 1:
             raise ValueError("Dynamo token capture requires n=1")
-        # The prefix is resolved on the worker from ``staging_chain``, so no prefix ids travel. The
-        # engine generates what the request asks for, as the vLLM worker does, so the call asks for
-        # the sampled tokens' log probabilities, which the worker stages; score centering's
+        # NeMo RL resolves the prefix from ``staging_chain``, so no prefix ids travel. The engine
+        # generates what the request asks for, as the vLLM worker does, so the call asks for the
+        # sampled tokens' log probabilities, which the engine stages; score centering's
         # ``top_logprobs`` is kept.
         add_dynamo_gym_extras(request_payload, {NG_CAPTURE_FIELD: admission.model_dump(mode="json")})
         request_payload["logprobs"] = True
@@ -552,7 +552,7 @@ class DynamoWorkerCaptureHandler(_BaseExternalCaptureHandler):
         return request_payload
 
     def request_headers(self) -> dict[str, str]:
-        """Pin every admitted call of a rollout to one engine, which holds that rollout's staged prefix."""
+        """Name each admitted call's rollout, so Dynamo's router can keep the rollout on one engine's KV cache."""
         context = current_capture_context()
         if context is None or not context.external_staging or context.capture_admission is None:
             return {}
