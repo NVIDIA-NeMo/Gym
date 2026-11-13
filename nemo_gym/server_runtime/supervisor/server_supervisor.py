@@ -34,7 +34,7 @@ import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.client.server_client import ServerClient, ServerStatus
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
@@ -373,10 +373,29 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs. A
     directory counts as a server only if it ships an install marker for one of our two venv setups. This
     lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
+
+    A directory at a higher-priority root that holds a server entrypoint (``app.py``) but no install marker is
+    refused rather than skipped, so a local server is never silently replaced by an installed server of the same
+    name. A directory without an entrypoint, such as a local copy of a server's data with its helper scripts, is
+    still skipped.
     """
-    return _resolve_under_cwd_or_install(
-        rel_path, validator=lambda d: any((d / name).is_file() for name in ("pyproject.toml", "requirements.txt"))
-    )
+
+    def has_install_marker(d: Path) -> bool:
+        return any((d / name).is_file() for name in ("pyproject.toml", "requirements.txt"))
+
+    resolved = _resolve_under_cwd_or_install(rel_path, validator=has_install_marker)
+    if not rel_path.is_absolute():
+        for root in component_search_roots():
+            candidate = root / rel_path
+            if candidate == resolved:
+                break
+            if (candidate / "app.py").is_file():
+                raise ConfigError(
+                    f"Server directory {candidate} contains server code but no requirements.txt or pyproject.toml, "
+                    f"so Gym would use {resolved} instead. Add a requirements.txt or pyproject.toml listing the "
+                    f"server's dependencies to {candidate}, or move it aside to use {resolved}."
+                )
+    return resolved
 
 
 class _ConfiguredServer(NamedTuple):
