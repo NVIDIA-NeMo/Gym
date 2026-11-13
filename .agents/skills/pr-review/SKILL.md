@@ -118,7 +118,8 @@ Apply the checks for the areas the diff touches.
   the literal `unknown` is supported by `training_allowed`, `requirements.gpu`
   and `requirements.internet`. New or modified metadata must not leave scaffold
   `TODO` values. For an existing manifest, review the affected declarations
-  without requiring unrelated metadata backfilling. Check new or changed
+  without requiring unrelated metadata backfilling. A setup or protocol
+  declares its own selection fields. Check new or changed
   `training_allowed` declarations against the data's licence and terms, not a guess.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
