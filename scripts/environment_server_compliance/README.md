@@ -3,6 +3,11 @@
 A non-blocking CI check that flags agent servers that do not follow the Environment Server design. It checks the
 agents a PR changes, and every agent when the suite itself changes or on a manual dispatch of `cicd-main.yml`.
 Findings are warnings in the PR and are summarized in the check run **Environment Server compliance (non-blocking)**.
+Completed inspections with findings publish a neutral check and leave the workflow successful. The findings, rule
+locations, tested commit and evidence remain visible; a neutral result does not mean the agent is compliant.
+Selection, installation/import, missing or invalid evidence, failed probe jobs and publication errors still fail the
+reporting job. A result marked compliant must have an empty findings report, and a result with findings must have a
+valid, nonempty report from the tested commit.
 
 ## Rules
 
