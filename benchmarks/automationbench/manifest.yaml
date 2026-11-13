@@ -37,7 +37,11 @@ datasets:
   prepare_script: benchmarks/automationbench/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
 lifecycle: active
 resources_server: automationbench
+adopted_from:
+  source: https://github.com/zapier/AutomationBench
+  ref: 4a8e1061254004d9dac807054eed33fad7d1ff14
+  reconciled: '2026-11-04'

@@ -37,4 +37,8 @@ datasets:
 model_server: policy_model
 canonical_split: B+C
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/HaCTang/ReactionMechanismReasoning
+  ref: 63bb79f912f0b2de593996b80ffeea894f6f1a59
+  reconciled: '2026-09-22'
 lifecycle: active

@@ -34,6 +34,6 @@ datasets:
   prompt_config: benchmarks/mbpp/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 standard_prompt_config: benchmarks/mbpp/prompts/default.yaml
 lifecycle: active

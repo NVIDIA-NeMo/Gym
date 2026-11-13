@@ -33,6 +33,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/math.yaml
   num_repeats: 32
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/prompts/generic/math.yaml
 lifecycle: active

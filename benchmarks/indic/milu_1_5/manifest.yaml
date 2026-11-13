@@ -34,6 +34,10 @@ datasets:
   num_repeats: 1
 model_server: policy_model
 grading_mode: boxed_and_normalized
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/indic/milu_1_5/prompts/default.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/ai4bharat/MILU-1.5
+  ref: d8a3cc2b4223989399adef5c2685915099e371a5
+  reconciled: '2026-10-14'
 lifecycle: active

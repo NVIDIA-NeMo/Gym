@@ -145,7 +145,8 @@ def test_manifest_matches_config_and_routes_to_indic_environment():
     config = _resolve_cli_config([])
     agent = config["indic_ifeval_instruction_following_simple_agent"]["responses_api_agents"]["simple_agent"]
     dataset = agent["datasets"][0]
-    assert manifest.canonical_split == dataset["type"] == "benchmark"
+    assert dataset["type"] == "benchmark"
+    assert manifest.canonical_split == "bn+gu+hi+kn+mr+ml+ne+or+pa+ta+te+ur"
     assert manifest.prompt_source == "prepared"
     for declared, configured in zip(manifest.datasets, agent["datasets"], strict=True):
         for key in ("name", "type", "jsonl_fpath", "prepare_script", "num_repeats"):

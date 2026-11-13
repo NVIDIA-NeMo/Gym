@@ -34,6 +34,10 @@ datasets:
   prepare_script: benchmarks/aa_briefcase_lite/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/ArtificialAnalysis/AA-Briefcase-Lite
+  ref: 4dec557b47d43867a1648c0974db1d8208c8b677
+  reconciled: '2026-11-10'
 lifecycle: active

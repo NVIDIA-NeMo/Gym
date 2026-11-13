@@ -34,6 +34,10 @@ datasets:
   prompt_config: benchmarks/brokenarxiv_0526/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/brokenarxiv_0526/prompts/default.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/MathArena/brokenarxiv-0526
+  ref: 2761f4553fdc3c49cf9776e740bc8f641a8937aa
+  reconciled: '2026-09-12'
 lifecycle: active

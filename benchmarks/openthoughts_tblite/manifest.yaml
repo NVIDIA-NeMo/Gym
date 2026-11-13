@@ -34,6 +34,10 @@ datasets:
   num_repeats: 3
 resources_server: null
 model_server: null
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
+adopted_from:
+  source: https://github.com/open-thoughts/OpenThoughts-TBLite
+  ref: f075e463472c7790b85793b392dff1fff20cc0e3
+  reconciled: '2026-10-24'
 lifecycle: active

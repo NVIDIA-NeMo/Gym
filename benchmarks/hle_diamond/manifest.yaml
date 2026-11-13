@@ -34,6 +34,10 @@ datasets:
   prepare_script: benchmarks/hle_diamond/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/cais/hle-diamond
+  ref: 04eeb7efa7e3e4f83a00cbd5ce436a38fd5dda23
+  reconciled: '2026-10-24'
 lifecycle: active

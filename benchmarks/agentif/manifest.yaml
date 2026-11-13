@@ -33,6 +33,6 @@ datasets:
   prepare_script: benchmarks/agentif/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 prompt_source: prepared
 lifecycle: active

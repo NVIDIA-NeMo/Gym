@@ -35,8 +35,12 @@ datasets:
     type: example
     jsonl_fpath: benchmarks/indic/ifeval/data/example.jsonl
     num_repeats: 1
-canonical_split: benchmark
+canonical_split: bn+gu+hi+kn+mr+ml+ne+or+pa+ta+te+ur
 prompt_source: prepared
 session_model: episode
 state: none
+adopted_from:
+  source: https://github.com/AI4Bharat/IndicIFEval
+  ref: 1bb5f1bc4936cb20b8544e185bfd7cbed8f31464
+  reconciled: '2026-10-19'
 lifecycle: active

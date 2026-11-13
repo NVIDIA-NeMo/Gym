@@ -33,6 +33,10 @@ datasets:
   prepare_script: benchmarks/mm_browsecomp/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/MMBrowseComp/MM-BrowseComp
+  ref: cf82a2390aa7a7ed3d96f72969d22548eff3e101
+  reconciled: '2026-11-11'
 lifecycle: active

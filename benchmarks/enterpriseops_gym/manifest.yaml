@@ -40,7 +40,11 @@ model_server: policy_model
 session_model: episode
 state: per_session
 sandbox: opensandbox
-canonical_split: oracle
+canonical_split: calendar+csm+drive+email+hr+hybrid+itsm+teams
 prompt_source: prepared
 lifecycle: active
 resources_server: enterpriseops_gym
+adopted_from:
+  source: https://huggingface.co/datasets/ServiceNow-AI/EnterpriseOps-Gym
+  ref: c8e538eae8a6205294f0a86675fefdc1fac408f6
+  reconciled: '2026-10-25'
