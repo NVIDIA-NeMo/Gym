@@ -135,10 +135,14 @@ class TestSourceKey:
             "7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"  # pragma: allowlist secret
         )
         assert tb21.model_copy(update={"source": None}).is_empty
-        # The test sharding the legacy TB4 benchmark's server sets for this task, and nothing else.
+        # The test sharding the legacy TB4 benchmark's server sets for this task, in the agent's sandbox and the
+        # separate verifier's, and nothing else.
         assert tb4.model_copy(update={"source": None, "tasks": {}}).is_empty
         assert tb4.tasks == {
-            "nextjs-performance": GymTaskOverride(environment={"env": {"CIRCLE_NODE_TOTAL": "3"}}),
+            "nextjs-performance": GymTaskOverride(
+                environment={"env": {"CIRCLE_NODE_TOTAL": "3"}},
+                verifier={"environment": {"env": {"CIRCLE_NODE_TOTAL": "3"}}},
+            ),
         }
 
 

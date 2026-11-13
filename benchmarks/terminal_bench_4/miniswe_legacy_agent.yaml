@@ -1,3 +1,5 @@
+# Deprecated: miniswe_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
+# migration. Use miniswe.yaml instead, which runs mini_swe_agent through the Harbor environment server.
 config_paths:
 - benchmarks/terminal_bench_4/resources.yaml
 terminal_bench_4_miniswe:

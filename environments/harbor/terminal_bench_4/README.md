@@ -2,7 +2,8 @@
 
 The 66 Terminal Bench 4 tasks also run as plain Harbor task folders through the generic `harbor` environment
 server, without the `terminal_bench_4` benchmark's own server. The dataset comes from Harbor's package store,
-pinned by content hash. The `terminal_bench_4/miniswe` benchmark runs this entry with mini-SWE at the Artificial
+pinned by tag (`@4.0.0`); the pull records each task's content hash in `manifest.toml` and refuses a task
+folder that no longer matches it. The `terminal_bench_4/miniswe` benchmark runs this entry with mini-SWE at the Artificial
 Analysis settings (`gym eval run --benchmark terminal_bench_4/miniswe`; see `benchmarks/terminal_bench_4/README.md`).
 
 ```sh
@@ -47,7 +48,8 @@ default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` sele
 
 Settings live in four places (see `fern/versions/latest/pages/agent-interactions/harbor.mdx`, "Configure the server"). `dataset.toml` sets
 `CIRCLE_NODE_TOTAL=3` for `nextjs-performance`, as the legacy benchmark's server does, so its test sharding matches
-the task's two-CPU allocation; the loader applies it and nothing else changes.
+the task's two-CPU allocation. It sets it for the agent's sandbox and for the separate verifier's, which gets only its
+own `[verifier.environment].env`; the loader applies both and nothing else changes.
 
 Deployment settings go in the `sandbox` and `sandbox_gpu` provider blocks of the merged configuration (`env.yaml` or a `--config` overlay): Compose networking and
 the shared-memory label as documented in `fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`, and, for `gym dataset validate` on the three images

@@ -23,3 +23,6 @@ harbor_environment_server:
       # grace), capped here. The server's default cap (21600 s) would cut a long run short; the slowest verifier
       # (fp8-rmsnorm-gemm) allows 18000 s.
       default_episode_timeout_seconds: ${oc.select:tb4_episode_timeout_sec,54000}
+      # mini-SWE's seed install may take up to its sandbox_install_timeout_seconds (900 s); the server's default
+      # allowance (300 s) would end a slow install, a full agent run and a long verifier as a task deadline.
+      harness_setup_allowance_s: 900

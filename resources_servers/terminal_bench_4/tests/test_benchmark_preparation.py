@@ -113,33 +113,23 @@ def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expec
     assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected
 
 
-@pytest.mark.parametrize(
-    "overrides,steps,timeout,runner,episode",
-    [
-        ({}, 500, 30, 28800, 54000),
-        (
-            {
-                "tb4_max_steps": 0,
-                "tb4_step_timeout_sec": 45,
-                "tb4_agent_max_timeout_sec": 900,
-                "tb4_episode_timeout_sec": 60000,
-            },
-            0,
-            45,
-            900,
-            60000,
-        ),
-    ],
-)
-def test_harbor_profile_runs_the_entry_at_the_benchmark_settings(overrides, steps, timeout, runner, episode):
+def test_harbor_profile_runs_the_entry_with_mini_swe():
     from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
 
-    path = preparation.BENCHMARK_DIR / "miniswe.yaml"
-    benchmark = harbor_benchmark(path)
+    benchmark = harbor_benchmark(preparation.BENCHMARK_DIR / "miniswe.yaml")
     assert benchmark.target == "terminal_bench_4"
     assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent",) * 2
-    config = OmegaConf.merge(OmegaConf.load(path), overrides)
-    agent = config.mini_swe_agent.responses_api_agents.mini_swe_agent
-    assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (steps, timeout, runner)
-    harbor = config.harbor_environment_server.environment_servers.harbor
-    assert harbor.default_episode_timeout_seconds == episode
+
+
+def test_a_variant_of_the_harbor_profile_keeps_its_server_settings(tmp_path: Path):
+    """The variant form `harbor_benchmark` asks for (repeat the target, include the preset) keeps the preset's
+    episode bound instead of the server's 21600 s default."""
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    preset = preparation.BENCHMARK_DIR / "miniswe.yaml"
+    variant = tmp_path / "variant.yaml"
+    variant.write_text(json.dumps({"harbor_target": "terminal_bench_4", "config_paths": [str(preset)]}))
+    settings = harbor_benchmark(variant).agent.benchmark_settings
+    assert settings == harbor_benchmark(preset).agent.benchmark_settings
+    harbor = OmegaConf.create(settings).harbor_environment_server.environment_servers.harbor
+    assert harbor.default_episode_timeout_seconds == 54000

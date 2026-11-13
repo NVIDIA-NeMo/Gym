@@ -13,8 +13,7 @@
   through the Harbor environment server (`harbor_target` in `miniswe.yaml`).
 - `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same mini-SWE version in
   `miniswe_sandboxed_agent`, over the legacy `/run` relay of the TB4 resources server. It stays for comparison until that
-  server is retired. The sections from "Failure scoring" to "Infra validation"
-  describe this path.
+  server is retired; "The `/run` profile" and its subsections describe this path.
 
 ## Artificial Analysis comparison
 
@@ -28,10 +27,10 @@ The following choices remain intentional differences:
 - **Repeats:** keep `num_repeats: 1` in this profile. Clients must explicitly set
   `++num_repeats=3` to reproduce AA's repetition protocol and average pass@1 over
   all three attempts, rather than reporting pass@3.
-- **Observations:** retain full command output, without the upstream template's
-  first/last 5,000-character truncation. It is unclear whether AA intended that
-  truncation or was unaware of the upstream behavior. No history compaction or
-  summarization is applied.
+
+Long command output keeps the upstream template's first/last 5,000-character
+truncation, as the pinned `mini.yaml` ships it (both profiles load it unchanged).
+No history compaction or summarization is applied.
 
 The adapter also keeps `cost_limit=0` and unattended `DefaultAgent` execution.
 Task MCP schemas and CLI invocation instructions are added to the prompt; MCP
@@ -43,7 +42,108 @@ The benchmark defaults can be overridden with `++tb4_max_steps=...` and
 The generic Python adapter retains its 600-second command timeout default; the
 benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 
-## Failure scoring
+## Run
+
+```sh
+gym dataset pull terminal_bench_4
+gym eval run --benchmark terminal_bench_4/miniswe --sandbox opensandbox \
+  --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
+  --config DEPLOYMENT_OVERLAY.yaml \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
+  --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8
+```
+
+The Harbor environment server starts each task's sandbox and Compose group,
+lends the sandbox to `mini_swe_agent`'s agent session, closes the agent, and then
+grades in the task's separate verifier. Each row carries the official instruction
+and the task's 8-hour agent budget; mini-SWE renders the instruction with its
+`mini.yaml` templates. A task's MCP servers and skills directory reach mini-SWE
+in `/tmp/.nemo-gym/task.json`. The agent server builds mini-SWE's runtime and
+uploads it at seed, so the task sandbox needs no PyPI access; it needs glibc 2.28
+or newer (or musl) and about 450 MB under `/tmp`. mini-SWE runs as the image's
+default user, and the response metadata reports its exit as
+`mini_swe_termination`. The episode bound (54,000 seconds,
+`++tb4_episode_timeout_sec`) covers harness setup, the agent budget and the
+slowest verifier.
+
+`DEPLOYMENT_OVERLAY.yaml` holds the deployment's settings: Compose networking
+and runtime labels in the `sandbox` block, and a `sandbox_gpu` block named by
+`harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider` for
+the three H100 tasks (see "Run on OpenSandbox" in
+`fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`). The `/run`
+profile also labels every sandbox `nemo.nvidia.com/resources: custom` and
+`nemo.nvidia.com/oom-kill: process` and waits up to 1,200 seconds for a sandbox
+to be ready; on this path they are deployment settings too, under
+`harbor_environment_server.environment_servers.harbor` (`sandbox_metadata` and
+`sandbox_ready_timeout_s`, whose default is 900). The OOM label changes scoring:
+with a process kill, the agent's own memory blowup is graded; with a whole-sandbox
+kill (the deployment's default without the label), the row is lost and rerun.
+
+Select tasks with `--only-tasks` and `--exclude-tasks`. `--agent-type` runs
+another harness on the same tasks with its own shipped limits, not the Artificial
+Analysis settings: `hermes_agent`, for example, keeps 30 turns and a
+21,600-second runner, below the tasks' 28,800-second agent budget. Only the
+episode bound carries over, so those scores are not comparable with this
+profile's. `++tb4_max_steps`, `++tb4_step_timeout_sec` and
+`++tb4_agent_max_timeout_sec` apply to mini-SWE only.
+
+### Scoring
+
+The separate verifier grades every episode the agent finishes, however it ends:
+mini-SWE's time limit, step limit, its own kill and a repeated format error are
+graded like a submission, and a verifier that runs past its timeout is a
+measured zero. Infrastructure endings are retried or masked, never scored zero:
+a model-server error or transport failure, a sandbox or provider failure, a lost
+sandbox, and an episode that runs past its bound (`harbor:task_deadline`).
+
+### From the `/run` commands
+
+`terminal_bench_4/miniswe` keeps its name but no longer reads the `/run`
+profile's keys, and `++` keys merge without an error, so map them:
+
+- `++tb4_split_sandbox_endpoints=true`: a `sandbox_gpu` provider block named by
+  `gpu_sandbox_provider`, as above.
+- `++use_absolute_ip` and `tb4_sandbox_model_base_url`: not read; mini-SWE in
+  the sandbox calls Gym's model server at the address the run's servers listen
+  on, so set `default_host` to one the sandboxes can reach.
+- `++prepare_script_args.task_names` and `.category`: `--only-tasks` and
+  `--exclude-tasks` on `gym eval run`.
+- `tb4_jobs_dir` and `tb4_agent_artifacts_dir`: the run's output directory
+  (`results/harbor/terminal_bench_4/`).
+- `tb4_concurrency`: `--concurrency`.
+
+The old commands still run under `terminal_bench_4/miniswe_legacy_agent`.
+
+## The `/run` profile
+
+```sh
+gym eval prepare --benchmark terminal_bench_4/miniswe_legacy_agent
+gym eval run --benchmark terminal_bench_4/miniswe_legacy_agent \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
+  --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8 \
+  ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
+```
+
+mini-SWE's loop runs in the resources process, using its existing sandbox and
+calling the Gym model server. The agent endpoint forwards the collector's run
+request and returns the result; it does not manage task environments.
+MCP tasks also need package-index access from the sandbox (Python venv/pip) for
+its pinned task-local `mcp==1.29.0` client.
+
+Select tasks during preparation:
+
+```sh
+gym eval prepare --benchmark terminal_bench_4/miniswe_legacy_agent \
+  '++prepare_script_args.task_names=[formal-crypto,interleaved-vigenere,ks-solver-cpp]'
+```
+
+Preparation also accepts `++prepare_script_args.category=cpu`, `compose`, or `gpu`.
+Prepare again without filters for all tasks. The profile defaults to one attempt;
+AA reproduction requires explicitly setting `++num_repeats=3` (the official
+Terminal-Bench leaderboard uses a separate five-attempt protocol). Scheduler allocations must cover
+setup, the full official agent budget, and verification.
+
+### Failure scoring
 
 A verifier that exhausts its own time budget scores zero and stays in the
 pass-rate denominator (`failure_kind: verifier_error`, `mask_sample: false`).
@@ -58,7 +158,7 @@ kill. Explicit provider reports that the sandbox exceeded its memory or local
 ephemeral-storage allocation score zero, with `sandbox_resource_limit` recording
 the resource. See the [resource server's failure contract](../../resources_servers/terminal_bench_4/README.md#contract).
 
-## Sandbox request timeouts
+### Sandbox request timeouts
 
 OpenSandbox SDK requests use a five-minute timeout for both freshly created
 sandboxes and reconnected agent handles (`create.request_timeout_s` and
@@ -68,7 +168,7 @@ connection settings, so both values must be set. Status polls keep their separat
 execution limits; an exhausted transport timeout still reports an infrastructure
 failure, and an uncertain command submission is not replayed.
 
-## Dataset and deployment
+### Dataset and deployment
 
 The dataset is `terminal-bench/terminal-bench@4.0.0`, pinned to
 `sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732`.
@@ -107,67 +207,7 @@ The OpenSandbox adapter maps separate-verifier `no-network` policies to deny-all
 egress. The deployment must enforce that policy for hostname and direct-IP
 traffic. Dynamic allowlists and offline Compose are not supported by this adapter.
 
-## Run
-
-```sh
-gym dataset pull terminal_bench_4
-gym eval run --benchmark terminal_bench_4/miniswe --sandbox opensandbox \
-  --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
-  --config DEPLOYMENT_OVERLAY.yaml \
-  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
-  --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8
-```
-
-The Harbor environment server starts each task's sandbox and Compose group,
-lends the sandbox to `mini_swe_agent`'s agent session, closes the agent, and then
-grades in the task's separate verifier. Each row carries the official instruction
-and the task's 8-hour agent budget; mini-SWE renders the instruction with its
-`mini.yaml` templates. A task's MCP servers and skills directory reach mini-SWE
-in `/tmp/.nemo-gym/task.json`. The agent server builds mini-SWE's runtime and
-uploads it at seed, so the task sandbox needs no PyPI access; it needs glibc 2.28
-or newer (or musl) and about 450 MB under `/tmp`. mini-SWE runs as the image's
-default user, and the response metadata reports its exit as
-`mini_swe_termination`. The episode bound (54,000 seconds,
-`++tb4_episode_timeout_sec`) covers harness setup, the agent budget and the
-slowest verifier.
-
-`DEPLOYMENT_OVERLAY.yaml` holds the deployment's settings: Compose networking
-and runtime labels in the `sandbox` block, and a `sandbox_gpu` block named by
-`harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider` for
-the three H100 tasks (see "Run on OpenSandbox" in
-`fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`).
-Select tasks with `--only-tasks` and `--exclude-tasks`. `--agent-type` runs
-another harness on the same tasks; `++tb4_max_steps`, `++tb4_step_timeout_sec`
-and `++tb4_agent_max_timeout_sec` apply to mini-SWE only.
-
-### The `/run` profile
-
-```sh
-gym eval prepare --benchmark terminal_bench_4/miniswe_legacy_agent
-gym eval run --benchmark terminal_bench_4/miniswe_legacy_agent \
-  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
-  --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8 \
-  ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
-```
-
-mini-SWE's loop runs in the resources process, using its existing sandbox and
-calling the Gym model server. The agent endpoint forwards the collector's run
-request and returns the result; it does not manage task environments.
-
-Select tasks during preparation:
-
-```sh
-gym eval prepare --benchmark terminal_bench_4/miniswe_legacy_agent \
-  '++prepare_script_args.task_names=[formal-crypto,interleaved-vigenere,ks-solver-cpp]'
-```
-
-Preparation also accepts `++prepare_script_args.category=cpu`, `compose`, or `gpu`.
-Prepare again without filters for all tasks. The profile defaults to one attempt;
-AA reproduction requires explicitly setting `++num_repeats=3` (the official
-Terminal-Bench leaderboard uses a separate five-attempt protocol). Scheduler allocations must cover
-setup, the full official agent budget, and verification.
-
-## Sandbox startup
+### Sandbox startup
 
 Each OpenSandbox creation or reconnect attempt has a five-minute client budget
 (`environment.sandbox_provider.opensandbox.create.timeout_s` and
@@ -175,7 +215,7 @@ Each OpenSandbox creation or reconnect attempt has a five-minute client budget
 budget still bounds provisioning, including retries and Compose services.
 The 1,200-second readiness setting is an upper bound within those outer budgets.
 
-## Infra validation
+### Infra validation
 
 For capped smoke runs, add `++tb4_max_steps=3` and
 `++tb4_agent_max_timeout_sec=900`. The cap can only shorten the task's official
