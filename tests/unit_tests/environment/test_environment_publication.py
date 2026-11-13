@@ -120,6 +120,15 @@ def test_publication_rejects_scaffold_placeholders(tmp_path: Path, updates: dict
         finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
 
 
+def test_publication_accepts_real_logins_and_metrics_that_start_with_todo(tmp_path: Path) -> None:
+    entry = _entry(tmp_path, maintainers=["todorov"], primary_metric="todo_completion_rate")
+    validation, verifier = _reports()
+
+    report = finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
+
+    assert report.name == "sample"
+
+
 def test_publication_report_serializes() -> None:
     report = EnvironmentPublicationReport(
         name="sample",

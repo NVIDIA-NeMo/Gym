@@ -39,6 +39,11 @@ def _is_placeholder(value: str | None) -> bool:
     return value is not None and value.strip().casefold().startswith("todo")
 
 
+def _is_placeholder_token(value: str | None) -> bool:
+    """A login or metric name still set to the scaffold's ``TODO``. A real value such as ``todorov`` is not one."""
+    return value is not None and value.strip().casefold() == "todo"
+
+
 def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]:
     if entry.manifest_path is None:
         return ("manifest",)
@@ -48,9 +53,9 @@ def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]
         placeholders.append("description")
     if any(_is_placeholder(author) for author in manifest.authors):
         placeholders.append("authors")
-    if any(_is_placeholder(maintainer) for maintainer in manifest.maintainers or ()):
+    if any(_is_placeholder_token(maintainer) for maintainer in manifest.maintainers or ()):
         placeholders.append("maintainers")
-    if _is_placeholder(manifest.primary_metric):
+    if _is_placeholder_token(manifest.primary_metric):
         placeholders.append("primary_metric")
     if manifest.licensing == "unknown":
         placeholders.append("licensing")
