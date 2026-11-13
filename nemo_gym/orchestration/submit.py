@@ -43,6 +43,7 @@ from nemo_gym.orchestration.recovery import (
     gate_summary_from_collected,
     gate_task_summary,
     mlflow_tracking_required,
+    tracking_export_due,
     with_operator_verdict,
 )
 from nemo_gym.utils.decorators import experimental
@@ -589,7 +590,9 @@ def _recover(
             mlflow=mlflow,
             pin_plan=pin_plan,
         )
-    if decision.action == RecoveryAction.NOOP and _tracking_export_due(decision, collected, mlflow):
+    if decision.action == RecoveryAction.NOOP and tracking_export_due(
+        decision, collected, mlflow["tracking_required"]
+    ):
         export = executor.export_tracking(record, benchmark, collected)
         if export.get("state") == "unsupported":
             reason = f"MLflow post-run export not performed: {export.get('error')}"
@@ -721,27 +724,6 @@ def _recover(
             walltime_plan=walltime_plan,
         )
     return RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=gate_task, mlflow=mlflow)
-
-
-def _tracking_export_due(decision: Any, collected: Any, mlflow: dict[str, Any]) -> bool:
-    """Whether a complete run lacks the MLflow export receipt its saved config requires.
-
-    Only a run whose saved config configures MLflow (tracking URI, experiment and run name) and does not set
-    ``mlflow_tracking_required`` to false, with no post-run receipt at all and no live job, is exported. A run that
-    configured no exporter is never exported, and a receipt, current or not, is never replaced.
-    """
-    if collected is None or not decision.complete or decision.scheduler_live or not mlflow["tracking_required"]:
-        return False
-    provenance = (collected.quality or {}).get("provenance")
-    facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
-    local = collected.mlflow
-    return (
-        isinstance(facts, dict)
-        and facts.get("configured") is True
-        and isinstance(local, dict)
-        and "receipt" in local
-        and local["receipt"] is None
-    )
 
 
 def _refused(

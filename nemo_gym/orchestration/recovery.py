@@ -5957,6 +5957,31 @@ def health_check_facts(quality: Mapping[str, Any] | None) -> list[str]:
 MLFLOW_NOT_REQUIRED_NOTE = "no MLflow export by design (mlflow_tracking_required is false in the saved config)"
 
 
+def tracking_export_due(
+    decision: RecoveryDecision, collected: CollectedEvidence | None, tracking_required: bool
+) -> bool:
+    """Whether a complete run lacks the MLflow export receipt its saved config requires, so that
+    ``gym eval resubmit --recover`` exports it.
+
+    Only a run whose saved config configures MLflow (``provenance.mlflow.configured`` is true: tracking URI,
+    experiment and run name) and does not set ``mlflow_tracking_required`` to false, with no post-run receipt at all
+    and no live job, is exported. A run that configured no exporter, or whose provenance does not say, is never
+    exported, and a receipt, current or not, is never replaced.
+    """
+    if collected is None or not decision.complete or decision.scheduler_live or not tracking_required:
+        return False
+    provenance = (collected.quality or {}).get("provenance")
+    facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
+    local = collected.mlflow
+    return (
+        isinstance(facts, dict)
+        and facts.get("configured") is True
+        and isinstance(local, dict)
+        and "receipt" in local
+        and local["receipt"] is None
+    )
+
+
 def mlflow_tracking_required(collected: CollectedEvidence | None) -> bool:
     """False only when the run's saved config snapshot sets ``mlflow_tracking_required`` to false; absent, unread or
     any other value means tracking is required. The health report's provenance states it when its pin did; for a run
@@ -6110,6 +6135,9 @@ def gate_summary_from_collected(
         tracking_required=task["mlflow_tracking_required"],
         status_error=status_error,
     )
+    # Whether a recovery would export the results, by the executor's own predicate: the operator verdict offers the
+    # export command only then.
+    task["mlflow_export_due"] = tracking_export_due(decision, collected, task["mlflow_tracking_required"])
     if task["mlflow_delivery"]["state"] in ("pending", "unverified"):
         task["warnings"] = task["warnings"] + [
             f"MLflow delivery {task['mlflow_delivery']['state']}: {'; '.join(task['mlflow_delivery']['reasons'])}"
@@ -6617,7 +6645,9 @@ def operator_verdict(
             f"coverage is incomplete: {open_text or 'rollouts are unsettled'}",
             f"{_command(decision)} now",
         )
-    delivery = _delivery_action(decision, gate_task.get("mlflow_delivery") or {})
+    delivery = _delivery_action(
+        decision, gate_task.get("mlflow_delivery") or {}, gate_task.get("mlflow_export_due") is True
+    )
     if status == "UNVERIFIED":
         cause = gate_task.get("unverified_cause")
         export = f"; {delivery[1]}" if delivery else ""
@@ -6657,8 +6687,11 @@ def operator_verdict(
         return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
     if flagged := _flagged_everything(gate_task, decision, expected):
         what, count = flagged
+        # The quality warning and the acceptance stand; the delivery state is a fact beside them.
         return _verdict(
-            "accept", f"accepted by contract; {what}: check the served configuration", f"read rollout quality: {count}"
+            "accept",
+            f"accepted by contract; {what}: check the served configuration" + (f"; {delivery[0]}" if delivery else ""),
+            f"read rollout quality: {count}" + (f"; {delivery[1]}" if delivery else ""),
         )
     omitted = gate_task.get("omitted_samples") or 0
     reason = (
@@ -6671,7 +6704,9 @@ def operator_verdict(
     return _verdict("accept", reason, "none")
 
 
-def _delivery_action(decision: RecoveryDecision, delivery: Mapping[str, Any]) -> tuple[str, str] | None:
+def _delivery_action(
+    decision: RecoveryDecision, delivery: Mapping[str, Any], export_due: bool = False
+) -> tuple[str, str] | None:
     """``(what, action)`` for a complete run whose MLflow delivery is not closed: the results stand, and the delivery
     is a fact beside them. Unverified by configuration (the export did not upload the rollouts) is reported, as no
     export changes it."""
@@ -6685,9 +6720,18 @@ def _delivery_action(decision: RecoveryDecision, delivery: Mapping[str, Any]) ->
             "report the MLflow delivery as unverified by configuration (upload_rollouts: false); an export does not change it",
         )
     if any(r.startswith("no MLflow run evidence") for r in reasons):
+        if export_due:
+            return (
+                what,
+                f"export the results to MLflow: {_command(decision)} runs the export of a complete run without a receipt (no model calls)",
+            )
+        # A recovery exports only a run whose saved provenance says MLflow is configured; it would repeat as a no-op.
         return (
             what,
-            f"export the results to MLflow: {_command(decision)} runs the export of a complete run without a receipt (no model calls)",
+            "report the MLflow delivery as not evidenced: the run's saved provenance does not say MLflow was configured "
+            "(provenance.mlflow.configured), so a recovery does not export it and its results stand without an export; "
+            "if MLflow was meant to be used, export them with the tracking tooling and inspect again with "
+            "--mlflow-run-id and --mlflow-status",
         )
     confirm = _command(decision, "--mlflow-run-id ID", "--mlflow-status STATUS", inspect=True)
     return what, (

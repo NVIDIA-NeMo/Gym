@@ -3190,7 +3190,7 @@ def test_inspect_prints_the_unverified_reading_of_an_all_skipped_run(tmp_path, f
     assert out.gate_task["errors"] == [] and out.dispatched is None
 
 
-def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuration_and_names_its_export(
+def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuration_and_its_delivery_state(
     tmp_path, fake_executor
 ) -> None:
     fake_executor.job_dir = _skipped_job(tmp_path)
@@ -3199,10 +3199,11 @@ def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuratio
     assert out.operator_verdict == {
         "state": "unknown",
         "reason": "unverified by configuration: 5 of 5 rows were not verified (verification skipped by configuration)",
-        # Nothing to recover; the MLflow delivery it still lacks is closed by the export (no model calls).
-        "action": "none: report the run as unverified by configuration; export the results to MLflow: "
-        "`gym eval resubmit gym-job-skip3 bench --recover` runs the export of a complete run without a receipt (no "
-        "model calls)",
+        # Nothing to recover; its provenance does not say MLflow was configured, so a recovery would not export it.
+        "action": "none: report the run as unverified by configuration; report the MLflow delivery as not evidenced: "
+        "the run's saved provenance does not say MLflow was configured (provenance.mlflow.configured), so a recovery "
+        "does not export it and its results stand without an export; if MLflow was meant to be used, export them "
+        "with the tracking tooling and inspect again with --mlflow-run-id and --mlflow-status",
     }
 
 

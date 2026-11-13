@@ -614,8 +614,12 @@ def test_a_stop_that_needs_the_launchers_revision_names_the_repin_not_a_fresh_su
 def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
     collected = _run(100)
     collected.score = 0.9  # tracking is required and the run has no MLflow evidence yet
+    # Its saved provenance says MLflow is configured, so a recovery exports it.
+    collected.quality["provenance"]["mlflow"]["configured"] = True
+    collected.mlflow = {"live_run_id": None, "receipt": None}
     verdict, task, _ = _verdict(collected)
     assert task["status"] == "SUCCESS" and task["mlflow_delivery"]["state"] == "pending"
+    assert task["mlflow_export_due"] is True
     assert verdict["state"] == "accept" and "MLflow delivery pending" in verdict["reason"]
     assert verdict["action"] == (
         "export the results to MLflow: `gym eval resubmit GYM_JOB_ID BENCHMARK --recover` runs the export of a complete run without a "

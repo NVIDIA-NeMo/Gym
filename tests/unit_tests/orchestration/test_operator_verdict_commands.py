@@ -195,9 +195,11 @@ def test_an_unverified_run_by_construction_is_reported_with_its_export_never_res
     assert verdict["state"] == "unknown"
     assert verdict["action"] == (
         "none: report the run as unverified with this reason and do not present it as verified; a resubmit cannot "
-        "change it, and no flag does: the fix is the verifier's grading record, in Gym; export the results to "
-        'MLflow: `gym eval resubmit gym-job-r bench --recover --score-key \'["agent", "mean/reward"]\'` runs the '
-        "export of a complete run without a receipt (no model calls)"
+        "change it, and no flag does: the fix is the verifier's grading record, in Gym; "
+        "report the MLflow delivery as not evidenced: the run's saved provenance does not say MLflow was configured "
+        "(provenance.mlflow.configured), so a recovery does not export it and its results stand without an export; "
+        "if MLflow was meant to be used, export them with the tracking tooling and inspect again with "
+        "--mlflow-run-id and --mlflow-status"
     )
     assert "gym eval submit" not in verdict["action"]
 
@@ -302,3 +304,69 @@ def test_a_failed_driver_install_names_its_fix_before_the_longer_walltime_restar
     action = out.operator_verdict["action"]
     assert action.index("fix the driver install") < action.index("gym eval resubmit"), action
     assert "--max-walltime HH:MM:SS --walltime-reason TEXT" in action
+
+
+def _pending_export(configured, *, flagged=False):
+    """A complete, healthy run whose required MLflow export has no receipt; ``configured`` is what its saved
+    provenance says about the exporter (absent when None)."""
+    collected = _run(100)
+    collected.score = 0.9
+    facts = {"tracking_required": True} | ({} if configured is None else {"configured": configured})
+    collected.quality["provenance"]["mlflow"] = facts
+    collected.mlflow = {"live_run_id": None, "receipt": None}
+    if flagged:
+        collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 100
+    return collected
+
+
+@pytest.mark.parametrize("configured", [False, None])
+def test_the_export_command_is_not_offered_when_recovery_would_not_export(monkeypatch, fake_executor, configured):
+    _collected_as(monkeypatch, fake_executor, _pending_export(configured))
+    exports = []
+    monkeypatch.setattr(fake_executor, "export_tracking", lambda *a: exports.append(a), raising=False)
+
+    out = submit.recover("gym-job-m", "bench")
+
+    assert out.decision.action == RecoveryAction.NOOP and exports == []
+    assert out.gate_task["mlflow_delivery"]["state"] == "pending"
+    action = out.operator_verdict["action"]
+    assert "gym eval resubmit" not in action and "runs the export" not in action, action
+    assert "does not export" in action
+
+
+def test_the_export_command_is_offered_only_when_recovery_reaches_the_export(monkeypatch, fake_executor):
+    _collected_as(monkeypatch, fake_executor, _pending_export(True))
+    exports = []
+    monkeypatch.setattr(
+        fake_executor,
+        "export_tracking",
+        lambda self, record, benchmark, collected: exports.append(benchmark) or {"state": "unsupported", "error": "x"},
+        raising=False,
+    )
+
+    inspected = submit.inspect_recovery("gym-job-m", "bench")
+
+    assert exports == [] and inspected.gate_task["mlflow_export_due"] is True
+    assert (
+        f"export the results to MLflow: `{RUN.replace('gym-job-x gsm8k', 'gym-job-m bench')}`"
+        in (inspected.operator_verdict["action"])
+    )
+    # The same plan, applied, reaches the export.
+    submit.recover("gym-job-m", "bench")
+    assert exports == ["bench"]
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_a_run_with_every_rollout_flagged_keeps_its_delivery_state_in_the_verdict(
+    monkeypatch, fake_executor, configured
+):
+    _collected_as(monkeypatch, fake_executor, _pending_export(configured, flagged=True))
+
+    out = submit.inspect_recovery("gym-job-m", "bench")
+
+    verdict = out.operator_verdict
+    assert verdict["state"] == "accept" and out.gate_task["status"] == "SUCCESS"
+    assert verdict["reason"].startswith("accepted by contract; every rollout ended on a failed model call")
+    assert "MLflow delivery pending" in verdict["reason"]
+    assert verdict["action"].startswith("read rollout quality: 100 of 100 rollouts flagged")
+    assert ("export the results to MLflow" in verdict["action"]) is configured
