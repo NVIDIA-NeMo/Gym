@@ -112,7 +112,7 @@ The output file is a JSON array with one entry per agent:
 | `agent_metrics` | Overall stats, custom metrics, `num_repeats` (distinct repeat indices), and cross-repeat aggregates |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
-| `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats |
+| `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats, except that rollouts carrying `ng_perf` token usage add per-repeat token statistics even for a single repeat |
 
 ---
 
@@ -122,7 +122,7 @@ A single run is a point estimate. Collecting repeats (`--num-repeats`) lets you 
 
 ### Within a repeat, across tasks
 
-`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty.
+`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty. Per-repeat token statistics computed from `ng_perf` are the exception: they are reported for every repeat, including a single one. When every rollout is masked, `compute_aggregate_metrics` returns no repeat rows, and an environment server such as `single_agent_turn` still adds the token statistics.
 
 Each entry carries:
 

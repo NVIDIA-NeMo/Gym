@@ -88,6 +88,30 @@ def test_the_receipt_flag_needs_settle_into_source(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "overrides,message",
+    [
+        ({"judge_failed_only": False}, "`settle_into_source` is only valid together with `judge_failed_only`"),
+        (
+            {"settle_into_source": False, "skip_spent_judge_failures": False, "settle_receipt_fpath": None},
+            "A source snapshot requires settle_into_source",
+        ),
+    ],
+)
+def test_source_settlement_requires_explicit_recovery_mode(tmp_path, overrides, message) -> None:
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1)])
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    snapshot = _snapshot(output)
+    before = {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
+    assert _job_config(output, settle_source_snapshot_json=snapshot).settle_into_source
+
+    with pytest.raises(ValueError, match=message):
+        _job_config(output, settle_source_snapshot_json=snapshot, **overrides)
+
+    assert {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()} == before
+    assert not (output.parent / "reverification").exists()
+
+
 async def test_the_pass_records_what_it_selected_judged_and_settled(tmp_path, verifier) -> None:  # noqa: F811
     output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
     helper = RolloutReverificationHelper()

@@ -25,11 +25,12 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
-from time import time
+from time import monotonic, time
 from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from aiohttp import ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pocketshell import run as pocketshell_run
@@ -110,6 +111,12 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
     exclude_domains_file_path: str
+    # Bounds on one search/browse provider call (both providers). Rate limits (429, 502, 503, 504, 520) are waited
+    # out without spending the retry attempts, but only for this long per call; past it they count as attempts and the
+    # call fails after the last one. 0 spends attempts from the first rate limit.
+    provider_rate_limit_wait_seconds: float = Field(default=600.0, ge=0, allow_inf_nan=False)
+    # Total time for one HTTP attempt to the provider, including a body that stalls. Applies to every attempt.
+    provider_request_timeout_seconds: float = Field(default=120.0, gt=0, allow_inf_nan=False)
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
@@ -341,6 +348,20 @@ def _count_provider_retry(status: int) -> None:
     counts["num_429_retries" if status == 429 else "num_other_retries"] += 1
 
 
+# Attempts per provider call, and the connection-error retries within one attempt.
+_PROVIDER_MAX_ATTEMPTS = 3
+_PROVIDER_RETRY_SLEEP_S = 0.5
+
+
+def _may_wait_out_rate_limit(started_at: float, wait_budget_s: float) -> bool:
+    """Whether a rate-limited response may be retried without spending an attempt.
+
+    Waiting is bounded by wall-clock time since the call started, so a provider that rate-limits or fails
+    for a long stretch ends the call instead of retrying forever.
+    """
+    return monotonic() - started_at < wait_budget_s
+
+
 # ---- benchmark-contamination guard -----------------------------------------
 #
 # A provider result that quotes the benchmark itself -- a dataset mirror, a
@@ -471,21 +492,25 @@ class TavilySearchAIOHTTPClient(BaseModel):
     base_url: str
 
     debug: bool
+    rate_limit_wait_seconds: float = 600.0
+    request_timeout_seconds: float = 120.0
 
     async def post(self, endpoint: str, content: str, timeout: float) -> TavilySearchAIOHTTPClientResponse:
         """
         endpoint: str e.g. "/search" or "/extract"
-        timeout: float is not used
+        timeout: float is not used; request_timeout_seconds bounds each attempt
         """
         request_kwargs = {
             "method": "POST",
             "headers": self.headers,
             "url": f"{self.base_url}{endpoint}",
             "data": content,
+            "timeout": ClientTimeout(total=self.request_timeout_seconds),
+            "_max_connection_retries": _PROVIDER_MAX_ATTEMPTS,
         }
 
-        MAX_NUM_TRIES = 3  # Hardcode for now
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = _PROVIDER_MAX_ATTEMPTS
+        started_at = monotonic()
         tries = 0
         while tries < max_num_tries:
             tries += 1
@@ -495,9 +520,9 @@ class TavilySearchAIOHTTPClient(BaseModel):
                 _abort_on_invalid_api_key("tavily", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                # A rate limit does not spend an attempt, but only while the wait budget lasts.
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
-                if rate_limited:
+                if rate_limited and _may_wait_out_rate_limit(started_at, self.rate_limit_wait_seconds):
                     max_num_tries += 1
                 _count_provider_retry(response.status)
 
@@ -508,7 +533,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
                     f"try={tries} body={content[:300]}",
                     flush=True,
                 )
-                await sleep(0.5)
+                await sleep(_PROVIDER_RETRY_SLEEP_S)
                 continue
             else:
                 tavily_response = TavilySearchAIOHTTPClientResponse(
@@ -524,11 +549,20 @@ class TavilySearchAIOHTTPClient(BaseModel):
         await raise_for_status(response)
 
     @classmethod
-    def from_httpx_AsyncClient(cls, client: AsyncClient, debug: bool) -> "TavilySearchAIOHTTPClient":
+    def from_httpx_AsyncClient(
+        cls,
+        client: AsyncClient,
+        debug: bool,
+        *,
+        rate_limit_wait_seconds: float = 600.0,
+        request_timeout_seconds: float = 120.0,
+    ) -> "TavilySearchAIOHTTPClient":
         return cls(
             headers=client.headers,
             base_url=str(client.base_url),
             debug=debug,
+            rate_limit_wait_seconds=rate_limit_wait_seconds,
+            request_timeout_seconds=request_timeout_seconds,
         )
 
 
@@ -543,6 +577,8 @@ class ExaAIOHTTPClient(BaseModel):
     headers: Dict[str, str]
     base_url: str = "https://api.exa.ai"
     debug: bool = False
+    rate_limit_wait_seconds: float = 600.0
+    request_timeout_seconds: float = 120.0
 
     async def _post(self, endpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
         request_kwargs = {
@@ -550,10 +586,12 @@ class ExaAIOHTTPClient(BaseModel):
             "headers": self.headers,
             "url": f"{self.base_url}{endpoint}",
             "data": json.dumps(body),
+            "timeout": ClientTimeout(total=self.request_timeout_seconds),
+            "_max_connection_retries": _PROVIDER_MAX_ATTEMPTS,
         }
 
-        MAX_NUM_TRIES = 3  # mirror the Tavily client
-        max_num_tries = MAX_NUM_TRIES
+        max_num_tries = _PROVIDER_MAX_ATTEMPTS
+        started_at = monotonic()
         tries = 0
         while tries < max_num_tries:
             tries += 1
@@ -564,8 +602,8 @@ class ExaAIOHTTPClient(BaseModel):
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
-                if rate_limited:
-                    # don't let rate limits burn the retry budget
+                if rate_limited and _may_wait_out_rate_limit(started_at, self.rate_limit_wait_seconds):
+                    # within the wait budget, rate limits do not burn the attempts
                     max_num_tries += 1
                 _count_provider_retry(response.status)
                 content = (await response.content.read()).decode()
@@ -575,7 +613,7 @@ class ExaAIOHTTPClient(BaseModel):
                     f"try={tries} body={content[:300]}",
                     flush=True,
                 )
-                await sleep(0.5)
+                await sleep(_PROVIDER_RETRY_SLEEP_S)
                 continue
 
             data = await response.json()
@@ -1001,7 +1039,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._async_tavily_clients = [AsyncTavilyClient(api_key=k) for k in tavily_api_keys]
             for async_tavily_client in self._async_tavily_clients:
                 async_tavily_client._client = TavilySearchAIOHTTPClient.from_httpx_AsyncClient(
-                    async_tavily_client._client, self.config.debug
+                    async_tavily_client._client,
+                    self.config.debug,
+                    rate_limit_wait_seconds=self.config.provider_rate_limit_wait_seconds,
+                    request_timeout_seconds=self.config.provider_request_timeout_seconds,
                 )
                 if client_source:
                     async_tavily_client._client.headers["x-client-source"] = client_source
@@ -1016,6 +1057,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 ExaAIOHTTPClient(
                     headers={"x-api-key": k, "Content-Type": "application/json"},
                     debug=self.config.debug,
+                    rate_limit_wait_seconds=self.config.provider_rate_limit_wait_seconds,
+                    request_timeout_seconds=self.config.provider_request_timeout_seconds,
                 )
                 for k in exa_api_keys
             ]
