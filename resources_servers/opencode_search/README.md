@@ -197,23 +197,36 @@ model sees differently. On this server's side:
 ## Config
 
 Needs `sandbox_image`, `sandbox_provider`/`sandbox_config`, and a `judge_model_server` pointing at a
-model-server block. Episode sessions use these settings, each off by default:
+model-server block. Episode sessions use these settings, each off by default; startup refuses a setting
+that cannot work:
 
-* `sandbox_workdir` turns on lending to episode seeds. It must be an absolute directory other than `/`
-  and `/tmp`; the seed creates it.
+* `sandbox_workdir` turns on lending to episode seeds; the seed creates it. It follows `opencode_agent`'s
+  rules for a workdir: an absolute directory other than `/` and `/tmp`, without `..` or a NUL byte, and
+  outside `/tmp/nemo-gym-opencode*`, where `opencode_agent` keeps its runtime and sessions.
 * `episode_sandbox_files` maps absolute sandbox paths to files relative to the Gym root, read at startup
-  and staged in each lent sandbox. Stage under `/tmp`, which every image has: a provider need not create
-  parent directories. Each file is uploaded once, when the sandbox starts (`SandboxSpec.files`); an upload
-  that fails stops the sandbox, and the seed answers 500, a non-terminal episode failure that a resume
-  retries. Nothing reads the files back or checks their digests in each episode; the BrowseComp scripted
-  smoke checks them once. A file missing at the agent's seed is refused by `opencode_agent` with a
-  terminal 422, and one that arrives but does not load is refused at verify by the plugin-log check (422).
+  and staged in each lent sandbox. A path must lie outside `sandbox_workdir`, where the model's tools
+  could list and change the file, and outside `/tmp/nemo-gym-opencode*`. A source must name a regular
+  file relative to the Gym root, without `..`: an absolute source, a missing one or a directory fails
+  startup. Stage under `/tmp`, which every image has: a provider need not create parent directories.
+  Each file is uploaded once, when the sandbox starts (`SandboxSpec.files`); an upload that fails stops
+  the sandbox, and the seed answers 500, a non-terminal episode failure that a resume retries. Nothing
+  reads the files back or checks their digests in each episode; the BrowseComp scripted smoke checks
+  them once. A file missing at the agent's seed is refused by `opencode_agent` with a terminal 422, and
+  one that arrives but does not load is refused at verify (422) when the log then lacks the sentinel's
+  line or a line of `required_plugin_markers`.
 * `episode_sandbox_env` is the lent sandbox's environment, over `sandbox_config.env`; an empty value sets
-  nothing. Supply secrets from an overlay. With `exa_cache_root` set, `NEMO_GYM_EXA_BASE_URL` defaults to
-  this server's `/mcp` proxy, so the server needs an address the sandbox reaches; on loopback it refuses
-  to start.
+  nothing. Supply secrets from an overlay. The search key is one `EXA_API_KEY`: the OpenCode plugins
+  read only that key, and the lent sandbox's environment is fixed at startup, so no key can be picked
+  from a pool for each row as the relay agent does. A lending server refuses an `EXA_API_KEYS` pool,
+  here or in `sandbox_config.env`, at startup. With `exa_cache_root` set, `NEMO_GYM_EXA_BASE_URL`
+  defaults to this server's `/mcp` proxy, so the server needs an address the sandbox reaches; on
+  loopback it refuses to start.
 * `plugin_log_path` is the plugin log verify reads, and also sets `NEMO_GYM_PLUGIN_LOG` in the lent
-  sandbox. `required_plugin_markers` lists the lines the log must hold besides the sentinel's.
+  sandbox. It must lie outside `sandbox_workdir`, where the model's tools could change it.
+  `required_plugin_markers` lists the lines the log must hold besides the sentinel's.
 
-See `configs/opencode_search.yaml`; wired up in `benchmarks/browsecomp/configs/browsecomp_opencode.yaml`
+`configs/opencode_search.yaml` sets none of these, not even as `null`. `gym eval run` refuses to resume
+across a changed semantic setting and counts a `null` as a value, so the relay preset, which resolves
+none of them, still resumes a run started before these settings existed. See
+`configs/opencode_search.yaml`; wired up in `benchmarks/browsecomp/configs/browsecomp_opencode.yaml`
 (relay) and `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` (episode sessions).
