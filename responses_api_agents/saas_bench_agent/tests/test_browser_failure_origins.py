@@ -70,7 +70,7 @@ async def test_model_call_boundary_only_attributes_confirmed_model_errors(kind, 
 
     owner = SimpleNamespace(_invoke_clean_output=invoke)
     with pytest.raises(type(error)):
-        await ns["ainvoke"](owner, [])
+        await ns["ainvoke"](owner, [], output_format=SimpleNamespace(model_fields={"action": None}))
     assert owner.last_actor_failure["failure_origin"] == expected
     assert owner.last_actor_exception is error
 
@@ -107,6 +107,10 @@ async def test_browser_fault_is_cleared_only_after_observation_recovers():
         ("screenshot", "evaluation"),
         ("swallowed_screenshot", "evaluation"),
         ("empty_history", "evaluation"),
+        ("swallowed_model_deadline", "evaluation"),
+        ("runtime_watchdog", "evaluation"),
+        ("empty_watchdog", "evaluation"),
+        ("model_watchdog", "model"),
         ("model_parse", "model"),
         ("unknown_after_turn", "evaluation"),
     ],
@@ -130,6 +134,28 @@ async def test_native_run_task_catch_all_preserves_failure_origin(tmp_path, monk
             self.history = history
 
         async def run(self, **kwargs):
+            if scenario in {"runtime_watchdog", "empty_watchdog", "model_watchdog"}:
+                if scenario == "runtime_watchdog":
+                    llm.last_actor_failure = {"failure_origin": "evaluation", "failure_kind": "runtime_error"}
+                elif scenario == "model_watchdog":
+                    history.history[-1] = SimpleNamespace(
+                        model_output=SimpleNamespace(action=[{"click": {"index": 1}}])
+                    )
+                raise ns["TrajectoryNoProgressError"]("repeated state/action")
+            if scenario == "swallowed_model_deadline":
+
+                async def stalled(*args, **kwargs):
+                    await asyncio.Event().wait()
+
+                llm._invoke_clean_output = stalled
+                try:
+                    await asyncio.wait_for(
+                        ns["ainvoke"](llm, [], output_format=SimpleNamespace(model_fields={"action": None})),
+                        timeout=0.01,
+                    )
+                except TimeoutError:
+                    pass
+                return history
             if scenario == "empty_history":
                 history.history.clear()
                 return history
@@ -231,3 +257,52 @@ async def test_raw_response_parsing_separates_model_text_from_missing_response(c
     if completion:
         assert isinstance(caught.value, ValidationError)  # Preserve browser-use's own JSON recovery branch.
     assert client.last_actor_failure == {"failure_origin": origin, "failure_kind": kind}
+
+
+async def test_model_call_deadline_preserves_evaluation_origin_and_cancellation():
+    ns = native_functions()
+
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    owner = SimpleNamespace(_invoke_clean_output=stalled)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            ns["ainvoke"](owner, [], output_format=SimpleNamespace(model_fields={"action": None})), timeout=0.01
+        )
+    assert isinstance(owner.last_actor_exception, asyncio.CancelledError)
+    assert owner.last_actor_failure["failure_origin"] == "evaluation"
+
+
+async def test_screenshot_deadline_is_recorded_even_when_cancellation_is_swallowed():
+    ns = native_functions()
+
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    browser = SimpleNamespace(start=stalled, get_browser_state_summary=stalled)
+    faults = {}
+    ns["_track_browser_runtime"](browser, faults)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(browser.get_browser_state_summary(), timeout=0.01)
+    assert faults == {"get_browser_state_summary": "CancelledError"}
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_optional_judge_and_helper_calls_do_not_rewrite_actor_origin(fails):
+    ns = native_functions()
+    original = {"failure_origin": "evaluation", "failure_kind": "runtime_error"}
+    error = TimeoutError("actor endpoint stalled")
+
+    async def helper(*args, **kwargs):
+        if fails:
+            raise ValueError("invalid optional judge response")
+        return "helper response"
+
+    owner = SimpleNamespace(_invoke_clean_output=helper, last_actor_failure=original, last_actor_exception=error)
+    if fails:
+        with pytest.raises(ValueError):
+            await ns["ainvoke"](owner, [], output_format=SimpleNamespace(model_fields={"judgement": None}))
+    else:
+        assert await ns["ainvoke"](owner, [], output_format=None) == "helper response"
+    assert owner.last_actor_failure is original and owner.last_actor_exception is error

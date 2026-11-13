@@ -110,7 +110,7 @@ def _track_browser_runtime(browser, faults: dict) -> None:
         async def tracked(*args, _call=original, _stage=name, **kwargs):
             try:
                 value = await _call(*args, **kwargs)
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 faults[_stage] = type(exc).__name__
                 raise
             faults.pop(_stage, None)
@@ -1531,12 +1531,21 @@ class _CleanOutputChatOpenAI(ChatOpenAI):
         return _ClientWithKimiOptions(client, extra_body, request_max_tokens, self)
 
     async def ainvoke(self, messages, output_format=None, **kwargs) -> Any:
+        # Browser-use shares this client with its optional trace judge and
+        # summarizer. Only AgentOutput/DoneAgentOutput carry the action field;
+        # helper calls must not overwrite the actor's terminal outcome.
+        if "action" not in getattr(output_format, "model_fields", {}):
+            return await self._invoke_clean_output(messages, output_format=output_format, **kwargs)
         self.last_actor_failure = None
         self.last_actor_exception = None
         self._model_output_failure_kind = None
         self._model_output_exception = None
         try:
             return await self._invoke_clean_output(messages, output_format=output_format, **kwargs)
+        except asyncio.CancelledError as exc:
+            self.last_actor_exception = exc
+            self.last_actor_failure = {"failure_origin": "evaluation", "failure_kind": "runtime_error"}
+            raise
         except Exception as exc:
             kind = self._model_output_failure_kind if self._model_output_exception is exc else (
                 "context_limit" if getattr(exc, "status_code", None) == 400 and _is_context_limit_error(exc) else None
@@ -3112,7 +3121,14 @@ async def run_task(
         if runtime_faults:
             failure = {"failure_origin": "evaluation", "failure_kind": "browser_runtime_error"}
         elif isinstance(e, TrajectoryNoProgressError):
-            failure = {"failure_origin": "model", "failure_kind": "agent_error"}
+            # The legacy watchdog can also stop repeated empty timeout steps.
+            # Preserve that stop behavior without blaming the model for them.
+            steps = getattr(partial_history, "history", None) or []
+            model_output = getattr(steps[-1], "model_output", None) if steps else None
+            failure = getattr(llm, "last_actor_failure", None) or {
+                "failure_origin": "model" if model_output is not None else "evaluation",
+                "failure_kind": "agent_error" if model_output is not None else "runtime_error",
+            }
         elif getattr(llm, "last_actor_exception", None) is e:
             failure = llm.last_actor_failure
         else:
