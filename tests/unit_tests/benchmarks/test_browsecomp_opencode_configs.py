@@ -2,34 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """BrowseComp's OpenCode presets. The session preset runs opencode_agent in the sandbox that opencode_search lends,
 behind single_agent_turn_legacy, with the settings of the relay preset's deprecated agent where opencode_agent has
-them; the relay preset keeps its explicit legacy_agent relay."""
+them; the relay preset keeps its explicit legacy_agent relay.
+
+The checks that need opencode_agent's or opencode_search's classes are in
+resources_servers/opencode_search/tests/test_browsecomp_presets.py: imported here, either server would count toward
+the core suite's coverage."""
 
 import os
 import shutil
 import subprocess
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Mapping
-from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationResolutionError
-from pydantic import BaseModel
 
 from benchmarks.browsecomp.prepare_opencode import OUTPUT_FPATH
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import BaseRunServerTypeConfig
 from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
 )
 from nemo_gym.server_runtime.sandbox_lending import STOP_TIMEOUT_S
-from resources_servers.opencode_search.app import SearchResourcesServer, SearchResourcesServerConfig
-from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig, _session_opencode_config_error
-from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -43,8 +39,6 @@ RELAY_AGENT = "opencode_sandboxed_search_agent"
 RELAY_ENVIRONMENT = "opencode_sandboxed_search_environment_server"
 LOOPBACK = "127.0.0.1"
 RECEIPTS = "resources_servers/opencode_search/opencode_bundle/nemo_gym_receipts.js"
-# Catalog entries of a server block: listings read them, and pairing checks read allowed_agents.
-CATALOG_KEYS = {"allowed_agents", "description", "value", "verified"}
 # Stand-ins for what a run supplies: the files it pins, and the judge it names.
 PINS = {
     "BROWSECOMP_OPENCODE_EXECUTABLE_PATH": "/opt/pinned/opencode",
@@ -156,20 +150,6 @@ def test_each_episode_runs_opencode_agent_in_the_sandbox_the_resources_server_le
     assert not settings(config, RESOURCES).get("expose_tools_over_mcp", False)
 
 
-@pytest.mark.parametrize(
-    ("name", "config_class"), [(AGENT, OpenCodeAgentConfig), (RESOURCES, SearchResourcesServerConfig)]
-)
-def test_every_setting_is_one_gym_reads(name: str, config_class: type[BaseModel]) -> None:
-    """Both config classes ignore keys they do not declare, so a misspelled setting would compose and do nothing.
-    Gym's config layer reads the other keys: those of every server block, such as datasets, and catalog entries."""
-    _, config = sessions()
-    block = settings(config, name)
-
-    read_by_gym = BaseRunServerTypeConfig.model_fields.keys() | CATALOG_KEYS
-    assert block.keys() - config_class.model_fields.keys() - read_by_gym == set()
-    config_class.model_validate(block | {"name": name})
-
-
 def test_only_the_agent_environment_server_and_judge_are_pinned_to_loopback() -> None:
     """A lent sandbox reaches every port of an address it can reach. The agent (a request without a session runs
     OpenCode on this host), the Environment Server and the judge (it spends its key for any caller) keep loopback
@@ -190,20 +170,6 @@ def test_only_the_agent_environment_server_and_judge_are_pinned_to_loopback() ->
     # Given this host's own address instead, use_absolute_ip passes it on to the model servers only.
     assert config.use_absolute_ip is True
     assert list(config.absolute_ip_server_types) == ["responses_api_models"]
-
-
-@pytest.mark.parametrize(("address", "starts"), [({"default_host": "192.0.2.20"}, True), ({}, False)])
-def test_with_the_search_cache_the_resources_server_starts_only_where_sandboxes_reach_it(
-    address: dict[str, str], starts: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A lent sandbox searches through the resources server's /mcp proxy. On loopback the server refuses to start,
-    rather than lend sandboxes whose every search fails."""
-    monkeypatch.setenv("NEMO_GYM_EXA_CACHE_ROOT", str(tmp_path / "search-cache"))
-    _, config = sessions(**address)
-    resources = SearchResourcesServerConfig.model_validate(settings(config, RESOURCES) | {"name": RESOURCES})
-
-    with nullcontext() if starts else pytest.raises(ValueError, match="cannot reach the search cache proxy"):
-        SearchResourcesServer(config=resources, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.parametrize(
@@ -256,36 +222,6 @@ def test_opencode_resolves_tool_permissions_as_on_the_relay() -> None:
     # which only the "*" rule allows.
     tools = ("webfetch", "websearch", "task", "skill", "external_directory", "doom_loop")
     assert [decision(ours, tool) for tool in tools] == ["allow", "allow", "allow", "deny", "allow", "allow"]
-
-
-def test_the_agent_runs_opencode_as_the_relay_agent_does() -> None:
-    _, config = sessions()
-    _, relay = resolve(RELAY)
-    agent = OpenCodeAgentConfig.model_validate(settings(config, AGENT) | {"name": AGENT})
-    theirs = settings(relay, RELAY_AGENT)
-
-    assert agent.opencode_version == theirs.get("opencode_version", OPENCODE_VERSION)
-    # The model ID that selects OpenCode's model-family prompts and tools: the relay agent's dummy_model.
-    assert agent.sandbox_model_id == "dummy_model"
-    assert agent.thinking is True
-    assert agent.context_window == agent.max_output_tokens == theirs["opencode_max_context_window"]
-    assert agent.timeout == theirs["sandbox_timeout"]
-    # opencode_agent puts no deadline on a single model call, and neither does the relay agent here.
-    assert theirs["opencode_model_call_timeout"] is None
-    assert agent.opencode_config["compaction"] == theirs["opencode_config"]["compaction"] == {"reserved": 70144}
-    assert agent.exclude_compaction_summaries is theirs["exclude_compaction_summaries"] is True
-    # OpenCode's stock system prompt and no step limit; a session accepts the rest of the configuration.
-    assert agent.system_prompt is None and agent.env == {} and "agent" not in agent.opencode_config
-    assert _session_opencode_config_error(agent.opencode_config) is None
-    # A borrowed sandbox keeps the resources server's network, open to the web.
-    assert agent.network_access == "inherit"
-    pins = (
-        agent.sandbox_executable_path,
-        agent.sandbox_executable_sha256,
-        agent.sandbox_ripgrep_path,
-        agent.sandbox_ripgrep_sha256,
-    )
-    assert pins == tuple(PINS.values())
 
 
 @pytest.mark.parametrize("unset", [*PINS, *JUDGE_NAMED])
