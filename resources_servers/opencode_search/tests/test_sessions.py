@@ -1849,3 +1849,55 @@ def test_a_graded_row_keeps_the_search_fields_and_echoes_its_request(workdir, se
     assert {key: row[key] for key in sent} == sent and "task_data" not in row
     assert row["responses_create_params"]["input"][0]["content"] == "Which city?"
     assert row["response"]["output"][0]["content"][0]["text"] == "Exact Answer: Paris"
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: re-seeds, stops that fail, hang or are cancelled, and sandboxes the relay agent stopped
+# ---------------------------------------------------------------------------
+
+
+@LENDING
+def test_a_reused_agent_run_cookie_stops_the_first_sandbox_before_it_starts_another(
+    workdir, started, stopped, monkeypatch, lending
+) -> None:
+    """A second seed under the same cookie replaces the run: its sandbox stops before another starts, rather than stay
+    running with nothing left holding it."""
+    server = _server(workdir if lending else None)
+    client = TestClient(server.setup_webserver())
+    first = client.post("/seed_session", json=_row())
+    stops_at_start: list[int] = []
+    recorded_start = AsyncSandbox.start
+
+    async def start(self: AsyncSandbox, spec: Optional[SandboxSpec] = None, **kwargs: Any) -> AsyncSandbox:
+        stops_at_start.append(len(stopped))
+        return await recorded_start(self, spec, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+
+    second = client.post("/seed_session", json=_row())
+
+    assert first.status_code == second.status_code == 200, second.text
+    # The second sandbox started once the first had been stopped.
+    assert stops_at_start == [1] and stopped == [started[0][0]] and len(started) == 2
+    assert second.json() == {"sandbox_handle": started[1][0].sandbox_id} != first.json()
+    assert list(server._agent_run_sandboxes.values()) == [started[1][0]]
+
+
+@LENDING
+def test_an_agent_run_reseed_whose_stop_fails_is_refused_and_keeps_the_first_sandbox(
+    workdir, started, monkeypatch, lending
+) -> None:
+    """A stop that fails raises and keeps its sandbox, so a later stop can try again: the re-seed answers 500 and starts
+    nothing in its place."""
+    server = _server(workdir if lending else None)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_row()).status_code == 200
+    (session_id,) = server._agent_run_sandboxes
+    stop = AsyncMock(side_effect=RuntimeError("the provider refused the stop"))
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    refused = client.post("/seed_session", json=_row())
+
+    assert refused.status_code == 500, refused.text
+    assert stop.await_count == 1 and len(started) == 1
+    assert server._agent_run_sandboxes == {session_id: started[0][0]}
