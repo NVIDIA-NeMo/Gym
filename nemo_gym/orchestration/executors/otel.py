@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 COLLECTOR_SERVICE_NAME = "otel_collector"
 COLLECTOR_DIR = "otel"
 COLLECTOR_CONFIG_NAME = "collector.yaml"
-COLLECTOR_HEALTH_PORT = 13133
+# Below the clusters' ephemeral range (ip_local_port_range 9000-65000): the collector's default
+# 13133 lies inside it, so an outgoing connection on the node can hold it and abort startup.
+COLLECTOR_HEALTH_PORT = 4319
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
 GYM_TELEMETRY_EXTRA = "telemetry"

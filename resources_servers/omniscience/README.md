@@ -1,6 +1,6 @@
 # Omniscience Resources Server
 
-Evaluates factual knowledge using an LLM judge on the [AA-Omniscience](https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public) benchmark.
+Evaluates factual knowledge using an LLM judge on the [AA-Omniscience](https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1) benchmark.
 
 ## Verification
 
@@ -27,6 +27,8 @@ Each JSONL row must have:
   "question": "...",
   "expected_answer": "...",
   "domain": "...",
-  "topic": "..."
+  "subtopic": "..."
 }
 ```
+
+The server reads neither `domain` nor `subtopic`. Rows prepared by earlier versions of the benchmark (AA-Omniscience v1) carry `topic` and no `subtopic`.

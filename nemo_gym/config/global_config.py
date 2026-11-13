@@ -231,12 +231,14 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "cline_agent",
         "codex_agent",
         "copilot_agent",
+        "crewai_agent",
         "droid_agent",
         "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
         "kilocode_agent",
+        "langchain_deepagents_agent",
         "kimi_code_agent",
         "mini_swe_agent",
         "miniswe_sandboxed_agent",
@@ -1030,7 +1032,10 @@ Duplicate config paths:
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
-                        if agent_type == "langgraph_agent" and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE:
+                        if (
+                            agent_type in {"langgraph_agent", "langchain_deepagents_agent"}
+                            and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE
+                        ):
                             # These graphs only call models; the environment still owns verification,
                             # but must not grant resource tools the selected agent cannot consume.
                             server["resources_tool_transports"] = []

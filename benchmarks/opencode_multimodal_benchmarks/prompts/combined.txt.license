@@ -1,0 +1,7 @@
+SPDX-FileCopyrightText: Copyright (c) 2025 opencode
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES
+SPDX-License-Identifier: Apache-2.0 AND MIT
+
+Adapted from OpenCode 1.17.11:
+https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/opencode/src/session/prompt/anthropic.txt
+Full license: ../third-party-notices.md
