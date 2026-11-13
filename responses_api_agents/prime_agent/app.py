@@ -150,12 +150,13 @@ def _kill_prime_processes(root_pid: int, agent_dir: Path) -> None:
         os.killpg(root_pid, signal.SIGKILL)
 
 
-def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
+def parse_prime_agent_events(stdout: str, *, timed_out: bool = False) -> tuple[list[Any], dict[str, int]]:
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
     # Prime Agent retries a failed model call after printing its error message, so only a final error fails the run.
+    # An error at the deadline is a retry still pending, so a timed-out run keeps its transcript.
     failed = False
 
     for line in stdout.splitlines():
@@ -242,7 +243,7 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                 )
             )
 
-    return [] if failed else output_items, {
+    return [] if failed and not timed_out else output_items, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cached_tokens,
@@ -477,7 +478,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
             if timed_out:
                 LOG.warning("Prime Agent timed out after %ds", self.config.timeout)
-                output_items, usage = parse_prime_agent_events(stdout.decode(errors="replace"))
+                output_items, usage = parse_prime_agent_events(stdout.decode(errors="replace"), timed_out=True)
                 return output_items, usage, self.config.model, True
 
             if proc.returncode not in (0, None):
@@ -728,7 +729,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         if return_code in (125, 126, 127) and not timed_out:
             raise RuntimeError(f"Prime Agent did not start (runner exit {return_code}): {artifacts.stderr[-4096:]}")
         stop = prime_stop(artifacts.stdout)
-        output, usage = parse_prime_agent_events(artifacts.stdout)
+        output, usage = parse_prime_agent_events(artifacts.stdout, timed_out=timed_out)
         status, incomplete, native = "completed", None, None
         if timed_out and not output and not state.session.expired:
             # The deadline passed before any model reply: a classified failure, retried rather than graded.

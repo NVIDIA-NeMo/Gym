@@ -53,9 +53,11 @@ end({"role": "assistant", "content": [{"type": "toolCall", "id": "c1", "name": "
 end({"role": "toolResult", "toolCallId": "c1", "content": [{"type": "text", "text": "a.txt"}]})
 if mode == "sleep":
     time.sleep(60)
-if mode in ("error", "retried"):
+if mode in ("error", "retried", "pending"):
     end({"role": "assistant", "content": [], "usage": usage, "stopReason": "error",
          "errorMessage": "503 Service Unavailable"})
+if mode == "pending":
+    time.sleep(60)
 if mode != "error":
     end({"role": "assistant", "content": [{"type": "text", "text": "Done."}], "usage": usage, "stopReason": "stop"})
 if mode == "lost":
@@ -290,6 +292,26 @@ async def test_model_error_that_prime_agent_retried_is_completed(tmp_path):
     assert response.status == "completed"
     assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
     assert response.usage.output_tokens == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_timeout_during_a_pending_retry_keeps_partial_work(tmp_path):
+    response, _, _, _, _ = await activate(tmp_path, "pending", timeout=3)
+    assert response.status == "incomplete"
+    assert [item.type for item in response.output] == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_stop_before_the_runner_opens_stdout_collects_no_events(tmp_path):
+    session = SandboxSession(
+        sandbox=LocalSandbox(), session_dir=str(tmp_path / "session"), workdir=str(tmp_path), harness="Prime Agent"
+    )
+    state = PrimeSession(
+        request=seed(workdir=str(tmp_path)), provider_name="local", sandbox_id="task", session=session
+    )
+    await state.stage(command=["prime-agent"], env={}, models="{}")
+    assert (await state.collect()).stdout == ""
 
 
 @pytest.mark.asyncio

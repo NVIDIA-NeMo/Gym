@@ -145,6 +145,8 @@ class PrimeSession(AgentSessionState):
             "stderr": f"{directory}/stderr.log",
         }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
+        # The runner creates stdout only at exec, so a rollout stop that lands before then still leaves an empty file.
+        await upload_text(self.session.sandbox, path=params["stdout"], text="")
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def collect(self) -> PrimeArtifacts:
