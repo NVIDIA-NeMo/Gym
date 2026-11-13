@@ -34,6 +34,7 @@ import anyio
 
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.sandbox.failures import sandbox_failure
+from nemo_gym.sandbox.observability import notify_stopped_sandbox
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
@@ -57,6 +58,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     SupportsSandboxSidecars,
     SupportsSandboxSnapshot,
+    SupportsSandboxUsage,
     create_provider,
 )
 from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
@@ -66,6 +68,13 @@ from nemo_gym.sandbox.resource_telemetry import (
     record_request,
     requested_attributes,
     sampling_interval,
+)
+from nemo_gym.sandbox.usage import (
+    SandboxUsageSummary,
+    SandboxUsageTracker,
+    sample_interval,
+    sampling_enabled,
+    usage_span_attributes,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.gym_metrics import (
@@ -556,6 +565,7 @@ class AsyncSandbox:
         self._connected = False
         self._resource_sampler: ResourceSampler | None = None
         self._resource_attributes: dict[str, Any] = {}
+        self._usage_tracker: SandboxUsageTracker | None = None
         # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
         # was counted by the process that started it and must not be subtracted here.
         self._counted_active = False
@@ -597,6 +607,15 @@ class AsyncSandbox:
     def cleanup_errors(self) -> tuple[str, ...]:
         """Every failed provider close or client release, in order, as ``close:<type>`` or ``aclose:<type>``."""
         return tuple(self._cleanup_errors)
+
+    @property
+    def resource_usage(self) -> tuple[SandboxUsageSummary, ...]:
+        """Measured CPU and memory of a sandbox this instance started, one summary per scope the provider measures.
+
+        Empty for a sandbox rebuilt with ``connect()``, whose creator measures it, and for providers without
+        ``SupportsSandboxUsage``. Final once ``stop()`` has taken the sample before close.
+        """
+        return self._usage_tracker.summaries() if self._usage_tracker is not None else ()
 
     @property
     def uploads_independent_of_execs(self) -> bool:
@@ -713,6 +732,14 @@ class AsyncSandbox:
         self._stopped = False
         if take_ownership is not None:
             take_ownership(self)
+        # Checked on the class, so a mock provider does not look like it measures usage.
+        if (
+            sampling_enabled()
+            and isinstance(self._provider, SupportsSandboxUsage)
+            and callable(getattr(type(self._provider), "usage", None))
+        ):
+            self._usage_tracker = SandboxUsageTracker(self._provider, handle, interval=sample_interval())
+            self._usage_tracker.start()
         interval = sampling_interval()
         if interval and isinstance(self._provider, ResourceProvider):
             self._resource_sampler = ResourceSampler(
@@ -1044,6 +1071,8 @@ class AsyncSandbox:
             if self._resource_sampler is not None:
                 await self._resource_sampler.stop()
                 self._resource_sampler = None
+            if self._usage_tracker is not None:
+                await self._usage_tracker.stop()
             try:
                 if is_span_group_enabled(GymSpanGroup.SANDBOX):
                     with managed_span(
@@ -1054,6 +1083,7 @@ class AsyncSandbox:
                             "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                             **default_span_attributes(),
                             **self._resource_attributes,
+                            **usage_span_attributes(self.resource_usage),
                         },
                     ):
                         await self._provider.close(self._handle)
@@ -1064,6 +1094,9 @@ class AsyncSandbox:
                 raise
             self._closed_at = time.monotonic()
             self._stopped = True
+            if self.resource_usage:
+                # Listeners bind the usage to the verification or agent request that stopped the sandbox.
+                notify_stopped_sandbox(self)
             if self._counted_active:
                 self._counted_active = False
                 record_sandbox_active(-1, provider=self._telemetry_provider_name())

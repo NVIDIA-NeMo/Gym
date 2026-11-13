@@ -725,6 +725,54 @@ class SupportsSandboxPauseResume(Protocol):
         ...
 
 
+# Which processes a usage sample covers. ``container``: the sandbox's own cgroup. ``process_tree``: the live
+# processes in the sandbox's namespaces. Their CPU misses processes that exited between samples, so it is a lower
+# bound of the container's CPU. Their memory is the sum of per-process resident memory: it leaves out page cache and
+# kernel memory but counts a page shared by several processes once per process, so it is not a bound of the
+# container's memory either way. ``shared_step``: the cgroup that encloses the sandbox together with Gym and its
+# sibling sandboxes, never attributable to one sandbox.
+SandboxUsageScope = Literal["container", "process_tree", "shared_step"]
+# ``counter``: the kernel's cumulative value or high-water mark. ``sampled_lower_bound``: the largest value of the
+# measured quantity Gym observed across its samples, so that quantity's true peak may be higher.
+SandboxUsageKind = Literal["counter", "sampled_lower_bound"]
+
+
+@dataclass(frozen=True)
+class SandboxUsageSample:
+    """One reading of a sandbox's measured CPU and memory; a value the source does not report is None.
+
+    ``source`` names the accounting read: ``cgroup_v2``; ``procfs_pidns``, ``procfs_mntns`` or ``procfs_pidns_mntns``
+    for the namespaces that selected the process tree; ``exec_rusage`` for the CPU of completed execs.
+    ``sampled_at`` is Unix time on the clock named by ``clock``. Memory values are bytes, and include page cache
+    when ``includes_page_cache``.
+    """
+
+    source: str
+    scope: SandboxUsageScope
+    sampled_at: float
+    clock: str = "gym_host"
+    cpu_usage_usec_total: int | None = None
+    cpu_kind: SandboxUsageKind | None = None
+    memory_current_bytes: int | None = None
+    memory_peak_bytes: int | None = None
+    peak_kind: SandboxUsageKind | None = None
+    memory_anon_bytes: int | None = None
+    memory_file_bytes: int | None = None
+    includes_page_cache: bool | None = None
+    process_count: int | None = None
+
+
+@runtime_checkable
+class SupportsSandboxUsage(Protocol):
+    """Optional provider capability: read a sandbox's measured CPU and memory from the runtime's accounting.
+
+    Returns one sample per scope the provider can measure, or none; values are never estimated from limits.
+    Only the component that created the sandbox samples it, so a borrowed connection never double-counts.
+    """
+
+    async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]: ...
+
+
 @runtime_checkable
 class SupportsSandboxSnapshot(Protocol):
     """Optional provider capability to snapshot a running sandbox into a durable, independent copy.
