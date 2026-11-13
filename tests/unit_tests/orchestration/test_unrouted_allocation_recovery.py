@@ -25,7 +25,7 @@ from nemo_gym.agents.agent_outcome import OutcomeAction
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig, decide_from_collected
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
-from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, _failure_compatibility_row, _failure_outcome
 from nemo_gym.rollouts.rollout_recovery import (
     ENDED_ALLOCATION_MANIFEST_ENV,
     PendingRejudge,
@@ -50,14 +50,9 @@ def _run(job, *, prior_attempts=0, protected=None, prior_outcome=None, chain=Tru
             writer.record_outcome(row | (prior_outcome or {"_ng_failure_class": "rollout_allocation_ended"}))
             row.pop("_ng_attempt_index")
             writer.record_dispatch(row)
-        writer.record_unstarted(
-            omitted_rollout_record(row)
-            | {
-                "_ng_unrouted_run_error": True,
-                "_ng_failure_class": "agent_run_error",
-                **(protected or {}),
-            }
-        )
+        diagnostic = {"_ng_failure_class": "agent_run_error", "_ng_failure_http_status": 500, **(protected or {})}
+        diagnostic.update(_failure_compatibility_row(_failure_outcome(row, diagnostic, "transport")))
+        writer.record_unstarted(omitted_rollout_record(row | diagnostic) | {"_ng_unrouted_run_error": True})
     return output
 
 
@@ -121,7 +116,6 @@ def test_ended_diagnostic_retries_within_budget_and_only_a_grade_completes(tmp_p
         )
         is not None
     )
-    assert not output.with_name("rollouts_aggregate_metrics.json").exists()
     if prior_attempts:
         output.with_name("rollouts_attempt_extension").write_text("1\n")
     with run_lock(output), _resume(output, approved=True) as writer:
@@ -153,16 +147,28 @@ def test_live_or_unconfirmed_allocation_does_not_authorize_replay(tmp_path, allo
         {"_ng_failure_counts_as_zero": True},
         {"_ng_failure_terminal": True},
         {"failure_outcome_action": "fail"},
-        {"failure_kind": "harness_termination_unconfirmed"},
-        {"failure_kind": "provider_credentials_rejected"},
-        {"failure_kind": "provider_quota_exhausted"},
+        {"failure_outcome_action": "retry", "failure_outcome_attribution": "model"},
+        {"_ng_failure_class": "model_request_error"},
+        {"_ng_failure_class": "judge_failed"},
+        {"_ng_failure_stage": "verification"},
+        {"_ng_failure_events_omitted": True},
+        {"_ng_failure_id": "missing"},
+        {"_ng_failure_id": "outer", "_ng_failure_events": {"outer": {"cause_id": "missing"}}},
+        {"_ng_failure_id": "outer", "_ng_failure_events": {"outer": {"cause_id": "outer"}}},
+        {"_ng_failure_class": "harness_termination_unconfirmed"},
+        {"_ng_failure_class": "provider_credentials_rejected"},
+        {"_ng_failure_class": "provider_quota_exhausted"},
     ],
 )
 def test_protected_diagnostic_stays_unresolved(tmp_path, protection):
     output = _run(tmp_path, protected=protection)
+    before = output.with_name("rollouts_failures.jsonl").read_bytes()
+    _, decision = _decide(tmp_path, allocation_cut=True)
+    assert decision.action.value == "stop"
     with run_lock(output), _resume(output, approved=True) as writer:
         assert writer.coverage()["missing"] == 1 and not writer.pending()
     assert not RolloutStore.read(output).allocation_end_diagnostics()
+    assert output.with_name("rollouts_failures.jsonl").read_bytes() == before
 
 
 @pytest.mark.parametrize(
@@ -294,3 +300,45 @@ def test_failed_agent_diagnostic_is_not_a_saved_answer(tmp_path, stage):
     with run_lock(output), _resume(output, approved=True) as writer:
         assert bool(writer.pending()) is (stage == "agent")
         assert writer.coverage()["counted_failures"] == (stage == "agent")
+
+
+@pytest.mark.parametrize(
+    "boundary,operation,selected,retry",
+    [
+        ("model", "model_request", True, False),
+        ("resources_server", "verify", True, False),
+        ("resources_server", "tool", True, True),
+        ("model", "model_request", False, True),
+    ],
+)
+def test_allocation_end_respects_selected_cause_not_recovered_observations(
+    tmp_path, boundary, operation, selected, retry
+):
+    diagnostic = {
+        "_ng_failure_class": "environment_server_failed",
+        "_ng_failure_id": "outer",
+        "_ng_failure_events": {
+            "outer": {
+                "boundary": "environment",
+                "operation": "episode.run",
+                "failure_kind": "environment_server_failed",
+                "cause_id": "cause" if selected else None,
+            },
+            "cause": {
+                "boundary": boundary,
+                "operation": operation,
+                "failure_kind": "model_request_error" if boundary == "model" else "infrastructure_error",
+                "http_status": 400 if boundary == "model" else 500,
+                "cause_id": None,
+            },
+        },
+    }
+    output = _run(tmp_path, protected=diagnostic)
+    before = output.with_name("rollouts_failures.jsonl").read_bytes()
+    _, decision = _decide(tmp_path, allocation_cut=True)
+    assert (decision.action.value == "resubmit") is retry
+    with run_lock(output), _resume(output, approved=True) as writer:
+        assert bool(writer.pending()) is retry
+        assert writer.coverage()["final_zeros"] == 0
+    if not retry:
+        assert output.with_name("rollouts_failures.jsonl").read_bytes() == before

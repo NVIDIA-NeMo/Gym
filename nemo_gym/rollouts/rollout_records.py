@@ -40,16 +40,21 @@ from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     HARNESS_TERMINATION_UNCONFIRMED,
+    JUDGE_FAILURE_KINDS,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
+    FailureClass,
     FailureClassificationConfig,
+    classify_failure,
 )
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _digest,
     _get_max_rollout_attempts,
+    applied_failure_class,
+    failure_stage,
     has_recorded_grade,
     has_saved_generation,
     has_unclassified_execution_failure,
@@ -558,6 +563,45 @@ def _has_eligible_interruption_cause(row: dict) -> bool:
     )
 
 
+def _allocation_end_has_protected_cause(row: dict, classification: FailureClassificationConfig | None) -> bool:
+    """Allocation end cannot replace model/verification evidence or an explicit producer stop with infrastructure."""
+    if row.get("_ng_failure_events_omitted") or applied_failure_class(row) == FailureClass.MODEL:
+        return True
+    event = {
+        "failure_kind": row.get("failure_kind") or row.get("_ng_failure_class"),
+        "stage": failure_stage(row),
+        "cause_id": row.get("_ng_failure_id"),
+    }
+    events, seen = row.get("_ng_failure_events"), set()
+    while isinstance(event, dict):
+        kind = event.get("failure_kind")
+        if (
+            kind in JUDGE_FAILURE_KINDS
+            or kind in {HARNESS_TERMINATION_UNCONFIRMED, PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED}
+            or event.get("stage") == "verification"
+            or event.get("boundary") == "model"
+            or (event.get("boundary") == "resources_server" and event.get("operation") == "verify")
+            or classify_failure(
+                failure_kind=kind,
+                stage=event.get("stage"),
+                http_status=event.get("http_status"),
+                config=classification,
+            )
+            == FailureClass.MODEL
+        ):
+            return True
+        cause = event.get("cause_id")
+        if cause is None:
+            break
+        if not isinstance(events, dict) or not isinstance(cause, str) or cause in seen:
+            return True
+        seen.add(cause)
+        event = events.get(cause)
+        if not isinstance(event, dict):
+            return True
+    return False
+
+
 class RolloutRecords:
     def __init__(
         self, manifest: RunManifest, expected: list[dict], *, classification: FailureClassificationConfig | None = None
@@ -960,8 +1004,7 @@ class RolloutRecords:
                 and not row.get("_ng_failure_counts_as_zero")
                 and not row.get("_ng_failure_terminal")
                 and row.get("failure_outcome_action") not in {"fail", "count_as_zero", "verify"}
-                and (row.get("failure_kind") or row.get("_ng_failure_class"))
-                not in {HARNESS_TERMINATION_UNCONFIRMED, PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED}
+                and not _allocation_end_has_protected_cause(row, self.classification)
                 for row in (record.read() for record in diagnostics)
             ):
                 eligible.add(identity)
@@ -1001,13 +1044,7 @@ class RolloutRecords:
                         "_ng_failure_terminal": False,
                         "failure_kind": ROLLOUT_ALLOCATION_ENDED,
                         "_ng_failure_message": (
-                            f"attempt {index} has an unresolved route-failure diagnostic; its allocation ended "
-                            "without a saved answer, so it spends one infrastructure-failure attempt"
-                        )
-                        if identity in diagnostics
-                        else (
-                            f"attempt {index} was in flight when its allocation ended; this rollout's first such end "
-                            "re-ran for free and each later one spends an attempt"
+                            f"attempt {index} ended with its allocation; it spends one infrastructure-failure attempt"
                         ),
                     }
                 )
