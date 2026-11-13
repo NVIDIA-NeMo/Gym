@@ -137,6 +137,11 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
     return tool if sep else name
 
 
+# Set by an agent on each tool call it posts, with a value unique to that call. A resend of the same request
+# after a lost reply carries the same value, so a server whose tools change external state can answer the
+# resend without running the tool twice.
+NEMO_GYM_TOOL_CALL_ID_HEADER = "X-NeMo-Gym-Tool-Call-Id"
+
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
 RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
 

@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import ANY, AsyncMock, MagicMock, call
 from uuid import uuid4
 
 import httpx
@@ -94,6 +94,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     StaleAttemptError,
 )
+from nemo_gym.server_runtime.base_resources_server import NEMO_GYM_TOOL_CALL_ID_HEADER
 from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     POLICY_TIMEOUT_OPERATION,
@@ -405,7 +406,7 @@ class TestApp:
             url="http://resources:8000/get_weather",
             json={"city": "San Francisco"},
             cookies={"session_id": "seeded-resource-cookie"},
-            headers={"X-Scoped-Access": "token"},
+            headers={"X-Scoped-Access": "token", NEMO_GYM_TOOL_CALL_ID_HEADER: ANY},
             _internal=True,
         )
         assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
@@ -1231,6 +1232,136 @@ class TestApp:
         # The exception type must be visible to the model — repr(e) on a
         # JSONDecodeError starts with the class name.
         assert "JSONDecodeError" in error_payload["error"]
+
+    async def test_each_tool_call_carries_its_own_call_id(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="my server name"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="my resources server"),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        tool_calls = [
+            {
+                "id": f"fc_{i}",
+                "call_id": "call_1",
+                "name": "my_tool",
+                "arguments": "{}",
+                "type": "function_call",
+                "status": "completed",
+            }
+            for i in range(2)
+        ]
+        message = {
+            "id": "msg_final",
+            "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+        responses = [
+            {
+                "id": "resp_tools",
+                "created_at": 1753983920.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": tool_calls,
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            {
+                "id": "resp_final",
+                "created_at": 1753983921.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [message],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        ]
+        model_reply = AsyncMock()
+        model_reply.read.side_effect = [json.dumps(response) for response in responses]
+        model_reply.cookies = MagicMock()
+        tool_reply = MagicMock(status=200, cookies={})
+        tool_reply.content.read = AsyncMock(return_value=b"ok")
+
+        async def post(*, server_name: str, **kwargs) -> object:
+            return tool_reply if server_name == "my resources server" else model_reply
+
+        server.server_client.post.side_effect = post
+
+        assert client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}).status_code == 200
+
+        tool_posts = [
+            c.kwargs
+            for c in server.server_client.post.call_args_list
+            if c.kwargs["server_name"] == "my resources server"
+        ]
+        call_ids = [kwargs["headers"][NEMO_GYM_TOOL_CALL_ID_HEADER] for kwargs in tool_posts]
+        # A model may repeat its own call_id, so the agent's id must still differ per call.
+        assert len(call_ids) == 2 and call_ids[0] != call_ids[1]
+
+    @pytest.mark.parametrize(
+        "name",
+        ["seed_session", "verify", "close_session", "verify?alias=1", "seed_session#", "a/../verify", "..", ""],
+    )
+    async def test_a_tool_call_named_after_a_resources_route_is_not_sent(self, name: str) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="my server name"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="my resources server"),
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        tool_call = {
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": name,
+            "arguments": "{}",
+            "type": "function_call",
+            "status": "completed",
+        }
+        message = {
+            "id": "msg_final",
+            "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+        responses = [
+            {
+                "id": f"resp_{i}",
+                "created_at": 1753983920.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [output],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+            for i, output in enumerate([tool_call, message])
+        ]
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.side_effect = [json.dumps(response) for response in responses]
+        dotjson_mock.cookies = MagicMock()
+        server.server_client.post.return_value = dotjson_mock
+
+        assert client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}).status_code == 200
+
+        post_call_kwargs = [c.kwargs for c in server.server_client.post.call_args_list]
+        assert [kw["server_name"] for kw in post_call_kwargs] == ["my server name", "my server name"]
+        [error_output] = [
+            item for item in post_call_kwargs[1]["json"].input if isinstance(item, NeMoGymFunctionCallOutput)
+        ]
+        assert json.loads(error_output.output) == {"error": f"{name} is not an available tool"}
 
     @pytest.mark.parametrize("empty_output", [False, True])
     async def test_responses_stops_without_message_or_tool_calls(self, caplog, empty_output) -> None:
