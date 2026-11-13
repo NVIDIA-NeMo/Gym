@@ -152,13 +152,12 @@ class LongmtEvalServer(SimpleResourcesServer):
     _actor_idx: int = PrivateAttr(default=0)
     _actors_init_attempted: bool = PrivateAttr(default=False)
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
+    def setup_webserver(self) -> FastAPI:
+        # Gym returns from dry runs before this hook, so build hosts need no scoring GPUs.
         if self.config.compute_segale:
             LOG.info("Provisioning LongMT scorer and initializing GPU actors before serving requests")
             self._ensure_actors()
 
-    def setup_webserver(self) -> FastAPI:
         return super().setup_webserver()
 
     def _ensure_actors(self) -> None:

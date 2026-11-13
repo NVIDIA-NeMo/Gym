@@ -94,8 +94,10 @@ for W&B logging.
 
 ## SEGALE actor pool
 
-When `compute_segale=true`, `model_post_init()` provisions the scoring environment
-and initializes actors before the HTTP server becomes ready. It spawns
+When `compute_segale=true`, `setup_webserver()` provisions the scoring environment
+and initializes actors before the HTTP server becomes ready. Gym skips this hook
+for `+dry_run=true`, so dry runs neither provision the scorer nor allocate its GPU
+actors. Constructing the server alone also performs no scoring setup. It spawns
 `comet_num_shards × actors_per_gpu` Ray actors, pings them within 300 seconds,
 and drops any that fail initialization. If none are ready, startup fails and
 releases the actors; fix the reported cause and restart the server. Requests do

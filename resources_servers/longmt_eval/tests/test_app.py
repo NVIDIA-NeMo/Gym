@@ -77,10 +77,11 @@ def _make_request(
 
 @pytest.mark.parametrize("compute_segale", [False, True])
 def test_reverify_mode_is_stateless(compute_segale: bool) -> None:
-    with patch.object(LongmtEvalServer, "_ensure_actors"):
-        server = _make_server(compute_segale=compute_segale)
+    server = _make_server(compute_segale=compute_segale)
     with patch.object(LongmtEvalServer, "_ensure_actors") as ensure_actors:
         with TestClient(server.setup_webserver()) as client:
+            assert ensure_actors.call_count == int(compute_segale)
+            ensure_actors.reset_mock()
             response = client.get("/reverify_mode")
         assert response.status_code == 200
         assert response.json() == "stateless"
@@ -515,18 +516,39 @@ class TestBuildSegaleActorClass:
 
 
 class TestActorStartup:
-    def test_provisions_before_serving(self) -> None:
+    @pytest.mark.parametrize("compute_segale", [False, True])
+    def test_construction_does_not_provision(self, compute_segale: bool) -> None:
         with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
-            _make_server(compute_segale=True)
-            initialize.assert_called_once()
-        with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
-            _make_server(compute_segale=False)
+            _make_server(compute_segale=compute_segale)
             initialize.assert_not_called()
 
-    def test_startup_failure_prevents_server_creation(self) -> None:
+    def test_dry_run_does_not_provision_or_setup_webserver(self) -> None:
+        server = _make_server(compute_segale=True)
+        server.config.uvicorn_reuse_port = False
+        with (
+            patch("nemo_gym.server_runtime.base_server.get_global_config_dict", return_value={"dry_run": True}),
+            patch("nemo_gym.server_runtime.base_server._connect_server_to_ray"),
+            patch("nemo_gym.server_runtime.base_server.ServerClient", return_value=server.server_client),
+            patch.object(LongmtEvalServer, "load_config_from_global_config", return_value=server.config),
+            patch.object(LongmtEvalServer, "_ensure_actors") as initialize,
+            patch.object(LongmtEvalServer, "setup_webserver") as setup,
+        ):
+            LongmtEvalServer.run_webserver()
+        initialize.assert_not_called()
+        setup.assert_not_called()
+
+    @pytest.mark.parametrize("compute_segale", [False, True])
+    def test_provisions_before_serving(self, compute_segale: bool) -> None:
+        server = _make_server(compute_segale=compute_segale)
+        with patch.object(LongmtEvalServer, "_ensure_actors") as initialize:
+            server.setup_webserver()
+            assert initialize.call_count == int(compute_segale)
+
+    def test_startup_failure_prevents_webserver_setup(self) -> None:
+        server = _make_server(compute_segale=True)
         with patch.object(LongmtEvalServer, "_ensure_actors", side_effect=RuntimeError("setup failed")):
             with pytest.raises(RuntimeError, match="setup failed"):
-                _make_server(compute_segale=True)
+                server.setup_webserver()
 
     def test_failed_startup_releases_actors_without_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import app
@@ -562,7 +584,7 @@ class TestActorStartup:
         killed = []
         monkeypatch.setattr(app.ray, "kill", killed.append)
         with pytest.raises(RuntimeError, match="creation failed"):
-            _make_server(compute_segale=True)
+            _make_server(compute_segale=True).setup_webserver()
         assert killed == [actor]
 
 
