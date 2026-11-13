@@ -29,7 +29,7 @@ from nemo_gym.core import (
     TaskId,
     encode_model_sampling,
 )
-from nemo_gym.server_runtime import SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.server_runtime import AgentContext, SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -218,7 +218,59 @@ def test_legacy_adapter_preserves_task_identity_and_data():
         "run_script": "verifier\nscript\n",
         "verifier_metadata": {"answer": "expected"},
     }
+    assert request.task.task_input.agent_context is None
     assert request.episode_id.attempt == 1
+
+    # A row's agent_context is the agent's, kept apart from the task data the Resources Server gets.
+    request = adapter._episode_request_from_row({**row, "agent_context": {"agent": {"values": {"tag": "figqa2"}}}})
+    assert request.task.task_input.agent_seed_context == AgentContext(values={"tag": "figqa2"})
+    assert "agent_context" not in request.task.task_input.task_data
+
+
+def test_a_malformed_agent_context_gets_the_typed_runs_final_422() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    context = {"agent": {"artifacts": {"media": {"path": "../outside"}}}}
+    row = {"task_id": "task", "_ng_rollout_id": "rollout", "responses_create_params": {"input": "task"}}
+    episode_request = {
+        "episode_id": {"rollout_id": "rollout"},
+        "task": {
+            "task_id": {"taskset": "resources", "task_id": "task"},
+            "task_input": {"responses_create_params": {"input": "task"}, "task_data": {}, "agent_context": context},
+        },
+    }
+
+    typed = TestClient(environment_server.setup_webserver()).post("/run", json=episode_request)
+    flat = TestClient(adapter.setup_webserver()).post("/run", json={**row, "agent_context": context})
+    episode = TestClient(adapter.setup_webserver()).post("/run", json=episode_request)
+
+    assert typed.status_code == flat.status_code == episode.status_code == 422
+    path_loc = ["task", "task_input", "agent_context", "agent", "artifacts", "media", "path"]
+    assert typed.json()["detail"][0]["loc"] == ["body", *path_loc]
+    assert flat.json()["detail"][0]["loc"] == episode.json()["detail"][0]["loc"] == path_loc
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "invalid_fields, detail",
+    [
+        ({"task_source": ""}, "task_source must be a non-empty string"),
+        ({"task_source": "unbound"}, "names none of this Environment Server's instances"),
+        ({"agent_ref": {"name": "other"}}, "does not match configured agent server"),
+        ({"_ng_attempt_index": -1}, "Invalid episode attempt"),
+        ({"_ng_attempt_index": True}, "Invalid episode attempt"),
+    ],
+)
+def test_invalid_flat_row_identity_returns_terminal_422(invalid_fields: dict, detail: str) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    row = {"task_id": "task", "_ng_rollout_id": "rollout", "responses_create_params": {"input": "task"}}
+
+    response = TestClient(adapter.setup_webserver()).post("/run", json={**row, **invalid_fields})
+
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
+    assert client.calls == []
 
 
 def test_a_rows_sampling_values_reach_the_agents_activation_url() -> None:
