@@ -1,0 +1,200 @@
+# BrowseComp on the opencode_search resources server with opencode_agent sessions, run by single_agent_turn_legacy.
+# For each question the resources server starts one sandbox, stages the OpenCode plugins and their settings in it, and
+# lends it to the agent's session. After the session closes, verify reads how the run ended from the plugins' log,
+# stops the sandbox and grades the last answer with the judge.
+#
+# browsecomp_opencode.yaml runs the same questions on the deprecated opencode_sandboxed_agent through a legacy_agent
+# relay. This preset repeats that agent's settings where opencode_agent has them, and benchmarks/browsecomp/README.md
+# lists what still differs. The two presets' scores are separate measurements until a paired comparison shows they
+# agree.
+#
+# Besides a policy model config (vllm_model.yaml) and a sandbox provider config, a run supplies:
+# - the judge's endpoint and model in search_judge_base_url and search_judge_model_name, and its key in
+#   inference_api_key;
+# - the OpenCode 1.17.11 binary and ripgrep 15.1.0, files already inside the sandbox (for example on a mounted cache),
+#   through BROWSECOMP_OPENCODE_EXECUTABLE_PATH, BROWSECOMP_OPENCODE_EXECUTABLE_SHA256,
+#   BROWSECOMP_OPENCODE_RIPGREP_PATH and BROWSECOMP_OPENCODE_RIPGREP_SHA256;
+# - the web-search key, from an overlay that is never committed:
+#   ++search_browsecomp_resources_server.resources_servers.opencode_search.episode_sandbox_env.EXA_API_KEY=<key>
+# The judge and the pins have no defaults, so the config does not compose without them.
+config_paths:
+- resources_servers/opencode_search/configs/opencode_search.yaml
+- responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+# OpenCode runs in the sandbox and calls the policy model at this host's address. The agent, the Environment Server and
+# the judge are pinned to loopback. The resources server is not pinned: with the search cache on
+# (NEMO_GYM_EXA_CACHE_ROOT), add resources_servers here so the sandbox reaches its /mcp proxy.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
+search_browsecomp_resources_server:
+  _inherit_from: opencode_search_resources_server
+  resources_servers:
+    opencode_search:
+      # Single-harness on purpose: the model's tools are OpenCode's own, shaped by the OpenCode plugins staged below,
+      # and this server serves no Gym tools, so another harness would run a different benchmark.
+      allowed_agents: [opencode_agent]
+      # The seed creates it. opencode_agent refuses /, the working directory of the relay agent's runs.
+      sandbox_workdir: /workspace
+      sandbox_config:
+        # The lent sandbox lives from the seed through grading and cleanup, so above the episode deadline below.
+        ttl_s: 27000
+      # The receipts plugin, then the relay agent's four plugins, unchanged and at the paths it uploads them to. The
+      # receipts plugin copies the other plugins' lines to plugin_log_path.
+      episode_sandbox_files:
+        /tmp/nemo-gym-plugin-nemo_gym_receipts.js: resources_servers/opencode_search/opencode_bundle/nemo_gym_receipts.js
+        /tmp/nemo-gym-plugin-nemo_gym_sentinel.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_sentinel.js
+        /tmp/nemo-gym-plugin-nemo_gym_turn_budget.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_turn_budget.js
+        /tmp/nemo-gym-plugin-nemo_gym_web_guard.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_web_guard.js
+        /tmp/nemo-gym-plugin-nemo_gym_tool_surface.js: responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_tool_surface.js
+      # The relay agent's opencode_env in browsecomp_opencode.yaml, as the lent sandbox's environment, since
+      # opencode_agent takes none of its own. An empty value sets nothing. The config test keeps the two equal.
+      episode_sandbox_env:
+        # OpenCode lists its websearch tool for the nemo_gym model provider only with this set.
+        OPENCODE_ENABLE_EXA: "true"
+        # The search backend, named rather than left to OpenCode.
+        OPENCODE_WEBSEARCH_PROVIDER: "exa"
+        # Read by nemo_gym_web_guard.js, which drops search and fetch results from these domains.
+        OPENCODE_WEBSEARCH_EXCLUDE_DOMAINS: "ad-italia.it:ad-magazin.de:admagazine.fr:allure.com:architecturaldigest.com:arstechnica.com:bonappetit.com:cntraveler.com:cntraveller.com:cntraveller.de:epicurious.com:glamour.com:glamour.de:glamour.es:glamourmagazine.co.uk:gq-magazine.co.uk:gq.com:gqitalia.it:gqmagazine.fr:johansens.com:lacucinaitaliana.com:newyorker.com:nyt.com:nytimes.com:nytimescooking.com:pitchfork.com:revistaad.es:revistagq.com:revistavanityfair.es:self.com:tatler.com:teenvogue.com:theathletic.com:them.us:vanityfair.com:vanityfair.fr:vanityfair.it:vogue.co.uk:vogue.com:vogue.de:vogue.fr:vogue.it:voguebusiness.com:wirecutter.com:wired.com:wired.it:worldofinteriors.com"
+        # Read by nemo_gym_turn_budget.js: after this many model calls, a request offers no tools.
+        NEMO_GYM_MAX_TURNS: "400"
+        # Read by nemo_gym_turn_budget.js, which removes the task tool from every request.
+        NEMO_GYM_DISABLE_SUBAGENTS: "1"
+        # Opt-in arms, off unless set where the run starts, as in browsecomp_opencode.yaml.
+        NEMO_GYM_DISABLE_BASH: ${oc.env:NEMO_GYM_DISABLE_BASH,""}
+        NEMO_GYM_FIX_GREP_DESCRIPTION: ${oc.env:NEMO_GYM_FIX_GREP_DESCRIPTION,""}
+        OPENCODE_WEBSEARCH_TYPE: ${oc.env:OPENCODE_WEBSEARCH_TYPE,""}
+        NEMO_GYM_PLUGIN_LOG: /tmp/nemo-gym-plugin-receipts.log
+      plugin_log_path: /tmp/nemo-gym-plugin-receipts.log
+      # Lines verify requires besides the sentinel's: the search guard loaded with the guard on, and the turn budget
+      # removed the task tool. A run whose log lacks one is refused with 422, not graded. A run with bash off also
+      # requires "[nemo-gym-plugin] tool_surface task=off bash=off" (an override replaces the whole list).
+      required_plugin_markers:
+      - "[nemo-gym-plugin] web_guard version=2 contamination=on"
+      - "[nemo-gym-plugin] tool_surface task=off"
+
+# A new instance name: opencode_sandboxed_search_agent names the relay preset's agent, and overlays written for it set
+# fields this agent does not have. Select this one with --agent browsecomp_opencode_agent.
+browsecomp_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      # A request without a session runs OpenCode on this host, so the agent stays off the address sandboxes reach.
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: search_browsecomp_resources_server
+      # The relay agent's OpenCode release, thinking, context window and run budget. OpenCode runs on its stock system
+      # prompt (no system_prompt) and without agent.build.steps; the turn budget plugin caps the run.
+      opencode_version: 1.17.11
+      thinking: true
+      context_window: 262144
+      # OpenCode asks for this many output tokens on every call, as on the relay; policy_model below removes the cap
+      # from what the model server sends.
+      max_output_tokens: 262144
+      # The relay agent's sandbox_timeout. Neither agent puts a deadline on a single model call.
+      timeout: 21600
+      # Four workers share the closing of sessions, which copies each session's OpenCode store to the agent server and
+      # reads it there. Each worker runs up to `concurrency` sessions, as many as the Environment Server admits, so no
+      # admitted episode waits for an OpenCode slot.
+      num_workers: 4
+      concurrency: 64
+      # Each phase of a session's close gets this long; a session of several hundred model calls has a large store.
+      session_close_timeout_seconds: 300
+      # A borrowed sandbox keeps its owner's network, which webfetch and websearch need; opencode_agent refuses any
+      # other value for one.
+      network_access: inherit
+      # The same OpenCode build and ripgrep on every row: unpinned, opencode_agent downloads OpenCode and installs the
+      # distribution's ripgrep package, which can differ from the 15.1.0 build OpenCode 1.17.11 downloads. No defaults,
+      # so an unset pin stops the config from composing instead of falling back.
+      sandbox_executable_path: ${oc.env:BROWSECOMP_OPENCODE_EXECUTABLE_PATH}
+      sandbox_executable_sha256: ${oc.env:BROWSECOMP_OPENCODE_EXECUTABLE_SHA256}
+      sandbox_ripgrep_path: ${oc.env:BROWSECOMP_OPENCODE_RIPGREP_PATH}
+      sandbox_ripgrep_sha256: ${oc.env:BROWSECOMP_OPENCODE_RIPGREP_SHA256}
+      # The files episode_sandbox_files stages, in load order: the receipts plugin first, so it copies every line the
+      # others print, then the relay agent's plugins in its order.
+      plugins:
+      - /tmp/nemo-gym-plugin-nemo_gym_receipts.js
+      - /tmp/nemo-gym-plugin-nemo_gym_sentinel.js
+      - /tmp/nemo-gym-plugin-nemo_gym_turn_budget.js
+      - /tmp/nemo-gym-plugin-nemo_gym_web_guard.js
+      - /tmp/nemo-gym-plugin-nemo_gym_tool_surface.js
+      # A run that ends on a compaction would otherwise have its summary graded as the answer, which the relay avoids.
+      exclude_compaction_summaries: true
+      # Off unless set. Each session's OpenCode export is written here, outside the workdir; the resources server stops
+      # the sandbox at verify, so keep it only on storage that outlives the sandbox, such as a provider volume.
+      export_dir: ${oc.env:BROWSECOMP_OPENCODE_EXPORT_DIR,null}
+      opencode_config:
+        # The relay's tools map over opencode_agent's permission rules, which resolves as on the relay: OpenCode puts
+        # the keys of a tools map ahead of the "*": allow rule and applies the last matching rule, so webfetch,
+        # websearch and task are allowed and skill denied. nemo_gym_turn_budget.js still removes the task tool from
+        # every request. No task deny: OpenCode's notice for a truncated tool result names the task tool only while
+        # it is allowed, as it is on the relay.
+        tools:
+          webfetch: true
+          websearch: true
+          task: false
+        compaction:
+          # Compaction starts after a call that reaches 262144 - 70144 = 192000 tokens, as on the relay; by default
+          # OpenCode would start at 242,144.
+          reserved: 70144
+      datasets:
+      # browsecomp_opencode.yaml's questions in the same order, as rows that hold only the user turn: opencode_agent
+      # refuses a request that sets tools and adds a system message to its own instructions.
+      - name: browsecomp
+        type: benchmark
+        jsonl_fpath: benchmarks/browsecomp/data/browsecomp_opencode_benchmark.jsonl
+        prepare_script: benchmarks/browsecomp/prepare_opencode.py
+        num_repeats: 1
+
+browsecomp_opencode_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: search_browsecomp_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: browsecomp_opencode_agent
+      # OpenCode works with its own tools in the lent sandbox; the resources server serves none.
+      resources_tool_transports: []
+      # Grade a run that failed at the context window, as the relay does; the plugin log then masks it as
+      # context_window. The default policy would leave it ungraded.
+      agent_outcome_policy:
+        by_failure_kind:
+          model_context_limit: verify
+      # Each admitted episode holds a sandbox from its seed on, so admit no more than one agent worker runs at once.
+      max_concurrent_episodes: 64
+      queue_timeout_seconds: 86400
+      # Covers the seed (sandbox start and OpenCode install), the run, the agent's close and the judge's retries, and
+      # ends before the lent sandbox's ttl_s.
+      default_episode_timeout_seconds: 25200
+      cleanup_timeout_seconds: 600
+
+# The judge, named by the run: use browsecomp_opencode.yaml's endpoint and model to compare the two presets. Pinned to
+# loopback, since the lent sandbox may reach the policy model's host and the judge spends its key for any caller.
+search_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      host: 127.0.0.1
+      base_url: ${search_judge_base_url}
+      model: ${search_judge_model_name}
+      api_key: ${oc.select:inference_api_key,null}
+      return_token_id_information: false
+      # A reasoning judge's verdict would otherwise stay inside its think block.
+      uses_reasoning_parser: true
+
+# No output cap from the model server either: vllm_model applies sampling_overrides to every request it sends.
+# `entrypoint` makes this block a model server instance, so the benchmark listing resolves the agent's model_server
+# without a model config; vllm_model.yaml supplies the rest.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      sampling_overrides:
+        max_output_tokens: null
+        max_tokens: null
+        max_completion_tokens: null

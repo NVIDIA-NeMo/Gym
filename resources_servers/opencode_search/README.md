@@ -28,28 +28,39 @@ of grading counts as unparsed.
 Every verify response carries `evaluation_completed`: true when grading reached a result (a verdict, or
 an empty answer), false when the judge gave no verdict or never answered and when the session was
 lost. A rollout that ended on its budget keeps its judged reward and is masked, with the ending's
-`failure_kind`; the ending (`max_iteration`, `context_window`, `agent_timed_out`) arrives as
-`opencode_terminal_reason` in the verify body, which `opencode_sandboxed_agent` sends. Gym's aggregate
-metrics leave masked rows out of the quality scores; the reward stays on each row.
+`failure_kind`. The ending (`max_iteration`, `context_window`, `agent_timed_out`) arrives as
+`opencode_terminal_reason` in the verify body, which `opencode_sandboxed_agent` sends; on an episode
+session with `plugin_log_path` set, verify reads it (`max_iteration`, `context_window`) from the plugin
+log instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality scores; the
+reward stays on each row.
 
 ## Sessions
 
 The server implements the session state hooks, so the base class serves `/seed_session` and
-`/close_session`. A session holds one sandbox, started from `sandbox_image` and `sandbox_config`;
-grading never reads it.
+`/close_session`. A session holds one sandbox, started from `sandbox_image` and `sandbox_config`.
+Grading reads nothing from it but the plugin log of an episode session, when `plugin_log_path` is set.
 
 * **Episode seed (Environment Server).** `/seed_session` takes a `ResourcesSeedSessionRequest` and keys
-  the session by its `resources_session_id`. With `sandbox_workdir` set, the seed starts the sandbox,
-  creates that directory in it, and returns `sandbox_access` (an `operate` descriptor and the
-  workdir) for a session harness to borrow; only this server stops the sandbox. Without
-  `sandbox_workdir` the seed is refused with 422. A seed whose `task_data` lacks `question` or
-  `ground_truth` is refused with 422 and starts nothing; an ID bound to another episode or task, or
-  one already closed, gets 409; repeating the seed returns the same sandbox.
+  the session by its `resources_session_id`. With `sandbox_workdir` set, the seed starts the sandbox
+  with the files of `episode_sandbox_files` and the environment of `episode_sandbox_env`, creates that
+  directory in it, and returns `sandbox_access` (an `operate` descriptor and the workdir) for a session
+  harness to borrow; only this server stops the sandbox. Without `sandbox_workdir` the seed is refused
+  with 422. A seed whose `task_data` lacks `question` or `ground_truth` is refused with 422 and starts
+  nothing; an ID bound to another episode or task, or one already closed, gets 409; repeating the seed
+  returns the same sandbox.
 * **Verify.** `/verify` stops the sandbox before it calls the judge. A session is verified once: an
   identical retry replays the verdict, and a retry with another body gets 409. After an attempt that
   reached no verdict, an identical retry is graded again. A verify after the session's close is
   masked (`failure_kind: session_lost`). A verify with no seed, such as `gym eval reverify`, is
   graded, since the grade reads only the request.
+* **Plugin log.** With `plugin_log_path` set, an episode's verify first reads that file from the sandbox:
+  the receipts plugin (`opencode_bundle/nemo_gym_receipts.js`) copies the OpenCode plugins' lines there.
+  Verify takes the run's ending from the turn-budget plugin's lines, as `opencode_sandboxed_agent` reads
+  its run output, and returns the log with it (`opencode_terminal_reason`, `opencode_plugins_loaded`,
+  `opencode_plugin_log`). A log without the sentinel plugin's line, or without a line of
+  `required_plugin_markers`, is refused with 422 and not graded. A log that cannot be read answers 500,
+  which an Environment Server treats as retryable. Without `plugin_log_path`, verify reads and refuses
+  nothing, so a harness that brings no OpenCode plugins is graded on its answer alone.
 * **Close.** `/close_session` stops the sandbox by ID, with or without the session cookie, and fences
   the ID: a seed for it gets 409 for `session_close_retry_window_seconds`. A close whose stop fails
   raises and keeps the sandbox, so a retried close stops it. A session that is never closed keeps its
@@ -61,13 +72,38 @@ grading never reads it.
   started exactly as before episode sessions existed (the image's working directory, no task
   label), and `/verify` stops it, since this path sends no close.
 
-Supported harnesses: `opencode_sandboxed_agent` (`allowed_agents`), on the agent-run seed. It serves
-no agent sessions, so its configs (`benchmarks/browsecomp/configs/browsecomp_opencode.yaml` and
-`configs/opencode_search_example.yaml`) declare a `legacy_agent` relay in front of it. The episode seed
-lends its sandbox to any session harness that accepts `sandbox_access`; the server serves no tools of
-its own, so the harness brings its tools. No shipped config pairs a session harness with this server
-yet. With lending on, the server runs with one worker (`num_workers: 1`): several workers are not
+Supported harnesses, each in the `allowed_agents` of the config that pairs it:
+
+* `opencode_agent`, on the episode seed. `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml`
+  runs it through `single_agent_turn_legacy` and stages the OpenCode plugins that the relay agent uploads.
+  That config admits no other harness, on purpose: the model's tools are OpenCode's own, shaped by those
+  plugins, and this server serves no tools, so another harness would run a different benchmark.
+* `opencode_sandboxed_agent`, on the agent-run seed, as `configs/opencode_search.yaml` declares. It serves
+  no agent sessions, so its configs (`benchmarks/browsecomp/configs/browsecomp_opencode.yaml` and
+  `configs/opencode_search_example.yaml`) declare a `legacy_agent` relay in front of it.
+
+The episode seed lends its sandbox to any session harness that accepts `sandbox_access`; the harness brings
+its tools. With lending on, the server runs with one worker (`num_workers: 1`): several workers are not
 tested with lent sandboxes.
+
+### What differs from the relay
+
+The session pairing repeats the relay pairing's settings; `benchmarks/browsecomp/README.md` lists what the
+model sees differently. On this server's side:
+
+* **Plugins and their settings.** This server stages them in the lent sandbox (`episode_sandbox_files`,
+  `episode_sandbox_env`). On the relay, `opencode_sandboxed_agent` uploads them and passes their settings
+  to OpenCode.
+* **How a run ended.** Verify reads it from the plugin log. On the relay, the agent reads its run output
+  and sends the ending in the verify body. The plugin log gives no agent timeout, so `agent_timed_out`
+  comes only from the relay.
+* **A run whose plugins did not load.** A log without a required line is refused with 422, which an
+  Environment Server does not retry, and a log that cannot be read answers 500. The relay agent refuses a
+  run whose output lacks the sentinel's line with 500.
+* **Working directory.** The lent sandbox's is `sandbox_workdir`, which the seed creates; the agent-run
+  sandbox keeps the image's.
+* **Close.** An episode session ends with `/close_session`, which releases its sandbox and fences the ID,
+  and a verify after it is masked as `session_lost`. The relay sends no close.
 
 The web-search cache proxy (`POST /mcp`, registered only when the cache is configured in
 `configs/opencode_search.yaml`) is not part of a session: it reads no session cookie and keeps no
@@ -76,6 +112,19 @@ session state. It owns the `/mcp` route, so this server cannot also set `expose_
 ## Config
 
 Needs `sandbox_image`, `sandbox_provider`/`sandbox_config`, and a `judge_model_server` pointing at a
-model-server block. `sandbox_workdir` (default null) turns on lending to episode seeds; it must be an
-absolute directory other than `/` and `/tmp`. See `configs/opencode_search.yaml`; wired up in
-`benchmarks/browsecomp/configs/browsecomp_opencode.yaml`.
+model-server block. Episode sessions use these settings, each off by default:
+
+* `sandbox_workdir` turns on lending to episode seeds. It must be an absolute directory other than `/`
+  and `/tmp`; the seed creates it.
+* `episode_sandbox_files` maps absolute sandbox paths to files relative to the Gym root, read at startup
+  and staged in each lent sandbox. Stage under `/tmp`, which every image has: a provider need not create
+  parent directories.
+* `episode_sandbox_env` is the lent sandbox's environment, over `sandbox_config.env`; an empty value sets
+  nothing. Supply secrets from an overlay. With `exa_cache_root` set, `NEMO_GYM_EXA_BASE_URL` defaults to
+  this server's `/mcp` proxy, so the server needs an address the sandbox reaches; on loopback it refuses
+  to start.
+* `plugin_log_path` is the plugin log verify reads, and also sets `NEMO_GYM_PLUGIN_LOG` in the lent
+  sandbox. `required_plugin_markers` lists the lines the log must hold besides the sentinel's.
+
+See `configs/opencode_search.yaml`; wired up in `benchmarks/browsecomp/configs/browsecomp_opencode.yaml`
+(relay) and `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` (episode sessions).
