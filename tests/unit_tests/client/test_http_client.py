@@ -1254,6 +1254,35 @@ class TestHTTPClient:
             await client.close()
             monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
 
+    async def test_global_aiohttp_client_reads_long_response_headers(self, monkeypatch: MonkeyPatch) -> None:
+        # github.com release downloads answer with a header longer than aiohttp's 8190-byte default.
+        long_value = "a" * 16384
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="ok", headers={"Content-Security-Policy": long_value})
+
+        app = web.Application()
+        app.router.add_get("/", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
+        monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
+
+        client = nemo_gym.client.http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        try:
+            async with client.get(f"http://127.0.0.1:{port}/") as response:
+                assert response.headers["Content-Security-Policy"] == long_value
+                assert await response.text() == "ok"
+        finally:
+            await client.close()
+            await runner.cleanup()
+            monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+
     async def test_connection_pool_telemetry_is_installed_when_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr("nemo_gym.client.http_client.get_nemo_gym_fastapi_num_workers", lambda: 1)
