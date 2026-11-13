@@ -14,6 +14,7 @@ from pathlib import Path
 import yaml
 
 from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
+from responses_api_agents.agentvista_agent.runtime.code_sandbox import install_code_sandbox
 from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.scoring import score
@@ -67,6 +68,8 @@ def run(config: dict) -> dict:
     def interrupt(signum: int, frame: object) -> None:
         raise InterruptedError(f"Original harness interrupted by signal {signum}")
 
+    sandbox = None
+    close_sandbox = lambda: None
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         result["failure_kind"] = "agentvista:setup"
@@ -94,6 +97,7 @@ def run(config: dict) -> dict:
         for key in ("REASONING_API_KEY_2", "REASONING_END_POINT_2"):
             os.environ.pop(key, None)
         # Load the original prompt initializer and exact single-sample algorithm.
+        sandbox, close_sandbox = install_code_sandbox(config, output)
         import infer
         from engine.api import api_model_caller, api_processors
 
@@ -148,6 +152,9 @@ def run(config: dict) -> dict:
         }
         result["failure_kind"] = "agentvista:execution"
         original = api_processors.process_single_sample(task["record"], args, sampling)
+        if sandbox.failed:
+            result["failure_kind"] = "agentvista:sandbox"
+            raise RuntimeError("Code sandbox failed; episode is unscorable")
         if original is None:
             raise RuntimeError("Original AgentVista harness returned no result")
         trace = Path(args.output_dir) / str(original["question_id"]) / "traj.jsonl"
@@ -179,6 +186,7 @@ def run(config: dict) -> dict:
         result.setdefault("failure_kind", "agentvista:episode")
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
+        close_sandbox()
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         temporary = output / "result.json.tmp"

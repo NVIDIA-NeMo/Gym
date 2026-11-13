@@ -88,7 +88,7 @@ def configuration(config: dict, workspace: Path, mcp_config: Path) -> dict:
 
 
 def actor_environment(workspace: Path) -> dict[str, str]:
-    # Minimize inherited credentials. The local kernel is trusted execution, not a sandbox boundary.
+    # Native host tools are denied; the only code tool uses a separate namespace sandbox.
     allowed = {
         "PATH",
         "AGENTVISTA_ROOT",
@@ -235,6 +235,12 @@ def run(config: dict) -> dict:
                 {
                     "output": str(output / "tools"),
                     "images": task["images"],
+                    "dataset": config["dataset"],
+                    "image_folder": config["image_folder"],
+                    "code_sandbox_python": config.get("code_sandbox_python")
+                    or os.environ.get("AGENTVISTA_SANDBOX_PYTHON")
+                    or sys.executable,
+                    "episode_timeout": config.get("episode_timeout", 6000),
                     "web_search_max_calls": config.get("web_search_max_calls", 100),
                     "image_search_max_calls": config.get("image_search_max_calls", 100),
                 }
@@ -294,6 +300,9 @@ def run(config: dict) -> dict:
         result["failure_kind"] = "agentvista:execution"
         if not (output / "tools/tools_listed").is_file():
             raise RuntimeError("OpenCode never listed the AgentVista MCP tools; inspect opencode.stderr")
+        if (output / "tools/code_sandbox_failed.json").exists():
+            result["failure_kind"] = "agentvista:sandbox"
+            raise RuntimeError("Code sandbox failed; episode is unscorable")
         kept_output = any(event.get("type") in {"text", "reasoning", "tool_use"} for event in events)
         answered_timeout = health["termination"] == "timeout" and kept_output and not health["native_errors"]
         if (

@@ -166,6 +166,9 @@ def test_real_kernel_state_image_output_and_reverse_reference(monkeypatch, tmp_p
         isolated = other.execute("code_interpreter", {"code": "print('counter' in globals())"})
         assert "False" in isolated[0]["text"]
     finally:
+        session.close()
+        if "other" in locals():
+            other.close()
         _kill_kernels_and_subprocesses()
 
 

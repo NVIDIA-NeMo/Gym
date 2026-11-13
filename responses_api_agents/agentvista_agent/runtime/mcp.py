@@ -13,6 +13,7 @@ from pathlib import Path
 from PIL import Image
 from utils.context_utils import pil_to_base64_data_uri
 
+from responses_api_agents.agentvista_agent.runtime.code_sandbox import CodeSandbox
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 
 
@@ -26,8 +27,13 @@ class ToolSession:
             name = "original_image" + (f"_{index}" if index else "")
             self.image_map[name] = Image.open(path).convert("RGB")
         self.instances, self.counts = {}, {}
+        self.code_sandbox = None
         self.image_aliases = {}
         self.lock = asyncio.Lock()
+
+    def close(self):
+        if self.code_sandbox is not None:
+            self.code_sandbox.close()
 
     def schema(self) -> list[dict]:
         from tools import get_tool_info, list_tools
@@ -58,7 +64,11 @@ class ToolSession:
                     value = os.environ.get("AGENTVISTA_VISIT_" + key.upper())
                     if value:
                         settings[key] = value
-            self.instances[name] = get_tool(name)(settings)
+            if name == "code_interpreter":
+                self.code_sandbox = CodeSandbox(self.config, self.output)
+                self.instances[name] = self.code_sandbox
+            else:
+                self.instances[name] = get_tool(name)(settings)
         params = dict(arguments)
         if name == "image_search" and params.get("image_url"):
             reference = params["image_url"]
@@ -139,6 +149,7 @@ async def serve(config: dict) -> None:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
     finally:
+        session.close()
         with contextlib.redirect_stdout(sys.stderr):
             from tools.code_interpreter import _kill_kernels_and_subprocesses
 

@@ -4,6 +4,7 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 USER root
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap && rm -rf /var/lib/apt/lists/*
 ARG OPENCODE_SHA256
 COPY responses_api_agents/agentvista_agent/requirements-worker.txt /opt/agentvista/requirements-worker.txt
 COPY benchmarks/agentvista/setup.py /opt/agentvista/bootstrap/setup.py

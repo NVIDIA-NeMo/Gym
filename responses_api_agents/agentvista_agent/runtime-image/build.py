@@ -84,6 +84,7 @@ def main() -> None:
     install = rootfs / "opt/agentvista/install.sh"
     install.write_text(
         "#!/bin/bash\nset -euo pipefail\n"
+        "command -v bwrap >/dev/null || (apt-get update && apt-get install -y --no-install-recommends bubblewrap)\n"
         "/opt/agentvista/bin/uv venv --python /opt/agentvista-python/bin/python3.13 /opt/agentvista-worker\n"
         "/opt/agentvista/bin/uv --no-config pip install --python /opt/agentvista-worker/bin/python "
         "--index-strategy unsafe-best-match --require-hashes -r /opt/agentvista/requirements-worker.txt\n"

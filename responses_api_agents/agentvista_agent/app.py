@@ -42,6 +42,7 @@ class AgentVistaConfig(BaseResponsesAPIAgentConfig):
     model_name: str
     output_root: str
     worker_python: str | None = None
+    code_sandbox_python: str | None = None
     harness: Literal["opencode", "default"] = "opencode"
     default_max_turns: int = Field(default=30, ge=1)
     default_max_images: int = Field(default=100, ge=1)
@@ -168,6 +169,7 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                     config[target] = value
             config.update(
                 output=str(output),
+                code_sandbox_python=self.config.code_sandbox_python or sys.executable,
                 task_id=body.verifier_metadata["task_id"],
                 source_sha256=body.verifier_metadata["source_sha256"],
                 model=self.config.model_name,

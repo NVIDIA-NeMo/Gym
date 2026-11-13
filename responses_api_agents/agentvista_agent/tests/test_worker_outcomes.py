@@ -23,6 +23,7 @@ from responses_api_agents.agentvista_agent.runtime.data import inventory
         ("reasoning-timeout", False, 0.0),
         ("silent-timeout", True, 0.0),
         ("no-mcp", True, 0.0),
+        ("sandbox-failed", True, 0.0),
         ("native-error", True, 0.0),
     ],
 )
@@ -68,7 +69,9 @@ ending={ending!r}
 mcp=json.loads(Path(cfg['mcp']['agentvista']['command'][-1]).read_text())
 if ending!='no-mcp':
  target=Path(mcp['output'])/'tools_listed';target.parent.mkdir(parents=True);target.write_text('listed')
-if ending in ('answer','answer-timeout','no-mcp'):
+if ending=='sandbox-failed':
+ target=Path(mcp['output'])/'code_sandbox_failed.json';target.write_text('{{}}')
+if ending in ('answer','answer-timeout','no-mcp','sandbox-failed'):
  print(json.dumps({{'type':'text','part':{{'text':'<answer>42</answer>'}}}}),flush=True)
 elif ending in ('empty','length','reasoning-timeout'):
  print(json.dumps({{'type':'reasoning','part':{{'text':'Still working'}}}}),flush=True)

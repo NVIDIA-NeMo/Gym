@@ -5,12 +5,30 @@ through Gym's rollout-correlated model endpoint. Choose `harness: default` for t
 original greedy loop or `harness: opencode` for the pinned OpenCode CLI and MCP
 tools. Both use the original answer judge. This component is evaluation-only.
 
-This is a trusted-host external-agent-loop integration. Its local Python tool
-is not a sandbox: model-written code can read the worker's filesystem and process
-environment. An environment-variable allowlist is not a security boundary.
-Use dedicated disposable infrastructure and trusted credentials/data; do not use
-this adapter for adversarial or reward-optimization training. A sandbox-backed
-resources server and stock `opencode_agent` pairing is a separate migration.
+The Python code tool in **both harnesses** runs in a mandatory Linux namespace
+sandbox. NeMo Gym's `AsyncSandbox` supervises a fixed Bubblewrap launcher; its
+`local` provider alone provides no isolation. Bubblewrap creates the isolated
+filesystem, process and network namespaces and clears the environment. There is
+no host execution fallback. The adapter remains evaluation-only; training and
+the resources-server/session migration are separate work.
+
+The sandbox contains read-only Python runtime/libraries and three hash-verified
+upstream tool modules, a temporary writable workspace, and one socket channel.
+Task images cross that channel as bytes. Dataset files, episode configuration,
+judge/tool credentials, host homes and the Docker socket are never mounted or
+forwarded. Original stateful Jupyter execution and image variables are retained.
+Image results return as bytes; model-supplied paths never reach the host image
+loader. Network access from model-written code is disabled; the original web
+search/image search/visit tools remain trusted host-side services.
+
+Bubblewrap (`bwrap`) and permitted unprivileged user namespaces are required on
+the worker host/container. Both image builders install Bubblewrap. On systems
+whose container policy disables nested namespaces, enable the approved namespace
+policy or use a compatible worker; an unavailable sandbox makes the episode
+unscorable rather than running Python on the host. Runtime prefixes must contain
+only executable/library files, not task data or secrets. Namespace isolation
+shares the host kernel and is not a VM or a claim of protection against kernel
+vulnerabilities. Resource admission remains the deployment's responsibility.
 
 ## Configuration
 
@@ -20,6 +38,7 @@ resources server and stock `opencode_agent` pairing is a separate migration.
 | `dataset`, `image_folder`, `task_selector` | Original task records, images and selected stable IDs |
 | `model_server`, `model_name` | Gym model-server reference and policy model name |
 | `output_root`, `worker_python` | Isolated episode storage and separate worker interpreter |
+| `code_sandbox_python` | Gym-installed interpreter supervising the sandbox; defaults to the agent-server interpreter |
 | `harness` | `default` or `opencode` |
 | `default_max_turns`, `default_max_images` | Original published run-command limits: 30 turns, 100 images |
 | `command`, `opencode_version` | OpenCode executable and required version 1.17.11 |
@@ -34,7 +53,7 @@ slot admission. Responses carry source/task bindings, native trajectories,
 execution-health metadata, extracted predictions and original judge diagnostics.
 Empty model answers and actor deadlines with retained output are judged.
 Infrastructure failures, an unavailable tool server, and judge outages stay
-unscored. Scores from older harness versions must not be combined with version 3.
+unscored. Scores from older harness versions must not be combined with version 4 (sandboxed code tools).
 
 Install server dependencies with:
 
@@ -61,3 +80,16 @@ pytest responses_api_agents/agentvista_agent/tests
 These fixtures use local fake policy/judge endpoints and need no provider keys
 or GPUs. For provider configuration, data preparation and evaluation commands,
 see [the benchmark README](../../benchmarks/agentvista/README.md).
+
+## Sandbox checks
+
+`tests/test_code_sandbox.py` exercises real namespaces: answer-file and symlink
+reads, host `/proc` access, credential environment exclusion, network separation,
+and cancellation of detached descendants. Transport/image tests reject arbitrary
+host image references and preserve sandbox failures as unscorable. The original
+default-loop and pinned OpenCode CLI fixtures additionally check persistent
+variables, image crops and image feedback. Run these with a complete pinned worker
+Python environment and `AGENTVISTA_SANDBOX_PYTHON` pointing to the Gym-installed
+interpreter when invoking workers directly (the Agent Server sets this in worker
+configuration automatically). No benchmark prompts, task answers or judge rules
+are changed.

@@ -92,13 +92,22 @@ Use a private environment file outside Git for policy/search/visit/judge setting
   judge; endpoint is a base URL ending in `/v1`. Both workers check these before
   any policy calls.
 
-The code tool runs model-written Python on the worker host. Neither harness is a
-security sandbox. The OpenCode subprocess environment omits judge credentials,
-but a same-user kernel can still read host files and process environments,
-including task answers and credentials. Use dedicated disposable infrastructure
-with data and credentials you trust this execution to access. This adapter is not
-suitable for adversarial policies or reward-optimization training. A sandbox-backed
-resources server plus stock `opencode_agent` is a separate architectural follow-up.
+Both harnesses now run `code_interpreter` in a mandatory Bubblewrap namespace
+sandbox supervised through NeMo Gym's sandbox lifecycle API. The boundary
+excludes task datasets, reference answers, host process environments and judge
+credentials. Only the Python runtime and verified tool code are mounted read-only;
+images and results cross a bounded byte channel. Generated code has no network
+access and cannot select host paths for returned images. Stateful Python and the
+original tool schemas remain available.
+
+Workers require `bwrap` and permitted nested user namespaces. Missing support or
+sandbox transport failure is unscorable and never falls back to host execution.
+Both runtime-image builders install Bubblewrap; rebuild older images before using
+harness version **4.0.0**. Do not combine historical unsandboxed scores with this
+version. See the [agent README](../../responses_api_agents/agentvista_agent/README.md)
+for the namespace tests, runtime requirements and shared-kernel limitations.
+Training remains unsupported. The resources-server/session migration with stock
+`opencode_agent` remains a separate architectural follow-up.
 
 ## Run evaluation
 

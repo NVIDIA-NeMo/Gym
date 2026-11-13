@@ -14,8 +14,9 @@ from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.default_worker import run
 
 
+@pytest.mark.parametrize("tool_name", ["web_search", "code_interpreter"])
 @pytest.mark.parametrize("judge", ["0", "1", "provider-error"])
-def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatch, judge: str) -> None:
+def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatch, judge: str, tool_name: str) -> None:
     source = os.environ.get("AGENTVISTA_ROOT")
     if not source:
         pytest.skip("Set AGENTVISTA_ROOT to the pinned upstream source")
@@ -63,8 +64,12 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
                         "index": 0,
                         "function": {
                             "index": 0,
-                            "name": "web_search",
-                            "arguments": json.dumps({"query": "42"}),
+                            "name": tool_name,
+                            "arguments": json.dumps(
+                                {"query": "42"}
+                                if tool_name == "web_search"
+                                else {"code": 'print("Evidence: 42"); original_image.crop((0,0,30,20))'}
+                            ),
                         },
                     }
                 ],

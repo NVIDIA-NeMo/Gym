@@ -2,5 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """AgentVista tools and scoring under NeMo Gym + OpenCode."""
 
-HARNESS_VERSION = "3.0.0"
+HARNESS_VERSION = "4.0.0"
 OPENCODE_VERSION = "1.17.11"
