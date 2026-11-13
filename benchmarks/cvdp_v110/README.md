@@ -62,7 +62,7 @@ that provider. See `resources_servers/cvdp/README.md` and
 Use the same simulator base images at preparation and runtime:
 
 ```bash
-python -m resources_servers.cvdp.prepare benchmarks/cvdp_v110/data/cvdp_v110.jsonl \
+python resources_servers/cvdp/prepare.py benchmarks/cvdp_v110/data/cvdp_v110.jsonl \
   --image-prefix <registry/repository> --manifest <prepared-images.json> \
   --oss-sim-image <cvdp_sim_image> --oss-pnr-image <oss_pnr_image> \
   --cocotb-bus-version 1.9.2 --push
