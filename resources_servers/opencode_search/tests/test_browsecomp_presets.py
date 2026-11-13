@@ -191,5 +191,6 @@ def test_the_readme_gives_the_judge_retry_limits_this_server_applies() -> None:
 
 def test_the_core_timing_check_counts_the_export_copy_at_this_servers_bound() -> None:
     """The core suite checks that an episode ends before its lent sandbox expires with the export copy at its bound, a
-    constant of its own since that suite imports no server. It must be the bound this server applies."""
+    constant of its own since the module that checks it imports neither this server nor opencode_agent. It must be
+    the bound this server applies."""
     assert EXPORT_COPY_S == _EXPORT_COPY_TIMEOUT_S
