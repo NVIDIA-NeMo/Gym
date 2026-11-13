@@ -3,6 +3,7 @@
 """Drive the public hooks, real session contract and retained artifact grading."""
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,14 +12,15 @@ import pytest
 from fastapi import HTTPException, Request
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
-from nemo_gym.verification import JudgeError
-from resources_servers.mm_coding_training.app import CodingSeedRequest
+from nemo_gym.verification import JudgeError, judge_failsafe
+from resources_servers.mm_coding_training.app import CodingRequest, CodingSeedRequest
 from resources_servers.mm_coding_training.session_app import SessionCodingConfig, SessionCodingTrainingServer
 from resources_servers.mm_coding_training.tests.test_app import png, request
 from resources_servers.mm_coding_training.tests.test_app import server as server
@@ -284,3 +286,37 @@ async def test_saved_receipt_can_be_regraded_without_policy_or_task_box(session_
     grading.assert_awaited_once()
     box.download.assert_awaited_once()
     box.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gym_reverify_payload_regrades_a_judge_failure(session_server):
+    body = request("Original policy reply")
+    installed(session_server, body)
+    renderer = AsyncMock()
+    renderer.render.return_value = png()
+
+    async def fail(*args, **kwargs):
+        raise JudgeError("judge outage")
+
+    with (
+        patch.object(type(session_server), "_renderer", return_value=renderer),
+        patch.object(type(session_server), "_judge", side_effect=fail),
+    ):
+        reply = await judge_failsafe(session_server.verify)(http_request(), body)
+    sidecar = json.loads(reply.body) | {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    materialized = {
+        "task": body.task.model_dump(),
+        "responses_create_params": body.responses_create_params.model_dump(mode="json", exclude_unset=True),
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+    }
+    payload = _build_verify_payload(InputRolloutPair(input=materialized, rollout=sidecar))
+
+    async def grade(body, source, result):
+        assert source == "<svg/>"
+        result.reward, result.evaluation_completed = 0.9, True
+        return result
+
+    with patch.object(type(session_server), "grade_source", side_effect=grade):
+        result = await session_server.verify(http_request("fresh-reverify"), CodingRequest.model_validate(payload))
+    assert result.reward == 0.9 and not result.mask_sample

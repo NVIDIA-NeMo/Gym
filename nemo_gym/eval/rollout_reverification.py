@@ -774,7 +774,17 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
     # per-sub-step solutions an agent sent, which a masked row keeps (the response holds only the last step), with the
     # usage accounting that travels through the verifier.
-    for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
+    for key in (
+        "deliverables_dir",
+        "reference_ids",
+        "solutions",
+        "token_usage_version",
+        "step_usage",
+        # A verifier that grades a saved source again needs the source, its SHA256 and its binding.
+        "source_artifact",
+        "source_sha256",
+        "source_binding_sha256",
+    ):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     if replay_patch:
