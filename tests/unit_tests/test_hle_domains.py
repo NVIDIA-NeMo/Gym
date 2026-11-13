@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from resources_servers.equivalence_llm_judge.slice_metrics import compute_slice_metrics
 
 
