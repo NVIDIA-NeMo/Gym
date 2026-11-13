@@ -35,7 +35,8 @@ agentic_mme_server_tools_agent:
         - name: agentic_mme_server_tools
           type: benchmark
           jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_server_tools_benchmark.jsonl
-          prepare_script: benchmarks/agentic_mme/prepare.py
+          prepare_script: benchmarks/agentic_mme/prepare_server_tools.py
+          prepare_project: resources_servers/agentic_mme
           num_repeats: 1
         - name: example
           type: example

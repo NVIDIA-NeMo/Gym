@@ -118,7 +118,8 @@ agentic_mme_opencode_agent:
         - name: agentic_mme_opencode
           type: benchmark
           jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_opencode_benchmark.jsonl
-          prepare_script: benchmarks/agentic_mme/prepare.py
+          prepare_script: benchmarks/agentic_mme/prepare_opencode.py
+          prepare_project: resources_servers/agentic_mme
           num_repeats: 1
         - name: example
           type: example

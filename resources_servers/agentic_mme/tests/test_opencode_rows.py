@@ -3,10 +3,12 @@
 """The OpenCode-track and server-tools-track rows that benchmarks/agentic_mme/prepare.py writes."""
 
 import base64
+import importlib
 import json
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 from PIL import Image
 
 from benchmarks.agentic_mme.prepare import (
@@ -20,9 +22,12 @@ from benchmarks.agentic_mme.prepare import (
     opencode_server_tools_row,
     server_tools_row,
 )
+from nemo_gym.config import GlobalConfigDictParser
 from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS
 
 
+ROOT = Path(__file__).resolve().parents[3]
+BENCHMARKS = ROOT / "benchmarks/agentic_mme"
 PNG = b"\x89PNG\r\n\x1a\nfirst"
 JPEG = b"\xff\xd8\xffsecond"
 
@@ -174,3 +179,38 @@ def test_a_converted_row_carries_its_task_id_at_the_top_level(tmp_path: Path) ->
     row = convert(task, tmp_path)
 
     assert row["task_id"] == row["verifier_metadata"]["task_id"] == "task-7"
+
+
+@pytest.mark.parametrize(
+    ("recipe", "agent", "dataset_name"),
+    [
+        ("config", "agentic_mme_agent", "agentic_mme"),
+        ("server_tools", "agentic_mme_server_tools_agent", "agentic_mme_server_tools"),
+        ("opencode", "agentic_mme_opencode_agent", "agentic_mme_opencode"),
+        ("opencode_server_tools", "agentic_mme_opencode_agent", "agentic_mme_opencode_server_tools"),
+    ],
+)
+def test_each_recipe_prepares_the_file_it_reads_in_the_locked_project(
+    recipe: str, agent: str, dataset_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gym eval prepare` requires prepare() to return the dataset's jsonl_fpath, and runs it in prepare_project.
+
+    prepare.py imports Pillow and, for the server-tools rows, OpenCV through the image tools; the resources server's
+    locked project has both, and a dev install of Gym has neither.
+    """
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths([str(BENCHMARKS / f"{recipe}.yaml")])
+    config = OmegaConf.merge(*configs)
+    (agent_config,) = config[agent].responses_api_agents.values()
+    (dataset,) = [dataset for dataset in agent_config.datasets if dataset.name == dataset_name]
+    assert dataset.prepare_project == "resources_servers/agentic_mme"
+    assert not dataset.get("prepare_dependencies")
+
+    preparer = importlib.import_module(".".join(Path(dataset.prepare_script).with_suffix("").parts))
+    written = []
+    # Every preparer converts the release once and writes all four tracks; the conversion itself is tested above.
+    monkeypatch.setattr(preparer, "prepare_all_tracks", lambda: written.append(recipe), raising=False)
+    output = preparer.OUTPUT_FPATH if recipe == "config" else preparer.prepare()
+
+    assert output.resolve() == (ROOT / dataset.jsonl_fpath).resolve()
+    assert written == ([] if recipe == "config" else [recipe])

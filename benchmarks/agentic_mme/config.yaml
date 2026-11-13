@@ -31,6 +31,7 @@ agentic_mme_agent:
         type: benchmark
         jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_benchmark.jsonl
         prepare_script: benchmarks/agentic_mme/prepare.py
-        # prepare.py downscales the input images with Pillow, which a dev install of Gym lacks.
-        prepare_dependencies: [pillow]
+        # prepare.py downscales the images with Pillow and builds the server-tools rows from the image tools, which
+        # import OpenCV; a dev install of Gym has neither. The resources server's locked project has both.
+        prepare_project: resources_servers/agentic_mme
         num_repeats: 1
