@@ -38,7 +38,13 @@ def inspect_compaction(
     helper_ids = fixture.get("response_ids")
     summary = fixture.get("summary")
     attempts = _objects((witness or {}).get("attempts"))
-    expected_ids = [_mapping(a.get("response")).get("id") for a in attempts]
+    successful = [a for a in attempts if a.get("status_code") == 200]
+    expected_ids = [_mapping(a.get("response")).get("id") for a in successful]
+    overflow_after = fixture.get("overflow_after")
+    expected_statuses = [200] * len(attempts)
+    valid_overflow = overflow_after is None or (type(overflow_after) is int and 0 < overflow_after < len(attempts) - 1)
+    if overflow_after is not None and valid_overflow:
+        expected_statuses[overflow_after] = 400
     available = (
         record is not None
         and isinstance(helper_ids, list)
@@ -46,6 +52,8 @@ def inspect_compaction(
         and isinstance(summary, str)
         and bool(summary)
         and bool(attempts)
+        and valid_overflow
+        and [a.get("status_code") for a in attempts] == expected_statuses
         and all(isinstance(value, str) and value for value in expected_ids)
     )
     helper_ids = helper_ids if available else []
@@ -72,9 +80,18 @@ def inspect_compaction(
     check(
         "event",
         lambda: len(events) == len(helper_ids) == int(expected)
-        and all(e.get("outcome") == "completed" and e.get("trigger") == "automatic" for e in events),
+        and all(
+            e.get("outcome") == "completed"
+            and e.get("trigger") in (("overflow",) if overflow_after is not None else ("automatic", "threshold"))
+            for e in events
+        )
+        and (overflow_after is None or _mapping(attempts[overflow_after + 1].get("response")).get("id") in helper_ids),
         "$.ng_agent_observations.records",
-        "expected one completed automatic compaction, or none in the control",
+        (
+            "expected one completed overflow compaction with the helper immediately after the declared context-limit error"
+            if overflow_after is not None
+            else "expected one completed automatic or threshold compaction, or none in the control"
+        ),
         depends_on=("compaction.schema",),
     )
 
@@ -105,7 +122,8 @@ def inspect_compaction(
     )
 
     def summary_reused() -> bool:
-        if events[0].get("summary") != summary or helper_ids[0] not in expected_ids:
+        saved_summary = events[0].get("summary")
+        if not isinstance(saved_summary, str) or summary not in saved_summary or helper_ids[0] not in expected_ids:
             return False
         following = expected_ids[expected_ids.index(helper_ids[0]) + 1 :]
         if not following:
@@ -153,7 +171,7 @@ def inspect_compaction(
     )
 
     def usage_retained() -> bool:
-        usages = [_mapping(_mapping(a.get("response")).get("usage")) for a in attempts]
+        usages = [_mapping(_mapping(a.get("response")).get("usage")) for a in successful]
         counts = [
             (u.get("prompt_tokens", u.get("input_tokens")), u.get("completion_tokens", u.get("output_tokens")))
             for u in usages

@@ -14,7 +14,13 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
-from scripts.harness_conformance.provider import SUMMARY_PROMPTS, OpenClawProbe, Probe, is_compaction_request
+from scripts.harness_conformance.provider import (
+    CONVERSATION_SUMMARY_PROMPTS,
+    SUMMARY_PROMPTS,
+    OpenClawProbe,
+    Probe,
+    is_compaction_request,
+)
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -475,6 +481,73 @@ def test_summary_does_not_waive_policy_tool_result_requirement(tmp_path):
         assert client.post("/v1/chat/completions", json=helper).status_code == 200
         assert client.post("/v1/chat/completions", json=body).status_code == 409
     assert len(probe.compaction_response_ids) == 1
+
+
+@pytest.mark.parametrize("instruction", CONVERSATION_SUMMARY_PROMPTS)
+def test_summary_instruction_after_quoted_history(instruction):
+    def request(text):
+        return {"messages": [{"role": "user", "content": text}]}
+
+    assert is_compaction_request(request(f"<conversation>Prior work</conversation>\n\n{instruction}"))
+    assert not is_compaction_request(request(f"<conversation>{instruction}</conversation>\nContinue working."))
+    assert not is_compaction_request(request(f"{instruction}</conversation>"))
+
+
+def test_overflow_fixture_retains_error_and_resumes_policy_after_summary(tmp_path):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path, compaction_overflow_after=1)
+    messages = [{"role": "user", "content": "Run checks"}]
+    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        for index in range(2):
+            message = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]["message"]
+            assert (len(message["reasoning_content"]) > 16000) == (index == 0)
+            call = message["tool_calls"][0]
+            execution = subprocess.run(
+                json.loads(call["function"]["arguments"])["command"],
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
+            if index == 0:
+                overflow = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+                assert overflow.status_code == 400
+                assert "maximum context length" in overflow.json()["error"]["message"]
+                assert "id" not in overflow.json() and "usage" not in overflow.json()
+                helper = client.post(
+                    "/ng-rollout/0-0/v1/chat/completions",
+                    json={
+                        **body,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": f"<conversation>History</conversation>\n{CONVERSATION_SUMMARY_PROMPTS[1]}",
+                            }
+                        ],
+                    },
+                ).json()
+                messages.append(helper["choices"][0]["message"])
+        answer = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+        assert answer.json()["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+    witness = json.loads((tmp_path / "witness.json").read_text())
+    assert not witness["violations"] and witness["finished"]
+    assert witness["compaction"]["overflow_after"] == 1
+    assert [a["status_code"] for a in witness["attempts"]] == [200, 400, 200, 200, 200]
+    captures = [row for _, row in json_rows(tmp_path / "capture/0-0.capture.jsonl")]
+    assert len(captures) == 5
+
+
+def test_finishing_without_history_does_not_allow_summary(tmp_path):
+    probe = Probe(dataclasses.replace(SCENARIO["context_compaction"], tool_steps=0), tmp_path)
+    body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/chat/completions", json=body).status_code == 200
+        # A helper still requires prior tool history; completing an empty task
+        # cannot manufacture the summary stage.
+        helper = {**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]}
+        assert client.post("/v1/chat/completions", json=helper).status_code == 409
+        assert client.post("/v1/chat/completions", json=body).status_code == 409
 
 
 def test_compaction_probe_rejects_unexpected_summary_request(tmp_path):

@@ -54,6 +54,54 @@ def test_completed_compaction_retains_helper_without_policy_turn(compaction_evid
     assert {c["tier"] for c in result.values()} == {"P1"}
 
 
+@pytest.mark.parametrize("trigger", ["automatic", "threshold", "overflow", "manual", "unknown", None])
+def test_wrapped_summary_requires_automatic_or_threshold_trigger(compaction_evidence, trigger):
+    record, witness = compaction_evidence
+    event = record["ng_agent_observations"]["records"][-1]
+    event.update(trigger=trigger, summary=f"Turn context:\n{witness['compaction']['summary']}")
+    result = checks(record, witness)
+    if trigger in ("automatic", "threshold"):
+        assert {c["status"] for c in result.values()} == {"pass"}
+    else:
+        assert result["compaction.event"]["status"] == "fail"
+
+
+def test_declared_overflow_precedes_helper_without_usage_or_a_policy_turn(compaction_evidence):
+    record, witness = compaction_evidence
+    witness["attempts"].insert(1, {"status_code": 400, "request": {}, "response": {"error": {"message": "overflow"}}})
+    witness["compaction"]["overflow_after"] = 1
+    record["ng_agent_observations"]["records"][-1]["trigger"] = "overflow"
+    assert {c["status"] for c in checks(record, witness).values()} == {"pass"}
+
+    # Undeclared errors cannot disappear from expected call/usage accounting.
+    del witness["compaction"]["overflow_after"]
+    assert all(c["status"] == "fail" for name, c in checks(record, witness).items() if name != "compaction.schema")
+
+
+@pytest.mark.parametrize("trigger", ["automatic", "threshold"])
+def test_declared_overflow_rejects_mismatched_trigger(compaction_evidence, trigger):
+    record, witness = compaction_evidence
+    witness["attempts"].insert(1, {"status_code": 400, "request": {}, "response": {"error": {}}})
+    witness["compaction"]["overflow_after"] = 1
+    record["ng_agent_observations"]["records"][-1]["trigger"] = trigger
+    assert checks(record, witness)["compaction.event"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("overflow_after", [-1, 0, 99, True, "1"])
+def test_invalid_overflow_declaration_fails_closed(compaction_evidence, overflow_after):
+    record, witness = compaction_evidence
+    witness["compaction"]["overflow_after"] = overflow_after
+    assert checks(record, witness)["compaction.event"]["status"] == "fail"
+
+
+def test_overflow_must_be_followed_by_helper_not_an_ordinary_retry(compaction_evidence):
+    record, witness = compaction_evidence
+    witness["attempts"].insert(2, {"status_code": 400, "request": {}, "response": {"error": {}}})
+    witness["compaction"]["overflow_after"] = 2
+    record["ng_agent_observations"]["records"][-1]["trigger"] = "overflow"
+    assert checks(record, witness)["compaction.event"]["status"] == "fail"
+
+
 @pytest.mark.parametrize("reverse_owners", [False, True])
 def test_ground_truth_separates_turn_exclusion_from_conflicting_ownership(compaction_evidence, reverse_owners):
     record, witness = compaction_evidence

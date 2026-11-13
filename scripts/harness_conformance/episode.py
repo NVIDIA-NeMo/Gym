@@ -211,7 +211,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         probe = BorrowedSandboxProbe(scenario, directory)
     else:
         probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-        probe = probe_cls(scenario, directory)
+        # Pi checks thresholds after the tool loop, so exercise its automatic
+        # overflow recovery while the shared shell task is still unfinished.
+        probe = probe_cls(
+            scenario,
+            directory,
+            compaction_overflow_after=scenario.tool_steps // 2 if harness == "pi" and scenario.compaction else None,
+        )
     probe.save()
     tasks = []
     servers = []
