@@ -543,3 +543,57 @@ def test_process_marker_cleans_setsid_descendant_but_not_other_process(tmp_path)
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("existing,contents", [(False, False), (True, False), (True, True)])
+def test_container_copy_preserves_native_directory_layout_and_executable_modes(tmp_path, existing, contents):
+    from responses_api_agents.wildclawbench_agent.enroot_docker import copy_path
+
+    source = tmp_path / "source"
+    source.mkdir()
+    executable = source / "run.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    destination = tmp_path / "destination"
+    if existing:
+        destination.mkdir()
+    assert copy_path(source, destination, contents) == 0
+    copied = destination / ("source/run.sh" if existing and not contents else "run.sh")
+    assert copied.read_bytes() == executable.read_bytes()
+    assert copied.stat().st_mode & 0o777 == 0o755
+
+
+def test_container_copy_works_when_destination_cannot_store_host_acls(tmp_path, monkeypatch):
+    import errno
+    import os
+
+    from responses_api_agents.wildclawbench_agent.enroot_docker import copy_path
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.txt").write_text("unchanged task bytes")
+    attempts = []
+    monkeypatch.setattr(os, "listxattr", lambda *args, **kwargs: ["system.posix_acl_access"])
+    monkeypatch.setattr(os, "getxattr", lambda *args, **kwargs: b"host-acl")
+
+    def unsupported(*args, **kwargs):
+        attempts.append(args[1])
+        raise OSError(errno.ENOTSUP, "ACLs unsupported")
+
+    monkeypatch.setattr(os, "setxattr", unsupported)
+    destination = tmp_path / "destination"
+    assert copy_path(source, destination, False) == 0
+    assert (destination / "input.txt").read_text() == "unchanged task bytes"
+    assert attempts == ["system.posix_acl_access"]
+
+
+def test_container_copy_keeps_symlink_and_replaces_existing_file(tmp_path):
+    from responses_api_agents.wildclawbench_agent.enroot_docker import copy_path
+
+    source = tmp_path / "link"
+    source.symlink_to("relative-target")
+    destination = tmp_path / "destination"
+    destination.write_text("previous")
+    assert copy_path(source, destination, False) == 0
+    assert destination.is_symlink()
+    assert destination.readlink() == Path("relative-target")

@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -94,6 +95,25 @@ def guard_copy_path(shim: ModuleType, name: str, value: str) -> None:
             raise ValueError("Container copy path escapes its rootfs")
 
 
+def copy_path(source: Path, destination: Path, copy_contents: bool) -> int:
+    """Match native copy layout while retaining POSIX modes, without requiring host ACL support."""
+    target = destination
+    if not copy_contents and destination.is_dir():
+        target = destination / source.name
+    if source.is_dir() and not source.is_symlink():
+        # copy(), unlike cp -a, does not require preserving a host file's ACL/ownership.
+        shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True, copy_function=shutil.copy)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            link = os.readlink(source)
+            target.unlink(missing_ok=True)
+            target.symlink_to(link)
+        else:
+            shutil.copy(source, target)
+    return 0
+
+
 def remove(shim: ModuleType, name: str) -> int:
     # state_path also validates the container identifier before any process or filesystem operation.
     state = shim.state_path(name)
@@ -123,6 +143,7 @@ def main() -> int:
             name, value = shim.split_copy_spec(argument)
             if name:
                 guard_copy_path(shim, name, value)
+        shim.copy_path = copy_path
     if operation == "run":
         index = arguments.index("--name")
         name = arguments[index + 1]

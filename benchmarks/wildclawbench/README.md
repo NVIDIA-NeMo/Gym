@@ -189,7 +189,9 @@ Enroot is an opt-in trusted-host compatibility mode: it shares the host PID and
 network namespaces. Use a dedicated trusted allocation; it is not a Docker
 security boundary. A policy process can reach loopback services and host PIDs.
 Use environment references for credentials rather than literal keys in service
-registries. Process markers permit best-effort cleanup of detached descendants;
+registries. Container copies retain file contents, symlinks and POSIX executable modes without
+requiring host ACL/ownership preservation on the Enroot filesystem.
+Process markers permit best-effort cleanup of detached descendants;
 processes that erase their environment can evade this mechanism. Copy-path
 checks reject known rootfs escapes, but shared-host concurrent filesystem mutation
 is not a supported security boundary.
