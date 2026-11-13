@@ -133,31 +133,20 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
-    if harness == "nooa":
-        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
-        return
-    if harness == "crewai":
-        _build_crewai_sandbox_runtime()
-    if harness in (
-        "hermes",
-        "stirrup",
-        "simple",
-        "openclaw",
-        "copilot",
-        "crewai",
-        "miniswe_sandboxed",
-        "claude_code",
-        "terminus_2_sandboxed",
-    ):
-        # Runtimes are locked dependencies or installed during agent-session setup.
+    definition = HARNESSES[harness]
+    if definition.install_module:
+        subprocess.run([sys.executable, "-m", definition.install_module], cwd=ROOT, check=True)
+    if definition.prepare_runtime:
+        definition.prepare_runtime()
+    if definition.npm_version_key is None:
+        # Locked dependencies or agent-session setup own the runtime installation.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
-    if harness == "opencode":
-        from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
-
-        config.setdefault("opencode_version", OPENCODE_VERSION)
-    version_key = "kilo_version" if harness == "kilocode" else f"{harness}_version"
+    version_key = definition.npm_version_key
+    if definition.npm_version_default:
+        module, attribute = definition.npm_version_default.split(":")
+        config.setdefault(version_key, getattr(importlib.import_module(module), attribute))
     version = config[version_key]
     if not version:
         raise ValueError(f"{harness} needs a pinned runtime version")
@@ -222,6 +211,18 @@ def main() -> None:
         print(f"Selected harnesses: {harnesses}")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
             handle.write(f"harnesses={json.dumps(harnesses)}\n")
+            matrix = {
+                "include": [
+                    {
+                        "harness": name,
+                        "container": HARNESSES[name].ci_container or "",
+                        "packages": " ".join(HARNESSES[name].ci_packages),
+                        "requires_root": HARNESSES[name].requires_root,
+                    }
+                    for name in harnesses
+                ]
+            }
+            handle.write(f"matrix={json.dumps(matrix)}\n")
     elif args.command == "install":
         install_runtime(args.harness)
     else:
