@@ -468,11 +468,13 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_max_attempts: int = 4
     judge_retry_delay_seconds: float = 30.0
     judge_retry_timeout_seconds: float = 120.0
-    # Abort the run after this many rollouts in a row fail to grade: the judge never answered, or never gave a
-    # parseable verdict (verify masks that row). Guards the silent-starvation mode where a dead judge masks every
-    # sample and the run burns its wall producing nothing.
+    # Verify answers 500 once this many rollouts in a row fail to grade: the judge never answered, or never gave a
+    # parseable verdict (verify masks that row). It goes on answering 500 for each later rollout without a verdict
+    # until a verdict resets the count. The first 500 ends a relay run without route_failures_to_sidecar; otherwise
+    # each is a failure row. Guards the silent-starvation mode where a dead judge masks every sample and the run burns
+    # its wall producing nothing.
     # Counted per ROLLOUT, not per attempt, so one transient burst cannot trip it. 0 disables.
-    # With num_workers > 1, each worker counts the rollouts it graded, so each worker aborts on its own.
+    # With num_workers > 1, each worker counts the rollouts it graded, so the breaker trips in each worker separately.
     judge_max_consecutive_failures: int = 25
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
@@ -937,7 +939,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         )
 
     def _maybe_abort_on_judge_failures(self) -> None:
-        """Stop the run once the judge looks dead, rather than masking every remaining row.
+        """Make verify answer 500 once the judge looks dead, rather than mask every remaining row.
 
         Ported from the legacy stack (the legacy stack's swe_agents/app.py).
         Without it a dead grader is indistinguishable from a model that answers nothing: every row
