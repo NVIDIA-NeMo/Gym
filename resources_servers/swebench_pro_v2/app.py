@@ -26,6 +26,7 @@ from pydantic import Field
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ResourcesSeedSessionResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench_pro.app import (
     PatchCaptureLostError,
     SWEBenchProInstanceRequest,
@@ -139,3 +140,5 @@ class SWEBenchProV2ResourcesServer(SWEBenchProResourcesServer):
 
 if __name__ == "__main__":
     SWEBenchProV2ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SWEBenchProV2ResourcesServer.run_webserver()

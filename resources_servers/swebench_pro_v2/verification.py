@@ -114,7 +114,7 @@ async def run_verification(
     log_dir: Path,
     timeout_s: int | None,
 ) -> VerificationResult:
-    """Keep upstream reward.txt authoritative; retry infrastructure failures without inventing zeros."""
+    """Preserve upstream reward.txt; keep provider, wrapper and artifact transport faults inconclusive."""
     log_dir.mkdir(parents=True, exist_ok=True)
     files, script = assemble_workspace_files(inputs.instance_id, None, inputs.patch, asdict(inputs))
     (log_dir / "patch.diff").write_text(files["patch.diff"], encoding="utf-8")
