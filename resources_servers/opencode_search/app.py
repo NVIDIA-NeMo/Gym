@@ -457,14 +457,14 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # BrowseComp answer is free text and string equality scores correct answers as wrong.
     judge_model_server: ModelServerRef
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
-    # The retry ladder: judge_max_attempts attempts, the first bounded by judge_timeout_seconds and each retry by the
-    # shorter judge_retry_timeout_seconds, a fixed judge_retry_delay_seconds apart rather than an exponential backoff,
-    # so a dead endpoint holds a rollout for a bounded time. Each attempt is one call_judge, which sends the request up
-    # to JUDGE_CALL_MAX_ATTEMPTS (3) times on a timeout, a lost connection or a 408, 429 or 5xx reply, with at most 2 s
-    # and then 4 s of backoff. With the defaults, a judge that never answers holds a rollout for
-    # (3*300 + 6) + 3*(3*120 + 6) + 3*30 = 2,094 s when each request is sent once. Gym's client also sends a timed-out
-    # or refused request again until global_aiohttp_internal_retry_budget_seconds (600 s by default) is spent, which
-    # stretches that to about two hours.
+    # The retry ladder: judge_max_attempts attempts, a fixed judge_retry_delay_seconds apart rather than an exponential
+    # backoff, so a dead endpoint holds a rollout for a bounded time. Each attempt is one call_judge, which sends the
+    # request up to JUDGE_CALL_MAX_ATTEMPTS (3) times on a timeout, a lost connection or a 408, 429 or 5xx reply, with
+    # at most 2 s and then 4 s of backoff. judge_timeout_seconds bounds each request of the first attempt, and the
+    # shorter judge_retry_timeout_seconds each request of a retry. With the defaults, a judge that never answers holds
+    # a rollout for (3*300 + 6) + 3*(3*120 + 6) + 3*30 = 2,094 s when each request is sent once. Gym's client also
+    # sends a timed-out or refused request again until global_aiohttp_internal_retry_budget_seconds (600 s by default)
+    # is spent, which stretches that to about two hours.
     judge_max_attempts: int = 4
     judge_retry_delay_seconds: float = 30.0
     judge_retry_timeout_seconds: float = 120.0
@@ -477,9 +477,10 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
     judge_max_output_tokens: int = 10240
-    # Bounds ONE attempt. Gym's shared aiohttp client has no timeout of its own, so without this
-    # a judge that accepts the connection and never answers holds its rollout until the job's
-    # wall clock and the retry loop below never runs.
+    # Bounds each request of the first judge attempt (call_judge sends up to three per attempt);
+    # judge_retry_timeout_seconds bounds those of each retry. Gym's shared aiohttp client has no timeout of its own, so
+    # without this a judge that accepts the connection and never answers holds its rollout until the job's wall clock
+    # and the retry loop below never runs.
     judge_timeout_seconds: float = 300.0
 
 
