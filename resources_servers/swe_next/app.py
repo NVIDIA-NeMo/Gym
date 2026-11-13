@@ -41,7 +41,6 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -66,7 +65,7 @@ from resources_servers.swe_next.verification import (
     run_verification,
     verification_files,
 )
-from resources_servers.swebench.agent_network import agent_network_policy
+from resources_servers.swebench.agent_network import AgentNetworkConfig
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
@@ -118,7 +117,7 @@ async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
         print(f"Failed to hide grading artifacts in {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
 
-class SWENextResourcesServerConfig(BaseResourcesServerConfig):
+class SWENextResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -130,11 +129,6 @@ class SWENextResourcesServerConfig(BaseResourcesServerConfig):
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
-    # Deny all egress from the agent's sandbox except sandbox_model_server's host (the
-    # agent's own network_access cannot apply to a sandbox this server created). See
-    # resources_servers/swebench/agent_network.py. Evaluation sandboxes are unaffected.
-    enforce_agent_no_network: bool = False
-    sandbox_model_server: ModelServerRef | None = None
 
 
 class SWENextInstanceRequest(BaseModel):
@@ -196,6 +190,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        self.config.check_agent_network_provider(get_global_config_dict())
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
@@ -221,12 +216,6 @@ class SWENextResourcesServer(SimpleResourcesServer):
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
 
-        provider_options = dict(self.config.sandbox_config.get("provider_options", {}))
-        if for_agent and self.config.enforce_agent_no_network:
-            provider_options["network_policy"] = agent_network_policy(
-                provider_config, self.config.sandbox_model_server
-            )
-
         spec = SandboxSpec(
             # The row names its own image; there is no repository template to apply.
             image=body.image_ref,
@@ -247,7 +236,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
                 "instance_id": body.instance_id[:63],
             },
             resources=sandbox_resources,
-            provider_options=provider_options,
+            provider_options=self.config.sandbox_provider_options(provider_config, for_agent=for_agent),
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)

@@ -107,7 +107,7 @@ def server(monkeypatch, sandboxes) -> ScaleSWEResourcesServer:
     server = ScaleSWEResourcesServer(config=config(), server_client=MagicMock(spec=ServerClient))
 
     async def create(body, files=None, *, for_agent=False):
-        sandboxes.append(FakeSandbox())
+        sandboxes.append(FakeSandbox(for_agent=for_agent))
         return sandboxes[-1]
 
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=create))
@@ -131,7 +131,7 @@ def use_verifier_exec(monkeypatch, server, sandboxes, result: SandboxExecResult)
         return await verification.run_verification(**{**kwargs, "log_dir": None})
 
     async def create(body, files=None, *, for_agent=False):
-        sandboxes.append(FakeSandbox())
+        sandboxes.append(FakeSandbox(for_agent=for_agent))
         if files:  # A verifier sandbox.
             sandboxes[-1].exec = AsyncMock(return_value=result)
         return sandboxes[-1]
@@ -225,6 +225,8 @@ def test_http_lifecycle_replays_the_first_verdict_until_close(server, grading, s
     task_sandbox.stop.assert_awaited_once()
     verifier_sandbox.stop.assert_awaited_once()
     assert not server._resources_sessions and not server._session_id_to_sandbox
+    # Only the agent's sandbox gets the egress block; grading installs test dependencies.
+    assert task_sandbox.for_agent is True and verifier_sandbox.for_agent is False
 
 
 @pytest.mark.parametrize("disconnect", [ServerDisconnectedError, ClientOSError])
@@ -824,7 +826,7 @@ def slow_verifier_stops(server, stop) -> None:
     create_task_sandbox = server._create_sandbox.side_effect
 
     async def create(body, files=None, *, for_agent=False):
-        sandbox = await create_task_sandbox(body, files)
+        sandbox = await create_task_sandbox(body, files, for_agent=for_agent)
         if files:  # A verifier sandbox.
             sandbox.stop.side_effect = stop
         return sandbox

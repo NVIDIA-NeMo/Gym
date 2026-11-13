@@ -13,17 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
 
-import nemo_gym.agents.agent_tools as agent_tools
 import resources_servers.swe_next.app as app
+import resources_servers.swebench.agent_network as agent_network
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 
 
-# seed_session creates the agent's sandbox with for_agent=True; verify creates the evaluation sandbox without it.
+# Seeding creates the agent's sandbox with for_agent=True; verify creates the evaluation sandbox without it.
 AGENT_SANDBOX = {"for_agent": True}
 EVAL_SANDBOX = {}
+INSTANCE = dict(instance_id="o__r-1", image_ref="img")
+MODEL_SERVER = ModelServerRef(type="responses_api_models", name="policy_model")
+
+
+class _Started(Exception):
+    """Raised by the recording sandbox once it has the spec, so a seed stops before its setup commands."""
 
 
 class _RecordingAsyncSandbox:
@@ -32,80 +43,109 @@ class _RecordingAsyncSandbox:
 
     async def start(self, spec) -> None:
         self.spec = spec
+        if _RecordingAsyncSandbox.raise_on_start:
+            raise _Started(spec)
 
     async def exec(self, *args, **kwargs) -> None:
         return None
 
+    async def stop(self) -> None:
+        return None
 
-class TestAgentNetworkPolicy:
-    """enforce_agent_no_network denies all egress from the agent's sandbox except the policy
-    model server's host; the evaluation sandbox keeps its network."""
 
-    @staticmethod
-    async def _create(
-        monkeypatch,
-        *,
-        enforce: bool,
-        sandbox_kwargs: dict,
-        provider: str = "opensandbox",
-        model_url: str = "http://10.1.2.3:8000",
-        sandbox_config: dict | None = None,
-    ):
+_RecordingAsyncSandbox.raise_on_start = False
+
+
+@pytest.fixture
+def make_server(monkeypatch):
+    def make(*, enforce=True, provider="opensandbox", model_url="http://10.1.2.3:8000", sandbox_config=None):
         monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
         monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
         monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {provider: {}})
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
-        monkeypatch.setattr(agent_tools, "get_server_url", lambda name: model_url)
-        server = SimpleNamespace(
-            config=SimpleNamespace(
-                sandbox_config=sandbox_config or {},
-                sandbox_provider="sandbox",
-                enforce_agent_no_network=enforce,
-                sandbox_model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-                overwrite_maven_settings=True,
-                name="swe_next",
-            ),
-            _session_id_to_sandbox={},
-            _verifier_sandboxes={},
+        monkeypatch.setattr(agent_network, "resolve_provider_config", lambda *_: {provider: {}})
+        monkeypatch.setattr(agent_network, "get_server_url", lambda name: model_url)
+        config = app.SWENextResourcesServerConfig(
+            host="",
+            port=0,
+            name="swe_next",
+            entrypoint="",
+            sandbox_provider="sandbox",
+            sandbox_config=sandbox_config or {},
+            enforce_agent_no_network=enforce,
+            sandbox_model_server=MODEL_SERVER if enforce else None,
         )
-        body = app.SWENextInstanceRequest(instance_id="o__r-1", image_ref="img")
-        return await app.SWENextResourcesServer._create_sandbox(server, body, **sandbox_kwargs)
+        return app.SWENextResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    async def test_off_by_default(self, monkeypatch) -> None:
-        sandbox = await self._create(monkeypatch, enforce=False, sandbox_kwargs=AGENT_SANDBOX)
-        assert "network_policy" not in sandbox.spec.provider_options
+    return make
 
-    async def test_agent_sandbox_allows_only_the_model_host(self, monkeypatch) -> None:
-        sandbox = await self._create(monkeypatch, enforce=True, sandbox_kwargs=AGENT_SANDBOX)
-        assert sandbox.spec.provider_options["network_policy"] == {
-            "defaultAction": "deny",
-            "egress": [{"action": "allow", "target": "10.1.2.3"}],
-        }
 
-    async def test_eval_sandbox_keeps_its_network(self, monkeypatch) -> None:
-        sandbox = await self._create(monkeypatch, enforce=True, sandbox_kwargs=EVAL_SANDBOX)
-        assert "network_policy" not in sandbox.spec.provider_options
+async def _create(server, sandbox_kwargs):
+    return await server._create_sandbox(app.SWENextInstanceRequest(**INSTANCE), **sandbox_kwargs)
 
-    async def test_other_provider_options_are_kept(self, monkeypatch) -> None:
-        sandbox_config = {"provider_options": {"platform": "linux/amd64"}}
-        sandbox = await self._create(
-            monkeypatch, enforce=True, sandbox_kwargs=AGENT_SANDBOX, sandbox_config=sandbox_config
+
+async def test_off_by_default(make_server) -> None:
+    sandbox = await _create(make_server(enforce=False), AGENT_SANDBOX)
+    assert "network_policy" not in sandbox.spec.provider_options
+
+
+async def test_agent_sandbox_allows_only_the_model_host(make_server) -> None:
+    sandbox = await _create(make_server(), AGENT_SANDBOX)
+    assert sandbox.spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "10.1.2.3"}],
+    }
+
+
+async def test_seeding_blocks_the_agent_sandbox_egress(make_server, monkeypatch) -> None:
+    server = make_server()
+    monkeypatch.setattr(_RecordingAsyncSandbox, "raise_on_start", True)
+    with pytest.raises(_Started) as started:
+        await server.seed_session(
+            SimpleNamespace(session={SESSION_ID_KEY: "session"}), app.SWENextSeedSessionRequest(**INSTANCE)
         )
-        assert sandbox.spec.provider_options["platform"] == "linux/amd64"
-        assert sandbox.spec.provider_options["network_policy"]["defaultAction"] == "deny"
-        assert "network_policy" not in sandbox_config["provider_options"], "the shared config must not be mutated"
+    assert started.value.args[0].provider_options["network_policy"]["defaultAction"] == "deny"
 
-    @pytest.mark.parametrize(
-        ("provider", "model_url"),
-        [("opensandbox", "http://127.0.0.1:8000"), ("docker", "http://10.1.2.3:8000")],
-    )
-    async def test_fails_closed(self, monkeypatch, provider: str, model_url: str) -> None:
-        with pytest.raises(ValueError):
-            await self._create(
-                monkeypatch, enforce=True, sandbox_kwargs=AGENT_SANDBOX, provider=provider, model_url=model_url
-            )
 
-    def test_config_fields_keep_the_fork_names_and_default_to_open(self) -> None:
-        fields = app.SWENextResourcesServerConfig.model_fields
-        assert fields["enforce_agent_no_network"].default is False
-        assert fields["sandbox_model_server"].default is None
+async def test_eval_sandbox_keeps_its_network(make_server) -> None:
+    sandbox = await _create(make_server(), EVAL_SANDBOX)
+    assert "network_policy" not in sandbox.spec.provider_options
+
+
+async def test_other_provider_options_are_kept(make_server) -> None:
+    sandbox_config = {"provider_options": {"platform": "linux/amd64"}}
+    sandbox = await _create(make_server(sandbox_config=sandbox_config), AGENT_SANDBOX)
+    assert sandbox.spec.provider_options["platform"] == "linux/amd64"
+    assert sandbox.spec.provider_options["network_policy"]["defaultAction"] == "deny"
+    assert "network_policy" not in sandbox_config["provider_options"], "the shared config must not be mutated"
+
+
+async def test_unreachable_model_host_refuses_the_seed(make_server) -> None:
+    server = make_server(model_url="http://127.0.0.1:8000")
+    with pytest.raises(HTTPException) as refused:
+        await _create(server, AGENT_SANDBOX)
+    assert refused.value.status_code == 422
+
+
+def test_startup_refuses_a_provider_without_network_policies(make_server) -> None:
+    with pytest.raises(ValueError, match="OpenSandbox"):
+        make_server(provider="docker")
+
+
+def test_config_refuses_the_flag_without_a_model_server_or_with_a_set_policy() -> None:
+    base = dict(host="", port=0, name="swe_next", entrypoint="", sandbox_provider="sandbox")
+    with pytest.raises(ValidationError, match="needs sandbox_model_server"):
+        app.SWENextResourcesServerConfig(**base, sandbox_config={}, enforce_agent_no_network=True)
+    with pytest.raises(ValidationError, match="not both"):
+        app.SWENextResourcesServerConfig(
+            **base,
+            sandbox_config={"provider_options": {"network_policy": {"defaultAction": "deny"}}},
+            enforce_agent_no_network=True,
+            sandbox_model_server=MODEL_SERVER,
+        )
+
+
+def test_config_fields_default_to_open_egress() -> None:
+    fields = app.SWENextResourcesServerConfig.model_fields
+    assert fields["enforce_agent_no_network"].default is False
+    assert fields["sandbox_model_server"].default is None
