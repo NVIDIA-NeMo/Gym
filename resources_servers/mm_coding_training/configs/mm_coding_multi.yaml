@@ -50,6 +50,10 @@ mm_coding_opencode_environment:
       resources_tool_transports: []
       cleanup_timeout_seconds: 300
       default_episode_timeout_seconds: 10800
+      # OpenCode runs 8 sessions at a time (opencode_agent concurrency). Admit only 8 episodes, so the others
+      # wait here with no task sandbox and no running deadline.
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 86400
 mm_coding_opencode_resources:
   _copy: mm_coding_training
   resources_servers:

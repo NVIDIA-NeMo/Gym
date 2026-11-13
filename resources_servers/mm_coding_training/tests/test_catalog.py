@@ -60,10 +60,15 @@ def test_training_config_resolves_resource_owned_sessions(monkeypatch, mode):
             environment_name = f"mm_coding_{harness}_environment"
             env = config[environment_name].environment_servers.single_agent_turn
             # Resolve the actual deployment schema, including required lifecycle limits.
-            SingleAgentTurnEnvironmentServerConfig.model_validate(
+            deployed = SingleAgentTurnEnvironmentServerConfig.model_validate(
                 OmegaConf.to_container(env, resolve=True) | {"name": environment_name}
             )
             agent = config[env.agent_server.name].responses_api_agents[f"{harness}_agent"]
+            # Admit only as many episodes as the agent runs, so a waiting row holds no task sandbox or deadline.
+            from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+
+            runs = agent.get("concurrency", OpenCodeAgentConfig.model_fields["concurrency"].default)
+            assert deployed.max_concurrent_episodes == runs
             assert agent.resources_server is None
             # Exercise the stock adapter's seed allowlist, not only Pydantic schema parsing.
             from responses_api_agents.opencode_agent.app import _session_opencode_config_error
