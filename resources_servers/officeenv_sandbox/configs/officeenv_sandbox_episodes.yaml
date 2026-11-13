@@ -1,0 +1,35 @@
+# OfficeEnv's episodes for a sandboxed harness, without the harness: each episode session borrows a
+# sandbox (a container from sandbox/Dockerfile), reaches the apps the way its row's exposure says (MCP tools, commands
+# or endpoints), and moves file content over the episode's file API (README.md in the workspace). The harness configs
+# compose it with a harness and the environment server that binds the two: configs/officeenv_sandbox.yaml (Pi),
+# configs/officeenv_sandbox_codex.yaml (Codex CLI) and configs/officeenv_sandbox_miniswe.yaml (mini-SWE).
+
+# When Gym's run command stops its servers (a job's end, Ctrl-C), it kills the ones still running this long after
+# signalling them (1 s by default). This server stops the sandboxes it lent, all at once, within it less a 2 s margin
+# for the exit: a sandbox left running stays on the cell until its TTL. The key is run-wide, so every server of a run
+# that includes this config waits up to 30 s to stop, not only this one.
+server_shutdown_timeout_seconds: 30
+
+oe:
+  resources_servers:
+    officeenv_sandbox:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: OfficeEnv episodes lent to sandboxed harnesses (MCP tools, commands or endpoints, a sandbox per episode, a file API)
+      expose_tools_over_mcp: true
+      # Everything the sandbox reads names a company's API, the MCP endpoint too: harnesses list it as `company` (Pi
+      # names its tools company_<tool>, at most 64 characters: the longest tool name is 56), and the session token
+      # goes as a standard bearer token, which tools/list requires.
+      mcp_server_name: company
+      mcp_bearer_token: true
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: officeenv-sandbox:pilot
+        ttl_s: 7200
+        # File content stays out of the model's context (OfficeEnv's workspace mode): a download is saved in the
+        # workspace and answered with its path, the content inline only for text up to this many bytes; an upload or
+        # an attachment names a workspace file by its path, and one that pastes binary content or longer text is
+        # refused with the path to use and the file API command. null takes text of up to 20 MB inline; other files
+        # still move through the workspace.
+        inline_file_bytes: 8192
