@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,79 @@ class TestImageBuilder:
         assert (
             configs[result.tag]["config"]["User"] == "app" and configs[result.tag]["config_digest"] == "sha256:def456"
         )
+
+    def test_docker_runs_every_command_on_the_client_environment_it_was_given(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/process-daemon.sock")
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        tool = FakeTool("docker")
+        remote = {"DOCKER_HOST": "tcp://backend:2376", "DOCKER_TLS_VERIFY": "1", "PATH": "/cli:/usr/bin"}
+        builder = ImageBuilder(tool="docker", repository=REPO, run=tool, client_env=remote)
+        build_images(folder, builder=builder, log=lambda _: None)
+        # The plugin check, the compose build, the inspect and the push all reach the remote daemon.
+        assert [argv[1] for argv in tool.calls] == ["compose", "compose", "image", "push"]
+        assert all(env is not None and env["DOCKER_HOST"] == "tcp://backend:2376" for env in tool.envs)
+        assert all(env["PATH"] == "/cli:/usr/bin" and env["DOCKER_TLS_VERIFY"] == "1" for env in tool.envs)
+        # The compose build keeps Harbor's variables over the client environment.
+        assert tool.envs[1]["MAIN_IMAGE_NAME"].endswith(tool.calls[2][-1].split("/")[-1])
+
+    def test_a_push_without_a_digest_line_reads_the_digest_on_the_remote_daemon(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        tool = FakeTool("docker")
+        real = tool.__call__
+
+        def quiet_push(argv, env=None):
+            completed = real(argv, env)
+            if argv[1] == "push":
+                return subprocess.CompletedProcess(argv, 0, "pushed\n", "")
+            if argv[1:3] == ["image", "inspect"] and "--format" in argv:
+                daemon = (env or {}).get("DOCKER_HOST", "local")
+                return subprocess.CompletedProcess(argv, 0, json.dumps([f"{REPO}/x@sha256:{daemon[-4:]}"]), "")
+            return completed
+
+        remote = {"DOCKER_HOST": "tcp://backend:2376", "PATH": "/usr/bin"}
+        builder = ImageBuilder(tool="docker", repository=REPO, run=quiet_push, client_env=remote)
+        (result,) = build_images(folder, builder=builder, log=lambda _: None)
+        assert result.image.endswith("@sha256:2376")
+        assert tool.envs[-1]["DOCKER_HOST"] == "tcp://backend:2376"
+
+    @pytest.mark.parametrize(
+        ("build", "refusal"),
+        [
+            # Checked against the process environment the context is `.`; built with the client environment it would
+            # be the TLS directory, copied into the image.
+            ("context: ${DOCKER_CERT_PATH:-.}", "resolves outside the task's environment folder"),
+            (
+                "args:\n        CERTS: ${DOCKER_CERT_PATH:-none}",
+                "interpolates a variable the Docker provider's client",
+            ),
+        ],
+    )
+    def test_a_compose_file_reading_a_client_environment_variable_is_refused_before_any_build(
+        self, tmp_path, monkeypatch, build, refusal
+    ):
+        monkeypatch.delenv("DOCKER_CERT_PATH", raising=False)
+        folder = tmp_path / "ds"
+        write_task(folder / "a", extra={"docker-compose.yaml": f"services:\n  main:\n    build:\n      {build}\n"})
+        tool = FakeTool("docker")
+        remote = {"DOCKER_HOST": "tcp://backend:2376", "DOCKER_CERT_PATH": str(tmp_path / "certs"), "PATH": "/usr/bin"}
+        builder = ImageBuilder(tool="docker", repository=REPO, run=tool, client_env=remote)
+        with pytest.raises(BuildError, match=refusal):
+            list(builder.build_many(plan_builds(folder)))
+        # Only the compose plugin check ran: nothing was built.
+        assert [argv[1:3] for argv in tool.calls] == [["compose", "version"]]
+
+    def test_a_client_environment_makes_docker_the_default_build_tool(self):
+        remote = {"DOCKER_HOST": "tcp://backend:2376", "PATH": "/usr/bin"}
+        assert ImageBuilder(repository=REPO, run=FakeTool("docker"), client_env=remote).tool == "docker"
+
+    def test_without_a_client_environment_docker_inherits_the_process_environment(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        tool = FakeTool("docker")
+        build_images(folder, builder=ImageBuilder(tool="docker", run=tool), log=lambda _: None)
+        assert tool.envs[0] is None and tool.envs[2] is None
 
     def test_tag_for_follows_harbor_naming(self, tmp_path):
         digest = "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret

@@ -76,7 +76,7 @@ import struct
 import termios
 import tty
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxPtyError
@@ -720,8 +720,11 @@ async def spawn(
     pid_file: str | None = None,
     fallback_pid_file: str | None = None,
     runtime_failure: Callable[[str], bool] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> DockerPtySession:
     """Start ``argv`` as a PTY session: under a fresh host pty sized ``rows``x``cols`` in PTY mode, on pipes otherwise.
+
+    ``env`` is the client's environment (``None``: this process's).
 
     The Docker provider passes a ``docker exec`` argv; a test may pass any local program, which exercises the same
     terminal plumbing without a daemon. ``runtime_failure`` tells, from the client's own stderr, a client that
@@ -736,6 +739,7 @@ async def spawn(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=env,
         )
         return DockerPtySession(
             proc=proc,
@@ -774,6 +778,7 @@ async def spawn(
             stdout=slave_fd,
             stderr=stderr_write,
             start_new_session=True,
+            env=env,
         )
     except BaseException:
         for fd in (master_fd, slave_fd, stderr_read, stderr_write):

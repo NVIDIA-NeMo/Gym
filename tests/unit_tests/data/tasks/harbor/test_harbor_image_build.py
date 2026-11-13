@@ -107,6 +107,53 @@ class TestPrepareBuilds:
         monkeypatch.setattr(prepare_builds, "ImageBuilder", factory)
         return made
 
+    def test_prepare_builds_on_the_client_environment_it_is_given(self, tmp_path, fake_builder):
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_base_record(folder)
+        remote = {"DOCKER_HOST": "tcp://backend:2376", "PATH": "/cli:/usr/bin"}
+        prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(), docker_client_env=lambda: remote
+        )
+        assert [call["client_env"] for call in fake_builder] == [remote]
+
+        # With every image recorded nothing is built, so a client.env the daemon has not written yet is never read.
+        def unwritten():
+            raise ValueError("sandbox.docker.client_env_file: client.env does not exist")
+
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(), docker_client_env=unwritten
+        )
+        assert len(fake_builder) == 1 and [task.task_id for task in prepared.tasks] == ["a"]
+
+    def test_the_docker_provider_block_names_the_build_daemon(self, tmp_path, monkeypatch):
+        import nemo_gym.cli.eval as harbor_cli
+        import nemo_gym.data.tasks.harbor.build_options as build_options
+
+        monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+        monkeypatch.setattr(build_options, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        client_env = tmp_path / "client.env"
+        client_env.write_text("export DOCKER_HOST=tcp://backend:2376\n")
+        docker = tmp_path / "docker.yaml"
+        docker.write_text(f"sandbox:\n  docker:\n    client_env_file: {client_env}\n    cli_dir: {tmp_path / 'cli'}\n")
+        opensandbox = tmp_path / "opensandbox.yaml"
+        opensandbox.write_text("sandbox:\n  opensandbox:\n    images: {}\n")
+        files = {"docker": docker, "opensandbox": opensandbox}
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: files[name])
+
+        load = harbor_cli.docker_client_env_from_overrides([], "docker")
+        env = load()
+        assert env["DOCKER_HOST"] == "tcp://backend:2376" and env["PATH"].split(":")[0] == str(tmp_path / "cli")
+        # Another provider, or no block: docker builds on the process environment's daemon.
+        assert harbor_cli.docker_client_env_from_overrides([], "opensandbox") is None
+        assert harbor_cli.docker_client_env_from_overrides([], None) is None
+        client_env.unlink()
+        with pytest.raises(ValueError, match="sandbox.docker.client_env_file: .*does not exist"):
+            load()
+
     def test_prepare_builds_once_and_the_tasks_load_in_pull_mode(self, tmp_path, fake_builder, capsys):
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
         from nemo_gym.data.tasks.harbor.prepare import prepare_target
@@ -119,7 +166,9 @@ class TestPrepareBuilds:
         prepared = prepare_target(
             str(folder), output_root=tmp_path / "out", build=BuildOptions(tool="podman", repository="reg.example/r")
         )
-        assert fake_builder == [{"tool": "podman", "repository": "reg.example/r", "platform": None}]
+        assert fake_builder == [
+            {"tool": "podman", "repository": "reg.example/r", "platform": None, "client_env": None}
+        ]
         assert [t.task_id for t in prepared.tasks] == ["a", "b", "c"]
         built = next(t for t in prepared.tasks if t.task_id == "a")
         # One build for the two identical contexts, under Harbor's name for it, pinned by its pushed digest.

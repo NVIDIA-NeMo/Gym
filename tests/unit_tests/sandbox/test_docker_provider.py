@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,7 @@ import pytest
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -46,9 +48,14 @@ class RunRecorder:
         self._responder = responder
 
     async def __call__(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        env_values: dict[str, str] | None = None,
     ) -> tuple[int, str, str]:
-        self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin})
+        self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin, "env_values": env_values})
         return self._responder(list(argv))
 
 
@@ -266,7 +273,7 @@ async def test_create_builds_argv_and_runs_probe(fake_binary: str, monkeypatch: 
     assert "--init" in run_argv
     assert "--rm" not in run_argv  # no ttl_s -> no self-remove
     assert _contains_seq(run_argv, ["-w", "/sandbox"])
-    assert _contains_seq(run_argv, ["--env", "FOO=bar"])
+    assert _contains_seq(run_argv, ["--env", "FOO"]) and rec.calls[0]["env_values"] == {"FOO": "bar"}
     assert _contains_seq(run_argv, ["--cpus", "2.0"])
     assert _contains_seq(run_argv, ["--memory", "1024m"])
     assert _contains_seq(run_argv, ["--gpus", "1"])
@@ -671,7 +678,7 @@ async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytes
     argv = rec.calls[0]["argv"]
     assert argv[:2] == [FAKE_BINARY, "exec"]
     assert _contains_seq(argv, ["-w", "/work"])
-    assert _contains_seq(argv, ["--env", "A=b"])
+    assert _contains_seq(argv, ["--env", "A"]) and rec.calls[0]["env_values"] == {"A": "b"}
     assert argv[-4:] == ["nemo-gym-x", "sh", "-c", "echo hi"]
     assert rec.calls[0]["timeout_s"] == 180
 
@@ -685,9 +692,47 @@ async def test_exec_reapplies_create_env_and_overrides_call_env(
     await provider.exec(handle, "env", env={"A": "from-call"})
 
     argv = rec.calls[0]["argv"]
-    assert _contains_seq(argv, ["--env", "A=from-call"])
-    assert _contains_seq(argv, ["--env", "B=base"])
-    assert "A=from-create" not in argv
+    assert _contains_seq(argv, ["--env", "A"]) and _contains_seq(argv, ["--env", "B"])
+    assert rec.calls[0]["env_values"] == {"A": "from-call", "B": "base"}
+
+
+async def test_env_values_never_reach_a_docker_command_line(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A credential in a sandbox's env (a judge's API key) must not show in the host's process list: run, exec and a
+    # PTY session pass it by name, its value only in the docker client's environment.
+    secret = "sk-not-on-argv"
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, docker_provider.READY_PROBE_EXPECTED if "exec" in argv else "cid", ""),
+    )
+    spawned: list[tuple[list[str], dict[str, Any]]] = []
+
+    async def spawn(argv: list[str], **kwargs: Any) -> Any:
+        spawned.append((list(argv), kwargs))
+        raise RuntimeError("stop after the spawn")
+
+    monkeypatch.setattr(provider, "_spawn_pty", spawn)
+    handle = await provider.create(SandboxSpec(image="img", env={"JUDGE_TOKEN": secret, "PATH": "/opt/bin:/usr/bin"}))
+    await provider.exec(handle, "true", env={"CALL_TOKEN": secret})
+    with pytest.raises(RuntimeError, match="stop after the spawn"):
+        await provider.create_pty(handle, SandboxPtySpec(command="true", env={"PTY_TOKEN": secret}))
+
+    argvs = [call["argv"] for call in rec.calls] + [argv for argv, _ in spawned]
+    assert not [arg for argv in argvs for arg in argv if secret in arg]
+    assert rec.calls[0]["env_values"] == {"JUDGE_TOKEN": secret}
+    assert rec.calls[-1]["env_values"] == {"JUDGE_TOKEN": secret, "CALL_TOKEN": secret}
+    assert spawned[0][1]["env"]["PTY_TOKEN"] == secret and spawned[0][1]["env"]["JUDGE_TOKEN"] == secret
+    # A variable the docker client reads itself keeps its value on the command line, out of the client's env.
+    assert _contains_seq(rec.calls[0]["argv"], ["--env", "PATH=/opt/bin:/usr/bin"])
+    assert spawned[0][1]["env"].get("PATH") != "/opt/bin:/usr/bin"
+
+
+async def test_run_hands_env_values_to_the_docker_client_process(fake_binary: str) -> None:
+    # The client reads an `--env KEY` flag's value from its own environment: _run must put it there.
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+    code, out, _err = await provider._run(
+        ["sh", "-c", 'printf "%s" "$JUDGE_TOKEN"'], timeout_s=10, env_values={"JUDGE_TOKEN": "sk-value"}
+    )
+    assert (code, out) == (0, "sk-value")
 
 
 async def test_exec_empty_streams_are_strings(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -774,6 +819,18 @@ async def test_exec_runtime_failure(fake_binary: str, monkeypatch: pytest.Monkey
     assert result.return_code == docker_provider.SANDBOX_RUNTIME_RETURN_CODE
     assert result.error_type == "sandbox"
     assert "No such container" in result.stderr
+
+
+async def test_an_unreachable_client_env_is_a_sandbox_failure_for_exec_and_status(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    # The daemon has not written client.env yet (or wrote a bad one): an infrastructure failure, not an exception.
+    provider = docker_provider.DockerProvider(client_env_file=str(tmp_path / "client.env"))
+    result = await provider.exec(_make_handle(), "echo hi")
+
+    assert (result.return_code, result.error_type) == (docker_provider.SANDBOX_RUNTIME_RETURN_CODE, "sandbox")
+    assert "client.env does not exist" in result.stderr
+    assert await provider.status(_make_handle()) == SandboxStatus.UNKNOWN
 
 
 async def test_exec_command_failure_is_not_runtime_error(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1014,6 +1071,117 @@ async def test_run_real_timeout(fake_binary: str) -> None:
     provider = docker_provider.DockerProvider()
     with pytest.raises(TimeoutError):
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
+
+
+# --------------------------------------------------------------------------- #
+# A remote daemon's client environment and a docker CLI outside PATH
+# --------------------------------------------------------------------------- #
+async def _child_environment(provider: Any) -> dict[str, str]:
+    code, out, _err = await provider._run([shutil.which("env")], timeout_s=10)
+    assert code == 0
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+@pytest.mark.skipif(shutil.which("env") is None, reason="env not available")
+async def test_client_env_file_is_merged_over_the_process_environment_at_each_call(
+    fake_binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "desktop-linux")
+    monkeypatch.setenv("KEPT", "from-process")
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    client_env = tmp_path / "backend" / "client.env"
+    provider = docker_provider.DockerProvider(client_env_file=str(client_env))
+
+    # The daemon writes the file after the provider exists: a call before that fails clearly.
+    with pytest.raises(docker_provider.DockerClientEnvError, match="client.env does not exist"):
+        await provider._run([shutil.which("env")], timeout_s=10)
+
+    client_env.parent.mkdir()
+    client_env.write_text(
+        f"# written by the backend\nexport DOCKER_HOST='tcp://backend:2376'\nexport DOCKER_TLS_VERIFY=1\n"
+        f"DOCKER_CERT_PATH={certs}\nexport DOCKER_BUILDKIT=0\n"
+    )
+    env = await _child_environment(provider)
+    assert (env["DOCKER_HOST"], env["DOCKER_TLS_VERIFY"], env["DOCKER_BUILDKIT"]) == ("tcp://backend:2376", "1", "0")
+    assert env["DOCKER_CERT_PATH"] == str(certs)
+    assert env["KEPT"] == "from-process"
+    # An inherited context would win over the file's DOCKER_HOST.
+    assert "DOCKER_CONTEXT" not in env
+
+    # A certificate path as the daemon's own host mounts it falls back to the file's directory when the TLS
+    # material sits beside the file, and is an error when it does not.
+    client_env.write_text(
+        "export DOCKER_HOST=tcp://other:2376 # rotated\nexport DOCKER_CERT_PATH=/backend-only/path\n"
+    )
+    with pytest.raises(docker_provider.DockerClientEnvError, match="holds no ca.pem"):
+        await provider._run([shutil.which("env")], timeout_s=10)
+    for name in ("ca.pem", "cert.pem", "key.pem"):
+        (client_env.parent / name).write_text("pem")
+    env = await _child_environment(provider)
+    assert (env["DOCKER_HOST"], env["DOCKER_CERT_PATH"]) == ("tcp://other:2376", str(client_env.parent))
+
+    for malformed in ("not an assignment\n", "export DOCKER_HOST='tcp://backend:2376\n"):
+        client_env.write_text(malformed)
+        with pytest.raises(docker_provider.DockerClientEnvError, match="Malformed line"):
+            await provider._run([shutil.which("env")], timeout_s=10)
+    client_env.write_bytes(b"export DOCKER_HOST=\xff\n")
+    with pytest.raises(docker_provider.DockerClientEnvError, match="Cannot read"):
+        await provider._run([shutil.which("env")], timeout_s=10)
+
+
+async def test_a_client_env_without_docker_host_is_an_error(fake_binary: str, tmp_path: Path) -> None:
+    # A comment-only or truncated file would otherwise send the CLI to the local daemon.
+    client_env = tmp_path / "client.env"
+    client_env.write_text("# written by the backend\nexport DOCKER_TLS_VERIFY=1\n")
+    provider = docker_provider.DockerProvider(client_env_file=str(client_env))
+    with pytest.raises(docker_provider.DockerClientEnvError, match="sets no DOCKER_HOST"):
+        await provider._run([shutil.which("true") or "true"], timeout_s=10)
+
+
+def test_client_environment_points_docker_config_at_a_cli_dir_with_plugins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """docker reads plugins (compose) from $DOCKER_CONFIG/cli-plugins only, so a cli_dir that holds them is named."""
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert "DOCKER_CONFIG" not in (docker_provider.client_environment(None, str(bare)) or {})
+    with_plugins = tmp_path / "docker-cli"
+    (with_plugins / "cli-plugins").mkdir(parents=True)
+    env = docker_provider.client_environment(None, str(with_plugins))
+    assert env is not None
+    assert env["DOCKER_CONFIG"] == str(with_plugins)
+    assert env["PATH"].split(os.pathsep)[0] == str(with_plugins)
+
+
+@pytest.mark.skipif(shutil.which("env") is None, reason="env not available")
+async def test_cli_dir_supplies_the_docker_binary_and_leads_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli_dir = tmp_path / "docker-cli"
+    cli_dir.mkdir()
+    (cli_dir / "docker").write_text("#!/bin/sh\n")
+    (cli_dir / "docker").chmod(0o755)
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: pytest.fail("PATH lookup with a cli_dir binary"))
+
+    provider = docker_provider.DockerProvider(cli_dir=str(cli_dir))
+
+    assert provider._binary == str(cli_dir / "docker")
+    env = await _child_environment(provider)
+    assert env["PATH"].split(":")[0] == str(cli_dir)
+    assert env["PATH"].endswith(docker_provider.os.environ["PATH"])
+
+
+@pytest.mark.skipif(shutil.which("env") is None, reason="env not available")
+async def test_without_client_settings_the_cli_inherits_the_process_environment(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    env = await _child_environment(docker_provider.DockerProvider())
+
+    assert (env["DOCKER_HOST"], env["PATH"]) == ("unix:///var/run/docker.sock", docker_provider.os.environ["PATH"])
 
 
 # --------------------------------------------------------------------------- #

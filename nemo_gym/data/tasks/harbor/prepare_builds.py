@@ -12,6 +12,7 @@ reasons.
 ``prepare_target`` in ``nemo_gym.data.tasks.harbor.prepare`` calls it.
 """
 
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import yaml
@@ -115,7 +116,13 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
     return refused
 
 
-def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str, str]:
+def _build_dockerfiles(
+    folder: Path,
+    build: BuildOptions,
+    *,
+    select,
+    client_env: Callable[[], Mapping[str, str] | None] | None = None,
+) -> dict[str, str]:
     """Build and record the images of the selected tasks whose Dockerfile needs a build.
 
     With builds disabled, the tasks that need one are left for the loader to skip with its message, a task whose
@@ -222,7 +229,13 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
         return refused
     names = ", ".join(task for entry in needs_build for task in entry.tasks[:3])
     try:
-        builder = ImageBuilder(tool=build.tool, repository=build.repository, platform=build.platform)
+        builder = ImageBuilder(
+            tool=build.tool,
+            repository=build.repository,
+            platform=build.platform,
+            # Loaded only now: a run that builds nothing never needs the remote daemon's client.env.
+            client_env=client_env() if client_env is not None else None,
+        )
     except BuildError as exc:
         raise ValueError(
             f"Could not build the Dockerfile image(s) for task(s) {names}: {exc} (set {BUILDS_KEY}.enabled to false "
