@@ -4,6 +4,7 @@
 provider in a temporary directory, with the judge answered at the server's HTTP client."""
 
 import asyncio
+import base64
 import json
 import os
 import shlex
@@ -20,8 +21,15 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxResources, SandboxSpec, cpu_cap_env
+from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, FailureHeader, TaskId
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxExecResult,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    sandbox_failure,
+)
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     ResourcesCloseSessionRequest,
@@ -30,6 +38,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import JudgeError
 from resources_servers.opencode_search.app import (
+    _PLUGIN_LOG_ROW_CHARS,
     SearchResourcesServer,
     SearchResourcesServerConfig,
     SearchSeedSessionRequest,
@@ -229,6 +238,23 @@ def _record_execs(monkeypatch: pytest.MonkeyPatch, stopped: list[AsyncSandbox]) 
 
     monkeypatch.setattr(AsyncSandbox, "exec", exec)
     return execs
+
+
+def _plugin_log_read(log_text: str, *, cut_after: Optional[int] = None) -> str:
+    """What the plugin log read prints for a log holding log_text, line breaks aside: the log's size in bytes, then
+    the log in base64. With cut_after, the base64 stops at the last whole group within that many bytes, as a provider
+    that cut the output short could return it."""
+    data = log_text.encode()
+    encoded = base64.b64encode(data).decode()
+    if cut_after is not None:
+        encoded = encoded[: cut_after // 3 * 4]
+    return f"{len(data)}:{encoded}"
+
+
+def _failure_kinds(reply: Any) -> list[str]:
+    """The failure kinds that a reply's failure report names."""
+    report = FailureHeader.decode(reply.headers)
+    return [] if report is None else [event.failure_kind for event in report.events.values()]
 
 
 # ---------------------------------------------------------------------------
@@ -780,14 +806,22 @@ def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
     assert client.post("/verify", json=_verify_body()).status_code == 422
 
 
+# A read of SENTINEL + TURN_CAP cut short at the end of a base64 group, as a provider that caps a command's output
+# could return it: it decodes cleanly, to a log that keeps the sentinel and loses the turn cap and its mask.
+CUT_SHORT = SandboxExecResult(
+    stdout=_plugin_log_read(SENTINEL + TURN_CAP, cut_after=len(SENTINEL)), stderr=None, return_code=0
+)
+
+
 @pytest.mark.parametrize(
     "failure",
     [
         SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
         SandboxExecResult(stdout="", stderr="base64: permission denied", return_code=1),
         RuntimeError("the provider is unavailable"),
+        CUT_SHORT,
     ],
-    ids=["error_type", "exit_code", "raised"],
+    ids=["error_type", "exit_code", "raised", "cut_short"],
 )
 def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
     workdir, tmp_path, started, stopped, monkeypatch, failure
@@ -795,7 +829,7 @@ def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
     """A read that fails gives no verdict: the 500 is retryable, so the episode runs again; nothing is graded."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
-    log.write_text(SENTINEL)
+    log.write_text(SENTINEL + TURN_CAP)
     read = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
     monkeypatch.setattr(AsyncSandbox, "exec", read)
     judge = _mock_judge(server, CORRECT)
@@ -808,18 +842,62 @@ def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
     assert _graded(client.post("/verify", json=_verify_body())) == (0.0, True, "session_lost", False)
 
 
+@pytest.mark.parametrize(
+    ("read", "status", "kind"),
+    [
+        (
+            SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
+            500,
+            "provider_io_timeout",
+        ),
+        (
+            SandboxExecResult(stdout="", stderr="base64: permission denied", return_code=1),
+            500,
+            "provider_request_failed",
+        ),
+        (CUT_SHORT, 500, "provider_request_failed"),
+        # A provider's own failure keeps its kind.
+        (sandbox_failure(operation="exec", failure_kind=PROVIDER_UNAVAILABLE), 500, PROVIDER_UNAVAILABLE),
+    ],
+    ids=["error_type", "exit_code", "cut_short", "provider_failure"],
+)
+def test_a_plugin_log_that_cannot_be_read_names_its_failure_kind(
+    workdir, tmp_path, monkeypatch, read, status, kind
+) -> None:
+    """An Environment Server records an episode whose verify did not grade by the kinds the reply's failure report
+    names."""
+    server = _server(workdir, plugin_log_path=str(tmp_path / "plugins.log"))
+    app = server.setup_webserver()
+    # As a running server has it: the middleware that reports each reply's failures in its failure header.
+    server.setup_exception_middleware(app)
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    mocked = AsyncMock(side_effect=read) if isinstance(read, Exception) else AsyncMock(return_value=read)
+    monkeypatch.setattr(AsyncSandbox, "exec", mocked)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == status, verified.text
+    assert _failure_kinds(verified) == [kind]
+
+
 def test_a_plugin_log_returned_as_messages_joined_by_newlines_keeps_its_lines(workdir, tmp_path, monkeypatch) -> None:
     """A provider may return a command's output as messages joined by newlines. A message boundary inside a plugin line
-    must not split it: the sentinel would read as missing, and the turn cap would go unmasked."""
+    must not split it: the sentinel would read as missing, and the turn cap would go unmasked. Nor one inside the size
+    the read prints, which would make the log read as cut short."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
     log.write_text(SENTINEL + TURN_CAP)
     real_exec = AsyncSandbox.exec
+    printed: list[str] = []
 
     async def exec(self: AsyncSandbox, command: str, **kwargs: Any) -> SandboxExecResult:
         result = await real_exec(self, command, **kwargs)
-        stdout = result.stdout or ""
-        return replace(result, stdout="\n".join(stdout[start : start + 7] for start in range(0, len(stdout), 7)))
+        printed.append("".join((result.stdout or "").split()))
+        # Two characters a message, so that a boundary also falls inside the size.
+        stdout = "\n".join(printed[-1][start : start + 2] for start in range(0, len(printed[-1]), 2))
+        return replace(result, stdout=stdout)
 
     monkeypatch.setattr(AsyncSandbox, "exec", exec)
     _mock_judge(server, CORRECT)
@@ -829,6 +907,27 @@ def test_a_plugin_log_returned_as_messages_joined_by_newlines_keeps_its_lines(wo
     assert verified.status_code == 200, verified.text
     assert _graded(verified) == (1.0, True, "agent_limit", True)
     assert verified.json()["opencode_plugin_log"] == SENTINEL + TURN_CAP
+    # Line breaks aside, the read printed what _plugin_log_read gives where a test fakes the read.
+    assert printed == [_plugin_log_read(SENTINEL + TURN_CAP)]
+
+
+def test_a_plugin_log_too_long_for_the_row_is_read_whole_and_carried_by_its_two_ends(workdir, tmp_path) -> None:
+    """The row carries at most _PLUGIN_LOG_ROW_CHARS characters of the plugin log, but the ending comes from all of it:
+    here from a turn cap in the part of the log the row leaves out."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    calls = [f"[nemo-gym-plugin] [exa-mcp] tool=web_search_exa ms={call} bytes=1\n" for call in range(24000)]
+    whole = SENTINEL + "".join(calls[:12000]) + TURN_CAP + "".join(calls[12000:])
+    log.write_text(whole)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0, True, "agent_limit", True)
+    carried = verified.json()["opencode_plugin_log"]
+    assert len(carried) <= _PLUGIN_LOG_ROW_CHARS < len(whole)
+    assert carried.startswith(SENTINEL) and carried.endswith(calls[-1]) and TURN_CAP not in carried
 
 
 @pytest.mark.parametrize(

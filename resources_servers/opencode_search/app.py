@@ -66,9 +66,12 @@ from nemo_gym.core import (
     AGENT_TIMEOUT,
     JUDGE_UNPARSEABLE,
     MODEL_CONTEXT_LIMIT,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_REQUEST_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -79,6 +82,7 @@ from nemo_gym.sandbox import (
     cpu_cap_env,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_failure,
 )
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -138,6 +142,9 @@ _PLUGIN_MARKER = "[nemo-gym-plugin] "
 _PLUGIN_SENTINEL = "[nemo-gym-plugin] loaded sentinel"
 # The variable the receipts plugin (opencode_bundle/nemo_gym_receipts.js) takes the plugin log's path from.
 _PLUGIN_LOG_ENV = "NEMO_GYM_PLUGIN_LOG"
+# The most of the plugin log a verify response carries. A run within its turn budget writes a few short lines per
+# model call, far less than this; a longer log keeps its two ends.
+_PLUGIN_LOG_ROW_CHARS = 1 << 20
 # opencode_agent keeps its runtime and sessions in a sandbox under paths that start with this, and refuses a workdir
 # there.
 _OPENCODE_STORAGE_PREFIX = "/tmp/nemo-gym-opencode"
@@ -225,6 +232,16 @@ def _episode_file(source: str) -> bytes:
     if not path.is_file():
         raise FileNotFoundError(f"episode_sandbox_files source {source!r} is not a file in the Gym root ({path})")
     return path.read_bytes()
+
+
+def _plugin_log_on_the_row(plugin_log: str) -> str:
+    """The plugin log as a verify response carries it: whole up to _PLUGIN_LOG_ROW_CHARS characters, else its two ends
+    around a line that gives its length, in _PLUGIN_LOG_ROW_CHARS characters in all."""
+    if len(plugin_log) <= _PLUGIN_LOG_ROW_CHARS:
+        return plugin_log
+    gap = f"\n[... the middle of the plugin log is left out; the whole log is {len(plugin_log)} characters ...]\n"
+    end = (_PLUGIN_LOG_ROW_CHARS - len(gap)) // 2
+    return plugin_log[:end] + gap + plugin_log[-end:]
 
 
 class SearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -452,6 +469,16 @@ class SearchVerifyResponse(BaseVerifyResponse):
 
 
 @dataclass(frozen=True)
+class _PluginLog:
+    """The plugin log an episode's verify read from its sandbox."""
+
+    text: str
+    # Bytes in the file; 0 when it did not exist.
+    size: int
+    exists: bool
+
+
+@dataclass(frozen=True)
 class _VerifyEvidence:
     """What a session's verify keeps for its retries: a digest of the body it graded, the plugin log it read from the
     sandbox before stopping it and, once grading reached a result, the grading fields it answered with.
@@ -462,7 +489,7 @@ class _VerifyEvidence:
 
     body_digest: str
     # None when no plugin log was read (see _read_plugin_log).
-    plugin_log: Optional[str] = None
+    plugin_log: Optional[_PluginLog] = None
     grade: Optional[Dict[str, Any]] = None
 
 
@@ -1028,54 +1055,94 @@ class SearchResourcesServer(SimpleResourcesServer):
             return "this server no longer holds the episode's sandbox, so its plugin log cannot be read"
         return None
 
-    async def _read_plugin_log(self, session_id: str) -> Optional[str]:
-        """The plugin log in an episode session's sandbox, "" when no plugin wrote one; None when there is none to read.
+    async def _read_plugin_log(self, session_id: str) -> Optional[_PluginLog]:
+        """The plugin log in an episode session's sandbox, empty when no plugin wrote one; None when there is none to
+        read.
 
         There is none without plugin_log_path, so a harness that brings no such plugins is graded as before, and none
         for an agent's own /run, whose agent sends the ending in the verify body.
 
-        A read that fails raises, and the server answers 500, which an Environment Server treats as retryable: the
-        episode fails ungraded and runs again on resume, as a relay run whose output could not be captured does. A row
-        masked instead would stay in the results with a reward that measured nothing, and lower a score that counts
-        masked rows.
+        The read prints the file's size in bytes and then its bytes in base64, or that the file is absent. Base64,
+        because a provider may return a command's output as messages joined by newlines, and a message boundary inside
+        a plugin line would split it; decoding comes after every whitespace character is dropped. The size, because a
+        provider that caps a command's output could cut the base64 at the end of a group, which decodes to a log
+        without its last lines, its ending among them: a read whose bytes differ from the size has failed.
+
+        A read that fails raises a sandbox failure with a provider failure kind, and the server answers 500, which an
+        Environment Server treats as retryable: the episode fails ungraded and runs again on resume, as a relay run
+        whose output could not be captured does. A row masked instead would stay in the results with a reward that
+        measured nothing, and lower a score that counts masked rows.
         """
         sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
         if self.config.plugin_log_path is None or sandbox is None:
             return None
         path = shlex.quote(self.config.plugin_log_path)
-        # From /, which exists whatever the harness did to its workdir. Base64, because a provider may return a
-        # command's output as messages joined by newlines, and a message boundary inside a plugin line would split it;
-        # decoding skips every newline.
-        result = await sandbox.exec(f"test ! -e {path} || base64 -- {path}", cwd="/", timeout_s=60)
+        # From /, which exists whatever the harness did to its workdir. head copies exactly the bytes wc counted, so a
+        # plugin that is still writing cannot make the two disagree.
+        result = await sandbox.exec(
+            f"if test -e {path}; then size=$(wc -c < {path}) && printf '%s:' $size "
+            f"&& head -c $size -- {path} | base64; else printf absent:; fi",
+            cwd="/",
+            timeout_s=60,
+        )
         if result.return_code != 0 or result.error_type is not None:
-            raise RuntimeError(
-                f"Cannot read the plugin log {self.config.plugin_log_path} in the lent sandbox "
-                f"(exit {result.return_code}, error {result.error_type}): {(result.stderr or '').strip()[-500:]}"
+            raise self._plugin_log_read_failure(
+                sandbox,
+                f"exit {result.return_code}, error {result.error_type}: {(result.stderr or '').strip()[-500:]}",
+                failure_kind=PROVIDER_IO_TIMEOUT if result.error_type == "timeout" else PROVIDER_REQUEST_FAILED,
+                provider_status_reason=result.error_type,
+                # With an error type the provider reported no exit of the command.
+                exit_code=result.return_code if result.error_type is None else None,
             )
-        return base64.b64decode(result.stdout or "").decode("utf-8", errors="replace")
+        output = "".join((result.stdout or "").split())
+        if output == "absent:":
+            return _PluginLog(text="", size=0, exists=False)
+        size, _, encoded = output.partition(":")
+        try:
+            expected, data = int(size), base64.b64decode(encoded, validate=True)
+        except ValueError:  # Also binascii.Error, for base64 cut inside a group.
+            expected, data = None, b""
+        if len(data) != expected:
+            raise self._plugin_log_read_failure(
+                sandbox,
+                f"it returned {len(data)} of the file's {size[:20]!r} bytes: its output was cut short or malformed",
+            )
+        return _PluginLog(text=data.decode("utf-8", errors="replace"), size=len(data), exists=True)
 
-    def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: str) -> None:
+    def _plugin_log_read_failure(
+        self, sandbox: AsyncSandbox, what: str, *, failure_kind: str = PROVIDER_REQUEST_FAILED, **facts: Any
+    ) -> NgFailureEvent:
+        """The failure a plugin log read that failed raises, with what went wrong and the sandbox it ran in."""
+        return sandbox_failure(
+            operation="exec",
+            failure_kind=failure_kind,
+            reason=f"Cannot read the plugin log {self.config.plugin_log_path} in the lent sandbox ({what})",
+            sandbox_id=sandbox.sandbox_id,
+            provider=sandbox.provider_name,
+            **facts,
+        )
+
+    def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: _PluginLog) -> None:
         """Put the ending and plugin receipts from an episode's plugin log on its verify body, where the relay agent puts
-        them, so every reply built from the body carries them, judge_failsafe's included.
+        them, so every reply built from the body carries them, judge_failsafe's included. The ending comes from the
+        whole log, of which the body carries at most _PLUGIN_LOG_ROW_CHARS characters.
 
         A log without the sentinel or a required marker means the run did not have the plugins it was configured with,
         and its answer is not graded. The refusal is terminal (422): the log was read, and it would read the same again.
         """
-        missing = [
-            marker for marker in (_PLUGIN_SENTINEL, *self.config.required_plugin_markers) if marker not in plugin_log
-        ]
+        text = plugin_log.text
+        missing = [marker for marker in (_PLUGIN_SENTINEL, *self.config.required_plugin_markers) if marker not in text]
         if missing:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"The harness's OpenCode plugins did not load as configured: the plugin log lacks {missing}. "
-                    f"Refusing to grade a run that ran without them. log_chars={len(plugin_log)} "
-                    f"head={plugin_log[:800]!r}"
+                    f"Refusing to grade a run that ran without them. log_chars={len(text)} head={text[:800]!r}"
                 ),
             )
-        body.opencode_terminal_reason = terminal_reason_from_plugin_log(plugin_log)
+        body.opencode_terminal_reason = terminal_reason_from_plugin_log(text)
         body.opencode_plugins_loaded = True
-        body.opencode_plugin_log = plugin_log
+        body.opencode_plugin_log = _plugin_log_on_the_row(text)
 
     async def _grade(self, body: SearchVerifyRequest) -> Dict[str, Any]:
         """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics."""
