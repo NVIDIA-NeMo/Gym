@@ -125,6 +125,18 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     input_container_fpath: Path
     output_container_fpath: Path
     log_file: Optional[Path] = None
+    python_executable: Optional[str] = Field(
+        default=None,
+        description="Absolute Python path inside the container for package build/install stages; omit for system Python.",
+    )
+
+    @field_validator("python_executable")
+    @classmethod
+    def validate_python_executable(cls, value: Optional[str]) -> Optional[str]:
+        """Validate container paths without resolving them on the submission host."""
+        if value is not None and (not value.startswith("/") or "\0" in value):
+            raise ValueError("python_executable must be an absolute path inside the container")
+        return value
 
     slurm: Dict[str, Any] = Field(default_factory=dict)
     vllm: Optional[VLLMConfig] = None
@@ -204,6 +216,33 @@ class BaseBuilder(BaseModel):
     # Log file is separate from the config so that we dont have the duplicate this log file property on every config.
     log_file: Path
 
+    def _python_env_vars(self, container_config: BuildContainerConfig) -> dict[str, str]:
+        """Select an existing container interpreter without forwarding host venv settings."""
+        if container_config.python_executable is None:
+            return {}
+        return {"BUILD_PYTHON": container_config.python_executable}
+
+    def _build_command(self, script: str, name: str, *args: str) -> str:
+        """Use the selected interpreter for installs and subprocess build tools."""
+        setup = dedent(
+            r"""
+            set -Eeuo pipefail
+            BUILD_PIP_ARGS=(--system)
+            if [[ -n "${BUILD_PYTHON:-}" ]]; then
+                [[ -x "$BUILD_PYTHON" ]] || {
+                    echo "Missing container Python executable: $BUILD_PYTHON" >&2; exit 1;
+                }
+                "$BUILD_PYTHON" -c 'import sys; print("Build Python:", sys.executable, "prefix:", sys.prefix)'
+                export PATH="$(dirname "$BUILD_PYTHON"):$PATH"
+                export PYO3_PYTHON="$BUILD_PYTHON"
+                BUILD_PIP_ARGS=(--python "$BUILD_PYTHON")
+            else
+                BUILD_PYTHON=python3
+            fi
+            """
+        ).lstrip()
+        return join(["bash", "-c", setup + script, name, *args])
+
     async def perform_preflight_checks(self) -> None:
         raise NotImplementedError
 
@@ -275,7 +314,7 @@ class FlashInferBuilder(BaseBuilder):
             # record binary-package versions for comparison after installation.
             # Run outside the checkout so imports refer to the base image's package.
             cd /
-            python3 - <<'PY'
+            "$BUILD_PYTHON" - <<'PY'
             import importlib.metadata as metadata
             import json
             import os
@@ -308,12 +347,13 @@ class FlashInferBuilder(BaseBuilder):
             # Python 2 (pip): replace only flashinfer-python with this branch. Use the
             # image's build dependencies (--no-build-isolation) and leave runtime
             # dependencies, including cubins/providers, installed as-is (--no-deps).
-            python3 -m pip install --no-deps --no-build-isolation --force-reinstall "$BUILD_DIR/source"
+            command -v uv >/dev/null || "$BUILD_PYTHON" -m pip install uv
+            uv pip install "${BUILD_PIP_ARGS[@]}" --no-deps --no-build-isolation --force-reinstall "$BUILD_DIR/source"
 
             # Python 3: restore unrelated AOT overrides, remove matching module families
             # from package/provider/JIT caches, and update provider manifests. No spec
             # generators, shape lists, CUDA compilation, or kernel launches are needed.
-            python3 - <<'PY'
+            "$BUILD_PYTHON" - <<'PY'
             import fnmatch
             import importlib.metadata as metadata
             import json
@@ -378,10 +418,11 @@ class FlashInferBuilder(BaseBuilder):
             """
         ).lstrip()
 
-        return join(["bash", "-c", script, "flashinfer-build"])
+        return self._build_command(script, "flashinfer-build")
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         return {
+            **self._python_env_vars(container_config),
             "FLASHINFER_REPO": self.config.repo,
             "FLASHINFER_HEAD_SHA": self._head_sha,
             "FLASHINFER_INVALIDATE_MODULES": ",".join(self.config.invalidate_modules),
@@ -430,7 +471,7 @@ class VLLMBuilder(BaseBuilder):
             apt-get update -y
             apt-get install -y --no-install-recommends git ca-certificates curl build-essential pkg-config perl \
                 2>&1 | tail -5
-            python3 -m pip install uv 2>&1 | tail -3
+            command -v uv >/dev/null || "$BUILD_PYTHON" -m pip install uv 2>&1 | tail -3
 
             git init "$BUILD_DIR/source"
             git -C "$BUILD_DIR/source" remote add origin "$VLLM_REPO"
@@ -458,13 +499,13 @@ class VLLMBuilder(BaseBuilder):
             export VLLM_USE_PRECOMPILED=1
             export VLLM_PRECOMPILED_WHEEL_COMMIT
             export SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION"
-            uv pip install --system . --prerelease=allow --torch-backend=auto --index-strategy unsafe-best-match
+            uv pip install "${BUILD_PIP_ARGS[@]}" . --prerelease=allow --torch-backend=auto --index-strategy unsafe-best-match
 
             # Installation copies wheel Rust artifacts too. Rebuild AFTER installing
             # and unset both reuse switches so the source and launcher stay in sync.
-            uv pip install --system 'setuptools>=77.0.3,<81' 'setuptools-scm>=9.2.0' 'setuptools-rust>=1.9.0' wheel
+            uv pip install "${BUILD_PIP_ARGS[@]}" 'setuptools>=77.0.3,<81' 'setuptools-scm>=9.2.0' 'setuptools-rust>=1.9.0' wheel
             env -u VLLM_USE_PRECOMPILED -u VLLM_USE_PRECOMPILED_RUST bash tools/build_rust.sh
-            installed_vllm_dir=$(cd / && python3 -c \
+            installed_vllm_dir=$(cd / && "$BUILD_PYTHON" -c \
                 'import vllm; from pathlib import Path; print(Path(vllm.__file__).parent)')
             install -m 755 vllm/vllm-rs "$installed_vllm_dir/vllm-rs"
             cmp vllm/vllm-rs "$installed_vllm_dir/vllm-rs"
@@ -479,13 +520,14 @@ class VLLMBuilder(BaseBuilder):
             find /usr/lib/aarch64-linux-gnu /usr/local/cuda-13.0 -name '*_static*.a' -delete 2>/dev/null || true
             """
         ).lstrip()
-        return join(["bash", "-c", script, "vllm-build"])
+        return self._build_command(script, "vllm-build")
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         """Pass build configuration as literal environment values."""
         if self._head_sha is None:
             raise RuntimeError("Run vLLM preflight checks before generating the build environment")
         return {
+            **self._python_env_vars(container_config),
             "BASE_IMAGE": str(container_config.input_container_fpath),
             "VLLM_REPO": self.config.repo,
             "VLLM_BRANCH": self.config.branch,
@@ -577,17 +619,17 @@ class VLLMRouterBuilder(BaseBuilder):
             # Match the interpreter that will run the router, without installing
             # the wheel build dependencies into system site-packages.
             buildenv="$BUILD_DIR/buildenv"
-            uv venv --python "$(command -v python3)" "$buildenv"
-            VIRTUAL_ENV="$buildenv" uv pip install setuptools wheel setuptools-rust build
+            uv venv --python "$BUILD_PYTHON" "$buildenv"
+            uv pip install --python "$buildenv/bin/python" setuptools wheel setuptools-rust build
             "$buildenv/bin/python" -m build --wheel --no-isolation --outdir dist
             wheels=(dist/*.whl)
             test "${#wheels[@]}" -eq 1 && test -f "${wheels[0]}"
-            uv pip install --system --force-reinstall "${wheels[0]}"
+            uv pip install "${BUILD_PIP_ARGS[@]}" --force-reinstall "${wheels[0]}"
             # Import outside the source checkout to test the installed package.
             cd /
-            python3 -c "import vllm_router_rs; print('vllm_router_rs import OK')"
+            "$BUILD_PYTHON" -c "import vllm_router_rs; print('vllm_router_rs import OK')"
             vllm-router --help >/dev/null
-            router_so=$(python3 -c 'import vllm_router_rs; print(vllm_router_rs.__file__)')
+            router_so=$("$BUILD_PYTHON" -c 'import vllm_router_rs; print(vllm_router_rs.__file__)')
             if grep -aqF 'Resetting worker loads (cycle' "$router_so"; then
                 echo 'ERROR: installed router still resets worker loads periodically' >&2
                 exit 1
@@ -598,20 +640,21 @@ class VLLMRouterBuilder(BaseBuilder):
                 echo 'ERROR: installed router is missing the #216 load-guard changes' >&2
                 exit 1
             fi
-            uv pip show --system vllm-router
+            uv pip show "${BUILD_PIP_ARGS[@]}" vllm-router
             rm -rf "$BUILD_DIR"
             uv cache clean
             apt-get clean
             rm -rf /var/lib/apt/lists/*
             """
         ).lstrip()
-        return join(["bash", "-c", script, "vllm-router-build"])
+        return self._build_command(script, "vllm-router-build")
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         """Pass pinned source and compilation concurrency literally."""
         if self._head_sha is None:
             raise RuntimeError("Run router preflight checks before generating the build environment")
         return {
+            **self._python_env_vars(container_config),
             "VLLM_ROUTER_REPO": self.config.repo,
             "VLLM_ROUTER_COMMIT": self._head_sha,
             "CARGO_BUILD_JOBS": str(self.config.cpus_per_task),
@@ -676,7 +719,7 @@ class MooncakeBuilder(BaseBuilder):
                 # Restore files that earlier image stages may have stripped.
                 apt-get install -y --no-install-recommends --reinstall -- "$@"
             fi
-            command -v uv >/dev/null || python3 -m pip install uv
+            command -v uv >/dev/null || "$BUILD_PYTHON" -m pip install uv
 
             BUILD_DIR=$(mktemp -d /tmp/mooncake-build.XXXXXX)
             export BUILD_DIR
@@ -692,8 +735,8 @@ class MooncakeBuilder(BaseBuilder):
 
             # Both distributions own the same mooncake package and CLI entry points.
             rm -f /opt/mooncake-build.env
-            uv pip uninstall --system mooncake-transfer-engine-cuda13 mooncake-transfer-engine
-            uv pip install --system . \
+            uv pip uninstall "${BUILD_PIP_ARGS[@]}" mooncake-transfer-engine-cuda13 mooncake-transfer-engine
+            uv pip install "${BUILD_PIP_ARGS[@]}" . \
                 --config-settings=cmake.build-type=Release \
                 --config-settings=cmake.define.USE_CUDA=ON \
                 --config-settings="cmake.define.CUDAToolkit_ROOT=${CUDA_HOME}" \
@@ -721,13 +764,14 @@ class MooncakeBuilder(BaseBuilder):
             rm -rf /var/lib/apt/lists/*
             """
         ).lstrip()
-        return join(["bash", "-c", script, "mooncake-build", *(self.config.extra_apt_packages or [])])
+        return self._build_command(script, "mooncake-build", *(self.config.extra_apt_packages or []))
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         """Pass source and build settings as literal environment values."""
         if self._head_sha is None:
             raise RuntimeError("Run Mooncake preflight checks before generating the build environment")
         return {
+            **self._python_env_vars(container_config),
             "BASE_IMAGE": str(container_config.input_container_fpath),
             "MOONCAKE_REPO": self.config.repo,
             "MOONCAKE_BRANCH": self.config.branch,

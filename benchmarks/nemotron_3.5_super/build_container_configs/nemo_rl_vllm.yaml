@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build into NeMo-RL's existing vLLM actor venv, then use the output as CONTAINER
+# for the training launcher. Warm up through NeMo-RL after the build; the Gym
+# serving warmup stage does not launch this actor environment.
+input_container_fpath: ${oc.env:BASE_IMAGE}
+output_container_fpath: ${oc.env:OUTPUT_IMAGE}
+python_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
+
+slurm:
+  account: ${oc.env:SLURM_ACCOUNT}
+  partition: ${oc.env:SLURM_PARTITION,batch}
+  qos: ${oc.env:SLURM_QOS,short}
+  container-mounts: ${oc.env:PWD}:${oc.env:PWD}
+
+# Match the version and precompiled wheel to the actor environment's CUDA/Torch
+# stack. This stage supports Python/Rust changes, not changed CUDA/C++ kernels.
+vllm:
+  repo: ${oc.env:VLLM_REPO}
+  branch: ${oc.env:VLLM_BRANCH}
+  version: ${oc.env:VLLM_VERSION}
+  precompiled_wheel_commit: ${oc.env:VLLM_PRECOMPILED_WHEEL_COMMIT}
+
+# Optional flashinfer, mooncake, and vllm_router blocks use the same interpreter.
+# FlashInfer's slim stage requires its installed cubins to match the source release.

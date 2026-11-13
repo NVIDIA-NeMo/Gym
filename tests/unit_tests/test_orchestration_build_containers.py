@@ -43,6 +43,62 @@ ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = Path("benchmarks/nemotron_3.5_super")
 
 
+@pytest.mark.parametrize("path", ["", "python3", "relative/bin/python", "/opt/python\0"])
+def test_build_python_requires_container_absolute_path(path, tmp_path):
+    with pytest.raises(ValidationError, match="absolute path inside the container"):
+        BuildContainerConfig(
+            input_container_fpath=tmp_path / "base.sqsh",
+            output_container_fpath=tmp_path / "out.sqsh",
+            python_executable=path,
+        )
+
+
+def test_build_python_targets_existing_venv(builder, container_config, tmp_path):
+    # A real venv proves that a symlinked interpreter retains its own prefix.
+    # Spaces and shell metacharacters in the path must remain literal.
+    target = tmp_path / "worker $(touch INJECTED)"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(target)], check=True)
+    python = target / "bin/python"
+    container_config.python_executable = str(python)
+    builder._head_sha = "a" * 40
+    script = r"""
+"$BUILD_PYTHON" -c 'import os, sys; print(sys.prefix); print(os.environ["PYO3_PYTHON"])'
+python3 -c 'import sys; print(sys.prefix)'
+printf '%s\n' "${BUILD_PIP_ARGS[@]}"
+"""
+    result = subprocess.run(
+        shlex.split(builder._build_command(script, "test-build")),
+        env={**os.environ, **builder.get_srun_env_vars(container_config)},
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.splitlines()[1:] == [str(target), str(python), str(target), "--python", str(python)]
+    assert not (tmp_path / "INJECTED").exists()
+
+
+def test_all_build_stages_export_python_and_fail_before_building(
+    builder, vllm_builder, mooncake_builder, container_config, tmp_path
+):
+    router = VLLMRouterBuilder(
+        config=VLLMRouterConfig(repo="repo", branch="dev", cpus_per_task=1), log_file=tmp_path / "router.log"
+    )
+    container_config.python_executable = str(tmp_path / "missing/bin/python")
+    for stage in (builder, vllm_builder, mooncake_builder, router):
+        stage._head_sha = "a" * 40
+        env = stage.get_srun_env_vars(container_config)
+        assert env["BUILD_PYTHON"] == container_config.python_executable
+        result = subprocess.run(
+            shlex.split(stage.get_srun_command_str()),
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1
+        assert "Missing container Python executable" in result.stderr
+
+
 @pytest.mark.parametrize("with_env", [True, False])
 async def test_srun_exports_only_builder_env(container_config, tmp_path, monkeypatch, with_env):
     bin_dir = tmp_path / "bin"
@@ -824,9 +880,17 @@ async def test_mooncake_preflight_and_resources(mooncake_builder, container_conf
 
 @pytest.mark.parametrize("cuda_version,install_failure", [("12.9", False), ("13.0", False), ("13.0", True)])
 @pytest.mark.parametrize("extra_apt_packages", [None, [], ["cuda-cudart-dev-13-0", "literal $(touch INJECTED)"]])
+@pytest.mark.parametrize("custom_python", [False, True])
 def test_mooncake_build_and_cleanup(
-    mooncake_builder, container_config, tmp_path, cuda_version, install_failure, extra_apt_packages
+    mooncake_builder, container_config, tmp_path, cuda_version, install_failure, extra_apt_packages, custom_python
 ):
+    pip_target = ["--system"]
+    if custom_python:
+        target = tmp_path / "worker venv/bin/python"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(sys.executable)
+        container_config.python_executable = str(target)
+        pip_target = ["--python", str(target)]
     assert mooncake_builder.config.extra_apt_packages is None
     mooncake_builder.config.extra_apt_packages = extra_apt_packages
     mooncake_builder._head_sha = "a" * 40
@@ -915,11 +979,11 @@ elif tool == "uv" and args == ["cache", "clean"]:
     assert uv_args[0] == [
         "pip",
         "uninstall",
-        "--system",
+        *pip_target,
         "mooncake-transfer-engine-cuda13",
         "mooncake-transfer-engine",
     ]
-    assert uv_args[1][:4] == ["pip", "install", "--system", "."]
+    assert uv_args[1][: 3 + len(pip_target)] == ["pip", "install", *pip_target, "."]
     assert "--config-settings=cmake.define.USE_CUDA=ON" in uv_args[1]
     assert "--config-settings=cmake.define.WITH_TE=ON" in uv_args[1]
     assert "--config-settings=cmake.define.WITH_STORE=ON" in uv_args[1]
