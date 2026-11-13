@@ -914,6 +914,57 @@ def test_slash_qualified_name_matches_nested_catalog_path(tmp_path: Path) -> Non
     assert report.name == "acme/demo"
 
 
+def _taskset_asset(tmp_path: Path, *, kind: str = "environment") -> Path:
+    """The asset moved to `tasksets/demo/`, with its config in `configs/`."""
+    tree = "benchmarks" if kind == "benchmark" else "environments"
+    directory = tmp_path / "tasksets/demo"
+    directory.parent.mkdir()
+    shutil.move(_asset(tmp_path, kind=kind).parent, directory)
+    (directory / "configs").mkdir()
+    (directory / "config.yaml").rename(directory / "configs/demo.yaml")
+    for path in (directory / "manifest.yaml", directory / "configs/demo.yaml"):
+        path.write_text(path.read_text(encoding="utf-8").replace(f"{tree}/demo/", "tasksets/demo/"), encoding="utf-8")
+    _replace_manifest(directory / "manifest.yaml", config_path="configs/demo.yaml")
+    return directory / "manifest.yaml"
+
+
+@pytest.mark.parametrize("kind", ["benchmark", "environment"])
+def test_a_task_set_of_either_kind_validates(tmp_path: Path, kind: str) -> None:
+    manifest_path = _taskset_asset(tmp_path, kind=kind)
+
+    report = validate_environment(manifest_path)
+
+    assert (report.kind, report.config_path) == (kind, str(manifest_path.parent.resolve() / "configs/demo.yaml"))
+
+
+def test_a_task_set_at_the_root_of_tasksets_is_refused(tmp_path: Path) -> None:
+    root_manifest = _taskset_asset(tmp_path).rename(tmp_path / "tasksets/manifest.yaml")
+    _replace_manifest(root_manifest, config_path="demo/configs/demo.yaml")
+
+    with pytest.raises(EnvironmentValidationError, match="named catalog directory"):
+        validate_environment(root_manifest)
+
+
+def test_a_task_set_and_a_benchmark_in_one_root_cannot_declare_one_name(tmp_path: Path) -> None:
+    benchmark_path = _asset(tmp_path, kind="benchmark")
+    taskset_path = tmp_path / "tasksets/moved/manifest.yaml"
+    shutil.copytree(benchmark_path.parent, taskset_path.parent)
+
+    for path in (benchmark_path, taskset_path):
+        with pytest.raises(EnvironmentValidationError, match="also declared by"):
+            validate_environment(path)
+
+
+def test_a_task_set_cannot_take_the_path_of_a_config_in_benchmarks(tmp_path: Path) -> None:
+    manifest_path = _taskset_asset(tmp_path, kind="benchmark")
+    other_config = tmp_path / "benchmarks/demo/config.yaml"
+    other_config.parent.mkdir()
+    other_config.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="path of another config"):
+        validate_environment(manifest_path)
+
+
 def test_config_defaults_to_sibling_and_must_exist(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path)
     config_path = manifest_path.with_name("config.yaml")
@@ -1301,8 +1352,22 @@ def test_a_setup_in_another_root_finds_a_benchmark_by_name(tmp_path: Path, monke
     assert validate_environment(setup_path, validate_datasets=False).name == "demo_setup"
 
 
+def test_a_task_set_setup_in_another_root_finds_a_benchmark_in_benchmarks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = tmp_path / "core"
+    _asset(core, kind="benchmark")
+    environments_repo = tmp_path / "environments_repo"
+    shutil.copytree(core / "benchmarks/demo", environments_repo / "tasksets/demo_setup")
+    setup_path = environments_repo / "tasksets/demo_setup/manifest.yaml"
+    _replace_manifest(setup_path, name="demo_setup", setup_of="demo")
+    monkeypatch.setattr("nemo_gym.environment.validation.component_search_roots", lambda: [core])
+
+    assert validate_environment(setup_path, validate_datasets=False).name == "demo_setup"
+
+
 def test_link_outside_a_catalog_directory_is_rejected(tmp_path: Path) -> None:
     manifest = EnvironmentManifest.model_validate(_manifest() | {"name": "standalone", "setup_of": "demo"})
 
-    with pytest.raises(EnvironmentValidationError, match="in neither"):
+    with pytest.raises(EnvironmentValidationError, match="in none of them"):
         _validate_related_manifest(tmp_path / "standalone/manifest.yaml", manifest)

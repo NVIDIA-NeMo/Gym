@@ -124,7 +124,7 @@ def test_migration_fields_reject_invalid_values(field, value) -> None:
     assert not Draft202012Validator(manifest_json_schema()).is_valid(raw)
 
 
-@pytest.mark.parametrize("tree", ["benchmarks", "environments"])
+@pytest.mark.parametrize("tree", ["benchmarks", "environments", "tasksets"])
 @pytest.mark.parametrize("config", ["config.yaml", "../config_web.yaml", "../../shared.yaml"])
 def test_resolve_manifest_config_within_catalog(tmp_path: Path, tree: str, config: str) -> None:
     from nemo_gym.environment import manifest as module
