@@ -544,8 +544,9 @@ class TestbenchRunner:
         )
 
         outcome = None
-        sandbox = AsyncSandbox(self._build_sandbox_provider_config(), spec)
+        sandbox = None
         try:
+            sandbox = AsyncSandbox(self._build_sandbox_provider_config(), spec)
             async with sandbox:
                 await sandbox.start()
                 input_archive = f"{transfer_dir}/cvdp-workspace.tar.gz"
@@ -608,7 +609,7 @@ class TestbenchRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if outcome is not None and sandbox.teardown_confirmed is True:
+            if outcome is not None and sandbox is not None and sandbox.teardown_confirmed is True:
                 # Remote teardown succeeded; a client-release error must not rerun
                 # a measured result (the harness may be randomized). Keep the
                 # cleanup diagnostic in the request failure report.
