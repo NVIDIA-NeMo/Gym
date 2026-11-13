@@ -42,8 +42,8 @@ Completed scheduled/manual main runs trigger the Fern publisher, which consumes
 the same retained measurements.
 
 Use the diagnostic command below to reproduce a warning at the reported commit.
-When registering another harness in `registry.HARNESSES`, provide its pinned runtime
-installation in `ci.install_runtime` as well as its episode configuration.
+When registering another harness, declare its runtime requirements and episode
+configuration together in its `HarnessDefinition` entry in `registry.HARNESSES`.
 
 ## Automatically published documentation
 
@@ -223,24 +223,22 @@ Run regression checks with:
 python -m pytest scripts/harness_conformance/tests tests/unit_tests/rollouts/harness_capabilities -q
 ```
 
-To add another local harness, add its adapter class to `registry.HARNESSES`, supply
-its launch settings in `episode._config`, and make its advertised shell-tool
-schema consumable by `provider.Probe._tool` and, if it ends episodes on a finish tool, that
-tool's schema consumable by `provider.Probe._finish`. Keep expectations and witnesses out
-of the task input and preserve the normal Gym collection path.
+To add another local harness, add a `HarnessDefinition` to `registry.HARNESSES`:
 
-Registration also means adding the harness name to hard-coded tuples. `episode._config`
-passes the probe's `--timeout` as the agent's `timeout` to OpenCode, Pi, CrewAI and
-OpenClaw, and to Codex outside agent sessions; add a new harness whose adapter has a
-`timeout` field to that list, so that it uses the probe timeout instead of the adapter's
-default.
-`ci.install_runtime` syncs the adapter's locked project (`pyproject.toml` and `uv.lock`)
-and then returns early only for the harnesses in its
-`("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes comes from that
-project, Stirrup, OpenClaw and CrewAI install in the task sandbox during session setup,
-and Simple Agent is built in. CrewAI's sandbox runtime takes longer to build than one probe
-episode lasts, so the install step builds it first, into a throwaway local sandbox. For any other harness it installs a
-pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
-so add a harness that installs its runtime in the task sandbox to that tuple. A
-data-driven registry entry could carry these per-harness settings and remove the
-tuples; the runner does not have one yet.
+- `agent` names the adapter class; its Pydantic metadata supplies the config type.
+- `base_settings` declares harness and probe overrides, session/legacy settings,
+  sandbox requirements, required imports, and task overrides. Bind adapter timeout
+  fields to the supplied probe timeout here.
+- `scenario_settings` supplies overrides by scenario name, including scripted model
+  replies. OmegaConf merges shared defaults, base settings, then the selected scenario.
+- Runtime fields describe built-in or Python-module runtimes, pinned npm installs,
+  preparation hooks, and provenance files. CI always syncs the adapter's locked
+  project first. Runtimes without an extra installer use that project or session setup.
+- `ci_container`, `ci_packages`, and `requires_root` supply CI execution requirements;
+  the workflow builds its matrix from these definitions.
+
+Use the shared `probes.Probe` when its shell-tool and finish protocols cover the
+adapter. Select another probe through settings when a different interaction is
+required. Keep expectations and witnesses out of the task input and preserve the
+normal Gym collection path. Registration requires no harness-name tuples in the
+runner, installer, or workflow.
