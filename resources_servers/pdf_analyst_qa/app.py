@@ -318,6 +318,10 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
                 result.stderr,
             )
             raise RuntimeError("could not stage selected PDFs from the shared bucket")
+        # Keep the supervisor privileged for trusted initialization, and carry
+        # the task UID through serialize/connect so every harness command runs
+        # without access to the protected backing cache.
+        state.sandbox.set_default_user(65534)
 
     async def release_session_state(self, session_id: str) -> None:
         state = self._sessions.get(session_id)
@@ -344,6 +348,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
                     descriptor=await state.sandbox.serialize(scope="operate"),
                 ),
                 workdir=TASK_ROOT,
+                user=65534,
             ),
         )
 

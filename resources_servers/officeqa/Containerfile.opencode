@@ -29,4 +29,6 @@ RUN case "$(uname -m)" in \
     && node --version > /usr/local/share/document-tools/node-version.txt \
     && mkdir -p /tmp/opencode \
     && chown -R 65534:65534 /tmp/opencode
-USER 65534:65534
+# The command supervisor must initialize protected PDF caches as root. The
+# resources server lends the sandbox to the agent with an explicit task UID.
+USER root

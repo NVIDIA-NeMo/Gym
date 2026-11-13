@@ -121,6 +121,7 @@ async def test_seed_retries_reuse_one_sandbox_and_close_without_cookie(server):
     assert first == again
     assert len(sandboxes) == 1
     assert first.sandbox_access.workdir == "/workspace/task"
+    assert first.sandbox_access.user == 65534
     preflight = shlex.split(sandboxes[0].exec.await_args.args[0])
     assert preflight == [
         "/opt/venv/bin/python",
@@ -274,6 +275,7 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
             self.start = AsyncMock()
             self.exec = AsyncMock(return_value=SandboxExecResult(stdout="staged", stderr="", return_code=0))
             self.stop = AsyncMock()
+            self.set_default_user = MagicMock()
             created.append(self)
 
     monkeypatch.setattr(app, "create_provider", lambda config: config)
@@ -295,6 +297,7 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
     assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 10}
     assert spec.files and spec.env["OPENCODE_CONFIG"] == "/opt/cli/opencode-model.json"
     assert sandbox.exec.await_args.kwargs["user"] == 0
+    sandbox.set_default_user.assert_called_once_with(65534)
     command = shlex.split(sandbox.exec.await_args.args[0])
     assert command[1] == f"{app.SANDBOX_SCRIPTS_ROOT}/documents.py"
     assert command[1] in spec.files
