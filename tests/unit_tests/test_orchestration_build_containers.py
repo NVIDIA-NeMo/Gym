@@ -43,6 +43,62 @@ ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = Path("benchmarks/nemotron_3.5_super")
 
 
+@pytest.mark.parametrize("path", ["", "python3", "relative/bin/python", "/opt/python\0"])
+def test_build_python_requires_container_absolute_path(path, tmp_path):
+    with pytest.raises(ValidationError, match="absolute path inside the container"):
+        BuildContainerConfig(
+            input_container_fpath=tmp_path / "base.sqsh",
+            output_container_fpath=tmp_path / "out.sqsh",
+            python_executable=path,
+        )
+
+
+def test_build_python_targets_existing_venv(builder, container_config, tmp_path):
+    # A real venv proves that a symlinked interpreter retains its own prefix.
+    # Spaces and shell metacharacters in the path must remain literal.
+    target = tmp_path / "worker $(touch INJECTED)"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(target)], check=True)
+    python = target / "bin/python"
+    container_config.python_executable = str(python)
+    builder._head_sha = "a" * 40
+    script = r"""
+"$BUILD_PYTHON" -c 'import os, sys; print(sys.prefix); print(os.environ["PYO3_PYTHON"])'
+python3 -c 'import sys; print(sys.prefix)'
+printf '%s\n' "${BUILD_PIP_ARGS[@]}"
+"""
+    result = subprocess.run(
+        shlex.split(builder._build_command(script, "test-build")),
+        env={**os.environ, **builder.get_srun_env_vars(container_config)},
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.splitlines()[1:] == [str(target), str(python), str(target), "--python", str(python)]
+    assert not (tmp_path / "INJECTED").exists()
+
+
+def test_all_build_stages_export_python_and_fail_before_building(
+    builder, vllm_builder, mooncake_builder, container_config, tmp_path
+):
+    router = VLLMRouterBuilder(
+        config=VLLMRouterConfig(repo="repo", branch="dev", cpus_per_task=1), log_file=tmp_path / "router.log"
+    )
+    container_config.python_executable = str(tmp_path / "missing/bin/python")
+    for stage in (builder, vllm_builder, mooncake_builder, router):
+        stage._head_sha = "a" * 40
+        env = stage.get_srun_env_vars(container_config)
+        assert env["BUILD_PYTHON"] == container_config.python_executable
+        result = subprocess.run(
+            shlex.split(stage.get_srun_command_str()),
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1
+        assert "Missing container Python executable" in result.stderr
+
+
 @pytest.mark.parametrize("with_env", [True, False])
 async def test_srun_exports_only_builder_env(container_config, tmp_path, monkeypatch, with_env):
     bin_dir = tmp_path / "bin"
@@ -823,9 +879,26 @@ async def test_mooncake_preflight_and_resources(mooncake_builder, container_conf
 
 
 @pytest.mark.parametrize("cuda_version,install_failure", [("12.9", False), ("13.0", False), ("13.0", True)])
-def test_mooncake_build_and_cleanup(mooncake_builder, container_config, tmp_path, cuda_version, install_failure):
+@pytest.mark.parametrize("extra_apt_packages", [None, [], ["cuda-cudart-dev-13-0", "literal $(touch INJECTED)"]])
+@pytest.mark.parametrize("custom_python", [False, True])
+def test_mooncake_build_and_cleanup(
+    mooncake_builder, container_config, tmp_path, cuda_version, install_failure, extra_apt_packages, custom_python
+):
+    pip_target = ["--system"]
+    if custom_python:
+        target = tmp_path / "worker venv/bin/python"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(sys.executable)
+        container_config.python_executable = str(target)
+        pip_target = ["--python", str(target)]
+    assert mooncake_builder.config.extra_apt_packages is None
+    mooncake_builder.config.extra_apt_packages = extra_apt_packages
     mooncake_builder._head_sha = "a" * 40
     argv = shlex.split(mooncake_builder.get_srun_command_str())
+    manifest = tmp_path / "mooncake-build.env"
+    manifest.write_text("STALE_BUILD=1\n")
+    assert "/opt/mooncake-build.env" in argv[2]
+    argv[2] = argv[2].replace("/opt/mooncake-build.env", shlex.quote(str(manifest)))
     subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
     cuda_home = tmp_path / "cuda toolkit"
     cuda_bin = cuda_home / "bin"
@@ -884,6 +957,20 @@ elif tool == "uv" and args == ["cache", "clean"]:
         assert not capture.exists()
         return
     calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    extra_installs = [call for call in calls if call["tool"] == "apt-get" and "--" in call["args"]]
+    if extra_apt_packages:
+        assert len(extra_installs) == 1
+        assert extra_installs[0]["args"] == [
+            "install",
+            "-y",
+            "--no-install-recommends",
+            "--reinstall",
+            "--",
+            *extra_apt_packages,
+        ]
+        assert calls.index(extra_installs[0]) < next(i for i, call in enumerate(calls) if call["tool"] == "uv")
+    else:
+        assert not extra_installs
     git_args = [call["args"] for call in calls if call["tool"] == "git"]
     assert ["remote", "add", "origin", mooncake_builder.config.repo] in git_args
     assert ["fetch", "--depth=1", "origin", "a" * 40] in git_args
@@ -892,11 +979,11 @@ elif tool == "uv" and args == ["cache", "clean"]:
     assert uv_args[0] == [
         "pip",
         "uninstall",
-        "--system",
+        *pip_target,
         "mooncake-transfer-engine-cuda13",
         "mooncake-transfer-engine",
     ]
-    assert uv_args[1][:4] == ["pip", "install", "--system", "."]
+    assert uv_args[1][: 3 + len(pip_target)] == ["pip", "install", *pip_target, "."]
     assert "--config-settings=cmake.define.USE_CUDA=ON" in uv_args[1]
     assert "--config-settings=cmake.define.WITH_TE=ON" in uv_args[1]
     assert "--config-settings=cmake.define.WITH_STORE=ON" in uv_args[1]
@@ -907,11 +994,33 @@ elif tool == "uv" and args == ["cache", "clean"]:
     if install_failure:
         assert result.returncode == 42, result.stderr
         assert ["cache", "clean"] not in uv_args
+        assert not manifest.exists()
     else:
         assert result.returncode == 23, result.stderr
         assert calls[-1]["args"] == ["cache", "clean"]
         assert calls[-1]["cwd"] == "/"
         assert not calls[-1]["build_exists"]
+        manifest_values = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; printf "%s\\0" "$MOONCAKE_REPO" "$MOONCAKE_BRANCH" "$MOONCAKE_HEAD_SHA" "$BASE_IMAGE"',
+                "manifest-check",
+                str(manifest),
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert manifest_values.stdout.split("\0") == [
+            mooncake_builder.config.repo,
+            mooncake_builder.config.branch,
+            mooncake_builder._head_sha,
+            str(container_config.input_container_fpath),
+            "",
+        ]
+        assert not (tmp_path / "INJECTED").exists()
 
 
 @pytest.mark.parametrize(
@@ -1077,7 +1186,8 @@ def test_build_failure_does_not_submit_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("status", [0, 37])
-async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeypatch, status):
+@pytest.mark.parametrize("args_mode", ["evaluation", "omitted", "empty_list", "empty_string"])
+async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeypatch, status, args_mode):
     benchmark = tmp_path / BENCHMARK
     benchmark.mkdir(parents=True)
     for name in ("sbatch_external_vllm.sh", "save_warmed_vllm_container.py"):
@@ -1100,6 +1210,17 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     monkeypatch.setenv("NODELIST", "")
     monkeypatch.setenv("SAVE_WARMED_CONTAINER", "must-not-export.sqsh")
     monkeypatch.setenv("SBATCH_WAIT", "1")
+    monkeypatch.delenv("EXPERIMENT_NAME", raising=False)
+    monkeypatch.delenv("eval_command", raising=False)
+    run_args = {
+        "evaluation": {
+            "args": '--config model.yaml \\\n--config benchmark.yaml \\\n"++text=spaces $(touch INJECTED)"'
+        },
+        "omitted": {},
+        "empty_list": {"args": []},
+        "empty_string": {"args": ""},
+    }[args_mode]
+    evaluation = args_mode == "evaluation"
     config = BuildContainerConfig(
         input_container_fpath="missing.sqsh",
         output_container_fpath="built image.sqsh",
@@ -1109,14 +1230,14 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
                 "MODEL": "/models/test",
                 "VLLM_CONFIG": "serving.sh",
                 "MOUNTS": f"{tmp_path}:/opt/Gym",
-                "EXPERIMENT_NAME": "eval-test",
+                **({"EXPERIMENT_NAME": "eval-test"} if evaluation else {}),
                 "NUM_PREFILL_NODES": 2,
                 "NUM_DECODE_NODES": 2,
                 "ENABLE_MOONCAKE": True,
                 "SBATCH_TIMELIMIT": "01:30:00",
                 "SBATCH_QOS": "short",
             },
-            args='--config model.yaml \\\n--config benchmark.yaml \\\n"++text=spaces $(touch INJECTED)"',
+            **run_args,
         ),
     )
     config.output_container_fpath.write_bytes(b"built and warmed")
@@ -1128,7 +1249,7 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     else:
         await launch
     submissions = [json.loads(line) for line in (tmp_path / "submitted.jsonl").read_text().splitlines()]
-    assert len(submissions) == (1 if status else 2)
+    assert len(submissions) == (2 if evaluation and not status else 1)
     job = submissions[0]
     assert "--time=01:30:00" in job["args"]
     assert job["env"]["SBATCH_ACCOUNT"] == "build-account"
@@ -1138,8 +1259,14 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     assert job["env"]["CONTAINER"] == str(config.output_container_fpath)
     assert "SBATCH_WAIT" not in job["env"]
     assert "SAVE_WARMED_CONTAINER" not in job["env"]
-    prepare = next(line for line in job["env"]["eval_command"].splitlines() if line.startswith("gym eval prepare "))
-    assert shlex.split(prepare)[3:-1] == config.run.args
+    if evaluation:
+        prepare = next(
+            line for line in job["env"]["eval_command"].splitlines() if line.startswith("gym eval prepare ")
+        )
+        assert shlex.split(prepare)[3:-1] == config.run.args
+    else:
+        assert config.run.args == []
+        assert "vllm_only" in " ".join(job["args"])
     assert config.output_container_fpath.read_bytes() == b"built and warmed"
     assert config.log_file.read_text().startswith("existing build log\n")
     assert not (tmp_path / "INJECTED").exists()

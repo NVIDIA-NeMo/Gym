@@ -108,6 +108,11 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     resolved: bool
 
     # Misc metrics
+    seed_sandbox_start_time_taken: Optional[float] = Field(
+        default=None,
+        description="Seconds to create and set up the agent sandbox, excluding anti-cheating preparation.",
+        exclude_if=lambda value: value is None,
+    )
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
 
@@ -281,6 +286,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._session_id_to_seed_head: Dict[str, str] = dict()
+        self._session_id_to_sandbox_start_time: Dict[str, float] = dict()
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -340,7 +346,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
+        sandbox_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec)
+        self._session_id_to_sandbox_start_time[request.session[SESSION_ID_KEY]] = monotonic() - sandbox_started_at
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
         if self.config.apply_anti_cheating:
@@ -394,6 +402,9 @@ Stderr:
         verifier_sandbox_lifecycle_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec)
         eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
+        seed_sandbox_start_time_taken = self._session_id_to_sandbox_start_time.pop(
+            request.session[SESSION_ID_KEY], None
+        )
 
         model_patch = ""
         if self.config.is_verifying_golden_patch:
@@ -463,6 +474,7 @@ Stderr:
             evaluation_completed=res["completed"] and mock_container._sandbox_error_type is None,
             resolved=res["resolved"],
             reward=int(res["resolved"]),
+            seed_sandbox_start_time_taken=seed_sandbox_start_time_taken,
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,

@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# NIXL requires matching speculative cache configurations on both PD roles.
-# DWDP applies only to target experts; MTP draft weights remain replicated.
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
@@ -63,18 +61,21 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 128
     --use-replayssm
     --replayssm-buffer-len 16
+    --quantization nvfp4_per_token
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
+# @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 # Four independent TP1/DP1 engines share expert weights on each prefill node.
 # The launcher assigns DWDP rank 0..3; merge_free reads resident shards directly.
 # Start with eager execution; graph-enabled DWDP is still experimental.
+# @bxyu-nvidia: max-num-batched-tokens=33920 tradesoff. Not clear yet why larger batch is not strictly faster.
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
     --data-parallel-size 1
     --data-parallel-size-local 1
     --moe-backend flashinfer_prims
     --dwdp-config '{"world_size":4,"port":29590,"timeout_seconds":3600,"merge_free":true}'
-    --enforce-eager
+    --compilation-config '{"mode":3,"cudagraph_mode":"NONE"}'
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
@@ -99,8 +100,9 @@ VLLM_PREFILL_ARGS=(
             ]
         }
     }'
-    --max-num-batched-tokens 16960
+    --max-num-batched-tokens 33920
     --max-num-seqs 256
+    --enable-prefill-batching-metrics
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(

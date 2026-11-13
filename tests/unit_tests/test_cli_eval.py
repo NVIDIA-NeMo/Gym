@@ -19,6 +19,7 @@ import sysconfig
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import requests
@@ -34,6 +35,117 @@ from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_sp
 from nemo_gym.cli.main import main
 from nemo_gym.config.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+
+
+@pytest.mark.parametrize("mode", ["explicit", "prepared", "cached"])
+def test_e2e_uses_explicit_input_or_prepares_split(tmp_path: Path, monkeypatch: MonkeyPatch, mode: str) -> None:
+    import nemo_gym.artifacts.resolved_config as resolved_config
+    import nemo_gym.data.dataset_preparation as preparation
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    output = tmp_path / "out.jsonl"
+    explicit = tmp_path / "mixed tasks.jsonl"
+    rows = [
+        {"agent_ref": {"name": agent}, "task_id": i, "responses_create_params": {"input": []}}
+        for i, agent in enumerate(["agent_b", "agent_a"])
+    ]
+    explicit.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    prepared = tmp_path / "out/preprocessed_datasets/benchmark.jsonl"
+    if mode in ("explicit", "cached"):
+        prepared.parent.mkdir(parents=True)
+        prepared.write_text('{"task_id": "cached"}\n')
+    config = DictConfig(
+        {
+            "output_jsonl_fpath": str(output),
+            "split": "benchmark",
+            "reuse_existing_data_preparation": True,
+            "disable_aggregation": True,
+            "require_complete": False,
+        }
+    )
+    if mode == "explicit":
+        config.input_jsonl_fpath = str(explicit)
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    servers = MagicMock()
+    monkeypatch.setattr(cli_eval, "RunHelper", servers)
+    collector = AsyncMock()
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collector)
+    monkeypatch.setattr(cli_eval, "_interrupt_on_sigterm", lambda: None)
+    monkeypatch.setattr(cli_eval, "_terminated", False)
+    monkeypatch.setattr(resolved_config, "write_resolved_config", MagicMock())
+    parser = MagicMock(return_value=[])
+    monkeypatch.setattr(cli_eval.GlobalConfigDictParser, "filter_for_server_instance_configs", parser)
+    split_check = MagicMock()
+    monkeypatch.setattr(cli_eval, "_validate_split_datasets_declared", split_check)
+
+    def prepare(config: DictConfig) -> None:
+        target = Path(config.output_dirpath) / f"{config.split}.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_text('{"task_id": "prepared"}\n')
+
+    processor = MagicMock()
+    processor.return_value.run.side_effect = prepare
+    monkeypatch.setattr(preparation, "TrainDataProcessor", processor)
+    cli_eval.e2e_rollout_collection()
+
+    servers.return_value.start.assert_called_once_with(None)
+    servers.return_value.shutdown.assert_called_once_with()
+    collector.assert_awaited_once()
+    selected = Path(collector.await_args.args[0].input_jsonl_fpath)
+    assert selected == (explicit if mode == "explicit" else prepared)
+    if mode == "explicit":
+        assert [json.loads(line) for line in selected.read_text().splitlines()] == rows
+        processed = RolloutCollectionHelper()._preprocess_rows_from_config(collector.await_args.args[0])
+        assert [row["agent_ref"] for row in processed] == [row["agent_ref"] for row in rows]
+        assert [row["task_id"] for row in processed] == [row["task_id"] for row in rows]
+        parser.assert_not_called()
+        split_check.assert_not_called()
+    else:
+        split_check.assert_called_once_with("benchmark", [])
+    assert processor.call_count == (1 if mode == "prepared" else 0)
+
+
+@pytest.mark.parametrize("command", [cli_eval.prepare_benchmark, cli_eval.e2e_rollout_collection])
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_explicit_input_fails_before_preparation_or_servers(
+    tmp_path: Path, monkeypatch: MonkeyPatch, command, kind: str
+) -> None:
+    import nemo_gym.data.dataset_preparation as preparation
+
+    input_path = tmp_path / "input.jsonl"
+    if kind == "directory":
+        input_path.mkdir()
+    monkeypatch.setattr(
+        cli_eval,
+        "get_global_config_dict",
+        lambda **kwargs: DictConfig(
+            {"input_jsonl_fpath": str(input_path), "output_jsonl_fpath": str(tmp_path / "out.jsonl")}
+        ),
+    )
+    servers, processor, prepare = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(cli_eval, "RunHelper", servers)
+    monkeypatch.setattr(preparation, "TrainDataProcessor", processor)
+    monkeypatch.setattr(cli_eval, "_prepare_datasets", prepare)
+    with pytest.raises(SystemExit) as error:
+        command()
+    assert error.value.code == 1
+    servers.assert_not_called()
+    processor.assert_not_called()
+    prepare.assert_not_called()
+
+
+def test_prepare_skips_dataset_discovery_with_explicit_input(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n")
+    monkeypatch.setattr(
+        cli_eval, "get_global_config_dict", lambda **kwargs: DictConfig({"input_jsonl_fpath": str(input_path)})
+    )
+    discovery, prepare = MagicMock(), MagicMock()
+    monkeypatch.setattr(cli_eval, "_datasets_to_prepare", discovery)
+    monkeypatch.setattr(cli_eval, "_prepare_datasets", prepare)
+    cli_eval.prepare_benchmark()
+    discovery.assert_not_called()
+    prepare.assert_not_called()
 
 
 def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIAgentServerInstanceConfig:

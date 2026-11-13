@@ -50,7 +50,8 @@ def make_sandbox(
 
 
 class TestApp:
-    def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("seeded", [False, True])
+    def test_sanity(self, monkeypatch: MonkeyPatch, seeded: bool) -> None:
         config = SwebenchResourcesServerConfig(
             host="0.0.0.0",
             port=8080,
@@ -58,14 +59,15 @@ class TestApp:
             name="",
             sandbox_provider="test",
             sandbox_config=dict(),
-            is_verifying_golden_patch=True,
+            is_verifying_golden_patch=not seeded,
+            apply_anti_cheating=False,
         )
         server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
 
         client = TestClient(app)
 
-        eval_sandbox = make_sandbox()
+        eval_sandbox = make_sandbox(exec_result=SandboxExecResult(stdout="/testbed", stderr="", return_code=0))
         monkeypatch.setattr(
             "resources_servers.swebench.app.SwebenchResourcesServer._create_sandbox",
             AsyncMock(return_value=eval_sandbox),
@@ -75,38 +77,49 @@ class TestApp:
             AsyncMock(return_value=dict(resolved=True, completed=True)),
         )
 
-        res = client.post(
-            "/verify",
-            json={
-                "repo": "astropy/astropy",
-                "instance_id": "my instance_id",
-                "base_commit": "my base_commit",
-                "patch": "my patch",
-                "test_patch": "my test_patch",
-                "problem_statement": "my problem_statement",
-                "hints_text": "",
-                "created_at": "my created_at",
-                "version": "4.3",
-                "FAIL_TO_PASS": "[]",
-                "PASS_TO_PASS": "[]",
-                "environment_setup_commit": "my environment_setup_commit",
-                "difficulty": "my difficulty",
-                "responses_create_params": {"input": []},
-                "response": {
-                    "output": [],
-                    "id": "",
-                    "created_at": 0,
-                    "model": "",
-                    "object": "response",
-                    "parallel_tool_calls": False,
-                    "tool_choice": "auto",
-                    "tools": [],
-                },
-                "subset": "my subset",
-                "split": "my split",
+        payload = {
+            "repo": "astropy/astropy",
+            "instance_id": "my instance_id",
+            "base_commit": "my base_commit",
+            "patch": "my patch",
+            "test_patch": "my test_patch",
+            "problem_statement": "my problem_statement",
+            "hints_text": "",
+            "created_at": "my created_at",
+            "version": "4.3",
+            "FAIL_TO_PASS": "[]",
+            "PASS_TO_PASS": "[]",
+            "environment_setup_commit": "my environment_setup_commit",
+            "difficulty": "my difficulty",
+            "responses_create_params": {"input": []},
+            "response": {
+                "output": [],
+                "id": "",
+                "created_at": 0,
+                "model": "",
+                "object": "response",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
             },
+            "subset": "my subset",
+            "split": "my split",
+        }
+        monkeypatch.setattr(
+            "resources_servers.swebench.app.monotonic",
+            MagicMock(side_effect=([10.0, 13.5] if seeded else []) + [100.0, 105.0, 120.0]),
         )
+        if seeded:
+            seed_response = client.post("/seed_session", json=payload)
+            assert seed_response.status_code == 200
+        res = client.post("/verify", json=payload)
         assert res.status_code == 200
+        assert res.json()["eval_sandbox_start_time_taken"] == 5.0
+        if seeded:
+            assert res.json()["seed_sandbox_start_time_taken"] == 3.5
+        else:
+            assert "seed_sandbox_start_time_taken" not in res.json()
+        assert server._session_id_to_sandbox_start_time == {}
         observation = res.json()["verifier_sandbox_observation"]
         assert observation.pop("wall_time_s") >= 0
         assert observation == {

@@ -18,6 +18,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import sqlite3
 import sys
 import tempfile
@@ -27,13 +28,14 @@ from copy import deepcopy
 from functools import cache
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import perf_counter, time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
 from fastapi import Request
+from numpy import percentile
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
@@ -623,6 +625,9 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_run_stdout: str
     opencode_run_stderr: str
     opencode_finished: bool
+    opencode_runtime: float = Field(
+        description="Wall-clock seconds awaiting the sandbox install-and-run command, excluding export and verification."
+    )
     opencode_export_found: bool
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
@@ -639,6 +644,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Summarize measured command runtimes in seconds across scored rollouts."""
+        runtimes = [
+            value
+            for task in tasks
+            for rollout in task
+            if isinstance(value := rollout.get("opencode_runtime"), (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ]
+        metrics = super().compute_metrics(tasks)
+        if runtimes:
+            metrics.update({f"p{p}/opencode_runtime": float(percentile(runtimes, p)) for p in (50, 90)})
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Include runtime percentiles alongside the default headline metrics."""
+        return super().get_key_metrics(agent_metrics) | {
+            key: agent_metrics[key] for key in ("p50/opencode_runtime", "p90/opencode_runtime") if key in agent_metrics
+        }
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -1018,6 +1045,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
+        run_started = perf_counter()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -1027,6 +1055,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        finally:
+            opencode_runtime = perf_counter() - run_started
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -1214,6 +1244,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_runtime": opencode_runtime,
             "opencode_attachment_count": len(attachments),
         }
         if collect_observations:

@@ -36,6 +36,10 @@ set -euo pipefail
 # Four TP1 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=4 NUM_NODES=1
 # Disaggregated pools also support two TP2 replicas per node with VLLM_ENGINES_PER_NODE=2.
 # Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
+# Multi-node decode with independent prefill: VLLM_DECODE_ENGINES_PER_NODE=1,
+# NUM_DECODE_NODES=2 and VLLM_DECODE_ARGS+=(--data-parallel-size 8 --data-parallel-size-local 4).
+# Each decode node serves its four local ranks; the launcher assigns the shared
+# DP address/port and starting ranks automatically. Keep router intra-node DP at 1.
 # SAVE_WARMED_CONTAINER=/shared/images/warmed.sqsh runs startup only (omit eval args),
 # collects all nodes' FlashInfer autotuning caches, compiled JIT modules, CuTe-DSL
 # file caches, and vLLM startup plans inside one image, exports it, and exits.
@@ -244,6 +248,8 @@ export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
 source "$VLLM_CONFIG"
 
+# With --input / ++input_jsonl_fpath, prepare validates the file and skips
+# dataset preparation; eval run then uses that file without collating a split.
 gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -451,6 +457,52 @@ fi
 
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
+
+# One API endpoint per decode node can front a shared multi-node DP group.
+# Multiple independent engines deliberately replace the model's DP arguments,
+# and coupled mode manages both tiers' ranks separately below.
+decode_distributed_args=()
+if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == independent ]] && \
+    (( $VLLM_DECODE_ENGINES_PER_NODE == 1 )); then
+    decode_dp_size=1
+    decode_dp_local=""
+    decode_dp_option=""
+    for arg in \${VLLM_COMMON_ARGS[@]+"\${VLLM_COMMON_ARGS[@]}"} \${VLLM_DECODE_ARGS[@]+"\${VLLM_DECODE_ARGS[@]}"}; do
+        if [[ -n "\$decode_dp_option" ]]; then
+            printf -v "\$decode_dp_option" '%s' "\$arg"
+            decode_dp_option=""
+            continue
+        fi
+        case "\$arg" in
+            (--data-parallel-size|-dp) decode_dp_option=decode_dp_size ;;
+            (--data-parallel-size=*|-dp=*) decode_dp_size=\${arg#*=} ;;
+            (--data-parallel-size-local|-dpl) decode_dp_option=decode_dp_local ;;
+            (--data-parallel-size-local=*|-dpl=*) decode_dp_local=\${arg#*=} ;;
+        esac
+    done
+    decode_dp_local=\${decode_dp_local:-\$decode_dp_size}
+    if [[ -n "\$decode_dp_option" || ! "\$decode_dp_size" =~ ^[1-9][0-9]*$ || ! "\$decode_dp_local" =~ ^[1-9][0-9]*$ ]]; then
+        echo 'ERROR: Decode DP sizes must be positive integers.' >&2
+        exit 1
+    fi
+    if (( decode_dp_size > decode_dp_local )); then
+        if (( decode_dp_size != $NUM_DECODE_NODES * decode_dp_local )); then
+            echo 'ERROR: Decode data-parallel-size must equal NUM_DECODE_NODES * data-parallel-size-local.' >&2
+            exit 1
+        fi
+        if [[ "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
+            echo 'ERROR: Multi-node decode DP requires ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1; vLLM balances local ranks.' >&2
+            exit 1
+        fi
+        if (( SLURM_PROCID >= $NUM_PREFILL_NODES )); then
+            decode_distributed_args=(
+                --data-parallel-start-rank "\$(( (SLURM_PROCID - $NUM_PREFILL_NODES) * decode_dp_local ))"
+                --data-parallel-address "\${nodes[$NUM_PREFILL_NODES]}"
+                --data-parallel-rpc-port $DECODE_DP_RPC_PORT
+            )
+        fi
+    fi
+fi
 
 # The model config can opt prefill into a short, API-triggered GPU trace.
 # Keep profiler setup here so decode, evaluation, and aggregated workers are unaffected.
@@ -696,14 +748,11 @@ MOONCAKE_CONFIG
     # W0924 18:25:48.906106 1830563 worker_pool.cpp:477] Worker: Cannot make connection for endpoint: 10.109.24.46:15741@mlx5_2, pausing peer rail and retrying through an alternate peer RNIC
     export MC_TE_FILTERS=mlx5_0,mlx5_1,mlx5_3,mlx5_4
 
-    # custom_mooncake_version.sh bakes the fork and its native dependencies into
-    # the image. The PyPI distribution owns the same files and would overwrite it.
+    # Use Mooncake and its native dependencies already installed in the image.
     mooncake_manifest=/opt/mooncake-build.env
     if [[ -f "\$mooncake_manifest" ]]; then
         echo "Using image-local Mooncake build:"
         cat "\$mooncake_manifest"
-    else
-        uv pip install --system mooncake-transfer-engine-cuda13==0.3.13.post1
     fi
     python3 -c 'from mooncake.engine import TransferEngine; from mooncake.store import MooncakeDistributedStore'
 
@@ -1162,6 +1211,7 @@ print(json.dumps(config))
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
         serve_decode $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            \${decode_distributed_args[@]+"\${decode_distributed_args[@]}"} \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
     fi
