@@ -123,7 +123,7 @@ def read_codex_observations(
     )
 
 
-def _session_transcripts(transcript: str | None) -> list[tuple[dict, str]]:
+def _session_transcripts(transcript: str | None) -> list[tuple[dict, str]] | None:
     sessions = []
     metadata = None
     lines = []
@@ -136,10 +136,10 @@ def _session_transcripts(transcript: str | None) -> list[tuple[dict, str]]:
             if metadata is not None:
                 sessions.append((metadata, "\n".join(lines)))
             elif lines:
-                return []  # No reliable boundary for the preceding records.
+                return None  # No reliable boundary for the preceding records.
             metadata = event.get("payload")
             if not isinstance(metadata, dict) or not isinstance(metadata.get("id"), str) or not metadata["id"]:
-                return []
+                return None
             lines = []
         lines.append(line)
     if metadata is not None:
@@ -186,11 +186,13 @@ def parse_codex_observations(
 ) -> AgentObservationBundle:
     """Keep Codex thread contexts separate and link children using session metadata."""
     sessions = _session_transcripts(transcript)
-    roots = [meta["id"] for meta, _ in sessions if meta.get("source") in ("exec", "cli")]
-    ids = [meta["id"] for meta, _ in sessions]
+    roots = [meta["id"] for meta, _ in (sessions or []) if meta.get("source") in ("exec", "cli")]
+    ids = [meta["id"] for meta, _ in (sessions or [])]
     if len(roots) != 1 or len(set(ids)) != len(ids):
         fallback_gaps = list(gaps or [])
-        if sessions:
+        if (sessions is None or sessions) and not any(
+            gap.code == "subagent_hierarchy_unavailable" for gap in fallback_gaps
+        ):
             fallback_gaps.append(ObservationGap(code="subagent_hierarchy_unavailable"))
         return _parse_codex_transcript(
             transcript,

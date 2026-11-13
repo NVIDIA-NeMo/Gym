@@ -449,3 +449,20 @@ def test_child_compaction_keeps_ownership_and_invalid_parent_is_explicit(parent)
     assert owners["episode.child"].model_calls == event.model_calls
     assert event.model_calls[0].response_id == "summary"
     assert any(g.code == "subagent_hierarchy_unavailable" for g in bundle.gaps) == (parent != "root")
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"id": ""}, {"id": 42}])
+def test_local_reader_marks_malformed_session_boundaries(tmp_path, metadata):
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    events = [
+        {"type": "session_meta", "payload": {"id": "root", "source": "exec"}},
+        {"type": "session_meta", "payload": metadata},
+        {
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+        },
+    ]
+    (directory / "native.jsonl").write_text("\n".join(json.dumps(event) for event in events))
+    bundle = read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False)
+    assert any(gap.code == "subagent_hierarchy_unavailable" for gap in bundle.gaps)
