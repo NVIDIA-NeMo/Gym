@@ -130,9 +130,10 @@ _MIN_COMPLETION_TOKENS = 1024
 # on long-context servers can degrade output quality for reasoning models.
 _DEFAULT_MAX_COMPLETION_TOKENS_CAP = 64000
 
-# Prompt tokens counted per image_url part: a vision model encodes an image into a bounded number of tokens, not
-# one per three base64 characters; completion_token_buffer absorbs the difference.
-_IMAGE_TOKEN_ESTIMATE = 1536
+# Default prompt tokens counted per image_url part: a vision model encodes an image into a bounded number of tokens,
+# not one per three base64 characters. A model that spends more than this on an image takes the difference out of
+# completion_token_buffer, so the buffer has to cover N_images * (real - estimate); both are agent config fields.
+_DEFAULT_IMAGE_TOKEN_ESTIMATE = 1536
 
 # ---------------------------------------------------------------------------
 # Thinking-overrun recovery
@@ -166,7 +167,12 @@ _TRUNCATION_RECOVERY_NUDGE = (
 def _without_images(
     messages: list[NeMoGymChatCompletionMessageParam],
 ) -> tuple[list[NeMoGymChatCompletionMessageParam], int]:
-    """The messages without their image_url parts, and how many parts were dropped (estimator only)."""
+    """The messages without their image_url parts, and how many parts were dropped (estimator only).
+
+    Out of scope: stirrup serializes a video block as ``{"type": "file", "file": {"file_data": "data:video/mp4;base64,..."}}``
+    (``stirrup.clients.utils.content_to_openai``), not as ``image_url``, so it is still counted by its characters
+    (one token per three base64 characters). That predates the image estimate and is left as it was.
+    """
     counted: list[NeMoGymChatCompletionMessageParam] = []
     images = 0
     for message in messages:
@@ -187,6 +193,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self,
         *args: Any,
         completion_token_buffer: int = 1000,
+        image_token_estimate: int = _DEFAULT_IMAGE_TOKEN_ESTIMATE,
         temperature: float = 1.0,
         top_p: float = 0.95,
         enable_thinking: bool = True,
@@ -202,6 +209,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         if min_completion_tokens < 1:
             raise ValueError("min_completion_tokens must be at least 1")
         self._completion_token_buffer = completion_token_buffer
+        self._image_token_estimate = image_token_estimate
         self._temperature = temperature
         self._top_p = top_p
         self._enable_thinking = enable_thinking
@@ -305,7 +313,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         ``completion_token_buffer``.
         """
         counted_messages, images = _without_images(self._messages_for_estimator_count(messages))
-        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3 + images * _IMAGE_TOKEN_ESTIMATE
+        total = len(json.dumps(counted_messages, ensure_ascii=False)) // 3 + images * self._image_token_estimate
         if tools:
             try:
                 total += len(json.dumps(to_openai_tools(tools))) // 3
