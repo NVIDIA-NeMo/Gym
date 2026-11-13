@@ -72,6 +72,10 @@ class TestRegistryLookup:
     def test_a_registered_name_is_recognized(self) -> None:
         assert is_registered("judge_failed")
 
+    def test_a_provider_safety_refusal_has_its_own_model_kind(self) -> None:
+        assert is_registered(failure_kinds.MODEL_SAFETY_REFUSAL)
+        assert failure_kinds.MODEL_SAFETY_REFUSAL == "model_safety_refusal"
+
     def test_an_unregistered_name_is_not(self) -> None:
         assert not is_registered("something_invented")
 

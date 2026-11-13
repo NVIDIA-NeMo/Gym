@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
@@ -31,6 +32,10 @@ from responses_api_agents.claude_code_agent.observability import extract_claude_
 
 
 LOG = logging.getLogger(__name__)
+
+
+def with_final_newline(events: str) -> str:
+    return events if not events or events.endswith("\n") else events + "\n"
 
 
 class HarnessProcessInfo(BaseModel):
@@ -103,6 +108,35 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
+    # Where to copy the stream-json output in the sandbox; the session directory is removed at close.
+    transcript_path: str | None = None
+    # CLAUDE_CONFIG_DIR, with the native conversation: fixed at the first activation, so a resume finds it.
+    config_dir: str | None = None
+    # Activations rearmed with ``begin_resume`` after the first one.
+    resumes: int = 0
+    # The stream-json events of the activations before the current one, held on the host for the response and the
+    # transcript Gym writes.
+    earlier_events: str = ""
+    # Gym could not replace the verifier transcript, so the file at transcript_path may be the agent's.
+    transcript_unavailable: bool = False
+
+    def claude_config_dir(self) -> str:
+        """Claude Code's config directory: the first activation's ``config``, kept across resumes."""
+        if self.config_dir is None:
+            self.config_dir = f"{self.session.session_dir}/config"
+        return self.config_dir
+
+    async def begin_resume(self, *, timeout: float) -> None:
+        """Rearm the stopped harness in the same sandbox for a ``claude --resume`` of its conversation."""
+        root = self.claude_config_dir().removesuffix("/config")
+        directory = f"{root}/resume-{self.resumes + 1}"
+        await self.session.begin_activation(session_dir=directory, timeout=timeout)
+        result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        if result.return_code or result.error_type:
+            raise RuntimeError(f"Cannot prepare the Claude Code resume directory: {result.stderr}")
+        await self.session.sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+        # Counted only once rearmed: a resume that could not start never ran.
+        self.resumes += 1
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage runner input using the shared file-transfer utility."""
@@ -162,7 +196,10 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Stage the invocation and return the runner command."""
         payload = dict(payload)
-        await self.upload_json("config/settings.json", payload.pop("settings"))
+        settings = payload.pop("settings")
+        if not self.resumes:
+            # A resume reads the settings the first activation put in the config directory it keeps.
+            await self.upload_json("config/settings.json", settings)
         mcp_config = payload.pop("mcp_config")
         if mcp_config is not None:
             await self.upload_json("mcp.json", mcp_config)
@@ -182,6 +219,25 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def copy_transcript(self, path: str, events: str) -> None:
+        """Write the conversation's events to ``path`` for a task verifier that reads the harness transcript.
+
+        Gym writes the events it holds for every activation, replacing whatever the activation left at ``path``.
+        When that fails, ``transcript_unavailable`` is set: the file at ``path`` may then be the agent's.
+        """
+        self.transcript_unavailable = True
+        parent = quote(str(Path(path).parent))
+        result = await self.session.sandbox.exec(f"mkdir -p {parent} && rm -rf -- {quote(path)}", timeout_s=60)
+        if result.return_code or result.error_type:
+            LOG.warning("Could not prepare the Claude transcript at %s: %s", path, (result.stderr or "")[-2000:])
+            return
+        try:
+            await upload_text(self.session.sandbox, path=path, text=self.earlier_events + with_final_newline(events))
+        except Exception:
+            LOG.warning("Could not write the Claude transcript to %s", path, exc_info=True)
+            return
+        self.transcript_unavailable = False
+
     async def collect_artifacts(self) -> ClaudeCodeArtifacts:
         """Copy dedicated stdout and transcripts after confirmed harness termination."""
         try:
@@ -193,6 +249,8 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         except Exception as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Claude runner returned no events: {(self.stderr or logs)[-16000:]}") from error
+        if self.transcript_path:
+            await self.copy_transcript(self.transcript_path, events)
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:
@@ -202,7 +260,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         directory = self.session.session_dir
         try:
             result = await self.session.sandbox.exec(
-                f"tar -czf {quote(directory + '/transcripts.tar.gz')} -C {quote(directory + '/config')} projects",
+                f"tar -czf {quote(directory + '/transcripts.tar.gz')} -C {quote(self.claude_config_dir())} projects",
                 timeout_s=30,
             )
             if result.return_code or result.error_type:

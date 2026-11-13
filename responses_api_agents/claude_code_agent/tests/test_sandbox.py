@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import SandboxObservation
 from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
 
@@ -363,6 +364,30 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
     assert state.runtime_info.pid == 123
     assert len(state.stderr) == 16000
     state.session.read_output_log.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_artifact_capture_copies_the_transcript_before_the_session_directory_goes(monkeypatch):
+    exec_ = AsyncMock(return_value=result(code=0))
+    written = {}
+
+    async def upload_text(sandbox, *, path, text):
+        written[path] = text
+
+    monkeypatch.setattr(adapter, "upload_text", upload_text)
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", sandbox=SimpleNamespace(exec=exec_)),
+        transcript_path="/logs/agent/claude-code.txt",
+    )
+    read = AsyncMock(side_effect=lambda name: {"events.jsonl": "{}\n", "stderr.log": "", "runtime.json": "{}"}[name])
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "read_text", read)
+
+    await state.collect_artifacts()
+
+    assert exec_.await_args_list[0].args[0] == "mkdir -p /logs/agent && rm -rf -- /logs/agent/claude-code.txt"
+    assert written == {"/logs/agent/claude-code.txt": "{}\n"}
 
 
 @pytest.mark.asyncio
@@ -767,3 +792,398 @@ async def test_close_distinguishes_borrowed_release_from_confirmed_termination(c
     remote.disconnect.assert_awaited_once()
     assert close.cleanup_confirmed is confirmed
     assert close.model_dump(mode="json")["cleanup_confirmed"] is confirmed
+
+
+def _events(*events: dict) -> str:
+    return "\n".join(map(json.dumps, events))
+
+
+def refused(session_id: str = "sess-1", message_id: str = "msg-refused") -> str:
+    """Claude Code's stream when the provider's safety filter ends a response: its error frame keeps stop_reason."""
+    return _events(
+        {"type": "system", "subtype": "init", "session_id": session_id},
+        {
+            "type": "assistant",
+            "message": {
+                "id": message_id,
+                "stop_reason": "refusal",
+                "content": [{"type": "text", "text": "API Error: the model's safeguards flagged this message"}],
+            },
+        },
+        {"type": "result", "subtype": "success", "is_error": True, "usage": {"input_tokens": 5, "output_tokens": 1}},
+    )
+
+
+def finished(session_id: str = "sess-1") -> str:
+    return _events(
+        {"type": "system", "subtype": "init", "session_id": session_id},
+        {
+            "type": "assistant",
+            "message": {"id": "msg-done", "stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]},
+        },
+        {"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 7, "output_tokens": 2}},
+    )
+
+
+def test_a_resumed_activation_that_timed_out_still_counts_its_tokens():
+    """F22: the first activation's result covers its own messages only; a resume killed before its result adds its
+    assistant messages' usage."""
+    resumed_without_result = _events(
+        {"type": "system", "subtype": "init", "session_id": "sess-1"},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg-long",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1000, "output_tokens": 300},
+                "content": [{"type": "text", "text": "working"}],
+            },
+        },
+    )
+
+    _, metadata = app.parse_stream_json(refused() + "\n" + resumed_without_result)
+
+    assert (metadata["input_tokens"], metadata["output_tokens"]) == (5 + 1000, 1 + 300)
+
+
+def test_the_parser_counts_provider_refusals_and_whether_one_ended_the_session():
+    _, metadata = app.parse_stream_json(refused())
+    assert metadata["safety_refusals"] == 1
+    assert metadata["ended_on_safety_refusal"] is True
+    assert metadata["session_id"] == "sess-1"
+    _, metadata = app.parse_stream_json(refused() + "\n" + finished())
+    assert metadata["safety_refusals"] == 1 and metadata["ended_on_safety_refusal"] is False
+    _, metadata = app.parse_stream_json(finished())
+    assert "safety_refusals" not in metadata and "ended_on_safety_refusal" not in metadata
+
+
+def resumable_state() -> adapter.ClaudeCodeSandboxSession:
+    return adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(
+            troxy_failed=False,
+            troxy_base_url=None,
+            token_capture=lambda: None,
+            session_dir="/tmp/session",
+            workdir="/app",
+            cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
+            artifacts=None,
+            cleanup_confirmed=True,
+            closing=False,
+        ),
+    )
+
+
+async def _counting_resume(self, *, timeout):
+    self.resumes += 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resumes", [0, 1])
+async def test_a_refusal_resumes_the_conversation_only_when_configured(monkeypatch, resumes):
+    instance = agent(anthropic_base_url="https://model.example", refusal_resumes=resumes)
+    state = resumable_state()
+    execute = AsyncMock(side_effect=[adapter.ClaudeCodeArtifacts(refused()), adapter.ClaudeCodeArtifacts(finished())])
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "begin_resume", _counting_resume)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    response = await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+    if not resumes:
+        # Off by default: Claude Code's exit stands, and the response still says it ended on a refusal (F23).
+        assert execute.await_count == 1
+        assert response.metadata == {
+            "safety_refusals": "1",
+            "safety_refusal_resumes": "0",
+            "ended_on_safety_refusal": "true",
+        }
+        return
+    assert execute.await_count == 2
+    first, second = (call.args[0]["command"] for call in execute.await_args_list)
+    assert "--resume" not in first
+    assert second[second.index("--resume") + 1] == "sess-1"
+    assert second[-1] == instance.config.refusal_resume_prompt
+    assert execute.await_args_list[1].kwargs["timeout"] <= execute.await_args_list[0].kwargs["timeout"]
+    # The response covers both activations and says the conversation went on.
+    assert response.output[-1].content[0].text == "done"
+    assert response.metadata == {
+        "safety_refusals": "1",
+        "safety_refusal_resumes": "1",
+        "ended_on_safety_refusal": "false",
+    }
+    assert state.claude_config_dir() == "/tmp/session/config"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first_activation_s, timed_out, resumed_timeout",
+    [(200.0, False, 400.0), (560.0, False, None), (100.0, True, None)],
+    ids=["resume-gets-the-time-left", "too-little-time-left", "activation-timed-out"],
+)
+async def test_a_refusal_resume_runs_only_within_the_activations_time_left(
+    monkeypatch, first_activation_s, timed_out, resumed_timeout
+):
+    """The resume shares the activation's one deadline: it gets exactly the time left, and none when under a minute
+    is left or the refused activation itself timed out."""
+    instance = agent(anthropic_base_url="https://model.example", refusal_resumes=1, timeout=600)
+    state = resumable_state()
+    state.session.cleanup["timed_out"] = timed_out
+    clock = [1000.0]
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock[0])
+    outcomes = iter([refused(), finished()])
+
+    async def execute(self, payload, *, timeout, close_timeout):
+        clock[0] += first_activation_s
+        return adapter.ClaudeCodeArtifacts(next(outcomes))
+
+    timeouts = []
+
+    async def recording(self, payload, *, timeout, close_timeout):
+        timeouts.append(timeout)
+        return await execute(self, payload, timeout=timeout, close_timeout=close_timeout)
+
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", recording)
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "begin_resume", _counting_resume)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    response = await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+    if resumed_timeout is None:
+        assert timeouts == [600]
+        assert response.metadata["ended_on_safety_refusal"] == "true"
+    else:
+        assert timeouts == [600, resumed_timeout]
+        assert response.metadata["ended_on_safety_refusal"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_spent_resumes_leave_the_session_ended_on_a_refusal(monkeypatch):
+    instance = agent(anthropic_base_url="https://model.example", refusal_resumes=2)
+    state = resumable_state()
+    execute = AsyncMock(
+        side_effect=[adapter.ClaudeCodeArtifacts(refused(message_id=f"msg-{index}")) for index in range(3)]
+    )
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "begin_resume", _counting_resume)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    response = await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+    assert execute.await_count == 3
+    assert response.metadata == {
+        "safety_refusals": "3",
+        "safety_refusal_resumes": "2",
+        "ended_on_safety_refusal": "true",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_resume_rearms_the_harness_and_keeps_the_conversation_directory():
+    session = SimpleNamespace(
+        session_dir="/tmp/session",
+        begin_activation=AsyncMock(),
+        sandbox=SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock()),
+    )
+    session.begin_activation.side_effect = lambda *, session_dir, timeout: setattr(session, "session_dir", session_dir)
+    state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
+    assert state.claude_config_dir() == "/tmp/session/config"
+
+    await state.begin_resume(timeout=5)
+
+    assert session.session_dir == "/tmp/session/resume-1" and state.resumes == 1
+    assert state.claude_config_dir() == "/tmp/session/config"
+    assert session.sandbox.upload.await_args.args[1] == "/tmp/session/resume-1/harness_runner.sh"
+
+
+@pytest.mark.asyncio
+async def test_each_activation_rewrites_the_verifier_transcript_from_the_events_gym_holds(monkeypatch):
+    """F24: the agent can rewrite the transcript during a resumed activation; Gym's copy replaces it each time."""
+    written = []
+
+    async def upload_text(sandbox, *, path, text):
+        written.append(text)
+
+    monkeypatch.setattr(adapter, "upload_text", upload_text)
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()))
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", sandbox=remote),
+    )
+
+    await state.copy_transcript("/logs/agent/claude-code.txt", '{"first":1}')
+    state.earlier_events = '{"first":1}\n'
+    await state.copy_transcript("/logs/agent/claude-code.txt", '{"resumed":2}\n')
+
+    assert written == ['{"first":1}\n', '{"first":1}\n{"resumed":2}\n']
+    assert all("rm -rf -- /logs/agent/claude-code.txt" in call.args[0] for call in remote.exec.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["rm", "upload"])
+async def test_a_transcript_gym_could_not_replace_is_reported_unavailable(monkeypatch, failing):
+    """S1: when the rm or the upload fails, the file at the path may be the agent's, so the response says so."""
+    instance = agent(anthropic_base_url="https://model.example")
+
+    async def upload_text(sandbox, *, path, text):
+        if failing == "upload":
+            raise RuntimeError("upload failed")
+
+    monkeypatch.setattr(adapter, "upload_text", upload_text)
+    exec_result = result(code=1) if failing == "rm" else result()
+    state = resumable_state()
+    state.session.sandbox = SimpleNamespace(exec=AsyncMock(return_value=exec_result))
+
+    async def execute(self, payload, *, timeout, close_timeout):
+        await self.copy_transcript("/logs/agent/claude-code.txt", finished())
+        return adapter.ClaudeCodeArtifacts(finished())
+
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    response = await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+    assert response.metadata == {"transcript_unavailable": "true"}
+
+
+STUB_CLAUDE = """#!/bin/bash
+# Stand-in for the claude CLI: records its argv and the config it saw, then replays one prepared activation.
+echo "$*" >> "$CLAUDE_CONFIG_DIR/argv.log"
+n=$(ls "$CLAUDE_CONFIG_DIR"/activation.* 2>/dev/null | wc -l)
+touch "$CLAUDE_CONFIG_DIR/activation.$n"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects"
+if [ -f "$(dirname "$0")/sleep.$n" ]; then sleep 60; fi
+cat "$(dirname "$0")/events.$n.jsonl"
+"""
+
+
+async def _real_resume_session(tmp_path, *activations: str, sleep_on: int | None = None):
+    from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+
+    work = tmp_path / "work"
+    work.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "claude").write_text(STUB_CLAUDE)
+    (runtime / "claude").chmod(0o755)
+    for index, events in enumerate(activations):
+        (runtime / f"events.{index}.jsonl").write_text(events + "\n")
+    if sleep_on is not None:
+        (runtime / f"sleep.{sleep_on}").write_text("")
+    sandbox = AsyncSandbox(create_provider({"local": {}}))
+    await sandbox.start(SandboxSpec(workdir=str(work)))
+    directory = str(tmp_path / "session")
+    (tmp_path / "session" / "config").mkdir(parents=True)
+    await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+    session = SandboxSession(
+        sandbox=sandbox, session_dir=directory, workdir=str(work), harness="Claude Code", owns_sandbox=True
+    )
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(workdir=str(work)),
+        runtime=str(runtime),
+        session=session,
+        transcript_path=str(tmp_path / "logs" / "claude-code.txt"),
+    )
+    instance = agent(
+        anthropic_base_url="https://model.example", refusal_resumes=2, timeout=600, session_close_timeout_seconds=20
+    )
+    return instance, state, session
+
+
+@pytest.mark.asyncio
+async def test_a_refused_session_resumes_through_the_real_sandbox_session(tmp_path):
+    instance, state, session = await _real_resume_session(tmp_path, refused(), finished())
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    response = await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+    config = tmp_path / "session" / "config"
+    argv = (config / "argv.log").read_text().splitlines()
+    assert len(argv) == 2 and "--resume" not in argv[0]
+    assert "--resume sess-1" in argv[1] and argv[1].endswith(instance.config.refusal_resume_prompt)
+    assert response.metadata == {
+        "safety_refusals": "1",
+        "safety_refusal_resumes": "1",
+        "ended_on_safety_refusal": "false",
+    }
+    # The resumed activation kept Claude's config: its native transcripts were collected from there.
+    assert session.artifacts is not None and session.artifacts.transcripts is not None
+    transcript = (tmp_path / "logs" / "claude-code.txt").read_text().splitlines()
+    assert len(transcript) == len(refused().splitlines()) + len(finished().splitlines())
+    await state.close(20)
+    assert session.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_cannot_start_keeps_the_refused_activation_as_the_result(tmp_path, monkeypatch):
+    """F21: a rearm that fails after begin_resume reset the session (here the runner upload) is not a failed
+    rollout, and it is not counted as a resume."""
+    instance, state, session = await _real_resume_session(tmp_path, refused(), finished())
+    upload = session.sandbox.upload
+
+    async def failing_resume_upload(source, destination, *args, **kwargs):
+        if "/resume-" in destination:
+            raise RuntimeError("upload failed")
+        return await upload(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(session.sandbox, "upload", failing_resume_upload)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    response = await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+    assert len((tmp_path / "session" / "config" / "argv.log").read_text().splitlines()) == 1
+    # As with resumes off: the refusal's own outcome, not a sandbox error.
+    assert response.status == "failed"
+    assert response.metadata == {
+        "safety_refusals": "1",
+        "safety_refusal_resumes": "0",
+        "ended_on_safety_refusal": "true",
+    }
+    # One activation's usage, not the refused events counted twice, and the refused activation's sandbox receipt.
+    assert response.usage.input_tokens == 5 and response.usage.output_tokens == 1
+    (observation,) = [record for record in state.observations.records if isinstance(record, SandboxObservation)]
+    assert observation.exit_code == 0
+    await state.close(20)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_refused_because_the_session_is_closing_fails_the_call(monkeypatch):
+    instance = agent(anthropic_base_url="https://model.example", refusal_resumes=1)
+    state = resumable_state()
+    monkeypatch.setattr(
+        adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=adapter.ClaudeCodeArtifacts(refused()))
+    )
+
+    async def closing_resume(self, *, timeout):
+        self.session.closing = True
+        raise RuntimeError("Claude Code sandbox session is closing")
+
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "begin_resume", closing_resume)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await instance._sandbox_response(state, body, prompt="Question", system=None)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_resume_keeps_the_first_activation_and_stops_the_harness(tmp_path):
+    instance, state, session = await _real_resume_session(tmp_path, refused(), finished(), sleep_on=1)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Question"}])
+    state.task = asyncio.create_task(instance._sandbox_response(state, body, prompt="Question", system=None))
+    resumed = tmp_path / "session" / "config" / "activation.1"
+    for _ in range(100):
+        if resumed.exists():
+            break
+        await asyncio.sleep(0.1)
+    # The resume is running (its stub sleeps) when close cancels it.
+    assert resumed.exists() and session.session_dir.endswith("/resume-1")
+
+    await state.close(20)
+
+    assert state.task.cancelled() or isinstance(state.task.exception(), BaseException)
+    # The verifier transcript still holds the first activation, refusal frame included, for the task's judges.
+    assert "msg-refused" in (tmp_path / "logs" / "claude-code.txt").read_text()
+    assert state.observations is not None and session.cleanup_confirmed

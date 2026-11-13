@@ -70,9 +70,10 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     output_items: list[Any] = []
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
     buffered_think: str | None = None
-    # Token usage. The result event carries the run's cumulative usage, so it is the total when present.
-    # Without one (the CLI was killed or timed out), sum the assistant messages' usage, once per message:
-    # stream-json emits one assistant event per content block, each repeating its message's usage.
+    # Token usage, per activation (a resumed conversation concatenates several). An activation's result event
+    # carries its cumulative usage. Without one (the CLI was killed or timed out), sum its assistant messages'
+    # usage, once per message: stream-json emits one assistant event per content block, each repeating its
+    # message's usage. A result settles the messages before it.
     result_usage: Optional[tuple[int, int]] = None
     message_usage: dict[str, tuple[int, int]] = {}
     unidentified_input = unidentified_output = 0
@@ -81,6 +82,9 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     compacting_sessions: set[str] = set()
     compaction_attempts: list[dict[str, str]] = []
     terminal_response_id: Optional[str] = None
+    refused_messages: set[str] = set()
+    ended_on_refusal = False
+    session_id: Optional[str] = None
 
     for event in raw_events:
         etype = event.get("type")
@@ -93,6 +97,8 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                     previous[0] + int(usage.get("input_tokens") or 0),
                     previous[1] + int(usage.get("output_tokens") or 0),
                 )
+                message_usage = {}
+                unidentified_input = unidentified_output = 0
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
@@ -117,6 +123,13 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
             else:
                 unidentified_input += counts[0]
                 unidentified_output += counts[1]
+            if not event.get("parent_tool_use_id"):
+                # Claude Code's error frame for a provider safety refusal keeps the provider's stop_reason.
+                ended_on_refusal = message.get("stop_reason") == "refusal"
+                if ended_on_refusal:
+                    refused_messages.add(
+                        message_id if isinstance(message_id, str) else f"refusal-{len(refused_messages)}"
+                    )
 
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
             # but never let their text or tool ids testify to the main conversation's terminal call.
@@ -207,27 +220,29 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                     )
                 )
 
+        elif etype == "system" and event.get("subtype") == "init":
+            if isinstance(event.get("session_id"), str) and event["session_id"]:
+                session_id = event["session_id"]
+
         elif etype == "system" and event.get("subtype") == "status":
-            session_id = event.get("session_id")
-            if not isinstance(session_id, str) or not session_id:
+            status_session = event.get("session_id")
+            if not isinstance(status_session, str) or not status_session:
                 continue
             if event.get("status") == "compacting":
-                compacting_sessions.add(session_id)
+                compacting_sessions.add(status_session)
                 continue
             compact_result = event.get("compact_result")
             if compact_result in {"failed", "success"}:
                 if compact_result == "failed":
-                    compaction_attempts.append({"invocation_id": session_id, "outcome": "failed"})
-                compacting_sessions.discard(session_id)
+                    compaction_attempts.append({"invocation_id": status_session, "outcome": "failed"})
+                compacting_sessions.discard(status_session)
 
     compaction_attempts.extend(
-        {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
+        {"invocation_id": compacting, "outcome": "unknown"} for compacting in compacting_sessions
     )
-    if result_usage is not None:
-        total_input, total_output = result_usage
-    else:
-        total_input = unidentified_input + sum(counts[0] for counts in message_usage.values())
-        total_output = unidentified_output + sum(counts[1] for counts in message_usage.values())
+    settled_input, settled_output = result_usage or (0, 0)
+    total_input = settled_input + unidentified_input + sum(counts[0] for counts in message_usage.values())
+    total_output = settled_output + unidentified_output + sum(counts[1] for counts in message_usage.values())
     metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
     if terminal_response_id:
         metadata["terminal_response_id"] = terminal_response_id
@@ -235,6 +250,11 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         metadata["num_turns"] = num_turns
     if compaction_attempts:
         metadata["compaction_attempts"] = compaction_attempts
+    if session_id:
+        metadata["session_id"] = session_id
+    if refused_messages:
+        metadata["safety_refusals"] = len(refused_messages)
+        metadata["ended_on_safety_refusal"] = ended_on_refusal
     metadata.update(result_metadata)
     return output_items, metadata
 

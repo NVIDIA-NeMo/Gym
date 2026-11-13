@@ -99,6 +99,8 @@ MODEL_TRANSPORT_ERROR = "model_transport_error"
 MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
+# The provider's safety classifier ended the response (stop_reason "refusal"), not the model's own answer.
+MODEL_SAFETY_REFUSAL = "model_safety_refusal"
 
 # --- environment: one episode attempt ------------------------------------------------ #
 ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
@@ -235,6 +237,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_TRANSPORT_ERROR,
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_CONTEXT_LIMIT,
+        MODEL_SAFETY_REFUSAL,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
