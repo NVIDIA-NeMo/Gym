@@ -20,6 +20,46 @@ echo "Head node IP address: $HEAD_NODE_IP"
 gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 export GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"
 export GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"
+# service declaration: which model service runs on which node and GPUs
+_gym_decl_gpus=$(timeout 120 srun --overlap --wait=0 --nodelist="${gym_nodes[0]},${gym_nodes[1]},${gym_nodes[2]},${gym_nodes[3]},${gym_nodes[4]},${gym_nodes[5]},${gym_nodes[6]},${gym_nodes[7]},${gym_nodes[8]},${gym_nodes[9]}" --nodes=10 --ntasks=10 bash -c 'out=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader); s=$?; if [ "$s" -ne 0 ]; then echo "$SLURMD_NODENAME, nvidia-smi-exit, $s"; else printf "%s\n" "$out" | sed "s/^/$SLURMD_NODENAME, /"; fi' 2>>logs/service_declaration-$SLURM_JOB_ID.log)
+_gym_decl_status=$?
+case "$_gym_decl_status" in
+    0) _gym_decl_reason="nvidia-smi listed no GPUs in a job step on this node" ;;
+    124) _gym_decl_reason="the GPU listing step timed out after 120 s" ;;
+    *) _gym_decl_reason="the GPU listing step failed with exit status $_gym_decl_status" ;;
+esac
+_gym_decl_nodes=()
+_gym_decl_rows=()
+_gym_decl_node() {
+    # <node index> <hostname> <services on the node> <its GPU-using services>
+    local host="$2" rows smi_status reason
+    rows=$(printf '%s\n' "$_gym_decl_gpus" | GYM_DECL_SERVICES="$4" awk -F' *, *' -v host="$host" -v node="$1" '
+        $1 == host && $2 ~ /^[0-9]+$/ && $3 ~ /^GPU-[0-9A-Za-z-]+$/ {
+            printf "%s{\"gpu_uuid\":\"%s\",\"node_index\":%d,\"gpu_index\":%d,\"services\":%s}", sep, $3, node, $2, ENVIRON["GYM_DECL_SERVICES"]
+            sep = ","
+        }')
+    if [ -n "$rows" ]; then
+        _gym_decl_rows+=("$rows")
+        _gym_decl_nodes+=("{\"index\":$1,\"hostname\":\"$host\",\"services\":$3,\"gpus_observed\":true}")
+    else
+        smi_status=$(printf '%s\n' "$_gym_decl_gpus" | awk -F' *, *' -v host="$host" '$1 == host && $2 == "nvidia-smi-exit" && $3 ~ /^[0-9]+$/ {print $3; exit}')
+        reason="$_gym_decl_reason"
+        [ -n "$smi_status" ] && reason="nvidia-smi failed on this node with exit status $smi_status"
+        _gym_decl_nodes+=("{\"index\":$1,\"hostname\":\"$host\",\"services\":$3,\"gpus_observed\":false,\"gpus_unavailable_reason\":\"$reason\"}")
+    fi
+}
+_gym_decl_node 0 "${gym_nodes[0]}" '["gym-vllm/policy-prefill","gym-vllm/policy"]' '["gym-vllm/policy-prefill"]'
+_gym_decl_node 1 "${gym_nodes[1]}" '["gym-vllm/policy-prefill"]' '["gym-vllm/policy-prefill"]'
+_gym_decl_node 2 "${gym_nodes[2]}" '["gym-vllm/policy-prefill"]' '["gym-vllm/policy-prefill"]'
+_gym_decl_node 3 "${gym_nodes[3]}" '["gym-vllm/policy-prefill"]' '["gym-vllm/policy-prefill"]'
+_gym_decl_node 4 "${gym_nodes[4]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
+_gym_decl_node 5 "${gym_nodes[5]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
+_gym_decl_node 6 "${gym_nodes[6]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
+_gym_decl_node 7 "${gym_nodes[7]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
+_gym_decl_node 8 "${gym_nodes[8]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
+_gym_decl_node 9 "${gym_nodes[9]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
+mkdir -p /jobs/swebench_pro/artifacts
+printf '{"schema_version":1,"status":"available","run_id":%s,"benchmark":%s,"slurm_job_id":"%s","services":%s,"nodes":[%s],"gpus":[%s]}\n' '"jobs"' '"swebench_pro"' "$SLURM_JOB_ID" '[{"service":"gym-vllm/policy-prefill","gym_service":"policy-prefill","kind":"vllm_pd_tier","pool_role":"prefill","node_pool":"prefill","node_indices":[0,1,2,3],"port":8001,"tensor_parallel_size":4,"pipeline_parallel_size":1,"data_parallel_size":4,"ray_serve":false,"server_per_node":false,"gpus_per_node":4},{"service":"gym-vllm/policy-decode","gym_service":"policy-decode","kind":"vllm_pd_tier","pool_role":"decode","node_pool":"decode","node_indices":[4,5,6,7,8,9],"port":8002,"tensor_parallel_size":4,"pipeline_parallel_size":1,"data_parallel_size":6,"ray_serve":false,"server_per_node":false,"gpus_per_node":4},{"service":"gym-vllm/policy","gym_service":"policy","kind":"vllm_pd_router","pool_role":"router","node_indices":[0],"port":8000,"gpus_per_node":0}]' "$(IFS=,; echo "${_gym_decl_nodes[*]}")" "$(IFS=,; echo "${_gym_decl_rows[*]}")" > /jobs/swebench_pro/artifacts/rollouts_service_declaration.json.tmp && cp /jobs/swebench_pro/artifacts/rollouts_service_declaration.json.tmp logs/service_declaration-$SLURM_JOB_ID.json && mv /jobs/swebench_pro/artifacts/rollouts_service_declaration.json.tmp /jobs/swebench_pro/artifacts/rollouts_service_declaration.json
 
 # service: otel_collector
 env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml &

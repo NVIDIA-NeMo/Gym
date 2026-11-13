@@ -172,6 +172,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     record_resubmit_offset as record_resubmit_offset,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.service_declaration import record_service_declaration
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -4246,6 +4247,8 @@ executions → not run again (left to recovery)
         from nemo_gym.rollouts.rollout_health import _remove_health_reports
 
         _remove_health_reports(output_fpath)
+        # Which service ran where: kept when `gym eval submit` wrote it for this job, else recorded as unavailable.
+        record_service_declaration(output_fpath)
         self._store = store
         self._collection_started = True
         persisted_success_keys = self._landed_keys
