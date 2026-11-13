@@ -1857,6 +1857,8 @@ def test_a_graded_row_keeps_the_search_fields_and_echoes_its_request(workdir, se
 
 import anyio
 
+from nemo_gym.core import FailureHeader
+
 
 async def _seed_agent_run(server: SearchResourcesServer) -> AsyncSandbox:
     """Seed an agent's own /run under the cookie session "run", and return the sandbox it started."""
@@ -1967,3 +1969,45 @@ async def test_an_agent_run_stop_that_hangs_times_out_and_keeps_its_sandbox(work
     with pytest.raises(TimeoutError):
         release.result()
     assert server._agent_run_sandboxes == {"run": sandbox}
+
+
+@pytest.mark.parametrize("seed", ["episode", "agent_run"])
+def test_a_verify_whose_stop_fails_keeps_its_grade_and_the_stop_is_retried(
+    workdir, started, monkeypatch, caplog, seed
+) -> None:
+    """A stop before the judge that fails is logged and leaves the grade as it is. verifying() tries again on exit and
+    reports session_release_failed; the server keeps the sandbox, and the episode's close, or the shutdown after an
+    agent run, stops it."""
+    server = _server(workdir)
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    attempts: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        attempts.append(self)
+        if len(attempts) <= 2:
+            raise RuntimeError("the provider refused the stop")
+        await real_stop(self)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
+        session_id = "session" if seed == "episode" else next(iter(server._agent_run_sandboxes))
+        monkeypatch.setattr(AsyncSandbox, "stop", stop)
+        judge = _mock_judge(server, CORRECT)
+
+        with caplog.at_level("WARNING"):
+            verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY if seed == "episode" else {})
+
+        assert verified.status_code == 200, verified.text
+        assert _graded(verified) == (1.0, False, None, True) and judge.await_count == 1
+        # The stop before the judge and verifying()'s on exit both failed, and the server still holds the sandbox.
+        assert attempts == [started[0][0]] * 2 and server.has_session_state(session_id)
+        assert "before grading" in caplog.text
+        report = FailureHeader.decode(verified.headers)
+        assert report is not None and "session_release_failed" in {e.failure_kind for e in report.events.values()}
+        if seed == "episode":
+            assert client.post("/close_session", json=_close()).status_code == 200
+            assert attempts == [started[0][0]] * 3 and not server.has_session_state(session_id)
+    # No close follows an agent run: the shutdown stops its sandbox.
+    assert attempts == [started[0][0]] * 3 and not server.has_session_state(session_id)
