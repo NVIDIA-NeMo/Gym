@@ -14,6 +14,9 @@ maintainers:
 - DanialTaheri
 intended_use:
 - evaluation
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

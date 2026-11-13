@@ -16,6 +16,9 @@ maintainers:
 - yaoyu-33
 intended_use:
 - evaluation
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

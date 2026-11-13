@@ -15,6 +15,9 @@ maintainers:
 - cmunley1
 intended_use:
 - training
+requirements:
+  gpu: true
+  network: public
 reward:
   range:
   - 0.0
