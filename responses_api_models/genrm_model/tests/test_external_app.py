@@ -72,8 +72,9 @@ def test_entrypoint_imports_neither_ray_nor_vllm() -> None:
         check=True,
     )
     modules = json.loads(result.stdout.strip().splitlines()[-1])
-    # Without Ray in this venv nothing could import it, and the check below would pass for any entrypoint.
-    assert "ray" in modules["installed"]
+    # Without Ray and vLLM installed, an entrypoint that imports them behind a try/except would pass this test,
+    # so require them. This server's venv installs both, so only the entrypoint's own imports can keep them out.
+    assert modules["installed"] == ["ray", "vllm"]
     assert modules["imported"] == []
 
 
