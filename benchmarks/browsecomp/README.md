@@ -124,6 +124,29 @@ a failures-sidecar row (`agent_run_error`, which a resume retries) only with `++
 without it, the first one ends the run. A session-preset failure is a failure row either way. Run both presets with
 `++route_failures_to_sidecar=true` and compare the failure rows by `failure_kind`.
 
+### Time limits
+
+The session preset's limits, from admission to cleanup:
+
+| Limit | Setting | Enforced by | On expiry |
+| --- | --- | --- | --- |
+| Admission | `queue_timeout_seconds: 86400` for an episode waiting for one of `max_concurrent_episodes: 64` slots | `single_agent_turn_legacy` | A non-terminal failure row ("Episode admission timed out") |
+| Sandbox start | `sandbox_config.ready_timeout_s: 1200` | The sandbox provider, at `opencode_search`'s seed | The seed answers 500: a non-terminal failure row |
+| OpenCode setup | `sandbox_install_timeout_seconds: 600` for each setup command | `opencode_agent`, at its seed | The agent's seed answers 500: a non-terminal failure row |
+| Run | `timeout: 21600`, from when the session's one activation holds a concurrency slot | `opencode_agent` | OpenCode is stopped; the `incomplete` response is graded on what the run produced, not masked |
+| Agent close | `session_close_timeout_seconds: 300` for each phase of the close, and `cleanup_timeout_seconds` for the whole close | `opencode_agent`; `single_agent_turn_legacy` for the whole close | The close fails, and the episode with it, before `/verify`: a non-terminal failure row |
+| Episode | `default_episode_timeout_seconds: 25200`, from the seed through `/verify` | `single_agent_turn_legacy` | A non-terminal failure row ("Episode timed out"); the cleanup then closes both sessions |
+| Judge | `judge_timeout_seconds: 300` for the first attempt and `judge_retry_timeout_seconds: 120` for each later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: masked, `judge_unparseable`. No reply at all: a `judge_failed` failures-sidecar row |
+| Cleanup | `cleanup_timeout_seconds: 600` for each step after the episode: the agent's close if it is still open, then the resources server's | `single_agent_turn_legacy` | Logged ("Episode cleanup timed out") and recorded in the row's failure report as `session_release_failed`; the row keeps its result, and a sandbox still running is stopped when the server shuts down or reclaimed after `ttl_s` |
+| Sandbox lifetime | `sandbox_config.ttl_s: 27000` | The sandbox provider | The provider reclaims the sandbox |
+
+The episode deadline covers the seed, the run, the agent's close, and `/verify`'s plugin-log read (60 s at most) and
+sandbox stop (120 s at most). After a run that used its whole budget it leaves the judge roughly 20 minutes: a judge
+that needs longer, which its attempts allow, times the episode out. A job time limit shorter than the run budget ends
+such runs first. `ttl_s` stays above the deadline plus two cleanup steps, since `/verify` stops the sandbox before it
+calls the judge and, after a deadline, the cleanup stops it. The relay preset has no episode deadline: its agent's
+`sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
+
 ### Run the session preset
 
 The preset needs these values, none of which has a default, so every command that loads it, `gym eval prepare`

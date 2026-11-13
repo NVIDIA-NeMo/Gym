@@ -178,6 +178,9 @@ browsecomp_opencode_environment_server:
       # 20 minutes: a slower judge (its retries can take far longer) times the episode out, a non-terminal failure that
       # a resumed run retries. A job time limit shorter than the run budget ends such runs first.
       default_episode_timeout_seconds: 25200
+      # Bounds the agent's close, and each cleanup step after the episode: the agent's close if it is still open, then
+      # the resources server's, which stops the sandbox. benchmarks/browsecomp/README.md lists each time limit and what
+      # its expiry does.
       cleanup_timeout_seconds: 600
 
 # The judge, named by the run: use browsecomp_opencode.yaml's endpoint and model to compare the two presets. Pinned to
