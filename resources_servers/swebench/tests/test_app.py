@@ -26,7 +26,6 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 from swebench.harness.run_evaluation import make_test_spec
 
-from docker.models.containers import ExecResult
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle
 from resources_servers.swebench.app import (
@@ -117,7 +116,8 @@ class TestApp:
         )
         assert res.status_code == 200
         observation = res.json()["verifier_sandbox_observation"]
-        assert observation.pop("wall_time_s") >= 0
+        wall_time_s = observation["wall_time_s"]
+        assert wall_time_s >= 0
         assert observation == {
             "kind": "sandbox",
             "role": "verifier",
@@ -125,11 +125,14 @@ class TestApp:
             "sandbox_id": "sandbox-123",
             "outcome": "completed",
             "stage": "verification",
+            "wall_time_s": wall_time_s,
             "exit_code": None,
             "cpu_time_s": None,
             "peak_memory_mib": None,
             "resource_usage_source": None,
             "error_type": None,
+            "error_message": None,
+            "failure_id": None,
             "observed_client_interval_s": None,
             "teardown_confirmed": None,
             "cleanup_errors": [],
@@ -513,6 +516,18 @@ class TestImageAssets:
             line for line in upstream if not line.startswith("curl ")
         ]
 
+    def test_a_javascript_row_without_image_assets_builds_the_upstream_script(self) -> None:
+        # SWE-bench Multilingual JavaScript rows have no image_assets.
+        # SWE-bench's JavaScript harness reads the key whenever it is present,
+        # so the request's null default must not reach it.
+        row = {key: value for key, value in CHART_ROW.items() if key != "image_assets"}
+        request = SWEBenchVerifyRequest.model_validate(row)
+        assert request.image_assets is None
+
+        script = make_server()._make_test_spec(request).eval_script_list
+
+        assert script == make_test_spec(row, namespace="swebench").eval_script_list
+
     def test_image_assets_stored_as_a_json_string_are_read(self) -> None:
         request = SWEBenchVerifyRequest.model_validate(
             CHART_ROW | {"image_assets": json.dumps(CHART_ROW["image_assets"])}
@@ -584,22 +599,23 @@ class TestImageAssets:
         }
 
 
-class _FakeEvalContainer:
-    """The verification sandbox as `run_instance` sees it: every command succeeds and the tests print `test_output`."""
+class _FakeEvalSandbox:
+    """A verification sandbox in which every command succeeds. The evaluation script prints `tests_printed` on stdout
+    and bash's trace, test-output markers included, on stderr, which a sandbox returns separately."""
 
-    def __init__(self, test_output: str) -> None:
-        self.test_output = test_output
+    def __init__(self, tests_printed: str) -> None:
+        self.tests_printed = tests_printed
 
-    async def copy(self, src: Path, dest: Any) -> None:
+    async def exec(self, command: str, **kwargs: Any) -> SandboxExecResult:
+        if command != "/bin/bash /eval.sh":
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+        trace = "+ : '>>>>> Start Test Output'\n+ ./node_modules/.bin/karma start\n+ : '>>>>> End Test Output'\n"
+        return SandboxExecResult(stdout=self.tests_printed, stderr=trace, return_code=0)
+
+    async def upload(self, local_path: Path, remote_path: str) -> None:
         pass
 
-    async def exec_run(self, command: str, workdir: str | None = None, user: str | None = None) -> ExecResult:
-        return ExecResult(exit_code=0, output=b"")
-
-    async def exec_run_with_timeout(self, command: str, timeout: int | None) -> tuple[str, bool, float]:
-        return self.test_output, False, 1.0
-
-    async def cleanup(self) -> None:
+    async def stop(self) -> None:
         pass
 
 
@@ -609,14 +625,14 @@ class TestFailureOnlyGrading:
     async def _run(self, monkeypatch: MonkeyPatch, tmp_path: Path, tests_printed: str) -> dict:
         monkeypatch.chdir(tmp_path)  # run_instance writes its logs under the working directory
         test_spec = make_server()._make_test_spec(SWEBenchVerifyRequest.model_validate(CHART_ROW))
+        container = DockerContainer(id="run-id", instance_id=test_spec.instance_id)
+        container._inner_container = _FakeEvalSandbox(tests_printed)
         return await run_instance(
             test_spec=test_spec,
             pred={"instance_id": test_spec.instance_id, "model_patch": "diff --git a/src/a.js b/src/a.js\n"},
             rm_image=False,
             force_rebuild=False,
-            client=_FakeEvalContainer(
-                f"+ : '>>>>> Start Test Output'\n{tests_printed}\n+ : '>>>>> End Test Output'\n"
-            ),
+            client=container,
             run_id="run-id",
         )
 

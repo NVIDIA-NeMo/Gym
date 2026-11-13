@@ -27,6 +27,14 @@ judge_model_api_key: ""
 judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
 ```
 
+## Provider call limits
+
+A search or browse call to Tavily or Exa ends. A rate limit (429, 502, 503, 504 or 520) is waited out without
+spending the call's three attempts, but only for `provider_rate_limit_wait_seconds` (default 600) per call. Past
+that, rate limits count as attempts and the call fails with the provider's last error, which the agent sees as a
+tool error. `0` spends attempts from the first rate limit. `provider_request_timeout_seconds` (default 120) is the
+total time of one HTTP attempt, and a dropped connection is retried at most three times within an attempt.
+
 ## Workspace sandbox
 
 Workspace tools require a configured sandbox provider. Add these fields under the resources server's
@@ -89,7 +97,7 @@ Each rollout has its own session: the provider-call metrics that `/verify` repor
 - **An agent's `/run`.** `/seed_session` takes the flat row and keys the session by the cookie. `/verify` releases the sandbox and removes the workspace, since this path sends no close. The sandbox starts with the first `bash_command`, not at the seed. A run whose agent never sends `/verify`, as `browsecomp_agent` does after a timeout or an aborted run, keeps its sandbox until the provider's `ttl_s` reclaims it or the server shuts down; Enroot ignores `ttl_s`. Sandboxed runs should use the Environment Server path, which always closes.
 
 `/close_session`, and `/verify` on the `/run` path, stop the owned sandbox before deleting its workspace and metrics.
-A failed stop leaves the session available for a retry. `/verify` of an Environment Server session releases nothing,
+A failed stop leaves the session available for a retry. `/verify` of an episode session releases nothing,
 so a re-sent verify still finds the session's metrics and its sandbox failure; its close releases them. Tool calls,
 verification, and close are serialized per session, so cleanup cannot delete files while a tool is running. Releasing
 a session drops its metrics, unless `dump_session_id_to_metrics_on_exit` keeps them for the dump at shutdown.

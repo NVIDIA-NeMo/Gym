@@ -131,14 +131,14 @@ tool. Tasks explored through `api_search` spend a search and a fetch on every en
 calling it, so long ones need more:
 `+officeenv_simple_agent.responses_api_agents.simple_agent.max_steps=150`.
 
-## Environment Server episodes and MCP
+## Episode sessions and MCP
 
 An Environment Server (for example `single_agent_turn`) seeds with a `ResourcesSeedSessionRequest`
 whose `task_data` holds the row's fields other than `responses_create_params`. The OfficeEnv
 session takes the request's `resources_session_id`, which the seed's session cookie also names;
 the agent calls the same `POST /<tool_name>` routes with that cookie, and `/verify` grades the
 episode as for an Agent. Seeding the same ID again for the same episode returns the same session,
-and `/close_session` frees a world that verification has not. After a close, a seed of the same
+and `/close_session` releases a world that verification has not. After a close, a seed of the same
 ID is refused for `session_close_retry_window_seconds`. These seeds carry no tool list, so they
 report no `tool_drift`.
 
@@ -151,7 +151,7 @@ separator; a seed whose tools differ from what the endpoint serves fails with 40
 
 ## Verification
 
-`/verify` grades the final state of the rollout's session and frees it. Besides `reward` (a
+`/verify` grades the final state of the rollout's session and releases it. Besides `reward` (a
 guarded weighted mean by default), it returns:
 
 - `officeenv_checks`: per check, pass or fail with observed and expected values;

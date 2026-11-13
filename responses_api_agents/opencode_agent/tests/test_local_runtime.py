@@ -15,6 +15,7 @@ from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
+from nemo_gym.models import HARNESS_NOTES
 from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, OpenCodeAgentRunRequest
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
@@ -182,3 +183,10 @@ async def test_invalid_session_never_falls_back_to_local(marker: str | None) -> 
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert error.value.status_code == 409
     local.assert_not_awaited()
+
+
+def test_token_capture_knows_the_notes_of_the_default_opencode_version() -> None:
+    """Token capture recognizes OpenCode's notes by their exact text, which is checked per release."""
+    notes = [note for note in HARNESS_NOTES if note.harness == "opencode"]
+    assert notes
+    assert all(OPENCODE_VERSION in note.checked_versions for note in notes)

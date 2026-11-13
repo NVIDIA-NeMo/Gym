@@ -6,7 +6,13 @@ import pytest
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON
-from nemo_gym.core import MODEL_POLICY_RESPONSE_TIMEOUT
+from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    FailureBoundary,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    failure_report_for,
+)
 from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
 
 
@@ -96,8 +102,10 @@ async def test_unproven_timeout_never_counts_as_zero_or_verifies(damage):
     "case,retryable",
     [
         ("connector", True),
+        ("handshake_timeout", True),
         ("upload_only", False),
         ("wrong_type", False),
+        ("read_timeout", False),
         ("unknown_upload", False),
         ("after_upload", False),
         ("earlier_uploaded", False),
@@ -119,6 +127,10 @@ async def test_only_proven_unconnected_selected_operation_retains_retry(case, re
     events = {"selected": event}
     if case == "upload_only":
         event.pop("foreign_error")
+    elif case == "handshake_timeout":
+        event["foreign_error"]["exception_type"] = "aiohttp.client_exceptions.ConnectionTimeoutError"
+    elif case == "read_timeout":
+        event["foreign_error"]["exception_type"] = "aiohttp.client_exceptions.SocketTimeoutError"
     elif case == "wrong_type":
         event["foreign_error"]["exception_type"] = "TimeoutError"
     elif case == "unknown_upload":
@@ -238,3 +250,226 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     (verify,) = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
     assert verify["response"]["status"] == "failed"
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
+
+
+RETRYABLE_PROVIDER_KINDS = [
+    "provider_unavailable",
+    "provider_io_timeout",
+    "provider_status_unavailable",
+    "provider_command_outcome_unknown",
+    "provider_protocol_error",
+    "provider_request_failed",
+    "provider_internal_error",
+    "provider_pty_unavailable",
+]
+
+
+def _provider_failure_response(kind, *, http_status):
+    """The failed response a sandbox agent returns: its own event caused by the provider's event, as the agent builds it."""
+    provider = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=kind,
+        failure_reason="Sandbox provider request failed",
+        http_status=http_status,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1"),
+        operation="sandbox.exec",
+        stage="agent",
+    )
+    reported = NgFailureEvent(
+        boundary=FailureBoundary.AGENT,
+        failure_kind=kind,
+        failure_reason=provider.failure_reason,
+        operation="agent.run",
+        stage="agent",
+    )
+    reported.__cause__ = provider
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        output=[],
+        error={"code": "server_error", "message": provider.failure_reason},
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind).model_dump_json()},
+        failure_report=failure_report_for(reported).model_dump(mode="json"),
+    )
+    return provider, response
+
+
+@pytest.mark.parametrize("kind", RETRYABLE_PROVIDER_KINDS)
+@pytest.mark.parametrize("http_status", [None, 404])
+@pytest.mark.parametrize("configured", [None, "fail"])
+async def test_provider_failure_from_an_agent_follows_the_configured_kind_rule_not_the_cause_status(
+    kind, http_status, configured
+):
+    """Transient provider kinds retry the episode by default; a configured kind rule decides instead, and the cause stays."""
+    environment, client = _environment_server()
+    policy = {"by_failure_kind": {kind: configured}} if configured else {}
+    terminal = configured == "fail"
+    environment.config.agent_outcome_policy = environment.config.agent_outcome_policy.model_validate(policy)
+    provider, response = _provider_failure_response(kind, http_status=http_status)
+    client.responses[2] = _Response(response)
+    del client.responses[4]
+    result = await environment.run_request(_request())
+    assert result.result is None and result.failure.terminal is terminal
+    assert result.failure.failure_kind == kind
+    kept = result.failure_report.events[provider.event_id]
+    assert (kept.failure_kind, kept.http_status, kept.operation) == (kind, http_status, "sandbox.exec")
+    assert kept.details == provider.details
+    chain, event_id = [], result.failure_report.failure_id
+    while event_id is not None:
+        chain.append(event_id)
+        event_id = result.failure_report.events[event_id].cause_id
+    assert chain[-1] == provider.event_id and len(chain) >= 2
+    assert not any(path == "/verify" for _, path, _ in client.calls)
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+async def test_session_verification_forwards_canonical_observations_without_changing_success(omitted):
+    from nemo_gym.core import (
+        PROVIDER_IO_TIMEOUT,
+        PROVIDER_OOM_KILLED,
+        FailureReport,
+        NgFailureEvent,
+        RequestFailureLog,
+        SandboxFailureDetails,
+        observe_failure,
+    )
+
+    environment, client = _environment_server()
+    cause = NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_IO_TIMEOUT, failure_reason="Read failed")
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Current workload OOMKilled",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
+    )
+    failure.__cause__ = cause
+    with RequestFailureLog.capture() as log:
+        if omitted:
+            log.MAX_EVENTS = 1
+        observe_failure(failure)
+        result = await environment.run_request(_request())
+
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    [verify] = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+    report = FailureReport.model_validate(verify["failure_report"])
+    assert report.failure_id is None
+    assert report.omitted is omitted
+    if omitted:
+        assert failure.event_id not in report.events
+    else:
+        assert report.events[failure.event_id].cause_id == cause.event_id
+        assert report.events[failure.event_id].details.sandbox_id == "sandbox-1"
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+async def test_checkpoint_restores_failure_reference_and_report_before_verification(omitted):
+    from nemo_gym.core import (
+        PROVIDER_OOM_KILLED,
+        FailureReport,
+        NgFailureEvent,
+        RequestFailureLog,
+        SandboxFailureDetails,
+        observe_failure,
+    )
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Current workload OOMKilled",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
+    )
+    observation = SandboxObservation(role="agent", stage="agent", outcome="oom", failure_id=failure.event_id)
+    with RequestFailureLog.capture() as original:
+        observe_failure(failure)
+        report = original.report.model_copy(update={"omitted": omitted})
+    response = _agent_response().model_copy(
+        update={
+            "failure_report": report.model_dump(mode="json"),
+            "metadata": {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
+        }
+    )
+    environment, client = _environment_server()
+    request = _request()
+    record = EpisodeRecord(
+        episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+        task_digest=task_digest(request.task.model_dump(mode="json")),
+        boundary={
+            "next": "verify",
+            "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
+            "response": response.model_dump(mode="json"),
+        },
+    )
+    participant = EnvironmentParticipant(mode="exported")
+    participant.restore_records([EpisodeRecord.model_validate_json(record.model_dump_json())])
+    environment._checkpoint = participant
+    del client.responses[:4]
+    with RequestFailureLog.capture() as restored:
+        assert not restored.report.events
+        result = await environment.run_request(request)
+        assert failure.event_id in restored.report.events
+    assert result.failure is None
+    [verify] = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+    forwarded = FailureReport.model_validate(verify["failure_report"])
+    reference = SandboxObservation.model_validate_json(
+        verify["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY]
+    )
+    assert forwarded.failure_id is None
+    assert forwarded.omitted is omitted
+    assert reference.failure_id == failure.event_id
+    assert forwarded.events[reference.failure_id].details.sandbox_id == "sandbox-1"
+    assert [path for _, path, _ in client.calls] == ["/verify", "/close_session"]
+
+
+@pytest.mark.parametrize("action", ["verify", "fail", "retry"])
+async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
+    from nemo_gym.agents import AgentOutcomePolicyConfig
+    from nemo_gym.core import PROVIDER_OOM_KILLED, FailureReport, NgFailureEvent, SandboxFailureDetails
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Current workload OOMKilled",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
+    )
+    observation = SandboxObservation(
+        role="agent",
+        stage="agent",
+        outcome="oom",
+        failure_id=failure.event_id,
+    )
+    report = FailureReport(events={failure.event_id: failure.event})
+    response = _agent_response().model_copy(
+        update={
+            "status": "failed",
+            "output": [],
+            "failure_report": report.model_dump(mode="json"),
+            "metadata": {
+                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=failure.failure_kind).model_dump_json(),
+                NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json(),
+            },
+        }
+    )
+    environment, client = _environment_server()
+    if action != "verify":
+        environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(
+            by_failure_kind={PROVIDER_OOM_KILLED: action}
+        )
+        del client.responses[4]
+    client.responses[2] = _Response(response.model_dump(mode="json"))
+    result = await environment.run_request(_request())
+    verified = any(path == "/verify" for _, path, _ in client.calls)
+    assert verified is (action == "verify")
+    if action == "verify":
+        assert result.failure is None
+        assert result.result.reward == 1.0  # The verifier's own verdict is retained.
+    else:
+        assert result.result is None
+        assert result.failure.terminal is (action == "fail")
+        partial = result.failure.partial_response
+        assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
+        saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert saved.failure_id == failure.event_id

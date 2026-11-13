@@ -61,7 +61,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.trajectory import SandboxObservation
-from nemo_gym.utils import bounded_text
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
@@ -404,8 +404,10 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
 
     def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
         test_spec = make_test_spec(
-            # This accepts a SWEbenchInstance which is identically our body.
-            body.model_dump(),
+            # This accepts a SWEbenchInstance: our body's instance fields, without the agent's request and response.
+            # SWE-bench reads some optional keys whenever they are present, such as image_assets for JavaScript,
+            # so an unset optional field is left out rather than sent as null.
+            body.model_dump(include=set(SWEBenchInstanceRequest.model_fields), exclude_none=True),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
@@ -416,17 +418,17 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
     async def seed_session(
         self, request: Request, body: SWEBenchSeedSessionRequest | ResourcesSeedSessionRequest
     ) -> SWEBenchSeedSessionResponse | ResourcesSeedSessionResponse:
-        """Create the task sandbox for a legacy instance body or a typed Environment Server seed.
+        """Create the task sandbox for an agent-run seed's instance body or an Environment Server's episode seed.
 
-        A typed seed returns ``sandbox_access`` with the serialized task sandbox and the image's working
-        directory; a legacy seed returns the sandbox handle.
+        An episode seed returns ``sandbox_access`` with the serialized task sandbox and the image's working
+        directory; an agent-run seed returns the sandbox handle.
         """
         if isinstance(body, ResourcesSeedSessionRequest):
             return await self.seed_task_sandbox_session(request, body, SWEBenchInstanceRequest)
         session_id = request.session[SESSION_ID_KEY]
         async with self._locked_task_session(session_id) as record:
-            if record.seed is not None or self._task_session_fence.closed_episode(session_id) is not None:
-                raise ResourcesSessionConflictError("A legacy seed cannot replace a typed resources session")
+            if record.seed is not None or session_id in self._task_session_fences:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
             await self._stop_task_sandbox(session_id)
             try:
                 record.workdir = await self._start_task_sandbox(session_id, body)
@@ -478,7 +480,7 @@ Stderr:
         self._session_id_to_seed_head.pop(session_id, None)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
-        """Grade the resources-owned sandbox, reusing the patch and verdict on typed retries."""
+        """Grade the resources-owned sandbox, reusing the patch and verdict on an episode session's retries."""
         return await self.verify_task_sandbox_session(
             request,
             body,
@@ -521,7 +523,7 @@ Stderr:
                 patch_extraction_failed = True
                 model_patch = ""
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            # A failed stop of a typed session retains the handle and captured patch for a retry.
+            # A failed stop of an episode session retains the handle and captured patch for a retry.
             await self.stop_task_sandbox_after_capture(session_id)
 
         verifier_sandbox_lifecycle_started_at = monotonic()
@@ -647,3 +649,6 @@ def _lost_session_response(
 
 if __name__ == "__main__":
     SwebenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SwebenchResourcesServer.run_webserver()  # noqa: F401

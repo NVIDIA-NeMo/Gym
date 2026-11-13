@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Grade a candidate in a fresh provider sandbox instead of on a Ray worker.
+"""Grade a candidate in a fresh provider sandbox.
 
 This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
 runs only in the sandbox, and the unchanged grading harness from ``lcb_integration/``, the same
-code the Ray path runs; nothing else from this server is uploaded. The upload and run go through
+grading code used for every candidate; nothing else from this server is uploaded. The upload and run go through
 ``nemo_gym.verification.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 Candidate failures (wrong answer, timeout, crash) come back as normal harness results.
@@ -39,7 +39,7 @@ from nemo_gym.verification import (
 
 _CODE_GEN_DIR = Path(__file__).parent
 _RUNNER = _CODE_GEN_DIR / "sandbox" / RUNNER_FILE
-# The exact grading code the Ray path runs, uploaded under the same relative paths so the runner can import it.
+# The grading harness, uploaded under the same relative paths so the runner can import it.
 _HARNESS_FILES = (
     "lcb_integration/__init__.py",
     "lcb_integration/correctness.py",

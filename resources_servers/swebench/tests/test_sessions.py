@@ -95,7 +95,7 @@ def session_server(monkeypatch: pytest.MonkeyPatch):
     return server, task, verifier, grader
 
 
-def test_typed_http_seed_reuses_sandbox_and_accepts_caller_assigned_task_id(session_server):
+def test_episode_seed_over_http_reuses_sandbox_and_accepts_caller_assigned_task_id(session_server):
     server, task, _, _ = session_server
     with TestClient(server.setup_webserver()) as client:
         body = _seed().model_dump(mode="json")
@@ -222,7 +222,7 @@ async def test_failed_handoff_retains_failed_cleanup_for_close_retry(session_ser
         await server.seed_session(_request(), _seed())
     assert server._session_id_to_sandbox["session"] is task
     assert server._task_sessions["session"].response is None
-    assert server._task_session_fence.closed_episode("session") is None
+    assert server._task_session_fences.get("session") is None
     await server.close_resources_session(_request(), _close())
     assert not server._session_id_to_sandbox
     assert not server._task_sessions
@@ -277,10 +277,10 @@ async def test_close_failure_keeps_session_and_does_not_fence(session_server):
     task.stop.side_effect = [RuntimeError("stop failed"), None]
     with pytest.raises(RuntimeError, match="stop failed"):
         await server.close_resources_session(_request(), _close())
-    assert server._task_session_fence.closed_episode("session") is None
+    assert server._task_session_fences.get("session") is None
     assert server._session_id_to_sandbox["session"] is task
     await server.close_resources_session(_request(), _close())
-    assert server._task_session_fence.closed_episode("session") == _seed().episode_id
+    assert server._task_session_fences.get("session") == _seed().episode_id
 
 
 async def test_close_cleanup_survives_anyio_cancellation(session_server):
@@ -401,7 +401,7 @@ async def test_close_waits_for_verification_and_keeps_failed_verifier_teardown(s
         with pytest.raises(RuntimeError, match="stop still failed"):
             await close
     assert server._verifier_sandboxes["session"] is verifier
-    assert server._task_session_fence.closed_episode("session") is None
+    assert server._task_session_fences.get("session") is None
     await server.close_resources_session(_request(), _close())
     assert not server._verifier_sandboxes
 
@@ -489,12 +489,13 @@ async def test_seed_head_is_recorded_after_the_anti_cheat_scrub(session_server):
     assert task.upload.await_args.args[1] == "/testbed/anti_cheat_setup.sh"
 
 
-def test_flat_seed_cannot_replace_a_typed_session(session_server):
+def test_agent_run_seed_cannot_replace_an_episode_session(session_server):
     server, task, _, _ = session_server
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
         flat = client.post("/seed_session", json=_seed().task_data)
         assert flat.status_code == 409, flat.text
+        assert "agent-run seed cannot replace an episode session" in flat.text
         task.stop.assert_not_awaited()
         server._create_sandbox.assert_awaited_once()
         assert client.post("/close_session", json=_close().model_dump(mode="json")).status_code == 200
@@ -600,7 +601,7 @@ def test_task_data_matches_the_instance_request():
     assert {n: f.annotation for n, f in TaskData.model_fields.items()} == {n: f.annotation for n, f in wire.items()}
 
 
-async def test_typed_seed_withholds_the_test_assets_from_the_task_sandbox_and_verify_uploads_them(session_server):
+async def test_episode_seed_withholds_the_test_assets_from_the_task_sandbox_and_verify_uploads_them(session_server):
     from resources_servers.swebench.tests.test_app import CHART_ROW, PNG_A, PNG_B
 
     server, _, _, _ = session_server
@@ -619,7 +620,7 @@ EXAMPLE_ROWS = [
 
 
 @pytest.mark.parametrize("row", EXAMPLE_ROWS, ids=lambda row: row["instance_id"])
-async def test_committed_rows_pass_the_typed_seed_and_verify_identity_check(session_server, row):
+async def test_committed_rows_pass_the_episode_seed_and_verify_identity_check(session_server, row):
     server, _, _, grader = session_server
     task_data = {key: value for key, value in row.items() if key != "responses_create_params"}
     seed = _seed().model_copy(update={"task_data": task_data})

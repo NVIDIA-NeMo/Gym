@@ -130,7 +130,7 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
     async def _invoke_graph(
         self, body: NeMoGymResponseCreateParamsNonStreaming, *, model_url_path: str
     ) -> NeMoGymResponse:
-        # Model cookies are independent of the agent and Resources Server session jars.
+        # Model cookies are independent of the agent and resources session jars.
         initial_state = await self.get_initial_state(body, {})
         initial_state["model_url_path"] = model_url_path
         final_state = await self.graph.ainvoke(initial_state)

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The typed resources sessions an Environment Server seeds and closes, next to the legacy /run seed."""
+"""The episode sessions an Environment Server seeds and closes, next to the agent-run seed."""
 
 import os
 from pathlib import Path
@@ -89,14 +89,14 @@ def _verify_body(answer: str) -> dict:
 
 
 @pytest.mark.parametrize("workspace", ["per_session", "none"])
-def test_typed_sessions_follow_the_session_contract(tmp_path: Path, workspace: str) -> None:
+def test_episode_sessions_follow_the_session_contract(tmp_path: Path, workspace: str) -> None:
     server = _server(tmp_path, workspace=workspace)
     check_resources_session_contract(
         server.setup_webserver(),
         ResourcesSeedSessionRequest.model_validate(_seed("contract-session")),
         keeps_state=True,
         holds_state=lambda resources_session_id: (
-            resources_session_id in server._typed_sessions or resources_session_id in server._session_workspaces
+            resources_session_id in server._episode_sessions or resources_session_id in server._session_workspaces
         ),
         verify_body=_verify_body("Answer: Paris Confidence: 90%"),
     )
@@ -142,12 +142,12 @@ def test_a_failed_workspace_removal_fails_the_close_and_a_retry_releases_it(
     # Not recorded as closed, so the workspace is still held for the caller's retry.
     assert workspace.exists()
     assert "resources-session" in server._session_workspaces
-    assert server._fence.closed_episode("resources-session") is None
+    assert server._fences.get("resources-session") is None
 
     monkeypatch.setattr(harness_app, "_remove_workspace", remove_workspace)
     assert client.post("/close_session", json=_close()).status_code == 200
     assert not workspace.exists()
-    assert server._fence.closed_episode("resources-session") == _EPISODE
+    assert server._fences.get("resources-session") == _EPISODE
 
 
 def test_a_seed_without_the_verify_fields_is_refused_as_final(tmp_path: Path) -> None:
@@ -163,7 +163,7 @@ def test_a_workspace_seed_refuses_an_id_that_is_not_a_directory_name(tmp_path: P
     response = client.post("/seed_session", json=_seed("../escape"))
     assert response.status_code == 422
     assert not (tmp_path / "escape").exists()
-    assert server._typed_sessions == {}
+    assert server._episode_sessions == {}
 
 
 def test_the_legacy_run_seed_and_verify_still_own_the_cookie_session(tmp_path: Path) -> None:
@@ -174,7 +174,7 @@ def test_the_legacy_run_seed_and_verify_still_own_the_cookie_session(tmp_path: P
     seed = client.post("/seed_session", json=row)
     assert seed.status_code == 200
     assert seed.json() == {}
-    assert server._typed_sessions == {}
+    assert server._episode_sessions == {}
     [sid] = server._session_workspaces
     assert (tmp_path / sid / "pages").is_dir()
 
@@ -234,7 +234,7 @@ def test_a_masked_verify_still_reports_a_timed_out_rollout(tmp_path: Path) -> No
 
 
 def test_a_caller_that_never_seeds_is_still_graded(tmp_path: Path) -> None:
-    """A verify whose session the fence never closed, here one nobody seeded, is graded from the response."""
+    """A verify for a session nobody closed, here one nobody seeded, is graded from the response."""
     client = TestClient(_server(tmp_path, workspace="per_session").setup_webserver(), raise_server_exceptions=False)
 
     verify = client.post("/verify", json=_verify_body("Answer: Paris Confidence: 90%"))

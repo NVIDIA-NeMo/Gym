@@ -10,14 +10,12 @@ code_gen:
       num_processes: 8
       unit_test_timeout_secs: 10
       debug: false
-      # Set to `sandbox` (with a provider config such as
-      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml) to run unit tests in a fresh
-      # sandbox per verification instead of on a Ray worker. num_processes then caps concurrent sandboxes.
-      # See the README ("Running unit tests in a sandbox") for a complete example config.
-      sandbox_provider: null
+      # Configure a sandbox provider and CODE_GEN_SANDBOX_IMAGE before starting.
+      # num_processes caps concurrent sandboxes; see the README for provider setup.
+      sandbox_provider: sandbox
       sandbox_config:
         image: ${oc.env:CODE_GEN_SANDBOX_IMAGE,null}
-        # One test runs at a time, as on a Ray worker. Memory stays above the harness's 4 GiB
+        # One test runs at a time. Memory stays above the harness's 4 GiB
         # RLIMIT_DATA so a memory-hungry candidate fails its test instead of killing the sandbox.
         resources:
           cpu: 1

@@ -12,22 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Environment Server sessions for SWE resources servers whose seed starts one task sandbox.
+"""Episode sessions for SWE resources servers whose seed starts one task sandbox.
 
 These servers give the agent a task sandbox at seed time. ``verify`` captures the agent's patch from that
-sandbox, stops it, and grades the patch in a fresh sandbox. ``SandboxSessionResourcesServer`` adds the typed
-half of the resources session contract (see ``SimpleResourcesServer.close_resources_session``) on top of that
+sandbox, stops it, and grades the patch in a fresh sandbox. ``SandboxSessionResourcesServer`` adds the episode
+session half of the resources session contract (see ``SimpleResourcesServer.close_resources_session``) on top of that
 lifecycle, so an Environment Server such as ``single_agent_turn`` can seed a task, hand the agent the task
 sandbox through ``sandbox_access``, verify, and close.
 
-A server subclasses it and keeps its legacy seed for agents that seed through ``/run``. It provides two hooks:
+A server subclasses it and keeps its agent-run seed for agents that seed through ``/run``. It provides two hooks:
 
 - ``_start_task_sandbox`` starts and prepares the task sandbox, registers it in ``_session_id_to_sandbox``
   as soon as it exists, and returns the directory the agent works in;
 - ``_forget_task_sandbox_state`` drops the other per-session state the server keeps, such as the
   untracked files the image ships.
 
-The server runtime routes typed requests to the worker that owns the session.
+The server runtime routes episode session requests to the worker that owns the session.
 """
 
 import asyncio
@@ -44,7 +44,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST
+from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
@@ -55,7 +55,8 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     SimpleResourcesServer,
 )
 
@@ -91,14 +92,14 @@ class _TaskSession:
 
 
 class SandboxSessionResourcesServer(SimpleResourcesServer):
-    """A resources server whose seed starts one task sandbox, serving typed resources sessions.
+    """A resources server whose seed starts one task sandbox, serving episode sessions.
 
     Task sandboxes live in ``_session_id_to_sandbox``, keyed by session ID. The config must have
     ``sandbox_provider`` and ``sandbox_config``.
 
     Seed, verify and close share a per-session lock. A session that is never closed expires after its
     sandbox's ``ttl_s`` (or ``DEFAULT_SESSION_LIFETIME_S``), but failed cleanup keeps ownership for a retry.
-    Closed-session fences use the server runtime's configured retry window.
+    Fences of closed sessions last the server runtime's close retry window.
     """
 
     def model_post_init(self, context: Any, /) -> None:
@@ -106,7 +107,10 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._verifier_sandboxes: dict[str, AsyncSandbox] = {}
         self._task_sessions: dict[str, _TaskSession] = {}
-        self._task_session_fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._task_session_locks = ResourcesSessionLocks()
+        self._task_session_fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
         self._open_task_sessions: dict[str, float] = {}
         self._busy_task_sessions: set[str] = set()
 
@@ -147,7 +151,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         await asyncio.gather(*(self._stop_abandoned_session(session_id, stopping) for session_id in session_ids))
 
     async def _stop_abandoned_session(self, session_id: str, stopping: asyncio.Semaphore) -> None:
-        async with stopping, self._task_session_fence.locked(session_id):
+        async with stopping, self._task_session_locks.locked(session_id):
             try:
                 await self._stop_session_sandboxes(session_id)
             except Exception:
@@ -165,11 +169,11 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
                 and expired_id not in self._busy_task_sessions
                 and expired_id not in self._session_id_to_sandbox
                 and expired_id not in self._verifier_sandboxes
-                and self._task_session_fence.closed_episode(expired_id) is None
+                and self._task_session_fences.get(expired_id) is None
             ):
                 self._task_sessions.pop(expired_id, None)
         await self._close_abandoned_task_sessions(monotonic())
-        async with self._task_session_fence.locked(session_id):
+        async with self._task_session_locks.locked(session_id):
             record = self._task_sessions.setdefault(session_id, _TaskSession())
             self._busy_task_sessions.add(session_id)
             try:
@@ -190,7 +194,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             record = self._task_sessions.get(session_id)
             if record is None or record.seed is None:
                 continue
-            async with self._task_session_fence.locked(session_id):
+            async with self._task_session_locks.locked(session_id):
                 # Requests that queued on this lock while another one retried the stop see its new deadline.
                 retry_deadline = self._open_task_sessions.get(session_id)
                 if (
@@ -209,7 +213,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
                     continue
                 self._open_task_sessions.pop(session_id, None)
                 # Keep the expired marker until the configured fence expires, for SESSION_EXPIRED verification.
-                self._task_session_fence.mark_closed(session_id, record.seed.episode_id)
+                self._task_session_fences.fence(session_id, record.seed.episode_id)
 
     def _session_lifetime_s(self) -> float:
         ttl_s = self.config.sandbox_config.get("ttl_s")
@@ -218,14 +222,14 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
     async def seed_task_sandbox_session(
         self, request: Request, body: ResourcesSeedSessionRequest, task_model: type[BaseModel]
     ) -> ResourcesSeedSessionResponse:
-        """Seed a typed session: start the task sandbox and hand it to the agent through ``sandbox_access``.
+        """Seed an episode session: start the task sandbox and hand it to the agent through ``sandbox_access``.
 
         Repeating the seed for the same episode and task returns the same sandbox. A seed for a closed
         session, or one that names another episode or task, is rejected.
         """
         session_id = body.resources_session_id
         async with self._locked_task_session(session_id) as record:
-            self._task_session_fence.raise_if_closed(session_id)
+            self._task_session_fences.raise_if_fenced(session_id)
             if record.expired:
                 raise ResourcesSessionConflictError("Resources session has expired")
             if record.seed is not None and record.seed != body:
@@ -285,12 +289,12 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         """
         session_id = body.resources_session_id
         async with self._locked_task_session(session_id) as record:
-            closed_episode = self._task_session_fence.closed_episode(session_id)
-            episode = closed_episode or (record.seed.episode_id if record.seed is not None else None)
+            fenced_episode = self._task_session_fences.get(session_id)
+            episode = fenced_episode or (record.seed.episode_id if record.seed is not None else None)
             if episode is not None and body.episode_id != episode:
                 raise ResourcesSessionConflictError("episode_id does not match the resources session")
             await self._stop_session_sandboxes(session_id)
-            self._task_session_fence.mark_closed(session_id, body.episode_id)
+            self._task_session_fences.fence(session_id, body.episode_id)
             self._task_sessions.pop(session_id, None)
             self._open_task_sessions.pop(session_id, None)
             if request.session.get(SESSION_ID_KEY) == session_id:
@@ -333,7 +337,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
     async def stop_task_sandbox_after_capture(self, session_id: str) -> None:
         """Stop the task sandbox once verify captured its patch; call inside the verify callback.
 
-        A typed session raises when the stop fails: the sandbox stays registered and a retried verify reuses the
+        An episode session raises when the stop fails: the sandbox stays registered and a retried verify reuses the
         captured patch. A session seeded through ``/run`` has no saved capture and no close, so a failed stop is
         logged and grading goes on; shutdown stops the sandbox that stays registered.
         """
@@ -361,7 +365,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         lost_response: Callable[[str, str], ResponseT],
         allow_seedless: bool = False,
     ) -> ResponseT:
-        """Serialize verification with close and replay a typed session's saved verdict.
+        """Serialize verification with close and replay an episode session's saved verdict.
 
         ``lost_response`` accepts a reason and failure kind, so each consumer can supply its required
         response fields. Seedless verification is reserved for golden-patch grading.
@@ -370,7 +374,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         async with self._locked_task_session(session_id) as record:
             if record.expired:
                 return lost_response("The task session has expired", SESSION_EXPIRED)
-            if self._task_session_fence.closed_episode(session_id) is not None:
+            if self._task_session_fences.get(session_id) is not None:
                 return lost_response("The resources session is closed", SESSION_LOST)
             if record.seed is not None:
                 if record.response is None or record.task is None:
@@ -409,7 +413,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
     async def capture_task_sandbox_patch[CaptureT](
         self, session_id: str, capture: Callable[[], Awaitable[CaptureT]]
     ) -> CaptureT:
-        """Save a typed session's captured patch before teardown; call inside the verify callback.
+        """Save an episode session's captured patch before teardown; call inside the verify callback.
 
         The consumer stops the task with ``stop_task_sandbox_after_capture`` after this returns, outside its
         extraction error handler. A failed stop or grading retry can then reuse the original capture.
@@ -424,11 +428,11 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         return result
 
     def _claim_task_sandbox(self, session_id: str) -> None:
-        """Mark a typed session's task sandbox as consumed by verify, and reject a repeated verify.
+        """Mark an episode session's task sandbox as consumed by verify, and reject a repeated verify.
 
-        A legacy session, seeded through ``/run``, has no typed record and is left as it was.
+        A session an agent's ``/run`` seeded has no episode record and is left as it was.
         """
-        self._task_session_fence.raise_if_closed(session_id)
+        self._task_session_fences.raise_if_fenced(session_id)
         record = self._task_sessions.get(session_id)
         if record is None or record.seed is None:
             return
@@ -440,7 +444,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
     async def _release_task_sandbox(self, session_id: str, sandbox: AsyncSandbox) -> None:
         """Stop a task sandbox verify already unregistered.
 
-        When the stop fails for an open typed session, the sandbox is registered again so its close retries.
+        When the stop fails for an open episode session, the sandbox is registered again so its close retries.
         """
         # Restore ownership before awaiting the provider, including for legacy consumers that popped it.
         self._session_id_to_sandbox[session_id] = sandbox

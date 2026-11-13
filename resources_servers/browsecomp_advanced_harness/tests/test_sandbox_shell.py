@@ -206,7 +206,7 @@ def test_missing_provider_refuses_seed_without_creating_workspace(tmp_path: Path
         response = client.post("/seed_session", json=_seed())
     assert response.status_code == 422
     assert "sandbox_provider" in response.json()["detail"]
-    assert not server._typed_sessions and not server._shell_sessions
+    assert not server._episode_sessions and not server._shell_sessions
     assert list(tmp_path.iterdir()) == []
 
 
@@ -241,7 +241,7 @@ def test_invalid_sandbox_configuration_refuses_the_seed_for_good(
         response = client.post("/seed_session", json=_seed())
     assert response.status_code == 422
     assert "sandbox configuration is invalid" in response.json()["detail"]
-    assert not containers and not server._typed_sessions
+    assert not containers and not server._episode_sessions
 
 
 @pytest.mark.asyncio
@@ -460,7 +460,7 @@ async def test_concurrent_commands_on_a_run_seed_start_one_sandbox(sandboxed, mo
     assert sorted(output.results_string for output in outputs) == [
         f"cat pages/{n}.txt\n[exit_code=0]" for n in range(3)
     ]
-    # The session's fence serializes the lazy start and the commands.
+    # The session's lock serializes the lazy start and the commands.
     assert len(containers) == 1 and peak == 1
     containers[0].start.assert_awaited_once()
     body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
@@ -559,7 +559,7 @@ async def test_setup_failure_retains_failed_cleanup_for_retry(sandboxed, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_typed_verify_keeps_the_session_and_close_retries_a_failed_stop(sandboxed) -> None:
+async def test_episode_verify_keeps_the_session_and_close_retries_a_failed_stop(sandboxed) -> None:
     # The Environment Server closes every session it seeds, so the close, not verify, stops the sandbox.
     server, containers = sandboxed
     await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
@@ -573,12 +573,12 @@ async def test_typed_verify_keeps_the_session_and_close_retries_a_failed_stop(sa
     with pytest.raises(RuntimeError, match="stop unavailable"):
         await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
     assert workspace.exists() and "resources-session" in server._shell_sessions
-    assert server._fence.closed_episode("resources-session") is None
+    assert server._fences.get("resources-session") is None
     await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
     assert containers[0].stop.await_count == 2
     assert not workspace.exists() and not server._shell_sessions
     assert "resources-session" not in server._session_id_to_metrics
-    assert server._fence.closed_episode("resources-session") is not None
+    assert server._fences.get("resources-session") is not None
 
 
 @pytest.mark.asyncio
@@ -601,7 +601,7 @@ async def test_close_waits_for_cancelled_tool_cleanup(sandboxed) -> None:
     tool.cancel()
     await asyncio.wait_for(cleanup_started.wait(), 1)
     close = asyncio.create_task(server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close())))
-    # Long enough for a close that ignored the fence to finish.
+    # Long enough for a close that ignored the lock to finish.
     await asyncio.sleep(0.05)
     assert not close.done()
     containers[0].stop.assert_not_awaited()

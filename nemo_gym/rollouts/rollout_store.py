@@ -66,6 +66,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     atomic_write_json,
     manifest_path_for,
     record_resubmit_offset,
+    saved_failure_classification,
     validate_resume,
 )
 from nemo_gym.telemetry.observer import driver_metrics
@@ -76,6 +77,7 @@ from nemo_gym.utils.path_utils import (
     failures_path_for,
     rerun_masked_journal_path_for,
     resubmit_offset_path_for,
+    task_selection_path_for,
 )
 
 
@@ -116,6 +118,21 @@ def raw_outcomes_are_selected(path: Path, *, artifacts: tuple[Path, ...] | None 
     }
     raw = {(record.path, record.offset) for artifact in paths for record, _ in _indexed_records(artifact)}
     return raw == selected
+
+
+# What a re-judgment decides itself, so a settled row never takes it from the row it settles: the grade and its
+# validity, the mask and the failure that explain a missing grade, and the verifier's own observations.
+_REJUDGE_GRADING_KEYS = frozenset(
+    {
+        "reward",
+        "mask_sample",
+        "evaluation_completed",
+        "failure_kind",
+        "failure_reason",
+        "ng_verifier_invocations",
+    }
+)
+_REJUDGE_DROPPED_PREFIXES = ("_ng_failure", "_ng_rejudge")
 
 
 class RolloutStore:
@@ -252,7 +269,7 @@ class RolloutStore:
 
         materialize_started = perf_counter()
         rows, manifest = prepare_inputs()
-        state = RolloutRecords(manifest, rows)
+        state = RolloutRecords(manifest, rows, classification=saved_failure_classification(output))
         with materialized.open("wb") as file:
             for row in rows:
                 file.write(orjson.dumps(row) + b"\n")
@@ -272,6 +289,8 @@ class RolloutStore:
             aggregate_metrics_path_for(output),
             # A shard list an earlier aggregation into this path left names other rows.
             aggregation_sources_path_for(output),
+            # The tasks an earlier run selected by id; a subset run records its own once it starts.
+            task_selection_path_for(output),
         ):
             path.unlink(missing_ok=True)
         output.touch()
@@ -422,7 +441,14 @@ class RolloutStore:
                 raise ConfigError(
                     f"Rollout attempt {key!r}: re-judged result has {name}={result.get(name)!r}, not {expected!r}."
                 )
-        settled = result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
+        # The saved row's evidence (timing, tokens, captures, fields its agent and server wrote) stays on the settled
+        # row; only what the re-judgment itself decides, its grading and the failure it replaces, is left behind.
+        carried = {
+            k: v
+            for k, v in failure.items()
+            if k not in result and k not in _REJUDGE_GRADING_KEYS and not k.startswith(_REJUDGE_DROPPED_PREFIXES)
+        }
+        settled = carried | result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
         if "ng_trajectory" in failure:
             from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, VerifierInvocation
 

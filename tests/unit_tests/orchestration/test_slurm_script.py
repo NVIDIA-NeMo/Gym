@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import base64
 import contextlib
 import os
@@ -86,6 +87,19 @@ def test_list_value():
 
 def test_empty():
     assert _flatten_run_args({}) == []
+
+
+def test_a_run_task_id_list_reaches_the_collection_config_as_the_same_ids():
+    # A submit's `run: {task_ids: [...]}` runs only those tasks; Hydra reads an unquoted `7` as a number.
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
+
+    [arg] = _flatten_run_args({"task_ids": ["django__django-11099", "7", "org/repo.2"]})
+    override = OverridesParser.create().parse_overrides([shlex.split(arg)[0]])[0]
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl", task_ids=override.value()
+    )
+
+    assert [str(task_id) for task_id in config.task_ids] == ["django__django-11099", "7", "org/repo.2"]
 
 
 def test_value_with_spaces_is_quoted():
@@ -492,6 +506,28 @@ def test_build_vllm_ray_serve_command_embeds_actual_gateway_source(vllm_service)
     assert match, cmd
     decoded = base64.b64decode(match.group(1)).decode()
     assert decoded == _RAY_SERVE_GATEWAY_SOURCE_PATH.read_text()
+
+
+def test_embedded_gateway_imports_nothing_from_nemo_gym():
+    """The embedded gateway has to run where `nemo_gym` was never installed.
+
+    Only this one file is written into the vLLM container, with aiohttp and Ray installed
+    beside it and no `driver.gym_install`. A `nemo_gym` import therefore fails at import
+    time, before argv is parsed, and the model service never becomes available. Parsed
+    rather than grepped so an import inside a function counts too: deferring one only
+    moves the failure to the first call.
+    """
+    tree = ast.parse(_RAY_SERVE_GATEWAY_SOURCE_PATH.read_text())
+
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imported.add(node.module)
+
+    offenders = sorted(name for name in imported if name == "nemo_gym" or name.startswith("nemo_gym."))
+    assert not offenders, f"ray_serve_gateway.py must stay self-contained, but imports {offenders}"
 
 
 def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_service):
@@ -2816,7 +2852,7 @@ def test_a_ray_head_is_probed_beside_a_non_zero_driver_node(tmp_path):
 
 def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     script = _driver_on_aux(tmp_path, {})
-    assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+    assert "Waiting for otel_collector at http://${gym_nodes[1]}:4319" in script
 
 
 def test_services_on_node_0_are_probed_locally(tmp_path):

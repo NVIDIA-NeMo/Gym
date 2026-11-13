@@ -1,0 +1,28 @@
+# Prompt subset filtered to N3.5 Super's difficulty level.
+config_paths:
+  - benchmarks/lmarena_v3/config.yaml
+
+prepare_script_args:
+  prompt_set: super35
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      model: gcp/google/gemini-3.8-flash
+      uses_reasoning_parser: true
+
+lmarena_v3_benchmark_resources_server:
+  resources_servers:
+    arena:
+      judge_concurrency: 32
+
+lmarena_v3_benchmark_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: lmarena_v3_super35
+          type: benchmark
+          jsonl_fpath: benchmarks/lmarena_v3/data/lmarena_v3_super35_validation.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/lmarena_v3/prepare.py
+          num_repeats: 1

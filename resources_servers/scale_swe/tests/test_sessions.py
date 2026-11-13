@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Environment Server sessions: typed seed, the /verify cookie, verify replay, masked failures, close and shutdown."""
+"""Episode sessions: episode seed, the /verify cookie, verify replay, masked failures, close and shutdown."""
 
 import asyncio
 import logging
@@ -173,7 +173,7 @@ def test_stop_timeout_must_be_positive_and_finite(timeout):
 
 
 @pytest.mark.asyncio
-async def test_typed_seed_returns_sandbox_access_and_binds_the_verify_cookie(server):
+async def test_episode_seed_returns_sandbox_access_and_binds_the_verify_cookie(server):
     request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
     response = await server.seed_session(request, seed())
 
@@ -322,7 +322,7 @@ async def test_interrupted_verification_requires_retrying_the_episode(server, mo
     assert error.value.status_code == 503
     server._verify.assert_awaited_once()
     await server.close_resources_session(close())
-    assert "attempt" in server._closed_sessions
+    assert "attempt" in server._fences
 
 
 async def test_cancelled_verification_stops_the_task_sandbox_and_requires_retrying_the_episode(
@@ -482,14 +482,14 @@ async def test_close_stops_the_sandbox_and_a_failed_stop_stays_retryable(server,
         await server.close_resources_session(close())
     assert server._session_id_to_sandbox["attempt"] is sandbox
     # The failed close is not recorded, but it still fences the session against a seed.
-    assert "attempt" not in server._closed_sessions
+    assert "attempt" not in server._fences
     with pytest.raises(HTTPException, match="already closed"):
         await server.seed_session(request, seed())
     await server.close_resources_session(close())
     await server.close_resources_session(close())
     assert sandbox.stop.await_count == 2
     assert "attempt" not in server._session_id_to_sandbox
-    assert "attempt" in server._closed_sessions
+    assert "attempt" in server._fences
     with pytest.raises(HTTPException, match="already closed"):
         await server.seed_session(request, seed())
     with pytest.raises(HTTPException, match="closed"):
@@ -523,8 +523,8 @@ async def test_close_records_are_kept_for_the_retry_window_only(server, monkeypa
         with pytest.raises(HTTPException, match="already closed"):
             await server.seed_session(request, seed(session_id))
     now = 401.0
-    assert len(server._closed_sessions) == 0
-    # Past the window no worker remembers the close, so the ID can be seeded (see ClosedResourcesSessionRecords).
+    assert len(server._fences) == 0
+    # Past the close retry window no worker holds the fence, so the ID can be seeded (see ResourcesSessionFences).
     await server.seed_session(request, seed("never-seeded"))
     assert "never-seeded" in server._session_id_to_sandbox
 
@@ -557,7 +557,7 @@ async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
         assert (await closing).resources_session_id == "attempt"
     (sandbox,) = sandboxes
     sandbox.stop.assert_awaited_once()
-    assert "attempt" in server._closed_sessions
+    assert "attempt" in server._fences
     assert not server._resources_sessions and not server._session_id_to_sandbox
     with pytest.raises(HTTPException, match="already closed"):
         await server.seed_session(request, seed())
@@ -583,7 +583,7 @@ async def test_close_that_arrives_during_verification_takes_effect_after_it(serv
         await closing
     release.set()
     assert (await verifying).reward == 1.0
-    assert "attempt" in server._closed_sessions
+    assert "attempt" in server._fences
     assert not server._resources_sessions
     with pytest.raises(HTTPException, match="closed"):
         await server.verify(request, verify_body())
@@ -609,13 +609,13 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
         await asyncio.wait_for(server.close_resources_session(close()), timeout=5)
     assert monotonic() - started < 2
     assert server._session_id_to_sandbox["attempt"] is sandbox
-    assert "attempt" not in server._closed_sessions
+    assert "attempt" not in server._fences
     release.set()
     await server.close_resources_session(close())
     # The retried close joined the stop that was still running instead of starting another.
     sandbox.stop.assert_awaited_once()
     assert not cut_short
-    assert "attempt" in server._closed_sessions and not server._session_id_to_sandbox
+    assert "attempt" in server._fences and not server._session_id_to_sandbox
 
 
 @pytest.mark.parametrize("stop_failure", ["error", "slow"])
@@ -644,7 +644,7 @@ async def test_failed_seed_cleanup_is_bounded_and_keeps_the_sandbox_for_close(se
     await server.close_resources_session(close())
     # A stop that failed is started again; a slow one is waited for again, not started twice.
     assert sandbox.stop.await_count == (2 if stop_failure == "error" else 1)
-    assert "attempt" in server._closed_sessions and not server._session_id_to_sandbox
+    assert "attempt" in server._fences and not server._session_id_to_sandbox
 
 
 async def test_failed_stop_after_capture_leaves_the_sandbox_to_close(server, grading):
@@ -856,12 +856,12 @@ async def test_slow_verifier_stop_is_left_to_close_never_cut_short(server, gradi
     assert server._session_id_to_verifier_sandboxes == {"attempt": [verifier]}
     with pytest.raises(TimeoutError):
         await server.close_resources_session(close())
-    assert "attempt" not in server._closed_sessions
+    assert "attempt" not in server._fences
     release.set()
     await server.close_resources_session(close())
     verifier.stop.assert_awaited_once()
     assert not cut_short
-    assert not server._session_id_to_verifier_sandboxes and "attempt" in server._closed_sessions
+    assert not server._session_id_to_verifier_sandboxes and "attempt" in server._fences
 
 
 async def test_failed_verifier_stop_is_retried_at_close(server, grading, sandboxes):
@@ -875,7 +875,7 @@ async def test_failed_verifier_stop_is_retried_at_close(server, grading, sandbox
     await server.close_resources_session(close())
 
     assert verifier.stop.await_count == 2
-    assert not server._session_id_to_verifier_sandboxes and "attempt" in server._closed_sessions
+    assert not server._session_id_to_verifier_sandboxes and "attempt" in server._fences
 
 
 async def test_shutdown_retries_a_verifier_stop_that_failed(server, grading, sandboxes):
@@ -936,7 +936,7 @@ async def test_seed_without_a_base_commit_is_retryable_and_stops_its_sandbox(ser
     assert not server._session_id_to_sandbox and not server._resources_sessions
 
 
-async def test_golden_patch_mode_refuses_typed_seeds(server):
+async def test_golden_patch_mode_refuses_episode_seeds(server):
     server.config.is_verifying_golden_patch = True
 
     with pytest.raises(HTTPException, match="Golden-patch mode") as error:

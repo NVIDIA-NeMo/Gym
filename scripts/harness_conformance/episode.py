@@ -20,7 +20,7 @@ from pathlib import Path
 import uvicorn
 import yaml
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, SimpleResponsesAPIAgent
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
@@ -41,7 +41,18 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     if harness == "simple":
         return {"installation": "builtin"}
     if use_agent_sessions and harness != "hermes":
-        return {"installation": "agent_session"}
+        runtime = {"installation": "agent_session"}
+        if harness == "nooa":
+            adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
+            runtime.update(
+                pyproject_sha256=digest_file(adapter / "pyproject.toml"),
+                lock_sha256=digest_file(adapter / "uv.lock"),
+                bootstrap_sha256=digest_file(adapter / "sandbox_runtime.py"),
+                sandbox_ownership="resources",
+                execution_mode="sandboxed",
+                observer_sha256=digest_file(Path(__file__).with_name("nooa_observer.py")),
+            )
+        return runtime
     if harness == "hermes":
         if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
             raise RuntimeError(
@@ -55,19 +66,6 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
         [harness, "--version"], capture_output=True, text=True, errors="replace", timeout=10, check=True
     )
     return {"executable": shutil.which(harness), "version": version.stdout.strip()}
-
-
-def _supports_agent_sessions(agent_cls: type[SimpleResponsesAPIAgent]) -> bool:
-    # Every SimpleResponsesAPIAgent exposes session routes, including legacy agents
-    # whose handlers raise NotImplementedError. Check implementations, not route presence.
-    return all(
-        getattr(agent_cls, handler) is not getattr(SimpleResponsesAPIAgent, handler)
-        or getattr(agent_cls, hook) is not getattr(SimpleResponsesAPIAgent, hook)
-        for handler, hook in (
-            ("seed_agent_session", "_seed_agent_session_state"),
-            ("close_agent_session", "_close_agent_session_state"),
-        )
-    )
 
 
 def _config(
@@ -92,15 +90,30 @@ def _config(
         f"{harness}_agent"
     ]
     agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
-    if use_agent_sessions and harness != "simple":
+    if harness == "nooa":
+        agent.pop("model")
+        agent.pop("concurrency")
+        from .nooa import observer_module_name
+
+        agent.update(
+            nooa={
+                **defaults["nooa"],
+                "execution_mode": "sandboxed",
+                "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
+            }
+        )
+        agent["sandbox_runner_timeout_seconds"] = timeout
+    if use_agent_sessions and harness not in ("simple", "nooa"):
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness == "simple":
         agent["max_steps"] = 6
-    if harness in ("opencode", "pi"):
+    if harness in ("opencode", "pi", "copilot"):
         agent["timeout"] = timeout
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
+    if harness == "crewai":
+        agent["timeout"] = timeout
     if harness == "openclaw":
         agent["timeout"] = math.ceil(timeout)
         if not use_agent_sessions:
@@ -158,7 +171,7 @@ def _config(
             "responses_api_models": {"probe": {**server(ports["judge_model"]), "name": "judge_model"}}
         }
     if use_agent_sessions and harness != "simple":
-        config["probe_sandbox"] = {"local": {"concurrency": 1}}
+        config["probe_sandbox"] = {("conformance_local" if harness == "nooa" else "local"): {"concurrency": 1}}
     return config
 
 
@@ -167,7 +180,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
     config_cls = getattr(module, HARNESSES[harness] + "Config")
-    use_agent_sessions = _supports_agent_sessions(agent_cls)
+    use_agent_sessions = agent_cls.supports_agent_sessions()
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
             "Conformance probes using agent sessions require Linux; run the probes on a Linux host or in a container"
@@ -179,8 +192,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-    probe = probe_cls(scenario, directory)
+    if harness == "nooa":
+        from .nooa import BorrowedSandboxProbe
+
+        probe = BorrowedSandboxProbe(scenario, directory)
+    else:
+        probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
+        probe = probe_cls(scenario, directory)
     probe.save()
     tasks = []
     servers = []

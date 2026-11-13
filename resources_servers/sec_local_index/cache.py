@@ -41,6 +41,40 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# mkstemp creates 0600 files and mkdir applies the umask, but a cache can be
+# shared by other users and jobs, who need to read its files and add to its dirs.
+SHARED_FILE_MODE = 0o664
+SHARED_DIR_MODE = 0o2775
+
+
+def make_shared_dirs(directory: Path) -> None:
+    """Create *directory* and any missing parents with SHARED_DIR_MODE."""
+    missing = []
+    while not directory.is_dir():
+        missing.append(directory)
+        directory = directory.parent
+    for d in reversed(missing):
+        try:
+            d.mkdir()
+        except FileExistsError:
+            continue
+        os.chmod(d, SHARED_DIR_MODE)
+
+
+def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write *content* to *path* via temp file + rename, readable by the group."""
+    make_shared_dirs(path.parent)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            os.fchmod(f.fileno(), SHARED_FILE_MODE)
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
 
 class ToolCache:
     """Namespaced, atomic disk cache with an on/off switch.
@@ -120,25 +154,23 @@ class ToolCache:
     # -- atomic IO ------------------------------------------------------------
     @staticmethod
     def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding=encoding) as f:
-                f.write(content)
-            os.replace(tmp, path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        atomic_write(path, content, encoding)
 
     def read_text(self, path: Path) -> Optional[str]:
         try:
             return path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            logger.warning("Ignoring unreadable cache entry %s: %s", path, e)
             return None
 
     def write_text(self, path: Path, text: str) -> None:
-        self._atomic_write(path, text)
+        """Best-effort: an entry that cannot be written stays uncached instead of failing the tool."""
+        try:
+            self._atomic_write(path, text)
+        except OSError as e:
+            logger.warning("Could not cache %s: %s", path, e)
 
     def read_json(self, path: Path) -> Optional[Any]:
         text = self.read_text(path)

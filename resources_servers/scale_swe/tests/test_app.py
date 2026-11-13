@@ -331,7 +331,7 @@ class TestRunVerification:
 
 
 class TestInfrastructureFailure:
-    """Finished runs that never tested the patch; an Environment Server session treats them as no verdict."""
+    """Finished runs that never tested the patch; an episode session treats them as no verdict."""
 
     @pytest.mark.asyncio
     async def test_a_provider_failure_without_an_exit_status_did_not_test_the_patch(self) -> None:

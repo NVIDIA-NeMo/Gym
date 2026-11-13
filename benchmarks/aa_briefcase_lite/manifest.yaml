@@ -1,0 +1,31 @@
+name: aa_briefcase_lite
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: AA-Briefcase-Lite four-task example of Artificial Analysis's office-work evaluation, graded with the
+  released binary checks and local pairwise criteria.
+modality: multimodal
+licensing: unknown
+authors:
+- Adam Rajfer
+- Serge Panev
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: aa_briefcase_lite
+agent_server: stirrup_agent
+datasets:
+- name: aa_briefcase_lite
+  type: benchmark
+  jsonl_fpath: benchmarks/aa_briefcase_lite/data/aa_briefcase_lite.jsonl
+  prepare_script: benchmarks/aa_briefcase_lite/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

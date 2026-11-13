@@ -682,8 +682,11 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("declaration", [{}, None], ids=["mapping", "null"])
+@pytest.mark.parametrize("with_setup", [False, True], ids=["image-workdir", "setup-workdir"])
 @pytest.mark.parametrize("placement_group", [None, "episode-shared-placement"])
-async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration, placement_group):
+async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(
+    tmp_path, declaration, with_setup, placement_group
+):
     # ``volumes:\n  data:`` (a null declaration, the canonical Compose spelling) provisions like ``data: {}``.
     shared = tmp_path / "shared"
     external = shared / "operator-data"
@@ -692,6 +695,12 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
     image_data = tmp_path / "image-data"
     image_data.mkdir()
     (image_data / "seed").write_text("image data")
+    workdir = tmp_path / "work"
+    startup_cwd = tmp_path / "startup-cwd"
+
+    async def setup(sandbox):
+        result = await sandbox.exec(f"mkdir -p {shlex.quote(str(workdir))}")
+        assert result.return_code == 0
 
     class VolumeProvider(ConnectableShellProvider):
         def shared_volume_metadata(self):
@@ -701,6 +710,9 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
             return {"volumes": [{"source": source, "target": target, "read_only": read_only}]}
 
         async def exec(self, handle, command, **kwargs):
+            cwd = kwargs.get("cwd")
+            if cwd is not None and not os.path.isdir(cwd):
+                raise RuntimeError(f"working directory does not exist: {cwd}")
             spec = self.created[int(handle.sandbox_id) - 1]
             mounts = spec.provider_options.get("volumes", [])
             replacements = {"/data": str(image_data)}
@@ -722,6 +734,8 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
                 },
                 "second": {
                     "image": "image",
+                    "working_dir": str(workdir),
+                    "command": ["sh", "-c", f"pwd > {shlex.quote(str(startup_cwd))}"],
                     "volumes": [
                         {"type": "volume", "source": "data", "target": "/data"},
                         {"type": "bind", "source": "/operator/source", "target": "/external", "read_only": True},
@@ -732,10 +746,15 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         },
         default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
+        service_setup={"second": setup} if with_setup else {},
         placement_group=placement_group,
         poll_interval_s=0.01,
     )
     async with group:
+        await group._wait("second", "service_completed_successfully")
+        assert startup_cwd.read_text().strip() == str(workdir)
+        (seed,) = group._seeds
+        assert seed._spec.workdir == (None if with_setup else str(workdir))
         for name in ("first", "second"):
             result = await group.services[name].exec("cat /data/seed")
             assert result.return_code == 0
@@ -1093,8 +1112,11 @@ async def test_resolve_selected_environment_urls_for_nonroot_service(tmp_path, a
                     "healthcheck": {
                         "test": [
                             "CMD-SHELL",
+                            f"test -s {shlex.quote(str(output))} && "
                             f'test "$URL" = {shlex.quote(expected)} && test "$UNCHANGED" = {shlex.quote(original)}',
-                        ]
+                        ],
+                        "interval": "0.01s",
+                        "retries": 500,
                     },
                 }
             }
@@ -2604,7 +2626,8 @@ async def test_service_setup_runs_after_the_sandbox_starts_and_before_uploads_an
         "services": {
             "main": {
                 "image": "image",
-                "command": ["sh", "-c", f"cat {sandbox_root}/data/seed.csv > {result}"],
+                "working_dir": str(sandbox_root / "data"),
+                "command": ["sh", "-c", f"cat seed.csv > {result}"],
                 "x-sandbox": {
                     "uploads": [{"source": str(task / "seed.csv"), "target": f"{sandbox_root}/data/seed.csv"}]
                 },
@@ -2626,6 +2649,7 @@ async def test_service_setup_runs_after_the_sandbox_starts_and_before_uploads_an
         await group._wait("main", "service_completed_successfully")
     # The upload won over the RUN line's default, and the command read the uploaded bytes.
     assert result.read_text() == "uploaded"
+    assert provider.created[0].workdir is None  # setup created the directory before it became the exec default
     assert order[:2] == ["setup", "upload"] and order.count("setup") == 1  # side had no setup
     setup_index = next(
         i for i, command in enumerate(provider.commands) if command.startswith("mkdir ") and "/data &&" in command

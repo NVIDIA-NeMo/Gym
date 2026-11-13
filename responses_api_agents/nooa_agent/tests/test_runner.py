@@ -16,10 +16,12 @@
 import asyncio
 import json
 from http.cookies import SimpleCookie
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from nooa import Agent, strategy
 from nooa.errors import GenerationError, LoopDetectedError
 
@@ -464,7 +466,12 @@ async def test_real_code_and_resource_outputs_join_to_their_own_invocations(stat
         for item in model_requests[1].input
         if item.type == "function_call_output" and item.call_id == "call-1"
     )
-    assert code.output == observed
+    assert observed == "status: accepted"
+    assert "PythonOutput(" in code.output and "cold" in code.output
+    assert any(
+        getattr(item, "role", None) == "user" and getattr(item, "content", None) == code.output
+        for item in model_requests[1].input
+    )
     assert json.loads(resource.output) == ({"weather": "cold"} if status == 200 else {"error": "unavailable"})
     assert all(tool.tool_name != "return_result" for tool in result.trajectory.tool_calls)
     model_owner = next(inv for inv in result.trajectory.invocations if inv.invocation_id == code.invocation_id)
@@ -568,6 +575,7 @@ async def test_swallowed_infrastructure_failure_never_becomes_gradable(source: s
         )
     assert caught.value.__cause__ is failure
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     root = caught.value.result.trajectory.invocations[0]
     assert root.status == "failed" and root.error_type == "ConnectionError"
 
@@ -631,6 +639,7 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
             )
         )
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     assert isinstance(caught.value.__cause__, GenerationError)
 
 
@@ -700,7 +709,271 @@ async def test_arbitrary_loop_error_is_not_a_policy_termination(wrapped: bool) -
             )
         )
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     assert type(caught.value.__cause__) is (GenerationError if wrapped else LoopDetectedError)
+
+
+def model_http_error(status: int) -> ClientResponseError:
+    return ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://model/v1/responses"),
+        history=(),
+        status=status,
+        message="Original provider error: request rejected",
+    )
+
+
+async def invoke_model_directly(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+    return await agent.llm.acall([{"role": "user", "content": "question"}])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 413, 422, 425, 429, 500, 503, 599])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_model_rejection_preserves_original_provider_error(
+    monkeypatch: pytest.MonkeyPatch, status: int, wrapped: bool
+) -> None:
+    from responses_api_agents.nooa_agent.result import finalize_run_result
+
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", AsyncMock())
+    runner, _ = policy_runner()
+    failure = model_http_error(status)
+    runner._server_client.post = AsyncMock(side_effect=failure)
+    if not wrapped:
+        runner._invocation_adapter = invoke_model_directly
+
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+
+    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (3 if status == 429 else 1)
+    root = next(item for item in result.trajectory.invocations if item.parent_invocation_id is None)
+    assert root.status == "failed"
+    assert root.error_type == ("GenerationError" if wrapped else "ClientResponseError")
+    assert result.termination_reason is NOOATerminationReason.MODEL_REJECTED
+    assert result.model_status_code == status
+    assert result.termination_error == str(failure)
+    response, observations = finalize_run_result(result)
+    assert response.status == "failed"
+    assert response.error.message == str(failure)
+    assert any(gap.code == "model_rejected" and gap.detail == str(failure) for gap in observations.gaps)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [399, 600])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_non_error_model_http_status_is_not_reported_as_rejection(status: int, wrapped: bool) -> None:
+    runner, _ = policy_runner()
+    failure = model_http_error(status)
+    runner._server_client.post = AsyncMock(side_effect=failure)
+    if not wrapped:
+        runner._invocation_adapter = invoke_model_directly
+
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+
+    assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
+    cause = caught.value.__cause__
+    assert (cause.__cause__ if wrapped else cause) is failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 413, 422, 503])
+async def test_successful_model_retry_clears_rejection(status: int) -> None:
+    runner, _ = policy_runner()
+    runner._server_client.post.side_effect = [
+        model_http_error(status),
+        FakeHTTPResponse(
+            model_response(
+                NeMoGymResponseFunctionToolCall(
+                    id="fc-retry", call_id="call-retry", name="return_result", arguments='{"result":"recovered"}'
+                )
+            )
+        ),
+    ]
+
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+
+    assert runner._server_client.post.await_count == 2
+    assert result.return_value == "recovered"
+    assert result.termination_reason is None
+    assert result.termination_error is None
+    assert result.model_status_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 503])
+@pytest.mark.parametrize("handling", ["swallowed", "fabricated", "replacement", "arbitrary_wrapper"])
+async def test_only_propagated_model_error_is_reported_as_rejection(status: int, handling: str) -> None:
+    runner, _ = policy_runner()
+    failure = model_http_error(status)
+    runner._server_client.post = AsyncMock(side_effect=failure)
+
+    async def invoke(agent, request):
+        if handling == "fabricated":
+            raise failure
+        try:
+            await invoke_model_directly(agent, request)
+        except ClientResponseError as cause:
+            if handling == "arbitrary_wrapper":
+                raise GenerationError("arbitrary wrapper") from cause
+            if handling == "replacement":
+                raise model_http_error(status) from cause
+        return "apparently successful"
+
+    runner._invocation_adapter = invoke
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 503])
+async def test_resource_infrastructure_failure_vetoes_model_rejection(outbound: AsyncMock, status: int) -> None:
+    runner, _ = make_runner()
+    resource_failure = ConnectionError("resources unavailable")
+    outbound.side_effect = resource_failure
+    runner._server_client.post = AsyncMock(side_effect=model_http_error(status))
+
+    async def invoke(agent, request):
+        try:
+            await agent.get_weather(city="Paris")
+        except ConnectionError:
+            pass
+        return await invoke_model_directly(agent, request)
+
+    runner._invocation_adapter = invoke
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                tool_access=grant(),
+                responses_create_params=responses_create_params("Paris"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value.__cause__ is resource_failure
+    assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 503])
+@pytest.mark.parametrize("marked_error", ["wrapper", "model"])
+async def test_cleanup_marker_anywhere_in_trusted_model_chain_vetoes_rejection(status: int, marked_error: str) -> None:
+    runner, _ = policy_runner()
+    runner._server_client.post = AsyncMock(side_effect=model_http_error(status))
+    original_adapter = runner._invocation_adapter
+
+    async def invoke(agent, request):
+        try:
+            return await original_adapter(agent, request)
+        except GenerationError as error:
+            target = error if marked_error == "wrapper" else error.__cause__
+            target.nooa_cleanup_errors = (ConnectionError("cleanup failed"),)
+            raise
+
+    runner._invocation_adapter = invoke
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_boundary", ["agent", "scope", "both"])
+async def test_benchagent_cleanup_failure_overrides_model_rejection(
+    tmp_path, monkeypatch, cleanup_boundary: str
+) -> None:
+    from nooa.tools._bash_session import BashSession
+    from nooa.tools.shell_tools import ShellTools
+
+    module = pytest.importorskip("nooa_bench.bench_agent")
+    monkeypatch.chdir(tmp_path)
+    fresh_sessions = []
+    solve_errors = []
+    original_solve = module.BenchAgent._solve_task
+    original_session_close = BashSession.close
+    original_shell_close = ShellTools.close
+    agent_error = ValueError("agent cleanup failed")
+    scope_error = ConnectionError("scope cleanup failed")
+
+    async def solve(agent, *args, **kwargs):
+        fresh_sessions.append(ShellTools(cwd=str(tmp_path)).session)
+        try:
+            return await original_solve(agent, *args, **kwargs)
+        except Exception as error:
+            solve_errors.append(error)
+            raise
+
+    async def session_close(session):
+        await original_session_close(session)
+        if cleanup_boundary in {"scope", "both"} and session in fresh_sessions:
+            raise scope_error
+
+    async def shell_close(shell):
+        await original_shell_close(shell)
+        if cleanup_boundary in {"agent", "both"}:
+            raise agent_error
+
+    monkeypatch.setattr(module.BenchAgent, "_solve_task", solve)
+    monkeypatch.setattr(BashSession, "close", session_close)
+    monkeypatch.setattr(ShellTools, "close", shell_close)
+    failure = model_http_error(400)
+    runner = InProcessNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class="nooa_bench.bench_agent:BenchAgent",
+            invocation_adapter="responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent",
+        ),
+        server_client=SimpleNamespace(post=AsyncMock(side_effect=failure)),
+        model_server_name="policy",
+        max_policy_calls=None,
+    )
+
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+                model_url_path="/v1/responses",
+            )
+        )
+
+    assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
+    assert len(solve_errors) == 1
+    assert caught.value.__cause__ is solve_errors[0]
+    assert solve_errors[0].__cause__ is failure
+    expected = tuple(
+        error
+        for boundary, error in (("agent", agent_error), ("scope", scope_error))
+        if cleanup_boundary in {boundary, "both"}
+    )
+    assert solve_errors[0].nooa_cleanup_errors == expected
+    for error in expected:
+        assert str(error) in str(caught.value)
 
 
 @pytest.mark.asyncio

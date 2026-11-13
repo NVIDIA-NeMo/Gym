@@ -26,12 +26,16 @@ when the same `session_id` is re-seeded, or when an Environment Server closes th
 session through `/close_session`. An Environment Server assigns the session id and
 registers that close before seeding, so a rollout abandoned before `verify` still
 has its browser released. An Agent's `/run` does not close, so there a rollout
-abandoned without `verify` or a re-seed keeps its browser until the process exits
-(local) or the provider reclaims it (remote).
+abandoned without `verify` or a re-seed keeps its browser until the server shuts
+down, when its lifespan closes every browser the process still holds. A process killed
+before that close finishes leaves its remote browsers for the provider to reclaim; the
+README says how long to give the server to shut down.
 """
 
+import asyncio
 import logging
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Dict, Optional, Tuple, Union
 
@@ -40,7 +44,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -53,11 +57,13 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -154,16 +160,15 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        # Session state lives in this process, so a second worker would serve tool calls
-        # for browsers it does not hold.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("interactive_browser keeps browsers in-process and requires num_workers=1")
         self._session_id_to_state = {}
-        # Sessions an Environment Server seeded under its own resources_session_id.
-        self._typed_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
-        # Closed ids stay known for a bounded time: a seed that lands after its close would
+        # Episode sessions, which an Environment Server seeded under its own resources_session_id.
+        self._episode_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
+        # Closed IDs stay fenced for the close retry window: a seed that lands after its close would
         # otherwise open a browser nobody will ever close.
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -172,14 +177,37 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         app.post("/browser_type")(self.browser_type)
         app.post("/browser_observe")(self.browser_observe)
         app.post("/browser_finish")(self.browser_finish)
+
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
         return app
+
+    async def shutdown(self) -> None:
+        """Close every browser this process still holds, local and remote.
+
+        Browsers close concurrently, and a failed close is logged without stopping the others.
+        No limit covers a whole close: each teardown step has its own, and a limit around the
+        provider release could cancel it before the provider ends the session.
+        """
+        self._episode_identity.clear()
+        self._fences.clear()
+        await asyncio.gather(*(self._release(session_id) for session_id in list(self._session_id_to_state)))
 
     # ----- lifecycle ----------------------------------------------------- #
     async def seed_session(
         self,
         request: Request,
-        # Typed first and left to right: the legacy model allows extra fields, so it would
-        # otherwise swallow a typed body and answer it with an empty response.
+        # Episode seed first and left to right: the agent-run seed model allows extra fields, so it would
+        # otherwise swallow an episode body and answer it with an empty response.
         body: Annotated[
             Union[ResourcesSeedSessionRequest, BrowserSeedSessionRequest],
             Field(union_mode="left_to_right"),
@@ -192,9 +220,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         # The cookie is bound only once the seed succeeds: a refused seed's reply would otherwise point this client at
         # the session it was refused, which may belong to another episode.
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
-            identity = self._typed_identity.get(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
+            identity = self._episode_identity.get(session_id)
             if identity is not None:
                 # A retried seed for the same episode gets the browser it already has.
                 if identity != (body.episode_id, body.task_id):
@@ -208,7 +236,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             except ValidationError as error:
                 raise ResourcesSeedRejectedError(f"task_data is not an interactive_browser task: {error}") from error
             await self._open_session(session_id, spec, episode_id=body.episode_id)
-            self._typed_identity[session_id] = (body.episode_id, body.task_id)
+            self._episode_identity[session_id] = (body.episode_id, body.task_id)
             request.session[SESSION_ID_KEY] = session_id
             return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
@@ -225,26 +253,26 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             return {"closed": True}
 
         try:
-            typed = ResourcesCloseSessionRequest.model_validate(body)
+            close = ResourcesCloseSessionRequest.model_validate(body)
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
-        session_id = typed.resources_session_id
+        session_id = close.resources_session_id
         # The body names the session, so a close without a cookie (after a lost seed reply) still releases it.
-        async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
-            if closed_episode is not None:
-                if typed.episode_id != closed_episode:
+        async with self._locks.locked(session_id):
+            fenced_episode = self._fences.get(session_id)
+            if fenced_episode is not None:
+                if close.episode_id != fenced_episode:
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 request.session.pop(SESSION_ID_KEY, None)
                 return ResourcesCloseSessionResponse(resources_session_id=session_id)
-            identity = self._typed_identity.get(session_id)
-            if identity is not None and typed.episode_id != identity[0]:
+            identity = self._episode_identity.get(session_id)
+            if identity is not None and close.episode_id != identity[0]:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             # Usually `verify` has already released the browser; this is the path for an
             # episode that ended before it, and a no-op otherwise.
             await self._release(session_id)
-            self._typed_identity.pop(session_id, None)
-            self._fence.mark_closed(session_id, typed.episode_id)
+            self._episode_identity.pop(session_id, None)
+            self._fences.fence(session_id, close.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -357,7 +385,11 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     # ----- reward -------------------------------------------------------- #
     def _verify_response(
-        self, body: BrowserVerifyRequest, reward: float, failure_reason: Optional[str] = None
+        self,
+        body: BrowserVerifyRequest,
+        reward: float,
+        failure_reason: Optional[str] = None,
+        failure_kind: Optional[str] = None,
     ) -> BaseVerifyResponse:
         """Build the response without letting a request field collide with a response one.
 
@@ -369,6 +401,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             **{k: v for k, v in body.model_dump().items() if k not in _RESPONSE_OWNED_FIELDS},
             reward=reward,
             failure_reason=failure_reason,
+            failure_kind=failure_kind,
         )
 
     async def verify(self, request: Request, body: BrowserVerifyRequest) -> BaseVerifyResponse:
@@ -383,17 +416,18 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
                 **lost_session_verification("browser session not found at verify"),
             )
 
-        reward, failure_reason = 0.0, None
+        reward, failure_reason, failure_kind = 0.0, None, None
         try:
             reward = await self._score(st)
         except _ScoringUnavailable as exc:
             # The browser died before it could be read. The rollout itself may have been
             # fine; what failed is the measurement. Raising here would abort the whole
             # collection run, because only JudgeError is converted to a routed row.
-            failure_reason = str(exc)
+            # The kind names the failed measurement; the row stays unmasked, as it was.
+            failure_reason, failure_kind = str(exc), VERIFIER_ERROR
         finally:
             await self._release(session_id)
-        return self._verify_response(body, reward=reward, failure_reason=failure_reason)
+        return self._verify_response(body, reward=reward, failure_reason=failure_reason, failure_kind=failure_kind)
 
     async def _score(self, st: _SessionState) -> float:
         gt = st.gt or {}
@@ -429,3 +463,6 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     InteractiveBrowserResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = InteractiveBrowserResourcesServer.run_webserver()  # noqa: F401

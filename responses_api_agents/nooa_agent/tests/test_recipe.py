@@ -53,6 +53,7 @@ def test_swe_shared_preparation_preserves_grading_metadata_through_legacy_adapte
             cleanup_timeout_seconds=180,
             resources_server={"type": "resources_servers", "name": "swebench_pro_nooa_resources_server"},
             agent_server={"type": "responses_api_agents", "name": "swebench_pro_nooa_agent"},
+            tool_servers=[],
         ),
         server_client=MagicMock(spec=ServerClient),
     )

@@ -15,6 +15,7 @@ from time import monotonic
 import pytest
 
 from nemo_gym.agents import AgentSeedRejectedError, SandboxSession
+from nemo_gym.core import AGENT_ROUTE_FAILED, NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.opencode_agent.app import _OPENCODE_ISOLATION, _private_directories
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment
@@ -329,6 +330,12 @@ async def test_an_unusable_import_refuses_the_seed(tmp_path, setup, cli, message
 async def test_an_import_that_never_ran_or_was_killed_stays_retryable(tmp_path, setup, code):
     agent, _ = setup
     state, _ = import_session(tmp_path, agent, import_code=code)
-    with pytest.raises(RuntimeError, match=f"exit={code}") as raised:
+    # A setup step that fails is a typed harness failure of the seed, never a seed rejection: it stays retryable.
+    with pytest.raises(NgFailureEvent, match=f"return_code={code}") as raised:
         await agent._import_session(state)
     assert not isinstance(raised.value, AgentSeedRejectedError)
+    assert (raised.value.failure_kind, raised.value.operation, raised.value.stage) == (
+        AGENT_ROUTE_FAILED,
+        "opencode.setup",
+        "seed",
+    )

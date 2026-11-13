@@ -66,3 +66,83 @@ Add instrumentation to a server.
 </Card>
 
 </Cards>
+
+## Sandbox resources
+
+Enable sandbox spans to record the number and declared shape of sandbox requests and
+collect existing OpenSandbox resource readings through the same OTLP collector:
+
+```yaml
+telemetry:
+  enabled: true
+  span_groups: default,sandbox
+  sandbox_resource_sample_interval_seconds: 10
+```
+
+`gym.sandbox.request` records one logical request, with
+`nemo.gym.sandbox.request.id`, `requested.count`, and declared `requested.cpu`,
+`requested.memory_mib`, `requested.disk_gib`, `requested.gpu` and `requested.gpu_type`
+attributes under `nemo.gym.sandbox`. Missing quantities are unspecified. Sidecar
+shapes are recorded separately. Compose records all service requests before starting
+services, with collection and service identifiers; a failed creation therefore remains
+in the requested inventory. Other callers record requests as they reach `start()`.
+Count distinct request IDs per rollout, rather than counting provider retries.
+
+`gym.sandbox.start` joins a successful request to `nemo.gym.sandbox.id` and records
+the OpenSandbox submission under `submitted.requests.*` and `submitted.limits.*`
+after provider clamping. Unspecified submission values are left to SDK defaults. OpenSandbox
+adds `gym.sandbox.resource.allocation` with the inspection endpoint's effective
+per-component requests and limits. All three stages use Gym's shared resource
+vocabulary: `cpu` (cores), `memory_mib`, `disk_gib`, `gpu` (count), and `gpu_type`
+(selector). Submitted and allocated quantities are numeric; fractional MiB/GiB are
+preserved. For example, Kubernetes `100m`, `1536Ki`, and `8Gi` become CPU `0.1`,
+memory `1.5` MiB, and memory `8192` MiB. Creation requests retain their existing
+integer memory/disk inputs through `SandboxResources`, which shares the
+`SandboxResourceAmounts` base with observations.
+
+Allocation components use `allocation.component_count` and indexed
+`allocation.component.<i>.name`, `.requests.<resource>` and `.limits.<resource>`.
+Names are values, not attribute keys. Missing resources remain absent; unknown
+vendor resource names are not mapped to a guessed generic resource. An inspection
+with no supported resource quantities is unavailable.
+
+Optional placement uses `allocation.designator.kind`, `.scope`, `.id` and an
+independent `allocation.host.kind`, `.scope`, `.id`. These are opaque diagnostic
+identities, not network endpoints or reconnect credentials. The existing sandbox
+`provider` selects the Gym adapter; designator `kind` selects the infrastructure
+identity format. For OSB's Kubernetes inspection, the designator kind is
+`kubernetes`, ID is `namespaces/<namespace>/pods/<pod>`, and host kind is
+`kubernetes-node` with the node name as ID. Scope is the OSB control-plane URL
+without user information, query or fragment (a deployment scope, not a claimed
+cluster ID). Missing namespace/pod or host information is omitted.
+
+The same shape can represent `docker-container` with a daemon scope/container ID,
+`ecs-task` with a cluster scope/task ARN, or `provider-sandbox` with a deployment
+scope/sandbox ID. These illustrate the contract; this PR implements allocation
+reads only for OSB. Provider-specific source strings remain provenance values.
+
+Declared shape, effective scheduling requests, and effective limits are
+separate quantities. The inspection endpoint is deployment-dependent; unavailable
+or unrecognized responses produce `resource.status=unavailable` and an error type.
+They never fall back to declared resources.
+
+`gym.sandbox.resource.sample` preserves execd's original timestamp in
+`nemo.gym.sandbox.sample.timestamp_ms`, CPU count, CPU usage percentage, and total/used
+memory in MiB. With metrics enabled, the same readings also populate
+`gym.sandbox.cpu_count`, `gym.sandbox.cpu_used_percentage`,
+`gym.sandbox.memory_total_mib`, and `gym.sandbox.memory_used_mib` gauges. Gauge
+exports contain the latest observation; resource spans preserve individual samples
+and their source timestamps. These are instantaneous readings, not cumulative CPU
+time, RSS, or lifetime memory peaks.
+
+The creator owns sampling and carries its rollout, request and sandbox identity into
+later records. Borrowed connections do not start duplicate samplers. Sampling stops
+before deletion and attempts a final read. Each provider read has a two-second bound;
+failures are recorded without blocking normal operation. Process death, expired
+sandboxes and trace sampling can leave gaps; missing records are not zero usage.
+
+Set the interval to `0` to disable provider resource reads. Request inventory remains
+available. Provider reads require an active trace exporter and the sandbox span group;
+metrics-only configurations do not start a sampler. No OpenSandbox deployment changes
+or additional in-sandbox commands are needed. Providers without the resource capability
+retain the requested inventory and lifecycle spans only.

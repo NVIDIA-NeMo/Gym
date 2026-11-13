@@ -447,7 +447,8 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     final: str | None, has_checkpoint: bool, log_kind: str
 ) -> None:
     r, s = runner()
-    r.close_timeout = 0.05
+    # Lifecycle capture must finish before the separate diagnostic deadline is exercised.
+    r.close_timeout = 5
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     if final is not None:
         s.files[r.directory + "/result.json"] = final
@@ -456,13 +457,17 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     if log_kind == "available":
         s.files[r.directory + "/output.log"] = "diagnostic " * 250
     events = []
+    diagnostic_cancelled = asyncio.Event()
     original_download = s.download
 
     async def download(source: str, destination: Path) -> None:
         events.append(Path(source).name)
         if source.endswith("/output.log"):
             if log_kind == "slow":
-                await asyncio.Event().wait()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    diagnostic_cancelled.set()
             if log_kind == "error":
                 raise ConnectionError("log download failed")
         await original_download(source, destination)
@@ -477,8 +482,9 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     s.exec.side_effect = execute
     request = payload().request
     with pytest.raises(RuntimeError) as caught:
-        await asyncio.wait_for(r.run(request), timeout=0.5)
+        await asyncio.wait_for(r.run(request), timeout=10)
     assert events.index("checkpoint.json") < events.index("output.log")
+    assert diagnostic_cancelled.is_set() is (log_kind == "slow")
     assert r.session.capture_error is None
     expected_gaps = {"sandbox_result_unavailable"}
     if has_checkpoint:
@@ -670,9 +676,9 @@ async def test_recovered_checkpoint_skips_environment_verification(monkeypatch, 
     assert response.result is None
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
     assert {"partial_checkpoint", "sandbox_result_unavailable", NOOATerminationReason.INFRASTRUCTURE_ERROR} <= {
-        gap.code for gap in receipt.agent_observations.gaps
+        gap.code for gap in saved_reply.agent_observations.gaps
     }
     await r.close()
 

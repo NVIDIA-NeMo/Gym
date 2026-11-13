@@ -27,7 +27,7 @@ from pytest import MonkeyPatch
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.config.global_config as gc
-import nemo_gym.orchestration.server_supervisor
+import nemo_gym.server_runtime.supervisor.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -153,6 +153,8 @@ class TestEvalRunFlags:
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
+            (["--task-ids", "a, b"], '+task_ids=["a","b"]'),
+            (["--task-ids-file", "subset_v1.txt"], "+task_ids_fpath='subset_v1.txt'"),
             (["--num-repeats", "4"], "+num_repeats=4"),
             (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -274,6 +276,80 @@ class TestEvalRunFlags:
         assert "+config_paths=[b.yaml]" in overrides
         assert "+agent_name=a" in overrides
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
+
+
+class TestEvalCompareCommands:
+    @pytest.mark.parametrize(
+        ("command", "target"),
+        [
+            ("compare", "nemo_gym.cli.eval:compare"),
+            ("compare-suite", "nemo_gym.cli.eval:compare_suite"),
+        ],
+    )
+    def test_commands_dispatch_independently(self, monkeypatch: MonkeyPatch, command: str, target: str) -> None:
+        actual_target, overrides = _dispatch_for(monkeypatch, ["eval", command])
+        assert actual_target == target
+        assert overrides == []
+
+    def test_suite_is_discoverable_in_eval_help(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "--help"])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 0
+        assert "compare-suite" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("command", "accepted", "absent"),
+        [
+            ("compare", ("--baseline", "--candidates", "--agent", "--confidence-level"), ("--suite", "--level")),
+            ("compare-suite", ("--suite", "--confidence-level"), ("--baseline", "--candidates", "--agent", "--level")),
+        ],
+    )
+    def test_command_help_lists_only_its_own_inputs(
+        self, monkeypatch: MonkeyPatch, capsys, command: str, accepted: tuple[str, ...], absent: tuple[str, ...]
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", command, "--help"])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 0
+        help_text = capsys.readouterr().out
+        for flag in (*accepted, "--output-dir", "--report-format"):
+            assert flag in help_text
+        for flag in absent:
+            assert flag not in help_text
+
+    @pytest.mark.parametrize(
+        ("command", "flag", "value"),
+        [
+            ("compare", "--suite", "suite.yaml"),
+            ("compare", "--level", "suite"),
+            ("compare", "--level", "run"),
+            ("compare-suite", "--level", "suite"),
+            ("compare-suite", "--baseline", "base.jsonl"),
+            ("compare-suite", "--candidates", "candidate.jsonl"),
+            ("compare-suite", "--baseline-agg-metrics", "base.json"),
+            ("compare-suite", "--candidates-agg-metrics", "candidate.json"),
+            ("compare-suite", "--agent", "agent"),
+            ("compare-suite", "--baseline-agent", "agent"),
+            ("compare-suite", "--candidate-agents", "agent"),
+        ],
+    )
+    def test_commands_reject_flags_from_the_other_interface(
+        self, monkeypatch: MonkeyPatch, capsys, command: str, flag: str, value: str
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", command, flag, value])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 2
+        stderr = capsys.readouterr().err
+        assert "unrecognized arguments" in stderr
+        assert flag in stderr
+
+    @pytest.mark.parametrize("command", ["compare", "compare-suite"])
+    def test_both_commands_accept_confidence_level(self, monkeypatch: MonkeyPatch, command: str) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["eval", command, "--confidence-level", "0.9"])
+        assert target == f"nemo_gym.cli.eval:{command.replace('-', '_')}"
+        assert overrides == ["+confidence_level=0.9"]
 
 
 class TestEvalExportFlags:
@@ -743,7 +819,7 @@ class TestFriendlyValidationError:
                 raise AssertionError("RunHelper must not be built for a malformed head_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "RunHelper", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
@@ -1624,7 +1700,6 @@ class TestAgentSelector:
         assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
         agent = resolved[new_name].responses_api_agents.langgraph_agent
         assert agent.entrypoint == f"{flavor}_agent.py"
-        assert agent.num_workers == 1
         for binding in ("resources_server", "model_server", "datasets"):
             assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers
@@ -1658,7 +1733,8 @@ class TestAgentSelector:
         assert resolved.reflection_agent.responses_api_agents.langgraph_agent.resources_server is None
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers.single_agent_turn_legacy
         assert environment.agent_server.name == "aime24_math_with_judge_simple_agent"
-        assert environment.resources_tool_transports == ["direct_http"]
+        # math_with_judge serves no tools, so its Environment Server grants the agent none.
+        assert environment.get("resources_tool_transports", []) == []
 
     @pytest.mark.parametrize(
         "command",

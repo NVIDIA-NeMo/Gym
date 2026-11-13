@@ -143,7 +143,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=0)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=0)
 
     async def exec(self, command: str, timeout_s=None):
         return self._result
@@ -331,7 +331,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v2.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v2_legacy_agent.yaml").read_text()
+        )
         assert config["swemer_v2_resources_server"]["resources_servers"]["swemer_v2"]["apply_anti_cheating"] is True
 
 
@@ -358,7 +360,9 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v2.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v2_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swemer_v2"].get("num_workers")
             if workers and workers > 1:

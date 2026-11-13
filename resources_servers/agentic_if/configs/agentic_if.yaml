@@ -1,6 +1,6 @@
 # Agentic IF, example stack: Gym's single_agent_turn and opencode_agent with this resources server, which owns
-# each episode. It borrows the task sandbox from Scale-SWE or Terminal-Bench 2.1 through their typed sessions, lends it
-# to OpenCode, stages the IF plugins and grades the episode at /verify. benchmarks/agentic_if/config.yaml includes this
+# each episode. It borrows the task sandbox from Scale-SWE or Terminal-Bench 2.1 through their episode sessions, lends
+# it to OpenCode, stages the IF plugins and grades the episode at /verify. benchmarks/agentic_if/config.yaml includes this
 # file and adds the benchmark dataset and its route. The run's config sets policy_model.
 config_paths:
   - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
@@ -93,8 +93,6 @@ agentic_if_opencode_agent:
       export_dir: /tmp/nemo-gym-agentic-if/exports
       # A continuation row's recorded prefix, which the resources server stages (opencode_bundle.SESSION_IMPORT_PATH).
       session_import_path: /tmp/nemo-gym-agentic-if/prefix-export.json
-      # The session's own turns, so a compaction's summary call is not counted as a step (TE-9).
-      return_session_trajectory: true
       opencode_config:
         # No tools map: with the permission map's "*": allow it would expose skill and webfetch again.
         tools: null
