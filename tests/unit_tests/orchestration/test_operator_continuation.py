@@ -590,3 +590,39 @@ def test_a_terminal_protocol_row_beside_missing_rows_is_recovered_not_resubmitte
     assert _accounting(job_dir) == before
     # The recovery the verdict names is the one the planner takes.
     assert recover(*_handle(job_dir)).decision.action.value == "resubmit"
+
+
+def test_a_protocol_row_beside_a_spent_retry_budget_is_extended_not_resubmitted_fresh(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
+    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+
+    violation = PROTOCOL_VIOLATION | {
+        "_ng_failure_class": "environment_protocol_violation",
+        "_ng_failure_id": "violation-1",
+        "failure_reason": "Environment server replied to an episode request with a list",
+        "reward": 0.0,
+    }
+    # One terminal protocol row, two rows never run, and the infra-retry budget spent (3 of 3): the retry budget stops it.
+    job_dir = _timed_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job_dir / "artifacts" / name).unlink(missing_ok=True)
+    _run(job_dir, [[violation], [], []])
+    (job_dir / ".gym_job_chain").write_text("100\n101\n102\n")
+    (job_dir / ".gym_infra_retries").write_text("3\n")
+    (job_dir / ".gym_accumulated_walltime").write_text("7200\n")
+    before, saved = _accounting(job_dir), _saved_rows(job_dir)
+
+    out = inspect_recovery(*_handle(job_dir))
+
+    assert out.decision.action.value == "stop", out.decision.reason
+    assert out.decision.counts.get("terminal") == 1 and out.decision.counts.get("missing") == 2
+    action = out.operator_verdict["action"]
+    assert "`gym eval submit`" not in action and "producer bug" not in action
+    assert _command(out.operator_verdict).startswith("gym eval resubmit gym-job-x") and "--extend-retries N" in action
+    assert _accounting(job_dir) == before and _saved_rows(job_dir) == saved
+    # Plain recover reaches the same verdict, and the options the verdict names resume the saved run.
+    assert "--extend-retries N" in recover(*_handle(job_dir)).operator_verdict["action"]
+    resumed = recover(*_handle(job_dir), extend_retries=1, **BUDGET)
+    assert resumed.decision.action.value == "resubmit", resumed.decision.reason
+    assert _saved_rows(job_dir) == saved

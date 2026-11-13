@@ -6769,6 +6769,11 @@ def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> 
     stopped = f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}"
     options = _continuation_options(decision)
     kind = _stop_kind(decision)
+    # A spent budget is the cause of this stop when it names a continuation: a protocol row among the saved rows then
+    # explains nothing, and its remedy (a fresh submit) would discard the saved run the extension keeps.
+    from_rows = not (options and decision.chain_stop_kind is None and kind == ENVIRONMENT_PROTOCOL_VIOLATION)
+    if not from_rows:
+        kind = None
     if kind == PROVIDER_QUOTA_EXHAUSTED and decision.chain_stop_kind is None:
         # Gym's own quota stop: every terminal identity waits on the grading provider's quota.
         waiting = counts.get(IdentityState.TERMINAL, 0)
@@ -6793,14 +6798,15 @@ def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> 
         return _verdict(
             state,
             f"an operator continuation is refused: {why}",
-            f"{clear}; the saved run then continues (completed work is kept): {_continue_with(decision, *options)}"
+            f"{clear}; the saved run then continues (completed work is kept): {_continue_with(decision, *options, kind_from_rows=from_rows)}"
             + _partial_rerun_note(decision, options),
         )
     if options:
         return _verdict(
             "needs_action",
             stopped,
-            f"your decision: continue the saved run (completed work is kept): {_continue_with(decision, *options)}"
+            "your decision: continue the saved run (completed work is kept): "
+            f"{_continue_with(decision, *options, kind_from_rows=from_rows)}"
             + ("; it is refused while a job of the run is pending or running" if _EXPLICIT_BUDGET in options else "")
             + _partial_rerun_note(decision, options),
         )
