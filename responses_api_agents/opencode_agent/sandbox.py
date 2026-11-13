@@ -362,13 +362,18 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
             # null until the plugin checks the grants before the first model call of this activation.
             await upload_text(self.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
-        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        # A prompt passed as `opencode run`'s argument leaves stdin empty, as Harbor's `</dev/null` does.
+        stdin = payload["prompt"] if payload.get("stdin_prompt", True) else ""
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=stdin)
         command = list(payload["command"])
         # OpenCode shows each attached file's path to the model, so stage_media names files by content:
         # rollouts of one task then get the same prompt.
         if media:
-            for path in await stage_media(self.session.sandbox, media):
-                command.extend(["--file", path])
+            # The flags go before a trailing `-- <prompt>` (sandbox_harbor_invocation), which ends the options.
+            at = command.index("--") if "--" in command else len(command)
+            command[at:at] = [
+                arg for path in await stage_media(self.session.sandbox, media) for arg in ("--file", path)
+            ]
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],

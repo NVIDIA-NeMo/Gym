@@ -65,6 +65,64 @@ def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, t
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_session_provider_block_takes_modalities_timeout_and_interleaving_only_when_set(setup, configured):
+    agent, sandbox = setup
+    if configured:
+        agent.config.sandbox_model_modalities = {"input": ["text", "image"], "output": ["text"]}
+        agent.config.sandbox_provider_timeout_ms = 3_600_000
+        agent.config.sandbox_interleaved_reasoning = False
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
+        provider = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    model = provider["models"]["dummy_model"]
+    if configured:
+        assert provider["options"]["timeout"] == 3_600_000
+        assert model["modalities"] == {"input": ["text", "image"], "output": ["text"]}
+        assert "interleaved" not in model
+    else:
+        # The block every existing user gets.
+        assert provider["options"]["timeout"] is False
+        assert "modalities" not in model
+        assert model["interleaved"] == {"field": "reasoning_content"}
+    window, output = agent.config.context_window, agent.config.max_output_tokens
+    assert model["limit"] == {"context": window, "input": window, "output": output}
+
+
+def test_harbor_invocation_sends_the_harbor_provider_block_and_the_prompt_as_argument(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_harbor_invocation = True
+    agent.config.sandbox_model_id = "nvidia/served-model"
+    agent.config.sandbox_model_modalities = {"input": ["text", "image"], "output": ["text"]}
+    agent.config.sandbox_provider_timeout_ms = 3_600_000
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
+        params = sandbox.params()
+        stdin = sandbox.files[params["stdin"]]
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    config = json.loads(params["env"]["OPENCODE_CONFIG_CONTENT"])
+    # The Harbor job's whole block: the `openai` provider id and a model
+    # entry of name, limits and modalities only, so no reasoning flag and no interleaved replay from turn 2 on.
+    assert config["model"] == "openai/nvidia/served-model" and config["enabled_providers"] == ["openai"]
+    provider = config["provider"]["openai"]
+    assert provider["npm"] == "@ai-sdk/openai-compatible" and provider["options"]["timeout"] == 3_600_000
+    assert provider["models"] == {
+        "nvidia/served-model": {
+            "name": "nvidia/served-model",
+            "limit": {"context": agent.config.context_window, "output": agent.config.max_output_tokens},
+            "modalities": {"input": ["text", "image"], "output": ["text"]},
+        }
+    }
+    # `opencode run -- <prompt>` with an empty stdin, so OpenCode quotes the prompt as Harbor's `</dev/null` run does.
+    assert params["command"][-2:] == ["--", "task"] and stdin == ""
+    assert params["env"]["OPENCODE_FAKE_VCS"] == "git"
+
+
 def test_no_sandbox_or_provider_returns_422_before_connecting(setup):
     agent, sandbox = setup
     agent.config.sandbox_provider = None

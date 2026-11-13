@@ -326,6 +326,23 @@ exist; the sandbox owner supplies mounts or image contents.
 family-specific prompts, tools and defaults behind a Gym model route; the route
 still controls the actual provider/model. Native ID changes can affect scores.
 
+Three settings shape the session's provider block for a benchmark that must match
+another OpenCode setup; the defaults keep the block unchanged.
+`sandbox_model_modalities` declares the model's `modalities` (for example
+`{input: [text, image], output: [text]}`, so OpenCode passes images the model reads
+to it), `sandbox_provider_timeout_ms` sets the provider's per-call `timeout` (default:
+none), and `sandbox_interleaved_reasoning: false` drops
+`interleaved: {field: reasoning_content}`. OpenCode's openai-compatible provider sends earlier
+reasoning back as `reasoning_content` either way; without `interleaved`, a turn that had no
+reasoning omits the field instead of sending it empty.
+
+`sandbox_harbor_invocation: true` reproduces Harbor 0.6.6's OpenCode trial for
+comparisons with Harbor runs: the `openai` provider id, a model entry of `name`, `limit`
+(context and output) and the modalities above, without `reasoning` or `interleaved`, the
+prompt as the argument of `opencode run` with an empty stdin, and `OPENCODE_FAKE_VCS=git`.
+Set `sandbox_model_modalities` and `sandbox_provider_timeout_ms` to the values of the job
+it must match.
+
 ## Owner extensions
 
 These sandbox-session settings are off by default; unset, sessions behave as described

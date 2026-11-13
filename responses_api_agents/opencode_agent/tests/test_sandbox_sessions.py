@@ -427,6 +427,28 @@ def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypa
         assert closed.status_code == 200, closed.text
 
 
+def test_harbor_invocation_attaches_prompt_images_before_the_prompt_argument(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_harbor_invocation = True
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": [{"role": "user", "content": prompt}]}
+        )
+        assert result.status_code == 200, result.text
+        command = sandbox.params()["command"]
+        # `--` ends OpenCode's options, so a `--file` after it would reach the model as prompt text.
+        assert command[-2:] == ["--", "What is shown?"]
+        assert command[-4:-2] == ["--file", f"/tmp/nemo-gym-media/{hashlib.sha256(PNG).hexdigest()}.png"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
 @pytest.mark.parametrize("image_input", [False, True])
 def test_text_prompt_declares_image_input_only_when_configured(setup, image_input):
     agent, sandbox = setup
