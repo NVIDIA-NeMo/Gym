@@ -169,7 +169,9 @@ class SessionCodingTrainingServer(CodingTrainingServer):
         sha = hashlib.sha256(source.encode()).hexdigest()
         if sha != body.source_sha256 or source_binding(body, sha) != body.source_binding_sha256:
             raise HTTPException(409, "Retained source does not match the task and policy-response binding")
-        return RetainedAnswer(request_fingerprint(body), source)
+        # An empty, SHA-bound source is the receipt for a measured absent/invalid final file.
+        # None means no receipt was saved, so a lost session still cannot be graded.
+        return RetainedAnswer(request_fingerprint(body), source or None)
 
     async def verify(self, request: Request, body: CodingRequest) -> CodingResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -204,6 +206,11 @@ class SessionCodingTrainingServer(CodingTrainingServer):
                 return answer.verdict.model_copy(deep=True)
             result = self.new_result(body)
             if answer.source is None:
+                # Preserve this measured zero for full reverification after process restart. Reuse the source
+                # receipt envelope (including its task/response binding), with an explicitly empty artifact.
+                result.source_artifact = ""
+                result.source_sha256 = hashlib.sha256(b"").hexdigest()
+                result.source_binding_sha256 = source_binding(body, result.source_sha256)
                 result.failure_kind = "mm_coding_training:invalid_artifact"
                 result.evaluation_completed = True
                 result = observe_programmatic_grading(lambda: result)

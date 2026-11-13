@@ -477,7 +477,7 @@ class Inspector:
                 location="$.ng_trajectory.model_calls",
                 reason="external, encrypted or invalid media is unavailable to this reader",
                 predicate=lambda: not any(
-                    _missing_request_content(c.get("request")) or _missing_content(c.get("response"))
+                    _missing_request_content(c.get("request")) or _missing_request_content(c.get("response"))
                     for c in self.calls
                 ),
                 available=self.available,

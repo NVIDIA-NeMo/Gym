@@ -48,8 +48,9 @@ def test_external_media_is_not_a_complete_payload(record):
 
 
 @pytest.mark.parametrize("chat", [False, True])
-def test_image_parameter_schema_is_not_an_unresolved_image(record, chat):
-    request = record["ng_trajectory"]["model_calls"][0]["request"]
+@pytest.mark.parametrize("envelope", ["request", "response"])
+def test_image_parameter_schema_is_not_an_unresolved_image(record, chat, envelope):
+    request = record["ng_trajectory"]["model_calls"][0][envelope]
     function = {
         "name": "vision_analyze",
         "parameters": {"type": "object", "properties": {"image_url": {"type": "string"}}},
@@ -58,7 +59,9 @@ def test_image_parameter_schema_is_not_an_unresolved_image(record, chat):
     before = json.dumps(record, sort_keys=True)
     assert verdict(record, "TE-7") == "fulfilled"
     assert json.dumps(record, sort_keys=True) == before
-    request["input"] = [{"type": "input_image", "image_url": "https://example.invalid/missing.png"}]
+    request["input" if envelope == "request" else "output"] = [
+        {"type": "input_image", "image_url": "https://example.invalid/missing.png"}
+    ]
     assert verdict(record, "TE-7") == "not_fulfilled"
 
 

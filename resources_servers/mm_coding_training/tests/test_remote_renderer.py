@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Provider receipt, cleanup and candidate/infra classification regressions."""
 
+import io
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from PIL import Image
 
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from resources_servers.mm_coding_training.remote_renderer import RemoteRenderer, image_uri
-from resources_servers.mm_coding_training.tests.test_app import png
+from resources_servers.mm_coding_training.tests.test_app import png, request
+from resources_servers.mm_coding_training.tests.test_app import server as server
+from resources_servers.mm_coding_training.tests.test_sessions import http_request
 
 
 def renderer() -> RemoteRenderer:
@@ -123,3 +127,25 @@ async def test_cancelled_render_still_stops_the_sandbox() -> None:
             await running.wait()
             requests.cancel_scope.cancel()
     assert stopped == [True]
+
+
+@pytest.mark.asyncio
+async def test_successfully_rendered_candidate_over_pixel_limit_is_unmasked_zero(server):
+    data = io.BytesIO()
+    Image.new("RGB", (1280, 25100)).save(data, format="PNG")
+    box = AsyncMock()
+    box.exec.return_value = SandboxExecResult("", "", 0)
+
+    async def download(remote_path, local_path):
+        local_path.write_bytes(data.getvalue())
+
+    box.download.side_effect = download
+    with (
+        patch("resources_servers.mm_coding_training.remote_renderer.AsyncSandbox", return_value=box) as factory,
+        patch.object(type(server), "_renderer", return_value=renderer()),
+    ):
+        result = await server.verify(http_request(), request("<html>tall page</html>", benchmark="design2code_full"))
+    assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind == "mm_coding_training:execution_failed"
+    assert factory.call_count == 1
+    box.stop.assert_awaited_once()

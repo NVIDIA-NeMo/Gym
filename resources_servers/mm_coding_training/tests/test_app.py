@@ -499,6 +499,22 @@ async def test_answer_carrying_image_bytes_is_model_zero(server, benchmark, temp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("separator", ["", " "])
+async def test_compact_svg_path_is_graded_like_spaced_drawing_code(server, separator):
+    source = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 ' + separator.join(["h1v1"] * 300) + '"/></svg>'
+    renderer = AsyncMock()
+    renderer.render.return_value = png()
+    verdict = Quality(quality=0.8, task_fidelity=0.8, visual_fidelity=0.8, reason="Valid drawing")
+    with (
+        patch.object(CodingTrainingServer, "_renderer", return_value=renderer),
+        patch.object(CodingTrainingServer, "_judge", AsyncMock(return_value=verdict)),
+    ):
+        result = await server.verify(http_request(), request(source))
+    assert result.execution == 1 and result.reward == pytest.approx(0.84)
+    assert result.evaluation_completed and not result.mask_sample
+
+
+@pytest.mark.asyncio
 async def test_incomplete_judge_reply_is_a_judge_failure(server: CodingTrainingServer) -> None:
     completion = NeMoGymResponse.model_validate(response("{}", status="incomplete"))
     with patch("resources_servers.mm_coding_training.app.call_judge", AsyncMock(return_value=completion)):

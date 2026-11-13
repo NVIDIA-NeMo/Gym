@@ -320,3 +320,34 @@ async def test_gym_reverify_payload_regrades_a_judge_failure(session_server):
     with patch.object(type(session_server), "grade_source", side_effect=grade):
         result = await session_server.verify(http_request("fresh-reverify"), CodingRequest.model_validate(payload))
     assert result.reward == 0.9 and not result.mask_sample
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("artifact", [None, b"", b"\xff", b" " * 33, b"x" * 33])
+async def test_missing_answer_zero_survives_full_reverification_after_restart(session_server, artifact):
+    body = request("No final answer file")
+    session_server.config.max_source_bytes = 32
+    box = installed(session_server, body, code=44 if artifact is None else 0)
+
+    async def download(remote, local):
+        Path(local).write_bytes(artifact)
+
+    box.download.side_effect = download
+    first = await session_server.verify(http_request(), body)
+    assert first.reward == 0 and first.evaluation_completed and not first.mask_sample
+    row = {
+        "task_id": {"taskset": "mm-coding:opencode", "task_id": "mmsvg_text2svg:task-1"},
+        "task_input": {
+            "task_data": {"task": body.task.model_dump()},
+            "responses_create_params": body.responses_create_params.model_dump(mode="json"),
+        },
+    }
+    payload = _build_verify_payload(InputRolloutPair(input=row, rollout=first.model_dump(mode="json")))
+    restarted = SessionCodingTrainingServer(config=session_server.config, server_client=session_server.server_client)
+    replay = CodingRequest.model_validate(payload)
+    second = await restarted.verify(http_request("after-restart"), replay)
+    assert second.reward == 0 and second.evaluation_completed and not second.mask_sample
+    assert second.failure_kind == "mm_coding_training:invalid_artifact"
+    replay.response.id = "different-answer"
+    with pytest.raises(HTTPException, match="binding"):
+        await restarted.verify(http_request("tampered"), replay)

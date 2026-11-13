@@ -29,13 +29,21 @@ class RendererSetupError(RuntimeError):
     """The pinned renderer image did not pass its dependency preflight."""
 
 
+class ImageSizeError(ValueError):
+    """An image exceeds the verifier's documented measurement budget."""
+
+
 def image_uri(data: bytes) -> str:
     """Validate a bounded renderer/reference image before including it in a judge request."""
-    if not data or len(data) > MAX_IMAGE_BYTES:
-        raise ValueError("Image is empty or exceeds 32 MiB")
+    if not data:
+        raise ValueError("Image is empty")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ImageSizeError("Image exceeds 32 MiB")
     with Image.open(io.BytesIO(data)) as image:
-        if image.format not in {"PNG", "JPEG", "WEBP"} or image.width * image.height > 32_000_000:
-            raise ValueError("Unsupported or oversized image")
+        if image.width * image.height > 32_000_000:
+            raise ImageSizeError("Image exceeds 32 million pixels")
+        if image.format not in {"PNG", "JPEG", "WEBP"}:
+            raise ValueError("Unsupported image")
         mime = Image.MIME[image.format]
         image.verify()
     return f"data:{mime};base64," + base64.b64encode(data).decode()
@@ -85,7 +93,12 @@ class RemoteRenderer:
                 output = Path(directory) / "render.png"
                 await sandbox.download("/workspace/render.png", output)
                 data = output.read_bytes()
-                image_uri(data)
+                try:
+                    image_uri(data)
+                except (ImageSizeError, Image.DecompressionBombError):
+                    # Only a successfully executed and downloaded candidate render reaches here. Reference size
+                    # errors and provider/dependency failures remain inconclusive; these measured limits do not.
+                    return None
                 return data
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError) as error:
             raise RuntimeError("Remote renderer could not produce a valid measurement") from error

@@ -41,6 +41,19 @@ rendering and private reference. Gym's `observe_llm_judge_grading`, `call_judge`
 and `record_parsed_judge_verdict` bind real grading calls to verifier observations.
 Programmatic invalid-artifact/execution zeros are observed separately.
 
+A successfully rendered candidate must fit within 32 MiB and 32 million pixels.
+Exceeding either render limit is a measured execution zero, not a masked provider
+failure. References that fail validation still mask the measurement. Compact
+SVG path commands are allowed; long encoded runs are rejected as embedded raster
+assets only when their decoded prefix identifies a supported image format.
+
+For session answers, an empty `source_artifact` with the SHA256 of empty bytes
+and its task/response binding records a measured absent or invalid final file.
+Full reverification can replay this zero after restart. A null source carries
+no such receipt; a lost session without a receipt remains masked. Historical
+missing-answer rows without receipts require their original session evidence
+and cannot be reconstructed from the assistant's prose.
+
 The original renderer is versioned with this server and uploaded to every fresh
 sandbox. The dependency preflight runs before candidate execution. It preserves
 the last saved Matplotlib figure, including save-then-close, and supplies the
