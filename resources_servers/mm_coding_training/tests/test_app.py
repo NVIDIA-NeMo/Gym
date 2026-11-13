@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -419,6 +420,17 @@ def test_reward_endpoints_and_partial_quality() -> None:
 
 def test_final_artifact_extraction() -> None:
     assert extract_answer("<think>analysis</think>\n```svg\n<svg/>\n```", "svg") == "<svg/>"
+    # Blank lines after the opening fence are removed, so an <?xml declaration stays first.
+    assert extract_answer("```svg  \n\n \n<?xml version='1.0'?><svg/>\n  ```", "svg") == "<?xml version='1.0'?><svg/>"
+    assert extract_answer("```py\r\nprint(1)\r\n```", "python") == "print(1)\r"
+
+
+def test_unclosed_fence_with_many_blank_lines_is_refused_in_linear_time() -> None:
+    # The fence pattern once took cubic time in the blank-line count on the event loop: 5000 lines took about 30 s.
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="one complete artifact"):
+        extract_answer("```python" + "\n" * 5000 + "import matplotlib", "python")
+    assert time.perf_counter() - started < 1
 
 
 def test_renderer_resolves_provider_and_only_carries_resource_metadata(server: CodingTrainingServer) -> None:

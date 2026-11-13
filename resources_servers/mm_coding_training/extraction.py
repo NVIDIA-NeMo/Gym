@@ -12,7 +12,10 @@ def extract_answer(text: str, language: str) -> str:
         if not match:
             raise ValueError("Unfinished thinking")
         text = match[1].strip()
-    fence = re.fullmatch(r"```([\w+-]*)\s*\n([\s\S]*?)\n\s*```", text)
+    # [^\S\n]* (whitespace other than a newline) stays on one line, so a long run of blank lines cannot make this
+    # match take cubic time. Leading blank lines are removed after the match: an SVG whose <?xml declaration
+    # follows a blank line does not parse.
+    fence = re.fullmatch(r"```([\w+-]*)[^\S\n]*\n([\s\S]*?)\n[^\S\n]*```", text)
     if fence:
         aliases = {
             "python": {"python", "py"},
@@ -23,7 +26,7 @@ def extract_answer(text: str, language: str) -> str:
         }
         if fence[1].lower() not in aliases[language]:
             raise ValueError("Wrong code fence")
-        text = fence[2]
+        text = re.sub(r"\A\s*\n", "", fence[2])
     if not text.strip() or "```" in text or "<think>" in text or "</think>" in text:
         raise ValueError("Expected one complete artifact")
     return text
