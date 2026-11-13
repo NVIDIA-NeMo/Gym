@@ -32,15 +32,23 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
-### Step 1: Scaffold the server
+### Step 1: Scaffold the workload or server
 
-Run `gym env init` to generate the directory structure:
+For a manifest-backed benchmark, start with the [benchmark onboarding workflow](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#1-reuse-components-and-scaffold):
+
+```bash
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+```
+
+This creates `benchmarks/my_benchmark/` with its config, manifest, preparation script, prompt, sample data and README, plus `resources_servers/my_benchmark/` with the scorer and its tests. Use `--environment` for a training environment. Follow the onboarding page for benchmark preparation and prompting; the prepared-input and component-config examples below also cover standalone servers and training data.
+
+To add only a reusable resources server, use the standalone scaffold instead:
 
 ```bash
 gym env init --resources-server my_benchmark
 ```
 
-This creates:
+The standalone command creates the following server files, without a workload manifest:
 ```
 resources_servers/my_benchmark/
 ├── app.py              # Server template
@@ -56,7 +64,7 @@ For external benchmarks, create the agent server manually under `responses_api_a
 
 ### Step 2: Prepare data
 
-Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
+Convert your source dataset to Gym JSONL format. For template-based benchmarks, follow the [preparation and prompt instructions](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#2-prepare-data-and-complete-the-manifest). For already-rendered inputs, each line has `responses_create_params.input` (OpenAI message format), as below. Task-specific verification data goes in `verifier_metadata`.
 
 ```json
 {
@@ -147,7 +155,7 @@ Key points:
 
 ### Step 4: Wire YAML config
 
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+For a manifest-backed workload, edit `benchmarks/my_benchmark/config.yaml` (or `environments/my_benchmark/config.yaml`) and the component configs it includes. A standalone server's config lives at `resources_servers/my_benchmark/configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
 
 Key points:
 - `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
@@ -178,18 +186,17 @@ Both fields must coexist: `jsonl_fpath` is the local download destination, `gitl
 
 ### Step 4b: Complete the manifest
 
-A benchmark or environment under `benchmarks/` or `environments/` has a `manifest.yaml`. `gym env init --benchmark <name>` (or `--environment <name>`) writes one with placeholders. Fill its authored fields, and keep its composition mirror in line with the config: `gym env validate --manifest <path> --sync`.
+For a manifest-backed workload, follow [Prepare data and complete the manifest](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#2-prepare-data-and-complete-the-manifest). Complete the metadata the author chooses: identity, description, authors, licensing, reward declaration and, for benchmarks, split and prompt source. Also complete selection metadata for ownership, intended use, training permission, the benchmark's headline metric and run requirements. The [field reference](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#field-reference) defines the allowed values.
 
-The selection fields tell people whether the environment suits them. Fill each one from what you know, and never guess:
+Use the code, data's licence and terms, and information the user has supplied. Ask for missing maintainer identities or unresolved training-use permission instead of guessing. The literal `unknown` is supported by `training_allowed`, `requirements.gpu` and `requirements.internet`; it is not a general value for every field. Leave optional `overlaps_with` absent unless an overlap is known.
 
-- `maintainers`: GitHub logins of the people who will fix it. Ask the user if they have not said.
-- `intended_use`: `evaluation`, `training`, or both.
-- `training_allowed`: whether the data may be used for training. Decide it with the user from the data's licence and terms. Write `unknown` when nobody knows.
-- `primary_metric` (benchmarks): the key metric reported as the headline score.
-- `requirements`: `gpu` (the environment itself needs a GPU) and `internet` (a run needs outbound access). Write `unknown` when the code does not tell you.
-- `overlaps_with`: benchmarks whose tasks this data overlaps, when known.
+Replace every scaffold `TODO`. When wiring or dataset declarations change, edit the runtime config first, then synchronize the manifest's copied fields and review the diff:
 
-`unknown` is an answer. A missing field or a leftover `TODO` is not, so replace every `TODO` the scaffold wrote.
+```bash
+gym env validate --manifest <path> --sync
+```
+
+Synchronization does not complete authored metadata. Skip this step when adding only a standalone server with no workload manifest.
 
 ### Step 5: Test
 
@@ -204,6 +211,8 @@ pytest tests/unit_tests/ -x
 Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong output), verify fail (no code extracted), verify fail (compilation error if applicable), verify timeout.
 
 ### Step 6: Smoke test end-to-end
+
+For a manifest-backed benchmark, use the [representative evaluation workflow](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#4-run-a-representative-evaluation). The commands below exercise a standalone server's example data.
 
 ```bash
 # Start servers
