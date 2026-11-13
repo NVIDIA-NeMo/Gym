@@ -1065,6 +1065,7 @@ name = "gym-responses-api-agents-goose-agent"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "nemo-gym", extra = ["dev", "sandbox"] },
 ]
 
@@ -1075,6 +1076,7 @@ telemetry = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.10.19" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
 ]
