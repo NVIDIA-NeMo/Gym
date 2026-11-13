@@ -589,3 +589,29 @@ def test_the_incomplete_run_message_names_the_masked_failed_kinds_and_the_retrya
     assert "masked_failed_kinds: demo_env:invalid_reference (2)" in note and "fix or drop" in note
     assert "--extend-attempts" in note
     assert unsettled_masked_note({"masked_failed": 0, "masked_exhausted": 0}) == ""
+
+
+@pytest.mark.parametrize(
+    "masked, note",
+    [
+        ([_masked("session_lost")] * 3, "masked_exhausted"),
+        ([_masked("demo_env:invalid_reference") | {"failure_outcome_action": "fail"}], "masked_failed_kinds"),
+    ],
+    ids=["exhausted", "producer-failed"],
+)
+def test_the_strict_saved_completion_gate_never_covers_an_unsettled_masked_result_with_an_omission(
+    tmp_path, masked, note
+):
+    import orjson
+
+    from nemo_gym.cli.eval import _check_saved_completion
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    omitted = [{"_ng_failure_class": "skipped", "_ng_failure_terminal": True}]
+    output, _ = _run(tmp_path, [omitted, masked])
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert (coverage["intentionally_omitted"], coverage["successful"], coverage["complete"]) == (1, 2, False)
+    coverage_path_for(output).write_bytes(orjson.dumps(coverage))
+    with pytest.raises(IncompleteEvaluationError, match=note):
+        _check_saved_completion(output)
