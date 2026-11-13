@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -24,6 +25,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.agents.utils import sandbox_python
 from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
+from nemo_gym.agents.utils.supervisor_client import EXPIRE_REQUEST_FILE
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
@@ -210,21 +212,41 @@ def test_an_agent_that_runs_out_of_wall_time_answers_with_its_partial_run_as_inc
     agent, client, root, monkeypatch
 ):
     resources = _Resources(_resources_app([]))
+    # The second model request hangs, so the run is stopped only once the first tool call is done.
     model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
     monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
-    agent.config.sandbox_runner_timeout_seconds = 4
+    # The deadline is moved to the moment the model hangs (below); this one is only a safety net, so how fast
+    # the runner starts and runs its first tool cannot decide what the partial run contains.
+    agent.config.sandbox_runner_timeout_seconds = 120
     tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    answers: list = []
     try:
         _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
-        response = client.post(
-            f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
-            json={"input": [{"role": "user", "content": "Write the report."}], "model": "policy", "tools": _TOOLS},
+        request = threading.Thread(
+            target=lambda: answers.append(
+                client.post(
+                    f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                    json={
+                        "input": [{"role": "user", "content": "Write the report."}],
+                        "model": "policy",
+                        "tools": _TOOLS,
+                    },
+                )
+            )
         )
+        request.start()
+        assert model.blocked.wait(90), "the run never reached its second model request"
+        # The deadline arrives now: the supervisor ends the harness as at its time limit.
+        state = agent._require_agent_session("agent-session")
+        (Path(state.session.session_dir) / EXPIRE_REQUEST_FILE).write_text("")
+        request.join(90)
+        assert not request.is_alive()
         closed = _close(client)
     finally:
         model.close()
         resources.close()
 
+    (response,) = answers
     assert response.status_code == 200, response.text
     body = response.json()
     assert (body["status"], body["metadata"]["stop_reason"]) == ("incomplete", "wall_time")
