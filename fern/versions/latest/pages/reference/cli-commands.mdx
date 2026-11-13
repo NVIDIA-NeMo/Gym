@@ -975,6 +975,7 @@ Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
 | `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
 | `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
 | `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. Masking is a precaution (it also covers the password in a URL's user info), not a guarantee: keep secrets out of the config with `${oc.env:NAME}` or `env.yaml`. |
+| `<stem>_server_logs.json` | Where the run's server logs are, written before collection starts. With `nemo_gym_log_dir` set: `gym_servers`, the `<nemo_gym_log_dir>/<server>.log` of each server this run's config starts, and `unverified_log_dir_files`, other logs already in that folder (a shared folder also holds earlier runs' logs). Under `gym eval submit` on Slurm: `services`, the job's logs folder, its `<step>-<job id>.log` naming and the step logs present at start (the model services such as vLLM, the driver, the collector). Paths only. Without either, `status: unavailable` with the reason; Kubernetes jobs record only Gym server logs. |
 
 #### Resume interrupted runs
 

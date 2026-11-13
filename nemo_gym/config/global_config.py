@@ -141,6 +141,9 @@ DELETE_KEY_KEY_NAME = "_delete_key"
 # real config value (e.g. a literal "???" or a DictConfig) for "missing".
 _MISSING_REF = object()
 NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
+# Exported by `gym eval submit` to the driver: the job folder's logs directory, where each step writes
+# `<step>-<job id>.log`.
+SERVICE_LOG_DIR_ENV = "NEMO_GYM_SERVICE_LOG_DIR"
 VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"

@@ -350,6 +350,7 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
+    from nemo_gym.artifacts.server_logs import write_server_log_locations
     from nemo_gym.data.dataset_preparation import TrainDataProcessor
     from nemo_gym.rollouts.rollout_collection import (
         E2ERolloutCollectionConfig,
@@ -405,6 +406,7 @@ def e2e_rollout_collection():  # pragma: no cover
     )
 
     write_resolved_config(global_config_dict, output_fpath)
+    write_server_log_locations(global_config_dict, output_fpath)
 
     rh = RunHelper()
     rh.start(None)
@@ -1136,6 +1138,7 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
+    from nemo_gym.artifacts.server_logs import write_server_log_locations
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
@@ -1147,6 +1150,7 @@ def collect_rollouts():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
     write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
+    write_server_log_locations(global_config_dict, Path(config.output_jsonl_fpath))
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
 
