@@ -67,6 +67,7 @@ from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    TOOL_OUTPUT_IMAGES_KEY,
     EpisodeId,
     FailureBoundary,
     FailureClassificationConfig,
@@ -82,8 +83,10 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NgFailureEvent,
     RequestFailureLog,
+    ToolOutputImage,
     accumulate_response_usage,
     report_for_current_request,
+    split_tool_output_images,
 )
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
@@ -379,7 +382,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
 
     def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
@@ -720,6 +725,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 await commit_boundary()
 
             all_fn_calls = [o for o in model_response.output if o.type == "function_call"]
+            tool_images: list[ToolOutputImage] = []
             for output_function_call in all_fn_calls:
                 if collect_trajectory:
                     started_at = time()
@@ -761,7 +767,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
                         )
-                    tool_output = (await api_response.content.read()).decode()
+                    tool_output, images = _split_tool_output_images((await api_response.content.read()).decode())
+                    tool_images.extend(images)
                     resources_server_cookies = dict(resources_server_cookies or {})
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
@@ -792,6 +799,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=tool_output,
                     )
                 )
+
+            # Images follow all of the turn's tool outputs, one user message each.
+            new_outputs.extend(_tool_image_message(image) for image in tool_images)
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
@@ -1299,6 +1309,28 @@ def _cookies(response: Any) -> dict[str, str]:
 
 
 _ROLLOUT_PREFIX_SUFFIX = re.compile(rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+$")
+
+
+def _split_tool_output_images(tool_output: str) -> tuple[str, list[ToolOutputImage]]:
+    """Move the images out of a JSON tool reply, so the tool output keeps only the rest of the reply."""
+    if TOOL_OUTPUT_IMAGES_KEY not in tool_output:
+        return tool_output, []
+    try:
+        payload = json.loads(tool_output)
+    except json.JSONDecodeError:
+        return tool_output, []
+    if not isinstance(payload, dict) or TOOL_OUTPUT_IMAGES_KEY not in payload:
+        return tool_output, []
+    rest, images = split_tool_output_images(payload)
+    # The JSON format FastAPI sends, so the text matches a reply without images and the MCP tool result.
+    return json.dumps(rest, ensure_ascii=False, separators=(",", ":")), images
+
+
+def _tool_image_message(image: ToolOutputImage) -> NeMoGymEasyInputMessage:
+    """Show one tool image to the model as a user message, after its label."""
+    content = [{"type": "input_text", "text": image.label}] if image.label else []
+    content.append({"type": "input_image", "image_url": image.image_url, "detail": "auto"})
+    return NeMoGymEasyInputMessage(type="message", role="user", content=content)
 
 
 def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) -> str:

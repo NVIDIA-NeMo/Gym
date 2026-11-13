@@ -34,15 +34,25 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
+    ModelCallSampling,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     TaskId,
+    encode_model_sampling,
 )
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -67,6 +77,30 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPa
     )
 
     assert namespace["app"] is worker_app
+
+
+@pytest.mark.parametrize("token_capture", [False, True])
+def test_the_trained_agents_activation_carries_the_episodes_sampling_values(token_capture: bool) -> None:
+    environment_server, _ = _environment_server(token_capture=token_capture)
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+    capture = "/training-token-capture" if token_capture else ""
+
+    path = environment_server._agent_responses_path(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/rollout-a2{capture}/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+    # Gym-only evaluation sends no values and gets the path it always had.
+    assert environment_server._agent_responses_path(_request()) == f"/ng-rollout/rollout-a2{capture}/v1/responses"
+
+
+async def test_an_episode_with_sampling_values_runs_and_its_agent_carries_them() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+    result = await environment_server.run_request(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert result.failure is None, result.failure
+    assert result.result.reward == 1.0
+    assert client.calls[2][1] == f"/ng-rollout/rollout-a2/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
 
 
 async def test_single_agent_turn_with_direct_resources_tools() -> None:
@@ -321,6 +355,14 @@ async def test_token_capture_keeps_prefixed_twin_route() -> None:
     await environment_server.run_request(_request())
 
     assert client.calls[2][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
+
+
+async def test_a_request_that_skips_token_capture_activates_the_agent_without_the_training_tag() -> None:
+    environment_server, client = _environment_server(token_capture=True)
+
+    await environment_server.run_request(_request().model_copy(update={"skip_token_capture": True}))
+
+    assert client.calls[2][1] == "/ng-rollout/rollout-a2/v1/responses"
 
 
 async def test_lost_resources_seed_response_closes_caller_assigned_session() -> None:
@@ -645,11 +687,172 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
 ) -> None:
     environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
 
-    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
-        metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+    metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 
     assert metrics == AggregateMetrics()
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("skip_verification", "masked"),
+    # Masking is never read when verification is skipped, so that case needs no masked twin.
+    [(False, False), (False, True), (True, False)],
+)
+async def test_aggregation_reports_execution_metrics_with_or_without_valid_scores(
+    skip_verification: bool, masked: bool
+) -> None:
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": skip_verification}, agent={}
+    )
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": 0.0,
+            "mask_sample": masked,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": 2},
+        }
+        for repeat, tokens in enumerate((10, 30))
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows)
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [10, 30]
+    assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
+    assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == 20
+    assert result.agent_metrics["ci_low_95_across_repeats/mean_completion_tokens"] < 20
+    assert result.agent_metrics["ci_high_95_across_repeats/mean_completion_tokens"] > 20
+    if skip_verification:
+        assert client.calls == []
+        assert result.key_metrics == {}
+        assert result.group_level_metrics == []
+    else:
+        assert client.calls[0][2]["json"] == {"verify_responses": benchmark_rows}
+        assert result.key_metrics == benchmark.key_metrics
+    if skip_verification or masked:
+        assert "mean/reward" not in result.agent_metrics
+
+
+async def test_aggregation_preserves_benchmark_hooks_and_existing_execution_statistics() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": float(task == repeat),
+            "response": {"usage": {"output_tokens": 1000}, "metrics": {"latency": 42}},
+            "num_steps_passed": int(task == repeat),
+            "num_steps_total": task + 1,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": turns},
+        }
+        for task, repeat, tokens, turns in ((0, 0, 4, 1), (1, 0, 8, 2), (0, 1, 12, 2), (1, 1, 20, 4))
+    ]
+
+    def subtask_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+        passed = sum(row["num_steps_passed"] for task in tasks for row in task)
+        total = sum(row["num_steps_total"] for task in tasks for row in task)
+        return {"subtask_accuracy": passed / total}
+
+    hooks = {
+        "compute_metrics_fn": subtask_metrics,
+        "compute_repeat_metrics_fn": subtask_metrics,
+        "get_key_metrics_fn": lambda metrics: {"subtask_accuracy": metrics["subtask_accuracy"]},
+    }
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows, **hooks)
+    assert benchmark.perf_summary is None
+    body = AggregateMetricsRequest(verify_responses=rows)
+    original = body.model_dump_json()
+    for _ in range(2):
+        client.responses = [_Response(benchmark.model_dump())]
+        result = await environment_server.aggregate_metrics(body)
+        assert result == compute_aggregate_metrics(rows, **hooks)
+        assert result.key_metrics == {"subtask_accuracy": pytest.approx(1 / 3)}
+        assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [6, 16]
+        assert result.perf_summary["total_completion_tokens"] == 44
+        assert body.model_dump_json() == original
+        assert client.calls[-1][0:2] == ("resources", "/aggregate_metrics")
+        assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_aggregation_preserves_custom_repeat_rows_without_indices(indexed: bool) -> None:
+    environment_server, client = _environment_server()
+    repeat_rows = [{"sample_count": 2, "mean/reward": 0.5}]
+    if indexed:
+        repeat_rows.append({ROLLOUT_INDEX_KEY_NAME: 1, "sample_count": 1})
+    benchmark = AggregateMetrics(repeat_level_metrics=repeat_rows, key_metrics={"custom_score": 0.5})
+    client.responses = [_Response(benchmark.model_dump())]
+    rows = [{ROLLOUT_INDEX_KEY_NAME: 0, "ng_perf": {"completion_tokens": 10}}]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.repeat_level_metrics == repeat_rows
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.perf_summary["total_completion_tokens"] == 10
+    assert "mean_across_repeats/mean_completion_tokens" not in result.agent_metrics
+
+
+async def test_aggregation_counts_execution_before_resources_filters_quality() -> None:
+    environment_server, client = _environment_server()
+    # A resources server override may select a stage with repeated task/repeat identities.
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": reward, "ng_perf": perf}
+        for reward, perf in ((0.0, {"completion_tokens": 10}), (1.0, {"completion_tokens": 30}))
+    ]
+    benchmark = compute_aggregate_metrics([{k: v for k, v in rows[1].items() if k != "ng_perf"}])
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.group_level_metrics == benchmark.group_level_metrics
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.agent_metrics["mean/reward"] == 1.0
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert result.repeat_level_metrics[0]["mean_completion_tokens"] == 20
+
+
+async def test_aggregation_withholds_observations_of_any_type_from_resources() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "ng_perf": None},
+        {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "ng_perf": "not-a-summary"},
+        {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+            "ng_perf": {"completion_tokens": 12, "num_turns": 3},
+        },
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    client.responses = [_Response(compute_aggregate_metrics(benchmark_rows).model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+    assert result.perf_summary["overall_observability_coverage"] == pytest.approx(1 / 3)
+    assert result.perf_summary["total_completion_tokens"] == 12
+    assert result.key_metrics["mean/reward"] == pytest.approx(2 / 3)
+
+
+async def test_aggregation_returns_resources_repeat_rows_as_published_when_nothing_was_observed() -> None:
+    environment_server, client = _environment_server()
+    published = AggregateMetrics(
+        agent_metrics={"mean/reward": 1.0},
+        key_metrics={"mean/reward": 1.0},
+        repeat_level_metrics=[{"mean/reward": 1.0}],
+    )
+    client.responses = [_Response(published.model_dump())]
+
+    result = await environment_server.aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
+    )
+
+    assert result == published
 
 
 async def test_environment_resources_binding_is_independent_of_the_agents() -> None:
@@ -730,10 +933,15 @@ async def test_failed_agent_response_still_reaches_verification(reward: float, m
     assert result.result.response.status == "failed"
 
 
+@pytest.mark.parametrize("forward_agent_evidence", [None, False, True])
 @pytest.mark.parametrize("mask_sample", [False, True])
 @pytest.mark.parametrize("result_path", ["episode-request", "flat-adapter"])
-async def test_results_preserve_verification_and_observations(mask_sample: bool, result_path: str) -> None:
+async def test_results_preserve_verification_and_observations(
+    mask_sample: bool, result_path: str, forward_agent_evidence: bool | None
+) -> None:
     environment, client = _environment_server()
+    if forward_agent_evidence is not None:
+        environment.config.forward_agent_evidence = forward_agent_evidence
     observations = {
         "source": "hermes",
         "records": [
@@ -778,6 +986,15 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     assert result.result.ng_agent_observations == AgentObservationBundle.model_validate(observations)
     # The harness's own turns from the close reach the result in the slot rollout collection reads.
     assert result.result.ng_trajectory == TrajectoryRecord.model_validate(trajectory)
+    verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
+    if forward_agent_evidence:
+        assert verify_body["ng_trajectory"] == TrajectoryRecord.model_validate(trajectory).model_dump(mode="json")
+        assert verify_body["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
+            mode="json"
+        )
+    else:
+        assert "ng_trajectory" not in verify_body
+        assert "ng_agent_observations" not in verify_body
     if result_path != "flat-adapter":
         return
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
@@ -968,15 +1185,24 @@ async def test_a_seed_reply_that_cannot_be_captured_makes_the_episode_a_restart(
     assert len(restarts) == (0 if restarting_seed is None else 1)
 
 
+@pytest.mark.parametrize("lends_sandbox", [False, True], ids=["agent_owns_sandbox", "agent_borrows_sandbox"])
+@pytest.mark.parametrize("rebinds", [False, True], ids=["agent_keeps_grants", "agent_rebinds_grants"])
 @pytest.mark.parametrize("transports", [["direct_http"], ["mcp"], ["direct_http", "mcp"]])
-async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[Literal["direct_http", "mcp"]]) -> None:
+async def test_an_episode_that_grants_mcp_access_restarts_unless_its_agent_borrows_a_sandbox_and_rebinds_grants(
+    transports: list[Literal["direct_http", "mcp"]], rebinds: bool, lends_sandbox: bool
+) -> None:
     environment_server, client = _environment_server(resources_tool_transports=transports)
-    client.responses[0] = _Response(
-        {
-            "resources_session_id": "resources-session",
-            "resources_tools": {"server_name": "resources", "headers": {"X-NeMo-Gym-Session-Token": "token"}},
-        }
-    )
+    seed: dict[str, Any] = {
+        "resources_session_id": "resources-session",
+        "resources_tools": {"server_name": "resources", "headers": {"X-NeMo-Gym-Session-Token": "token"}},
+    }
+    if lends_sandbox:
+        seed["sandbox_access"] = _sandbox_access("lent")
+    client.responses[0] = _Response(seed)
+    if rebinds:
+        client.responses[1] = _Response(
+            {"agent_session_id": "agent-session"}, {"x-ng-checkpoint-rebinds-tool-accesses": "1"}
+        )
     restarts: list[list[str]] = []
 
     async def record_restart(request: object) -> None:
@@ -985,8 +1211,17 @@ async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[L
     object.__setattr__(environment_server, "checkpoint_restart", record_restart)
     await environment_server.run_request(_request())
 
-    # Marked before the agent receives the token, so no checkpoint ever records the episode past its seed.
-    assert restarts == ([["/seed_session"]] if "mcp" in transports else [])
+    # The MCP token names this attempt, and only a restore's re-seed carries the replacement attempt's token.
+    # A restore re-seeds only an episode whose agent borrows a sandbox, so without one the episode restarts,
+    # marked before the agent seed creates a session any checkpoint could export.
+    # An agent that keeps its token restarts too, as its own seed reply says;
+    # the reply is checked again here for an agent whose own check misses it.
+    expected = []
+    if "mcp" in transports and not lends_sandbox:
+        expected.append(["/seed_session"])
+    if "mcp" in transports and not rebinds:
+        expected.append(["/seed_session", "/v1/agent_sessions"])
+    assert restarts == expected
 
 
 async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_and_stays_ready() -> None:
@@ -1349,7 +1584,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
         )
         environment_boundary = {"next": "invoke_agent", "handles": handles.model_dump()}
         await environment._invoke_agent(first_attempt, handles)
-        agent_records = await agent.checkpoint_participant.export(None)
+        agent_records = await agent.checkpoint_participant.export(None, checkpoint_id="c")
     observations = agent._session_state("agent-session").observations
 
     # Both are restored, and the environment server invokes the activation again.
@@ -1975,3 +2210,317 @@ async def test_verifier_evidence_reaches_collector_through_result_or_failure(out
     assert invocation["model_calls"] == []
     assert "ng_verifier_invocations" not in record  # Only the canonical trajectory is persisted.
     assert list(tmp_path.iterdir()) == []  # Resources never writes verifier sidecars.
+
+
+# -- continuing a checkpoint after a restore -------------------------------------------------------------------
+
+
+def _sandbox_access(sandbox_id: str) -> dict:
+    return {
+        "connection": {
+            "kind": "direct",
+            "provider_config_ref": "opensandbox",
+            "descriptor": {"sandbox_id": sandbox_id},
+        },
+        "workdir": "/testbed",
+    }
+
+
+def _restore_into(
+    environment: SingleAgentTurnEnvironmentServer, boundary: dict, *, elapsed_s: float = 0.0
+) -> SingleAgentTurnRequest:
+    """Restore ``environment`` as a fresh process would, from a checkpoint of attempt 1 at ``boundary``."""
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    request = _request()
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id.model_copy(update={"attempt": 1}),
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary=boundary,
+                elapsed_s=elapsed_s,
+            )
+        ]
+    )
+    return request
+
+
+def _restored_handles(**extra: Any) -> dict:
+    return {
+        "resources_session_id": "resources-session",
+        "resources_cookies": {"session": "old-cookie"},
+        "agent_session_id": "agent-session",
+        "agent_cookies": {"session": "old-agent-cookie"},
+        **extra,
+    }
+
+
+@pytest.mark.parametrize("server_type", [SingleAgentTurnEnvironmentServer, SingleAgentTurnLegacyEnvironmentServer])
+async def test_a_restore_at_invoke_agent_re_seeds_both_sessions_onto_the_forked_sandbox(server_type: type) -> None:
+    environment, client = _environment_server(resources_tool_transports=["direct_http"])
+    environment = server_type(config=environment.config, server_client=client)
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles(borrowed_sandbox=True)})
+    # The resources server answers the re-seed with the sandbox its restore forked.
+    client.responses[0] = _Response(
+        {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+    )
+
+    episode = await environment.run_request(request)
+
+    assert episode.result is not None and episode.result.reward == 1.0
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    reseed = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"])
+    rebind = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
+    # Same sessions, under the replacement attempt, with the forked sandbox and this attempt's grants.
+    assert reseed.resources_session_id == "resources-session" and reseed.episode_id.attempt == 2
+    assert rebind.agent_session_id == "agent-session" and rebind.episode_id.attempt == 2
+    assert rebind.sandbox_access.connection.descriptor == {"sandbox_id": "forked"}
+    [grant] = rebind.tool_accesses
+    assert grant.cookies == {"session": "cookie-value"}
+    # The re-seed set the resources cookie again, and the activation used the agent cookie it returned.
+    assert client.calls[2][2]["cookies"] == {"session": "cookie-value"}
+
+
+async def test_a_restore_at_close_agent_re_seeds_then_closes_from_the_forked_sandbox() -> None:
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    request = _restore_into(
+        environment,
+        {"next": "close_agent", "handles": _restored_handles(borrowed_sandbox=True), "response": response},
+    )
+    client.responses[0] = _Response(
+        {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+    )
+    del client.responses[2]  # The agent already replied before the checkpoint.
+
+    episode = await environment.run_request(request)
+
+    assert episode.result is not None and episode.result.reward == 1.0
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    assert AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).sandbox_access is not None
+
+
+@pytest.mark.parametrize("handles", [_restored_handles(), _restored_handles(borrowed_sandbox=False)])
+async def test_a_restore_without_a_borrowed_sandbox_seeds_nothing_again(handles: dict) -> None:
+    # The first is a bookmark written before borrowed_sandbox existed; it still loads.
+    environment, client = _environment_server()
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": handles})
+    del client.responses[:2]
+
+    episode = await environment.run_request(request)
+
+    assert episode.result is not None
+    assert [path for _, path, _ in client.calls] == [
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+
+
+async def test_a_restored_episode_that_skips_verification_still_re_seeds_and_closes_both_sessions() -> None:
+    environment, client = _environment_server()
+    environment = SingleAgentTurnEnvironmentServer(
+        config=environment.config.model_copy(update={"skip_verification": True, "skip_verification_reward": 0.5}),
+        server_client=client,
+    )
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles(borrowed_sandbox=True)})
+    client.responses[0] = _Response(
+        {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+    )
+    del client.responses[4]  # No verification.
+
+    episode = await environment.run_request(request)
+
+    assert episode.result.reward == 0.5 and episode.result.verification_skipped
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
+async def test_a_re_seed_the_agent_cannot_capture_turns_the_episode_into_a_restart() -> None:
+    environment, client = _environment_server()
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles(borrowed_sandbox=True)})
+    client.responses[0] = _Response(
+        {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+    )
+    client.responses[1] = _Response({"agent_session_id": "agent-session"}, {"x-ng-checkpoint-restart": "1"})
+    restarts: list[object] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append(request)
+
+    object.__setattr__(environment, "checkpoint_restart", record_restart)
+    episode = await environment.run_request(request)
+
+    assert episode.result is not None
+    assert len(restarts) == 1
+
+
+async def test_a_replacement_attempt_has_only_what_is_left_of_the_episode_budget() -> None:
+    environment, client = _environment_server()
+    environment = SingleAgentTurnEnvironmentServer(
+        config=environment.config.model_copy(update={"default_episode_timeout_seconds": 30}), server_client=client
+    )
+    client.slow_path = "/ng-rollout/rollout-a2/v1/responses"
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles()}, elapsed_s=29.9)
+    del client.responses[:2]
+
+    episode = await environment.run_request(request)
+
+    # The earlier attempt spent all but 0.1 s of the budget; the slow activation runs past it.
+    assert episode.failure is not None and episode.failure.failure_reason == "Episode timed out"
+
+
+class _AgentHoldClient(_Client):
+    """Holds the agent call until ``released`` is set, then answers it as scripted."""
+
+    released: asyncio.Event = Field(default_factory=asyncio.Event)
+    holding: bool = False
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path.endswith("/v1/responses"):
+            self.holding = True
+            await self.released.wait()
+        return await super().post(server_name, url_path, **kwargs)
+
+
+async def _until(condition: Any) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def test_a_checkpoint_while_the_agent_runs_records_the_budget_it_spent_without_parked_time() -> None:
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
+
+    environment, client = _environment_server(client_type=_AgentHoldClient)
+    environment = SingleAgentTurnEnvironmentServer(
+        config=environment.config.model_copy(update={"default_episode_timeout_seconds": 60}), server_client=client
+    )
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    running = asyncio.create_task(environment.run_request(_request()))
+    await _until(lambda: client.holding)
+    # The agent works for a while after its boundary was recorded.
+    await asyncio.sleep(0.3)
+    first = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 30)
+    await controller.prepare(first)
+    [at_first] = participant.export_records(None)
+    await asyncio.sleep(1.0)
+    [while_parked] = participant.export_records(None)
+    await controller.resume(first)
+    second = CheckpointRequest(checkpoint_id="c2", deadline_ts=time.time() + 30)
+    await controller.prepare(second)
+    [at_second] = participant.export_records(None)
+    await controller.resume(second)
+    client.released.set()
+    episode = await running
+
+    assert at_first.boundary["next"] == "invoke_agent" and "elapsed_s" not in at_first.boundary["handles"]
+    assert 0.3 <= at_first.elapsed_s < 1.0
+    assert while_parked.elapsed_s == at_first.elapsed_s
+    # The second checkpoint counts the agent's time since, but not the second the first one held it.
+    assert at_first.elapsed_s <= at_second.elapsed_s < at_first.elapsed_s + 1.0
+    assert episode.result.reward == 1.0
+
+
+@pytest.mark.parametrize("server_type", [SingleAgentTurnEnvironmentServer, SingleAgentTurnLegacyEnvironmentServer])
+@pytest.mark.parametrize("lends_sandbox", [True, False], ids=["lent", "not_lent"])
+async def test_the_seed_records_whether_the_agent_borrows_a_sandbox_and_only_then_does_a_restore_re_seed(
+    server_type: type, lends_sandbox: bool
+) -> None:
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
+
+    environment, client = _environment_server(client_type=_AgentHoldClient)
+    environment = server_type(config=environment.config, server_client=client)
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    if lends_sandbox:
+        client.responses[0] = _Response(
+            {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("lent")}
+        )
+    running = asyncio.create_task(environment.run_request(_request()))
+    await _until(lambda: client.holding)
+    checkpoint = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 30)
+    await controller.prepare(checkpoint)
+    [record] = participant.export_records(None)
+    await controller.resume(checkpoint)
+    client.released.set()
+    await running
+
+    # The restore, in a fresh process, continues that record.
+    restored, restored_client = _environment_server()
+    restored = server_type(config=restored.config, server_client=restored_client)
+    request = _restore_into(restored, record.boundary)
+    if lends_sandbox:
+        restored_client.responses[0] = _Response(
+            {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+        )
+    else:
+        del restored_client.responses[:2]
+    episode = await restored.run_request(request)
+
+    assert record.boundary["next"] == "invoke_agent"
+    assert record.boundary["handles"]["borrowed_sandbox"] is lends_sandbox
+    assert episode.result is not None and episode.result.reward == 1.0
+    paths = [path for _, path, _ in restored_client.calls]
+    reseeded = ["/seed_session", "/v1/agent_sessions"] if lends_sandbox else []
+    assert paths == [
+        *reseeded,
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    if lends_sandbox:
+        rebind = AgentSeedSessionRequest.model_validate(restored_client.calls[1][2]["json"])
+        assert rebind.sandbox_access.connection.descriptor == {"sandbox_id": "forked"}
+
+
+async def test_a_checkpoint_does_not_wait_for_a_replacement_s_re_seed() -> None:
+    from nemo_gym.server_runtime import CheckpointRequest, ParticipantControlPlane
+
+    environment, client = _environment_server(client_type=_HoldingClient)
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles(borrowed_sandbox=True)})
+    participant = environment._checkpoint
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    client.responses[0] = _Response(
+        {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+    )
+    running = asyncio.create_task(environment.run_request(request))
+    await _until(lambda: client.started == ["/seed_session"])
+    # The re-seed is held in flight; a crash during it would re-seed again, so the checkpoint does not wait for it.
+    checkpoint = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 2)
+    prepared = await controller.prepare(checkpoint)
+    [record] = participant.export_records(None)
+    await controller.resume(checkpoint)
+    client.released.set()
+    episode = await running
+
+    assert prepared["phase"] == "prepared", prepared
+    assert record.boundary["next"] == "invoke_agent"
+    assert episode.result is not None and episode.result.reward == 1.0
+    assert [path for _, path, _ in client.calls][:2] == ["/seed_session", "/v1/agent_sessions"]

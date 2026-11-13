@@ -46,6 +46,11 @@ if TYPE_CHECKING:
 
 
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
+# Response metadata a harness adapter sets to "true" when the last prompt made at least as many model calls as the
+# harness's own step limit allows. The harness may only ask for a final answer at that limit (OpenCode adds a note and
+# still offers the tools), so the mark says the limit was reached, not how the model answered. The environment decides
+# whether a marked answer is scored.
+HARNESS_STEP_LIMIT_METADATA_KEY = "harness_step_limit_reached"
 
 
 class AgentOutcome(BaseModel):

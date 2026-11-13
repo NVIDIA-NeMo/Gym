@@ -4,7 +4,9 @@ Runs OpenClaw CLI (`openclaw agent --local --json`).
 OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
-Minimal, meant to be extended, and currently eval-only. 
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Quick start
 
@@ -289,7 +291,6 @@ Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
 Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 
-This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;
 unit tests alone do not establish runtime compatibility or benchmark accuracy. Process/memory/setup
 and close-latency overhead have not been benchmarked at scale.

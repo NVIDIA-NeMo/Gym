@@ -3609,7 +3609,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
                 "input_tokens": 20,
                 "output_tokens": 8,
                 "total_tokens": 28,
-                "input_tokens_details": {"cached_tokens": 3},
+                "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": None},
                 "output_tokens_details": {"reasoning_tokens": 2},
             }
         elif usage_source == "cli":
@@ -3683,7 +3683,7 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
             "input_tokens": 20,
             "output_tokens": 8,
             "total_tokens": 28,
-            "input_tokens_details": {"cached_tokens": 3},
+            "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": 2},
         }
     else:

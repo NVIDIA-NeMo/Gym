@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import monotonic
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -172,6 +173,10 @@ class OpenCodeSandboxSession(AgentSessionState):
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    # All retained activations use this same sandbox clock. A new session gets a
+    # separate domain; neither model-server clocks nor imported DBs are equated.
+    agent_instance: str = field(default_factory=lambda: f"opencode-agent:{uuid4().hex}", init=False)
+    tool_clock_domain: str = field(default_factory=lambda: f"opencode-wall:{uuid4().hex}", init=False)
     observations: AgentObservationBundle | None = None
     stderr: str = ""
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
@@ -275,6 +280,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         self._retained_activations[self.activation_id] = (self.activation_observations, self.activation_trajectory)
         bundles = [bundle for bundle, _ in self._retained_activations.values()]
         self.observations = AgentObservationBundle(
+            schema_version="2.0",
             source="opencode",
             records=[record for bundle in bundles for record in bundle.records],
             gaps=[gap for bundle in bundles for gap in bundle.gaps],
@@ -579,7 +585,10 @@ class OpenCodeSandboxSession(AgentSessionState):
                 self.request.episode_id.capture_key,
                 trajectory,
                 require_terminal_finish=True,
+                observation_schema_version="2.0",
                 model_ref=self.model_ref,
+                clock_domain=self.tool_clock_domain,
+                agent_instance=self.agent_instance,
                 message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
             )
             lifecycle = json.dumps(
@@ -614,6 +623,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="opencode",
                 gaps=[
                     ObservationGap(code="agent_artifact_unavailable"),

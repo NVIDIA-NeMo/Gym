@@ -124,10 +124,10 @@ from nemo_gym.eval.eval_plan import (
     eval_plan_json_schema,
     write_eval_plan,
 )
-from nemo_gym.orchestration.server_supervisor import RunHelper
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -1176,12 +1176,25 @@ def collect_rollouts():  # pragma: no cover
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
     global_config = get_global_config_dict()
     config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
-    asyncio.run(rah.run_from_config(config))
+    # Like a standalone collection, a standalone aggregation sets up its own telemetry, so the merged run's summary
+    # reaches OpenTelemetry as well as an experiment tracker.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config))
+    init_telemetry(server_name="driver", server_type="driver")
+    try:
+        asyncio.run(rah.run_from_config(config))
+    finally:
+        shutdown_telemetry()
 
 
 def health_check_rollouts(
@@ -1959,13 +1972,18 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sys.exit(1)
 
 
-def eval_status(target: str, *, json_output: bool = False) -> None:
-    """Print saved progress for a run directory or a locally indexed Gym job ID.
+def eval_status(
+    target: str,
+    *,
+    json_output: bool = False,
+    job_artifact_dirs: Callable[[str], dict[str, Path] | None],
+) -> None:
+    """Print saved progress for a run directory or, through `job_artifact_dirs`, a Gym job ID.
 
-    Submitted job artifacts must be visible on the current filesystem. This command
-    reads saved progress and does not contact a scheduler or a remote host.
+    `job_artifact_dirs` is required: it maps a target that is not a run directory with status files to each benchmark's
+    artifacts directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
+    command reads saved progress and does not contact a scheduler or a remote host.
     """
-    from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord, local_index_dir
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
 
     def status_files(directory: Path) -> list[Path]:
@@ -1996,26 +2014,24 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
     path = Path(target)
     if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
         raise NotADirectoryError(f"Run directory expected: {target}")
-    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
     files = status_files(path) if path.is_dir() else []
     exports: dict[str, dict[str, dict[str, Any]]] = {}
     if files:
         statuses = {str(file): json.loads(file.read_text()) for file in files}
         exports = {str(file): export_facts(file) for file in files}
-    elif record_path.is_file():
-        record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    else:
+        artifact_dirs = job_artifact_dirs(target)
+        if artifact_dirs is None:
+            raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
         statuses = {}
-        for benchmark in record.benchmarks:
-            directory = Path(benchmark.job_dir) / "artifacts"
+        for benchmark, directory in artifact_dirs.items():
             files = status_files(directory)
             if not files:
-                statuses[benchmark.benchmark] = {"status": "unavailable", "path": str(directory)}
+                statuses[benchmark] = {"status": "unavailable", "path": str(directory)}
             for file in files:
-                name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
+                name = benchmark if len(files) == 1 else f"{benchmark}/{file.name}"
                 statuses[name] = json.loads(file.read_text())
                 exports[name] = export_facts(file)
-    else:
-        raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
     if json_output:
         print(
             json.dumps(

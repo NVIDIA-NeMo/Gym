@@ -190,7 +190,8 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
 
 @pytest.mark.parametrize("task_index", [100, 200])
 @pytest.mark.parametrize("explicit_rollout_id", [False, True])
-def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id):
+@pytest.mark.parametrize("skip_token_capture", [False, True])
+def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id, skip_token_capture):
     row = {
         "responses_create_params": {"input": "same prompt across shards"},
         "_ng_task_index": task_index,
@@ -199,6 +200,8 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     }
     if explicit_rollout_id:
         row["_ng_rollout_id"] = f"shard-{task_index}"
+    if skip_token_capture:
+        row["_ng_skip_token_capture"] = True
     source = tmp_path / "source.jsonl"
     source.write_text(json.dumps(row) + "\n")
     output = tmp_path / "collated"
@@ -253,6 +256,7 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
+    assert request.skip_token_capture is skip_token_capture
 
 
 @pytest.mark.parametrize(

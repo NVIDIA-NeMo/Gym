@@ -1,0 +1,5 @@
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 2 + 2? Return only the answer in \\boxed{}."}]}, "question": "What is 2 + 2?", "expected_answer": "4"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 7 + 5? Return only the answer in \\boxed{}."}]}, "question": "What is 7 + 5?", "expected_answer": "12"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 9 + 6? Return only the answer in \\boxed{}."}]}, "question": "What is 9 + 6?", "expected_answer": "15"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 11 + 8? Return only the answer in \\boxed{}."}]}, "question": "What is 11 + 8?", "expected_answer": "19"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 13 + 10? Return only the answer in \\boxed{}."}]}, "question": "What is 13 + 10?", "expected_answer": "23"}

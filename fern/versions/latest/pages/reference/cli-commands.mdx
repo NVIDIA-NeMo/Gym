@@ -1171,7 +1171,7 @@ service stops accepting an old client, the export fails and names the environmen
 | `+wait=true\|false` | Wait for EvalRDL's verdict on the upload. Defaults to `true`. |
 | `+timeout=SECONDS` | How long to wait for the verdict. Defaults to `1800`. |
 | `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
-| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl`. |
+| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl>=0.0.241`. |
 
 The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. With
 `+wait=false` the run counts as `succeeded` once EvalRDL has stored it, and the upload token is in the result. When

@@ -132,11 +132,10 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
         "enabled_toolsets": ["terminal"],
         "chat_template_kwargs_enabled": False,
     },
-    # Episode sessions are process-local, so the harness must run as one worker. Its shipped template
-    # leaves `resources_server.name` unset for benchmark composition; here the environment server
-    # drives it, so the generated instance declares none (and is not a composition source).
+    # Without a resources server, its episode sessions are process-local, so the harness must run as one worker.
+    # Its shipped template leaves `resources_server.name` unset for benchmark composition;
+    # here the environment server drives it, so the generated instance declares none (and is not a composition source).
     "terminus_2_sandboxed_agent": {"num_workers": 1, "resources_server": None},
-    "miniswe_sandboxed_agent": {"num_workers": 1},
 }
 
 

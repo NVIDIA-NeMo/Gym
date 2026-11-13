@@ -149,7 +149,14 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
 - **`UNKNOWN`** with "nothing was read or decided" is a reader that did not run (reason on stderr), not a
   run fault; fix the reason and rerun the identical inspect; `NEMO_GYM_REMOTE_READER_SRUN` takes extra
   srun args if it needs a partition or QOS, and `NEMO_GYM_REMOTE_READER_TIMEOUT_S` raises its time bound
-  (300 to 14400 s; by default it grows with the size of the rollout files).
+  (300 to 14400 s; by default it grows with the size of the rollout files). A big store needs memory
+  (`--mem=<size>` in `NEMO_GYM_REMOTE_READER_SRUN`; on a login node the reader ends with `MemoryError`) and more
+  time than a tool call that is cut at about 10 minutes allows: start the inspect or the recovery detached
+  (`setsid nohup <command> > <log> 2>&1 &`) and poll the log. If a large-store reader still stalls or times out
+  after one retry with the 14400 s bound and more memory, report the store size, command and reader diagnostics
+  as a suspected Gym reader issue, and say the run is blocked on the reader. If inspection reports "saved rows
+  are unreadable", check the named files' read permissions and storage errors before attributing the failure
+  to Gym. Never report either condition as "nothing to recover".
 - **Exit code**: 0 only when `gate_task.status` is `SUCCESS`. A dispatching call exits 1 when it carries
   a score, MLflow or health-limit option, and a call handed to a queue can exit 0 while the gate still
   reads `RESUMING`: read `ok`, `dispatched` and `job_id` from the JSON line, not the exit code.
@@ -202,6 +209,10 @@ submitting user only (mode 0600) in the runs read: as another user, say they are
 
 ## 4. Act on the decision
 
+When the operator has asked you to complete or recover a run, inspect it and, if no continuation is live,
+run the recovery the decision permits in the same turn and babysit it. Keep an intentionally stopped run
+stopped unless the operator asks to continue it. A STOP that needs an owner's approval or a fix still waits.
+
 Plain `gym eval resubmit` without `--recover` resets the budgets and the per-rollout attempt allowance:
 it is not a substitute for any row below. Every row is the same command as the inspect, without
 `--inspect` and with the option the row names. Facts about single benchmarks (agent time limits,
@@ -222,7 +233,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | FAILED, the driver log ends `ValueError: Environment server must return an episode result or failure.` (or `InvalidRolloutResult`), the chain did not continue | A server replied in a shape the collector cannot use. It is deterministic: retrying cannot help. Fix the server or the benchmark pairing (the benchmark config names which server), optionally set `+route_failures_to_sidecar=true` to keep the other tasks' results while diagnosing, then `gym eval submit` again. Never `--recover`. |
 | STOP typed `environment_protocol_violation` (the first results of one environment server were all replies the collector cannot use) | Same: fix the server or the benchmark pairing, then `gym eval submit` again. Never `--recover`. |
 | STOP typed `collection_resume_refused`, or a **semantic** configuration difference (data, limits, repeats, model, sampling, judge or grading) | Usually a fresh run (section 8). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"` (records the reason and the user; never bypasses corrupt history). Operational differences (timeouts, retries, ports, concurrency, paths, tracking) resume by themselves with a warning. If the saved fingerprint no longer matches, continue at the run's own pin and report it; a resume on a newer Gym can be refused after setup, which costs an allocation. |
-| STOP: a resumed segment saved no rollout (its walltime was shorter than setup plus one rollout) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
+| STOP: a resumed segment saved no rollout (its walltime was shorter than setup plus one rollout) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, when the partition allows a longer segment. Each segment requests the smaller of `--max-walltime` and the partition's MaxTime (`walltime_plan` shows `each segment requests ...`), and the recovery keeps the recorded partition: a raise past MaxTime lifts only the chain cap, so a segment that saved no rollout twice at MaxTime will do it again. Then submit a new run on a partition with a longer MaxTime (the compute pool's `partition` in the submit document), and raise `compute.<cluster>.walltime` above setup plus one rollout. If the benchmark sets `resumable.max_walltime`, make sure that chain cap permits the full segment too. Changing the partition alone does not raise the requested walltime. Follow section 8, keep the old run directory and name it in the report, because nothing links the two runs; when earlier segments saved no rollout there is nothing to lose. |
 | The chain's walltime cap is spent, or the chain's accounting is unknown (a requeued segment) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime; journaled. For unknown accounting the explicit budget is what continues it, optionally with `--extend-retries`. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |
 | The infra-retry budget is spent | `--recover --extend-retries N`; the spent count is kept; journaled. It raises infra retries only, not the per-row attempt cap. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |
 | Rows used every attempt (`exhausted`, `max_rollout_attempts`) | `--recover --extend-attempts N`. Only rollouts the Store would run again are reopened (infrastructure failures, allocation cuts); a model failure or a saved result never is. Recorded in `artifacts/rollouts_attempt_extension`. |

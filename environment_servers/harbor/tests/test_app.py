@@ -75,7 +75,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
+from nemo_gym.core import ModelCallSampling, NgFailureEvent, RequestFailureLog, encode_model_sampling, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -210,6 +210,19 @@ class TestRewardFile:
 
 
 class TestEpisode:
+    async def test_the_trained_agents_activation_carries_the_episodes_sampling_values(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+        response = await server.run_request(episode(task).model_copy(update={"model_sampling": sampling}))
+
+        assert response.failure is None, response.failure
+        assert server.server_client.paths() == [
+            "/v1/agent_sessions",
+            f"/ng-rollout/r1/ng-sampling/{encode_model_sampling(sampling)}/v1/responses",
+            "/v1/agent_sessions/close",
+        ]
+
     async def test_episode_seeds_runs_the_agent_verifies_and_stops_the_sandbox(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
         client = server.server_client
@@ -5514,3 +5527,21 @@ class TestVerifierNetwork:
         assert server._verifier_network_policy(task) is None
         spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
         assert "network_policy" not in spec.provider_options
+
+
+@pytest.mark.parametrize(
+    ("skip_token_capture", "agent_path"),
+    [
+        (False, "/ng-rollout/r1/training-token-capture/v1/responses"),
+        (True, "/ng-rollout/r1/v1/responses"),
+    ],
+)
+def test_an_episode_that_skips_token_capture_activates_the_agent_without_the_training_tag(
+    tmp_path, monkeypatch, skip_token_capture, agent_path
+):
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    server.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
+
+    request = episode(task).model_copy(update={"skip_token_capture": skip_token_capture})
+
+    assert server._agent_responses_path(request) == agent_path

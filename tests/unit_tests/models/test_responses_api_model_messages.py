@@ -15,14 +15,15 @@
 """Tests for the default ``/v1/messages`` route on ``SimpleResponsesAPIModel``.
 
 Every Gym model server inherits an Anthropic Messages endpoint that maps Messages <-> Responses
-around the server's own ``responses()``. These tests use minimal fake servers to exercise the
-default mapping for both ``responses()`` signatures (with and without a leading ``request``).
+around the server's own ``responses()``. Minimal servers cover both ``responses()`` signatures
+and native-cause capture reconstruction.
 """
 
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
@@ -34,6 +35,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.models.model_call_capture import _reconstruct_anthropic_sse
 
 
 def _build_response(text: str, model: str = "downstream-model") -> NeMoGymResponse:
@@ -103,6 +105,23 @@ def _client(model_cls) -> TestClient:
 
 
 class TestDefaultMessagesRoute:
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("output_config", [None, {"effort": None}, {"effort": "max"}])
+    def test_output_config_effort_remains_ignored(self, output_config: object, stream: bool) -> None:
+        client, server = _client(_BodyOnlyModel)
+        result = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "messages": [],
+                "max_tokens": 8,
+                "stream": stream,
+                "output_config": output_config,
+            },
+        )
+        assert result.status_code == 200
+        assert "reasoning" not in server.last_params.model_dump(exclude_unset=True)
+
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
         server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         paths = {route.path for route in server.setup_webserver().routes}
@@ -150,3 +169,29 @@ class TestDefaultMessagesRoute:
         assert "event: message_start" in body
         assert "event: content_block_delta" in body
         assert "event: message_stop" in body
+
+
+def test_anthropic_sse_reconstruction_preserves_zero_native_causes() -> None:
+    response = _reconstruct_anthropic_sse(
+        [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "message",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "model",
+                    "stop_reason": "end_turn",
+                    "native_stop_reason": 0,
+                    "native_finish_reason": 0,
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "answer"}},
+            {"type": "message_stop"},
+        ]
+    )
+    assert response["stop_reason"] == "end_turn"
+    assert response["content"] == [{"type": "text", "text": "answer"}]
+    for key in ("native_stop_reason", "native_finish_reason"):
+        assert response[key] == 0
+        assert type(response[key]) is int

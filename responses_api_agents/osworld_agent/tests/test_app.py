@@ -2305,7 +2305,7 @@ def test_child_result_sums_usage_of_every_policy_response_gym_received() -> None
     )
     expected = {
         "input_tokens": 3700,
-        "input_tokens_details": {"cached_tokens": 1536},
+        "input_tokens_details": {"cached_tokens": 1536, "cache_write_tokens": None},
         "output_tokens": 118,
         "output_tokens_details": {"reasoning_tokens": 30},
         "total_tokens": 3818,

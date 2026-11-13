@@ -342,8 +342,10 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         # Need `openai/` provider prefix for LiteLLM
         config.llm_user = TAU2_USER_MODEL
+        # A training framework trains the agent, not the simulated user, which keeps its own sampling.
+        user_base_url = self.base_url_for_run(get_server_url(self.config.user_model_server.name), body, trained=False)
         config.llm_args_user |= {
-            "api_base": f"{self.base_url_for_run(get_server_url(self.config.user_model_server.name), body)}/v1",
+            "api_base": f"{user_base_url}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | self.config.user_llm_args
 

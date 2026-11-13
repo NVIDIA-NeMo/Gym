@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: opencode_multimodal_benchmarks/zerobench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: 100 main-split questions scored by exact final-answer matching.
+modality: image
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+dataset_owner: opencode_multimodal_benchmarks
+resources_server: opencode_multimodal_benchmarks
+agent_server: simple_agent
+datasets:
+- name: zerobench
+  type: benchmark
+  jsonl_fpath: benchmarks/opencode_multimodal_benchmarks/data/zerobench.jsonl
+  prepare_script: benchmarks/opencode_multimodal_benchmarks/zerobench_prepare.py
+  num_repeats: 5
+model_server: policy_model
+canonical_split: zerobench
+prompt_source: prepared

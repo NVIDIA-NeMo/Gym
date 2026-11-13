@@ -59,6 +59,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge
 
 
@@ -299,7 +300,10 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
                 response_model=NeMoGymChatCompletion,
             )
             if self.config.judge_mode == "research" and (
-                not chat_response.choices or chat_response.choices[0].finish_reason != "stop"
+                not chat_response.choices
+                or chat_response.choices[0].finish_reason != "stop"
+                or getattr(chat_response.choices[0], "native_finish_reason", None) == "repetition"
+                or getattr(chat_response.choices[0], "stop_reason", None) == "repetition_detected"
             ):
                 reason = chat_response.choices[0].finish_reason if chat_response.choices else "no choices"
                 raise JudgeError(f"FrontierScience Research judge did not complete: {reason}")
@@ -387,3 +391,6 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     FrontierScienceJudgeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = FrontierScienceJudgeServer.run_webserver()  # noqa: F401

@@ -2839,7 +2839,7 @@ def test_a_ray_head_is_probed_beside_a_non_zero_driver_node(tmp_path):
 
 def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     script = _driver_on_aux(tmp_path, {})
-    assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+    assert "Waiting for otel_collector at http://${gym_nodes[1]}:4319" in script
 
 
 def test_services_on_node_0_are_probed_locally(tmp_path):

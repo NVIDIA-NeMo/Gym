@@ -71,7 +71,7 @@ Grades each task with the dataset's own patch, which measures the dataset rather
 
 ```bash
 gym env start \
-  --config resources_servers/swemer_oml/configs/swemer_oml.yaml \
+  --config resources_servers/swemer_oml/configs/swemer_oml_legacy_agent.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/swemer_oml/apply_golden_patch.py \
@@ -104,6 +104,15 @@ is the filter. A per-task JSON report of every excluded row (failure category, p
 grader output tail) and of the 306 images that never built sits next to the pass files.
 
 ## Running an agent
+
+`configs/swemer_oml.yaml` is the default OpenCode session pairing for the example taskset.
+The resources-only configuration is now `configs/swemer_oml_legacy_agent.yaml`; use it for
+golden-patch validation. `configs/swemer_oml_opencode.yaml` retains the legacy relay pairing
+for the training dataset.
+
+```bash
+gym env start --config resources_servers/swemer_oml/configs/swemer_oml.yaml
+```
 
 ```bash
 gym env start \
