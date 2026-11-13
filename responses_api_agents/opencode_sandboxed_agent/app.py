@@ -1745,8 +1745,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ]
             length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
             terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
-            # A sandbox-reported error, such as the exec timeout, outranks the error the killed
-            # session left in its export, so timeout and out-of-memory classification still sees it.
+            # The sandbox's exec timeout outranks the error the killed session left in its export,
+            # so rules that match opencode_error_type == "timeout" still see it.
             if terminal_error and not run_error_type and getattr(result, "error_type", None) is None:
                 run_error_type = (
                     terminal_error.get("name", "OpenCodeError")
