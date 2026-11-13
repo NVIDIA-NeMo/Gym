@@ -456,6 +456,8 @@ A named config is often a variant of another workload rather than a workload of 
 
 Write a link as the `name` the target manifest declares. Validation looks for the target in the same `benchmarks/` or `environments/` tree as the manifest that links to it.
 
+A setup or protocol declares its own selection fields; it does not take them from the manifest it names, so each manifest can be read on its own. A setup runs the same task data as its target, so when both declare `training_allowed`, validation requires the same answer.
+
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 
 ### Prompt Sources
