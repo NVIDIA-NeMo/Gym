@@ -1511,11 +1511,14 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "harbor" },
-    { name = "nemo-gym", extra = ["cwsandbox", "dev", "ray", "sandbox"] },
+    { name = "nemo-gym", extra = ["dev", "ray", "sandbox"] },
     { name = "pathspec" },
 ]
 
 [package.optional-dependencies]
+cwsandbox = [
+    { name = "nemo-gym", extra = ["cwsandbox"] },
+]
 telemetry = [
     { name = "nemo-gym", extra = ["telemetry"] },
 ]
@@ -1523,11 +1526,12 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "harbor", git = "https://github.com/laude-institute/harbor.git?rev=9dddd797b57ab8a0f9d6352a20fce73abbb29573" },
-    { name = "nemo-gym", extras = ["dev", "ray", "sandbox", "cwsandbox"], editable = "../../" },
+    { name = "nemo-gym", extras = ["cwsandbox"], marker = "extra == 'cwsandbox'", editable = "../../" },
+    { name = "nemo-gym", extras = ["dev", "ray", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
     { name = "pathspec", specifier = "==1.1.1" },
 ]
-provides-extras = ["telemetry"]
+provides-extras = ["telemetry", "cwsandbox"]
 
 [[package]]
 name = "h11"

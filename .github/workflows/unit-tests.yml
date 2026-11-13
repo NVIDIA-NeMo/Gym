@@ -176,7 +176,7 @@ jobs:
           COVERAGE_FILE: results/.coverage.sandbox
         run: |
           source ./scripts/ci/setup_dev.sh
-          uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra mlflow --extra wandb
+          uv sync --extra dev --extra ray --extra sandbox --extra cwsandbox --extra openshell --extra mlflow --extra wandb
           pytest --cov=. --cov-report= --cov-fail-under=0 --durations=10 -m sandbox
 
       - name: Upload sandbox coverage
