@@ -3,7 +3,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: long_context
 description: Long-context RULER v2 verifier with WER-fallback soft string match across
   3 match types plus a multichoice route
 modality: text

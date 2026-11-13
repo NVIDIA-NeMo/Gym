@@ -3,7 +3,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: knowledge
+domain: long_context
 description: LongBench-v2 multiple-choice questions filtered to at most 1048576 context
   tokens using the Nemotron-3-Super tokenizer.
 modality: text

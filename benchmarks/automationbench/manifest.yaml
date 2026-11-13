@@ -3,7 +3,7 @@ version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: agent
 description: AutomationBench enterprise workflows scored by guardrail-gated objective
   completion, run with simple_agent sessions against the automationbench resources server.
 modality: text

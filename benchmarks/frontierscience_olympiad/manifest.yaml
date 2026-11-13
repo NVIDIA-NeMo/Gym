@@ -3,7 +3,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: knowledge
 description: FrontierScience answer grading via single-pass LLM judge
 modality: text
 licensing: unknown

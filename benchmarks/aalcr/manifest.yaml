@@ -3,7 +3,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: long_context
 description: AA-LCR long-context document question answering with the legacy v1.0
   equality judge.
 modality: text
