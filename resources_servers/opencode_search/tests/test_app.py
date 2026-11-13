@@ -13,10 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from typing import Any, Optional
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
@@ -27,6 +33,7 @@ from resources_servers.opencode_search.app import (
     _last_assistant_text,
     parse_judge_verdict,
 )
+from resources_servers.opencode_search.exa_cache import ExaCache
 
 
 def _text_part(text: str) -> SimpleNamespace:
@@ -230,3 +237,131 @@ class TestMaskedTerminalFailureKinds:
         assert verified.reward == reward
         assert verified.failure_kind is None
         assert verified.failure_reason is None
+
+
+# A search, as the search plugin in a sandbox sends it to the proxy: one JSON-RPC tool call.
+SEARCH = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {"name": "web_search_exa", "arguments": {"query": "tallest tower in Paris"}},
+}
+# The search endpoint's reply: one SSE frame that carries the JSON-RPC envelope.
+FRAME = b'data: {"jsonrpc": "2.0", "id": 1, "result": {"content": []}}\n\n'
+
+
+class _Upstream:
+    """Stands in for aiohttp.ClientSession in the search cache proxy. It records each call the proxy forwards, with the
+    thread the call was made on, and answers it with FRAME, or raises error."""
+
+    def __init__(self, error: Optional[Exception] = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self) -> "_Upstream":
+        return self
+
+    async def __aenter__(self) -> "_Upstream":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    @asynccontextmanager
+    async def post(self, url: str, **kwargs: Any) -> AsyncIterator[SimpleNamespace]:
+        self.calls.append({"url": url, "thread": threading.get_ident(), **kwargs})
+        if self.error is not None:
+            raise self.error
+        yield SimpleNamespace(
+            status=200, headers={"content-type": "text/event-stream"}, read=AsyncMock(return_value=FRAME)
+        )
+
+
+def _search_cache_server(exa_cache_root: str) -> SearchResourcesServer:
+    """A server that lends no sandbox, with its search cache at exa_cache_root; an empty root turns the cache off."""
+    return SearchResourcesServer(
+        config=SearchResourcesServerConfig(
+            host="0.0.0.0",
+            port=0,
+            entrypoint="app.py",
+            name="opencode_search",
+            sandbox_provider="opensandbox",
+            sandbox_config={},
+            sandbox_image="image",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            exa_cache_root=exa_cache_root,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+class TestSearchCacheProxy:
+    """The /mcp proxy that a sandbox's searches go through when exa_cache_root is set. It reads no session, and it fails
+    open: a cache that cannot be read or written costs a call upstream, never the search."""
+
+    def test_without_a_cache_root_there_is_no_proxy(self):
+        with TestClient(_search_cache_server("").setup_webserver()) as client:
+            assert client.post("/mcp", json=SEARCH).status_code == 404
+            assert client.get("/exa_cache_stats").status_code == 404
+
+    def test_a_repeated_search_is_answered_from_the_cache(self, tmp_path, monkeypatch):
+        """Both routes are served under the app's lifespan, which the server wraps to stop its sandboxes at exit."""
+        upstream = _Upstream()
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", upstream)
+
+        with TestClient(_search_cache_server(str(tmp_path / "cache")).setup_webserver()) as client:
+            replies = [client.post("/mcp", json=SEARCH) for _ in range(2)]
+            stats = client.get("/exa_cache_stats").json()
+
+        assert [(reply.status_code, reply.content) for reply in replies] == [(200, FRAME)] * 2
+        assert len(upstream.calls) == 1
+        assert (stats["miss"], stats["put"], stats["hit_exact"]) == (1, 1, 1)
+
+    def test_a_cache_that_fails_forwards_the_search_with_its_query_string(self, tmp_path, monkeypatch):
+        cache_threads: list[int] = []
+
+        def get(cache: ExaCache, kind: str, text: str) -> Any:
+            cache_threads.append(threading.get_ident())
+            raise RuntimeError("the cache cannot be read")
+
+        def put(cache: ExaCache, kind: str, text: str, payload: Any) -> None:
+            cache_threads.append(threading.get_ident())
+            raise OSError("the cache cannot be written")
+
+        monkeypatch.setattr(ExaCache, "get", get)
+        monkeypatch.setattr(ExaCache, "put", put)
+        upstream = _Upstream()
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", upstream)
+        client = TestClient(_search_cache_server(str(tmp_path / "cache")).setup_webserver())
+
+        # The search key rides on the query string. The call carries no session cookie: the proxy needs none.
+        reply = client.post("/mcp?exaApiKey=KEY", content=json.dumps(SEARCH))
+
+        assert reply.status_code == 200 and reply.content == FRAME
+        assert reply.headers["content-type"].startswith("text/event-stream")
+        (call,) = upstream.calls
+        assert call["url"] == "https://mcp.exa.ai/mcp?exaApiKey=KEY"
+        assert call["data"] == json.dumps(SEARCH).encode() and call["timeout"].total == 120
+        # Both cache calls were made, on worker threads rather than on the event loop's, where the upstream call ran.
+        assert len(cache_threads) == 2 and call["thread"] not in cache_threads
+
+    @pytest.mark.parametrize("body", [b"not json", b"[]"], ids=["not_json", "not_an_object"])
+    def test_a_body_the_proxy_cannot_read_is_forwarded_as_sent(self, tmp_path, monkeypatch, body):
+        upstream = _Upstream()
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", upstream)
+        client = TestClient(_search_cache_server(str(tmp_path / "cache")).setup_webserver())
+
+        reply = client.post("/mcp", content=body)
+
+        assert reply.status_code == 200 and reply.content == FRAME
+        assert [call["data"] for call in upstream.calls] == [body]
+
+    def test_an_upstream_that_cannot_be_reached_is_a_502(self, tmp_path, monkeypatch):
+        upstream = _Upstream(ConnectionError("the search endpoint is unreachable"))
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", upstream)
+        client = TestClient(_search_cache_server(str(tmp_path / "cache")).setup_webserver())
+
+        reply = client.post("/mcp", json=SEARCH)
+
+        assert reply.status_code == 502 and reply.content == b""
+        assert len(upstream.calls) == 1
