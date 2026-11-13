@@ -19,7 +19,7 @@ wildclaw_agent:
       context_window: ${oc.select:wildclaw_context_window,131072}
       max_tokens: ${oc.select:wildclaw_max_tokens,8192}
       thinking: ${oc.select:wildclaw_thinking,high}
-      judge_model: ${oc.env:JUDGE_MODEL,azure/openai/gpt-5.4}
+      judge_model: ${oc.env:JUDGE_MODEL,openai/gpt-5.4}
       sandbox_runtime: ${oc.env:WILDCLAW_SANDBOX_RUNTIME,docker}
       datasets:
         - name: wildclawbench

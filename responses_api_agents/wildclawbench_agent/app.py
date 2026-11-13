@@ -50,7 +50,7 @@ class WildClawConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = Field(default=8192, gt=0)
     thinking: str = "high"
     sandbox_runtime: str = "docker"
-    judge_model: str = "azure/openai/gpt-5.4"
+    judge_model: str = "openai/gpt-5.4"
 
     @model_validator(mode="after")
     def validate_execution(self) -> WildClawConfig:

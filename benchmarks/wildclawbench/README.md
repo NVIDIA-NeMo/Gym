@@ -78,6 +78,15 @@ Load private credentials into the compute job's environment:
   require using OpenRouter as the actual provider.
 - Policy credentials belong to Gym's separately selected model configuration.
 
+The judge endpoint must accept the original graders' Chat Completions requests,
+including `max_tokens=300` and JSON-object mode when the JSON instruction appears
+only in the system message. A plain "reply OK" probe does not test this contract.
+On NVIDIA's inference API, the tested `azure/openai/gpt-5.4` route rejected that
+request shape; `openai/openai/gpt-5.4` accepted it unchanged. Select the compatible
+route with `JUDGE_MODEL`; the generic default is the upstream `openai/gpt-5.4`
+identifier. The effective identifier is recorded with every result. Do not modify
+grader prompts or suppress judge-failure masks to work around a provider error.
+
 The evaluated model calls Gym's rollout-specific `/v1` endpoint with an inert
 local key; provider credentials stay with the Gym model server. The judge is
 separate and must stay fixed across compared models. Auxiliary calls explicitly
