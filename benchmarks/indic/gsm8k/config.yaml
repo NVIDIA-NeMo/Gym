@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/gsm8k_reference/configs/gsm8k_reference.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+indic_gsm8k_resources_server:
+  _inherit_from: gsm8k_reference
+
+indic_gsm8k_simple_agent:
+  _inherit_from: gsm8k_reference_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_gsm8k_resources_server
+      model_server:
+        name: policy_model
+      datasets:
+        - name: indic-gsm8k
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/gsm8k/data/indic_gsm8k_benchmark.jsonl
+          prompt_config: benchmarks/indic/gsm8k/prompts/default.yaml
+          prepare_script: benchmarks/indic/gsm8k/prepare.py
+          num_repeats: 1
+          license: Apache-2.0
+
+indic_gsm8k_environment_server:
+  _inherit_from: gsm8k_reference_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_gsm8k_simple_agent
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      use_completions_api: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: false
+      chat_template_kwargs:
+        enable_thinking: true
