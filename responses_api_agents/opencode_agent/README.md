@@ -179,8 +179,7 @@ that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
 Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto`,
-`compaction.reserved` and `agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
-`agent.build.steps` (see below).
+`compaction.reserved` and `agent.build.steps`, preserving Gym capture.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
