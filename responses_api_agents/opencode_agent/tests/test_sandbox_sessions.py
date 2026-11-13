@@ -617,6 +617,11 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             config["provider"]["nemo_gym"]["options"]["baseURL"]
             == "http://model.example:9000/ng-rollout/opencode-smoke-a2/v1"
         )
+        # As on opencode_sandboxed_agent with opencode_model_call_timeout null, only the run's own deadline bounds a
+        # model call: the provider timeout is off, and there is no chunkTimeout.
+        options = config["provider"]["nemo_gym"]["options"]
+        assert options["timeout"] is False
+        assert "chunkTimeout" not in options
         assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
