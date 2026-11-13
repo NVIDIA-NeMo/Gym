@@ -478,7 +478,8 @@ def local_runner(agent, state, monkeypatch, tmp_path):
     directory.mkdir()
     state.session.session_dir = str(directory)
     state.session.workdir = str(tmp_path)
-    agent.config.session_close_timeout_seconds = 2
+    # This fixture runs real subprocesses; keep deadline behavior tests on their own short budgets.
+    agent.config.session_close_timeout_seconds = 15
     monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
     monkeypatch.setattr(
         hermes_sandbox, "_SANDBOX_RUNNER", str(Path(hermes_sandbox.__file__).with_name("sandbox_runner.py"))
@@ -497,7 +498,7 @@ def local_runner(agent, state, monkeypatch, tmp_path):
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
             return SimpleNamespace(
                 return_code=process.returncode,
                 stdout=stdout.decode(errors="replace"),
