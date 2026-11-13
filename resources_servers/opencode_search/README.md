@@ -116,8 +116,9 @@ a crash an episode starts over from its input.
   treats as retryable. Its failure kind is `provider_io_timeout` when the read timed out;
   `provider_request_failed` when it exited non-zero, reported another error type, or printed output cut
   short or malformed; or the provider's own kind when `exec` raised a typed failure. An untyped exception
-  from `exec` carries no kind. Without `plugin_log_path`, verify reads and refuses nothing, so a harness
-  that brings no OpenCode plugins is graded on its answer alone.
+  from `exec` carries no kind. An Environment Server records these kinds as the cause of the failed
+  episode, in the failure row's `_ng_failure_events`. Without `plugin_log_path`, verify reads and refuses
+  nothing, so a harness that brings no OpenCode plugins is graded on its answer alone.
 * **Export copy.** With `episode_export_copy_dir` set, an episode's verify copies the session exports to
   this host after the plugin log read and before the sandbox stops, within 300 s. It copies the regular
   files directly in `episode_export_dir`, where the harness writes them (`opencode_agent`'s `export_dir`),
