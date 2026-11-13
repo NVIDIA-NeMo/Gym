@@ -17,7 +17,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Dict, Iterable, Iterator, List, Literal, Optional
 
 import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -88,30 +88,19 @@ def _enum_value(value: object) -> Optional[str]:
     return str(getattr(value, "value", value))
 
 
-def _path_identity(tree_dir: Path, manifest_path: Path) -> str:
-    relative = manifest_path.parent.relative_to(tree_dir)
-    if relative == Path("."):
-        raise RegistryError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
-    return relative.as_posix()
-
-
 def _manifest_entry(
     tree_dir: Path,
     manifest_path: Path,
+    manifest: EnvironmentManifest,
     expected_kind: CatalogKind,
 ) -> EnvironmentCatalogEntry:
-    expected_name = _path_identity(tree_dir, manifest_path)
-    manifest: EnvironmentManifest = load_manifest(manifest_path)
+    if manifest_path.parent == tree_dir:
+        raise RegistryError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
     actual_kind = _enum_value(manifest.kind)
     if actual_kind != expected_kind:
         raise RegistryError(
             f"Manifest '{manifest_path}' declares kind '{actual_kind}', "
             f"but its catalog path requires '{expected_kind}'."
-        )
-    if manifest.name != expected_name:
-        raise RegistryError(
-            f"Manifest '{manifest_path}' declares name '{manifest.name}', "
-            f"but its catalog path requires '{expected_name}'."
         )
 
     config_path = resolve_manifest_config_path(manifest_path, manifest)
@@ -277,6 +266,31 @@ def _manifest_paths(tree_dir: Path) -> List[Path]:
     return sorted(found)
 
 
+def declared_manifests(tree_dir: Path) -> Iterator[tuple[Path, EnvironmentManifest]]:
+    """Every readable manifest under one catalog tree, with its path.
+
+    A manifest that fails to load is left out, as catalog discovery leaves it out.
+    """
+    for manifest_path in _manifest_paths(tree_dir):
+        try:
+            yield manifest_path, load_manifest(manifest_path)
+        except ManifestError:
+            continue
+
+
+def find_named_manifest(name: str, *, subdir: str, roots: Iterable[Path]) -> Optional[Path]:
+    """The manifest that declares ``name`` under ``subdir`` of the first root that has one.
+
+    ``subdir`` is ``benchmarks`` or ``environments``. Roots are searched in order, so an earlier root shadows a
+    later one, as in catalog discovery.
+    """
+    for root in roots:
+        for manifest_path, manifest in declared_manifests(root / subdir):
+            if manifest.name == name:
+                return manifest_path
+    return None
+
+
 def _discover_registry_tree(
     tree_dir: Path,
     kind: CatalogKind,
@@ -289,12 +303,20 @@ def _discover_registry_tree(
 
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
-    for manifest_path in _manifest_paths(tree_dir):
-        key = (kind, _path_identity(tree_dir, manifest_path))
+    declared_by: Dict[str, Path] = {}
+    # A manifest's name is its ID, wherever its folder sits, so two manifests in one tree cannot share it.
+    for manifest_path, manifest in declared_manifests(tree_dir):
+        if manifest.name in declared_by:
+            raise RegistryError(
+                f"Manifests '{declared_by[manifest.name]}' and '{manifest_path}' both declare name "
+                f"'{manifest.name}'. A manifest's name is its ID and must be unique within '{tree_dir}'."
+            )
+        declared_by[manifest.name] = manifest_path
+        key = (kind, manifest.name)
         if key in claimed:
             continue
         try:
-            entry = _manifest_entry(tree_dir, manifest_path, kind)
+            entry = _manifest_entry(tree_dir, manifest_path, manifest, kind)
         except ManifestError:
             continue
         entries[key] = entry

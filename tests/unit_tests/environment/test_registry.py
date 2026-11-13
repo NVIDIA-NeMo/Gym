@@ -133,10 +133,9 @@ class TestDiscoverEnvironments:
         envs_dir = tmp_path / "environments"
         _make_env(envs_dir, "real", _ENV_CONFIG.format(name="real"))
         # A task inside the pulled dataset ships its own manifest.yaml (a Kubernetes task, say) that would
-        # be read as a catalog manifest with the wrong name if the walk descended into the dataset.
+        # be read as a catalog entry if the walk descended into the dataset.
         stray = _write_manifest(tmp_path, "environments", "harbor/terminal-bench-4.0.0/k8s-task", _manifest("k8s"))
-        with pytest.raises(registry_module.RegistryError):
-            _discover_environments_in_dir(envs_dir)
+        assert set(_discover_environments_in_dir(envs_dir)) == {"real", "k8s"}
 
         (envs_dir / "harbor" / "terminal-bench-4.0.0" / registry_module.HARBOR_DATASET_MANIFEST).write_text(
             '[dataset]\nsource = "harbor-package-store"\n', encoding="utf-8"
@@ -337,26 +336,41 @@ class TestEnvironmentCatalog:
 
         assert entry.path == tmp_path / "environments" / "suite" / "alpha"
 
-    @pytest.mark.parametrize(
-        ("tree", "path_name", "manifest"),
-        [
-            ("environments", "path-name", _manifest("declared-name")),
-            ("benchmarks", "wrong-kind", _manifest("wrong-kind", "environment")),
-        ],
-    )
-    def test_rejects_manifest_identity_that_disagrees_with_path(
-        self,
-        tmp_path: Path,
-        monkeypatch,
-        tree: str,
-        path_name: str,
-        manifest: dict,
-    ) -> None:
-        _write_manifest(tmp_path, tree, path_name, manifest)
+    def test_rejects_manifest_whose_kind_disagrees_with_its_tree(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "benchmarks", "wrong-kind", _manifest("wrong-kind", "environment"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
-        with pytest.raises(RegistryError, match="catalog path"):
+        with pytest.raises(RegistryError, match="catalog path requires 'benchmark'"):
             discover_environment_catalog()
+
+    def test_manifest_name_is_its_id_wherever_its_folder_sits(self, tmp_path: Path, monkeypatch) -> None:
+        manifest_path = _write_manifest(tmp_path, "environments", "group/moved", _manifest("alpha"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entry = resolve_catalog_entry("alpha")
+
+        assert entry.manifest_path == manifest_path
+        assert entry.path == tmp_path / "environments" / "group" / "moved"
+        assert [entry.name for entry in discover_environment_catalog()] == ["alpha"]
+
+    def test_two_manifests_in_one_tree_cannot_declare_one_name(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "environments", "alpha", _manifest("alpha"))
+        _write_manifest(tmp_path, "environments", "copy", _manifest("alpha"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both declare name 'alpha'"):
+            discover_environment_catalog()
+
+    def test_an_earlier_root_shadows_a_manifest_by_its_name(self, tmp_path: Path, monkeypatch) -> None:
+        high = tmp_path / "high"
+        low = tmp_path / "low"
+        high_manifest = _write_manifest(high, "environments", "elsewhere", _manifest("shared"))
+        _write_manifest(low, "environments", "shared", _manifest("shared"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        entries = [entry for entry in discover_environment_catalog() if entry.name == "shared"]
+
+        assert [entry.manifest_path for entry in entries] == [high_manifest]
 
     def test_manifest_requires_a_sibling_config(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(

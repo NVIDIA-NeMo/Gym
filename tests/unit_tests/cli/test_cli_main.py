@@ -1625,6 +1625,50 @@ class TestAssetSelectors:
 
         assert overrides == [f"+config_paths=[{(nested / 'config.yaml').resolve()}]"]
 
+    def test_benchmark_selector_finds_a_moved_manifest_by_its_name(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A manifest's name is its ID: once its folder moves, `--benchmark <name>` finds it through the manifest.
+        moved = tmp_path / "benchmarks" / "group" / "moved_here"
+        moved.mkdir(parents=True)
+        (moved / "config.yaml").write_text("dataset:\n  type: benchmark\n", encoding="utf-8")
+        (moved / "manifest.yaml").write_text(
+            json.dumps(
+                {
+                    "name": "stable_id",
+                    "version": "0.1.0",
+                    "kind": "benchmark",
+                    "integration_profile": "custom-gym-verifier",
+                    "domain": "other",
+                    "description": "Moved benchmark",
+                    "modality": "text",
+                    "authors": ["Test"],
+                    "reward": {"range": [0, 1], "higher_is_better": True},
+                    "resources_server": "scorer",
+                    "agent_server": "simple_agent",
+                    "model_server": "policy_model",
+                    "datasets": [
+                        {
+                            "name": "validation",
+                            "type": "benchmark",
+                            "jsonl_fpath": "data.jsonl",
+                            "prepare_script": "prepare.py",
+                        }
+                    ],
+                    "canonical_split": "validation",
+                    "standard_prompt_config": "prompt.yaml",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "start", "--benchmark", "stable_id", "--search-dir", str(tmp_path)],
+        )
+
+        assert overrides == [f"+config_paths=[{(moved / 'config.yaml').resolve()}]"]
+
     def test_selectors_merge_into_single_config_paths(self, monkeypatch: MonkeyPatch) -> None:
         # --config and multiple asset selectors all feed one +config_paths list (Hydra rejects duplicates).
         # _split_overrides asserts they coalesce into a single token.
