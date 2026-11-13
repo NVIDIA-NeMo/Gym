@@ -70,12 +70,13 @@ log. A row that ended on its budget comes back from such a verify graded and unm
 ## Sessions
 
 On the episode path, an Environment Server seeds this server, which starts the episode's sandbox and
-lends it to the agent's session; the agent works in the sandbox; `/verify` reads the plugin log, stops
-the sandbox and grades the answer; and `/close_session` fences the session. The server implements the
-session state hooks, so the base class serves `/seed_session` and `/close_session`. A session holds one
-sandbox, started from `sandbox_image` and `sandbox_config`. Grading reads nothing from it but the plugin
-log of an episode session, when `plugin_log_path` is set. Sessions are not exported to checkpoints
-(`restart_only`): after a crash an episode starts over from its input.
+lends it to the agent's session; the agent works in the sandbox; `/verify` reads the plugin log, copies
+the session exports to this host when `episode_export_copy_dir` is set, stops the sandbox and grades the
+answer; and `/close_session` fences the session. The server implements the session state hooks, so the
+base class serves `/seed_session` and `/close_session`. A session holds one sandbox, started from
+`sandbox_image` and `sandbox_config`. Grading reads nothing from it but the plugin log of an episode
+session, when `plugin_log_path` is set. Sessions are not exported to checkpoints (`restart_only`): after
+a crash an episode starts over from its input.
 
 * **Episode seed (Environment Server).** `/seed_session` takes a `ResourcesSeedSessionRequest` and keys
   the session by its `resources_session_id`. With `sandbox_workdir` set, the seed starts the sandbox
@@ -117,6 +118,21 @@ log of an episode session, when `plugin_log_path` is set. Sessions are not expor
   short or malformed; or the provider's own kind when `exec` raised a typed failure. An untyped exception
   from `exec` carries no kind. Without `plugin_log_path`, verify reads and refuses nothing, so a harness
   that brings no OpenCode plugins is graded on its answer alone.
+* **Export copy.** With `episode_export_copy_dir` set, an episode's verify copies the session exports to
+  this host after the plugin log read and before the sandbox stops, within 300 s. It copies the regular
+  files directly in `episode_export_dir`, where the harness writes them (`opencode_agent`'s `export_dir`),
+  to `<episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/`, which it empties first, so
+  a retried episode never finds an earlier attempt's files there. The task ID gets `_` in place of each
+  character other than an ASCII letter, a digit, `.`, `_` and `-`, and in place of each dot of an ID made
+  only of dots. Links, directories, names that start with `.` (such as a partial file the harness has not
+  renamed into place yet) and names with a character other than those are left out. The row carries
+  `opencode_export_copy`: `status`, `dir` (that directory), `files` (each file's size in bytes, by name),
+  `bytes` (their total) and `detail` (why nothing was copied). `status` is `copied`, with no files when
+  the directory is empty; `absent` when the sandbox has no `episode_export_dir`; `oversize` when the
+  files hold more than `episode_export_max_bytes`, and none is copied; or `failed` when the listing or a
+  download failed or the copy ran past 300 s. Only a `copied` status leaves files on this host, and any
+  other is logged. No copy changes the reward, `mask_sample` or `evaluation_completed`, and an identical
+  retry replays the record.
 * **Close.** `/close_session` stops the sandbox by ID, with or without the session cookie, and fences
   the ID: a seed for it gets 409 for `session_close_retry_window_seconds`. A close whose stop fails
   raises and keeps the sandbox, so a retried close stops it. A session that is never closed keeps its
@@ -191,14 +207,17 @@ model sees differently. On this server's side:
   relay agent checks only the sentinel's line, and refuses a run whose output lacks it with 500.
 * **Working directory.** The lent sandbox's is `sandbox_workdir`, which the seed creates; the agent-run
   sandbox keeps the image's.
+* **OpenCode's exports.** With `episode_export_copy_dir` set, verify copies each session's exports to this
+  host and reports the copy on the row (`opencode_export_copy`). On the relay, `opencode_sandboxed_agent`
+  saves its run's export on the host itself (`opencode_results_fpath`).
 * **Close.** An episode session ends with `/close_session`, which fences the ID and releases the sandbox if
   verify did not stop it, and a verify after it is masked as `session_lost`. The relay sends no close.
 
 ## Config
 
 Needs `sandbox_image`, `sandbox_provider`/`sandbox_config`, and a `judge_model_server` pointing at a
-model-server block. Episode sessions use these settings, each off by default; startup refuses a setting
-that cannot work:
+model-server block. Episode sessions use these settings, which leave each episode feature off by default;
+startup refuses a setting that cannot work:
 
 * `sandbox_workdir` turns on lending to episode seeds; the seed creates it. It follows `opencode_agent`'s
   rules for a workdir: an absolute directory other than `/` and `/tmp`, without `..` or a NUL byte, and
@@ -224,9 +243,16 @@ that cannot work:
 * `plugin_log_path` is the plugin log verify reads, and also sets `NEMO_GYM_PLUGIN_LOG` in the lent
   sandbox. It must lie outside `sandbox_workdir`, where the model's tools could change it.
   `required_plugin_markers` lists the lines the log must hold besides the sentinel's.
+* `episode_export_dir` is the sandbox directory the harness writes its session exports to. It follows
+  `opencode_agent`'s rules for `export_dir`: absolute, not `/`, outside `/tmp/nemo-gym-opencode*`, and
+  neither `sandbox_workdir`, inside it nor above it. `episode_export_copy_dir` turns on the export copy at
+  verify: an absolute directory on this host, one per run, which the run's overlay sets; it needs
+  `episode_export_dir`. `episode_export_max_bytes` (256 MiB) caps what one episode copies.
 
 `configs/opencode_search.yaml` sets none of these, not even as `null`. `gym eval run` refuses to resume
 across a changed semantic setting and counts a `null` as a value, so the relay preset, which resolves
 none of them, still resumes a run started before these settings existed. See
 `configs/opencode_search.yaml`; wired up in `benchmarks/browsecomp/configs/browsecomp_opencode.yaml`
-(relay) and `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` (episode sessions).
+(relay) and `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` (episode sessions). The
+session preset takes `episode_export_dir` from `BROWSECOMP_OPENCODE_EXPORT_DIR`, the variable that also
+sets the agent's `export_dir`, and leaves `episode_export_copy_dir` to a run's overlay.
