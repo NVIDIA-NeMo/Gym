@@ -41,6 +41,11 @@ harbor_environment_server:
       # Sandbox and Compose group starts that fail on an image pull are retried here, with jittered backoff,
       # before the failure is reported as retryable.
       image_pull_retries: 2
+      # A separate verifier's sandbox start that failed for another reason (no free GPU node, a provider readiness
+      # timeout) is started again this many times, `verifier_start_retry_delay_s` apart, all within the one
+      # `sandbox_ready_timeout_s` deadline of the start. 0 masks the turn on the first failure.
+      verifier_start_retries: 0
+      verifier_start_retry_delay_s: 60
       # Verify tasks that declare `artifacts` in a fresh sandbox even when task.toml keeps the shared mode
       # (tamper-proof grading, as training runs want). Tasks without artifacts keep their declared mode.
       separate_verifier_for_artifacts: false
