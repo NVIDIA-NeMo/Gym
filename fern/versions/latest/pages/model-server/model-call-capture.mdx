@@ -264,6 +264,22 @@ The attachment is additive: it does not replace or rewrite the existing response
 `NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
 rollout tables omit `ng_trajectory` and model-call request and response payloads.
 
+### Cancelled calls
+
+A call is recorded as `cancelled` when the server saw the client disconnect. The capture holds
+the body only as raw text, and what collection does with it depends on how far the call got:
+
+| Cancelled | Capture holds | Collection | Health |
+| --- | --- | --- | --- |
+| After a complete answer (2xx status; a complete JSON body or terminal SSE event, with completed status or a finish reason) | Raw text | Recovers the parsed response, `response_id`, and available token counts; drops the raw text. `error_category` stays `cancelled`. | A successful call |
+| After a Responses stream ends with `response.incomplete` and `incomplete_details.reason` (2xx status) | Raw text | Recovers the partial response and counts; the reason becomes `finish_reason`. | Counts as delivered, so cancellation alone does not make it a failed call. Other health checks still apply, including output-limit checks. |
+| After a Responses stream ends with `response.incomplete` (2xx status; no finish reason) | Raw text | Recovers the partial response, `response_id`, available token counts, and `response_status="incomplete"`; drops the raw text. `error_category` stays `cancelled`. | Still a failed call; recovering its data does not make the answer complete. |
+| Before a parseable JSON body or terminal SSE event arrives | Raw text, if any | Keeps it as is, with null token counts and no `response_id`. | A failed call that [reported no usage](/main/evaluation/rollout-health) |
+
+Recovery preserves available evidence; it does not by itself make a call successful. A retry after a
+dropped connection can leave successful and failed calls in one rollout. Failed calls still need a
+later successful call to count as recovered in rollout health.
+
 ### Raw `CaptureStore` record
 
 Each rollout has an append-only file named `<rollout_id>.capture.jsonl`. Each line contains one raw
@@ -322,7 +338,7 @@ and cache usage, status, finish reason, latency, error details, tool calls, reas
 payloads. `call_index` and timestamps do not establish causal ordering between concurrent calls.
 
 Streaming Responses, Chat Completions, and Anthropic Messages are reassembled for capture on a
-best-effort basis. If reassembly fails, request, status, correlation, and latency data remain
+best-effort basis. A Chat stream with several choices keeps each choice apart by its index. If reassembly fails, request, status, correlation, and latency data remain
 available. A successful-status stream that closes without its dialect's terminal event retains any
 partial reconstruction and is marked `stream_truncated`.
 
