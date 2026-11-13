@@ -228,24 +228,33 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "browsecomp_agent",
         "claude_code_agent",
+        "cline_agent",
         "codex_agent",
         "copilot_agent",
+        "droid_agent",
+        "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
         "kilocode_agent",
+        "kimi_code_agent",
         "mini_swe_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
         "openclaw_agent",
         "opencode_agent",
+        "openhands_agent",
         "pi_agent",
         "pool_agent",
         "simple_agent",
+        "simple_strands_agent",
         "stirrup_agent",
         "terminus_2_sandboxed_agent",
     }
 )
+# Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
+# Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -340,6 +349,9 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
 MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
+# A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
+# the rollout's model calls is captured. False or absent leaves capture to the run's token_id_capture block.
+SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
@@ -990,7 +1002,7 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
-            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES or source.agent_type in HOST_RUN_SWAP_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
@@ -1027,7 +1039,8 @@ Duplicate config paths:
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
         """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
 
-        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        Those agents either do not implement agent sessions or are in HOST_RUN_SWAP_AGENT_TYPES, whose swap template
+        runs on the host through /run, so single_agent_turn_legacy would fail every episode.
         The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
         """
         for instance_name, instance in global_config_dict.items():
@@ -1044,7 +1057,7 @@ Duplicate config paths:
                 continue
             logger.info(
                 f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
-                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+                f"that agent type has no agent sessions, or its swap template runs on the host through /run."
             )
             servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
             servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
