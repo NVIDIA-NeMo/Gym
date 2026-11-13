@@ -121,6 +121,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
 )
+from nemo_gym.rollouts.rollout_recovery import ENDED_ALLOCATION_MANIFEST_ENV
 from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
 from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
@@ -225,6 +226,8 @@ class ManagedRecoveryFact(BaseModel):
     # The selected result is a masked one the operator approved to run again (`--rerun-masked-without-artifact`):
     # the Store counts it as a failed attempt and runs it again within its cap.
     rerun_approved: bool = False
+    # The Store can close this unanswered diagnostic with one infrastructure failure after allocation end.
+    allocation_end_failure: bool = False
 
 
 # What an exhausted-attempts stop says an operator can do; the extension is explicit and journaled.
@@ -518,6 +521,8 @@ class RecoveryDecision(BaseModel):
     # The results of that kind this recovery asks to run again (``rerun_masked_without_artifact``) and plans as
     # retries: what the resubmit journals as the approval.
     rerun_masked: list[RerunMaskedApproval] = Field(default_factory=list)
+    # Exact manifest whose unanswered diagnostics may be closed after scheduler-confirmed allocation end.
+    ended_allocation_manifest: str | None = None
 
     @property
     def complete(self) -> bool:
@@ -984,6 +989,22 @@ def decide_recovery(
             unknown_rows += 1
             continue
         sidecar.setdefault(identity, []).append(row)
+
+    if allocation_cut and not budget.live_job:
+        for identity, fact in list(managed.items()):
+            if not fact.allocation_end_failure:
+                continue
+            # Preview exactly what the next writer will record, without changing the inspected artifacts.
+            spent = fact.attempts + 1
+            managed[identity] = fact.model_copy(update={"attempts": spent, "pending": spent < fact.max_attempts})
+            sidecar[identity] = [
+                {
+                    "_ng_task_index": identity[0],
+                    "_ng_rollout_index": identity[1],
+                    FAILURE_CLASS: ROLLOUT_ALLOCATION_ENDED,
+                    "failure_kind": ROLLOUT_ALLOCATION_ENDED,
+                }
+            ]
 
     evidence: list[IdentityEvidence] = []
     policy_stopped = False
@@ -1856,7 +1877,8 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             raise ValueError("managed inventory is ambiguous or its identity is not verified")
         with redirect_stdout(StringIO()):
             pending = {logical_rollout_id(row) for row in store.pending()}
-        replayable = store.replayable_identities()
+        allocation_end = store.allocation_end_diagnostics()
+        replayable = store.replayable_identities() | allocation_end
         approved = store.rerun_approved_identities()
         facts = []
         for row in collected.materialized:
@@ -1876,6 +1898,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                     reserved=logical in store.manifest.next_attempt,
                     replayable=logical in replayable,
                     rerun_approved=logical in approved,
+                    allocation_end_failure=logical in allocation_end,
                 )
             )
         selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
@@ -2070,6 +2093,13 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     decision = _decide_from_collected(collected, **options).model_copy(
         update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
     )
+    if (
+        decision.action == RecoveryAction.RESUBMIT
+        and options.get("allocation_cut")
+        and options.get("live_job") is False
+        and any(fact.allocation_end_failure for fact in collected.managed_selection or [])
+    ):
+        decision.ended_allocation_manifest = (collected.source_digests or {}).get("rollouts_manifest.json")
     notes = [resume_drift_note(collected.resume_drift_keys)]
     blocked = failed_judge_jobs_blocking(collected.judge_jobs, collected.judge_job_acknowledgements)
     if blocked is not None and decision.action == RecoveryAction.REVERIFY:
@@ -2445,6 +2475,8 @@ def continuation_admission(
         print(CONTINUATION_REASON_PREFIX + decision.reason)
         if decision.action != RecoveryAction.RESUBMIT:
             return "stop"
+        if decision.ended_allocation_manifest:
+            print(f"{ENDED_ALLOCATION_MANIFEST_ENV}={decision.ended_allocation_manifest}")
         return "segment" if segment and not decision.counts.get(IdentityState.RETRYABLE) else "retry"
     except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
@@ -2497,6 +2529,8 @@ def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | N
         print(CONTINUATION_REASON_PREFIX + decision.reason + (f"; {requeued}" if requeued else ""))
         if decision.action != RecoveryAction.RESUBMIT:
             return "stop"
+        if decision.ended_allocation_manifest:
+            print(f"{ENDED_ALLOCATION_MANIFEST_ENV}={decision.ended_allocation_manifest}")
         print(f"{ACCOUNTED_WALLTIME_PREFIX}{int(collected.accounted_walltime_s)}")
         return "retry"
     except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:

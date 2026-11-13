@@ -60,6 +60,7 @@ from nemo_gym.rollouts.rollout_records import (
     resolve_rollout_path,
 )
 from nemo_gym.rollouts.rollout_recovery import (
+    ENDED_ALLOCATION_MANIFEST_ENV,
     PendingRejudge,
     RunManifest,
     _get_max_rollout_attempts,
@@ -222,6 +223,11 @@ class RolloutStore:
                 raise ConfigError(
                     "Cannot resume: saved materialized inputs, rollout output, or failure sidecar are missing."
                 )
+            # A run lock alone cannot prove a remote agent stopped. Bind scheduler admission to this manifest.
+            ended = os.environ.get(ENDED_ALLOCATION_MANIFEST_ENV)
+            close_diagnostics = bool(
+                ended and manifest_path.exists() and ended == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            )
             current = None
             if manifest_path.exists():
                 try:
@@ -245,7 +251,7 @@ class RolloutStore:
                 manifest.write(manifest_path)
             elif manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
-            charges = state.allocation_end_charges()
+            charges = state.allocation_end_charges(close_diagnostics=close_diagnostics)
             if charges:
                 # Saved before a resubmit resets the budget, so a resubmit gives these identities a fresh one. A
                 # separate writer, so the charges count neither as outcomes nor as progress of this allocation.
@@ -253,7 +259,7 @@ class RolloutStore:
                     for row in charges:
                         charging.record_outcome(row, sync=True)
                 print(
-                    f"Charged {len(charges)} attempt(s) to rollouts in flight at a second or later allocation end "
+                    f"Recorded {len(charges)} ended-allocation failure(s) "
                     f"({ROLLOUT_ALLOCATION_ENDED}). Failures: {failures_path_for(output)}."
                 )
             if resubmit:
@@ -757,6 +763,10 @@ class RolloutStore:
         """The logical rollouts whose selected result is a masked one an operator approved to run again
         (`--rerun-masked-without-artifact`): each counts one failed attempt and a later attempt supersedes it."""
         return self._state.rerun_approved_identities()
+
+    def allocation_end_diagnostics(self) -> set[str]:
+        """Unanswered diagnostics eligible for writer reconciliation after a confirmed allocation end."""
+        return self._state.allocation_end_diagnostics()
 
     def replayable_identities(self) -> set[str]:
         """The logical rollouts this Store would run again under some attempt cap: its replay rule without the cap.
