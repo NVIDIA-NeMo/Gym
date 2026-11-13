@@ -149,3 +149,19 @@ def test_the_agent_runs_opencode_as_the_relay_agent_does() -> None:
         agent.sandbox_ripgrep_sha256,
     )
     assert pins == tuple(PINS.values())
+
+
+@pytest.mark.parametrize("export_dir", ["/tmp/nemo-gym-exports", None], ids=["set", "unset"])
+def test_the_resources_server_copies_the_exports_from_where_the_agent_writes_them(
+    export_dir: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BROWSECOMP_OPENCODE_EXPORT_DIR names both ends: the agent writes each session's export there, and verify copies
+    the exports from there. The host directory is a run's own, so the preset leaves it to an overlay."""
+    if export_dir is not None:
+        monkeypatch.setenv("BROWSECOMP_OPENCODE_EXPORT_DIR", export_dir)
+    _, config = sessions()
+    resources = SearchResourcesServerConfig.model_validate(settings(config, RESOURCES) | {"name": RESOURCES})
+    agent = OpenCodeAgentConfig.model_validate(settings(config, AGENT) | {"name": AGENT})
+
+    assert resources.episode_export_dir == agent.export_dir == export_dir
+    assert resources.episode_export_copy_dir is None

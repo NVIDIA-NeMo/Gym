@@ -77,6 +77,10 @@ search_browsecomp_resources_server:
       required_plugin_markers:
       - "[nemo-gym-plugin] web_guard version=2 contamination=on"
       - "[nemo-gym-plugin] tool_surface task=off"
+      # Where opencode_agent writes each session's OpenCode export (its export_dir, below); off unless set. A run whose
+      # overlay also sets episode_export_copy_dir, a directory on this host of its own, gets the exports copied there
+      # at verify, before the sandbox stops.
+      episode_export_dir: ${oc.env:BROWSECOMP_OPENCODE_EXPORT_DIR,null}
 
 # An instance name of its own: opencode_sandboxed_search_agent names the relay preset's agent, and overlays written for
 # it set fields this agent does not have. Select this one with --agent browsecomp_opencode_agent.
@@ -126,8 +130,10 @@ browsecomp_opencode_agent:
       - /tmp/nemo-gym-plugin-nemo_gym_tool_surface.js
       # A run that ends on a compaction would otherwise have its summary graded as the answer, which the relay avoids.
       exclude_compaction_summaries: true
-      # Off unless set. Each session's OpenCode export is written here, outside the workdir; the resources server stops
-      # the sandbox at verify, so keep it only on storage that outlives the sandbox, such as a provider volume.
+      # Off unless set. Each session's OpenCode export is written here, outside the workdir, where the resources server
+      # reads it (episode_export_dir). The sandbox stops at verify: a run that keeps the exports sets the resources
+      # server's episode_export_copy_dir, which copies them to this host first. Name a directory of its own, such as
+      # /tmp/nemo-gym-exports: the copy takes every regular file directly in it.
       export_dir: ${oc.env:BROWSECOMP_OPENCODE_EXPORT_DIR,null}
       opencode_config:
         # Merged into opencode_agent's permission rules, these replace its webfetch and websearch denies in place,
