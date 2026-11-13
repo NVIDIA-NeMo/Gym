@@ -180,6 +180,7 @@ A row's `failure_kind` says why the verifier gave no reward, or why the row is l
 | `harbor:missing_reward` | `test.sh` wrote neither `reward.txt` nor `reward.json`. A Python verifier that raised lands here. | Yes, as 0 |
 | `harbor:invalid_reward` | The reward file could not be read as a finite number. | Yes, as 0 |
 | `harbor:verifier_timeout` | `test.sh` ran past its timeout without a reward. | Yes, as 0 |
+| `harbor:verifier_inconclusive` | `test.sh` wrote `inconclusive.json` and no reward: a judge service or asset download it depends on was unavailable. | No, masked |
 | `harbor:task_deadline` | The episode ran past its task's budget. | No, retried |
 | `harbor:trajectory_export_failed` | The transcript could not be written for the verifier. | No, masked |
 | `harbor:entrypoint_failed` | The image's entrypoint exited non-zero after the seed: during the rollout, or in a separate verifier's sandbox. At seed, it fails the episode instead, with stage `seed`. | No, masked |

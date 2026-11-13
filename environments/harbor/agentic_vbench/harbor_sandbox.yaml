@@ -6,13 +6,15 @@
 #
 # The repurpose verifiers judge with an LLM over the NVIDIA Inference Hub. The prepare script moved the key into
 # each judged task's `[steps.verifier.env]` as the `${NVINFERENCE_API_KEY}` template, which the server fills from
-# this secret for the verifier process only; the agent's sandbox never sees it. Every episode starts one sandbox
-# from a task image of a few gigabytes, so the episode cap keeps a run from starting all 100 at once.
+# this secret for the verifier process only; the agent's sandbox never sees it. The secret has no empty default:
+# with neither variable set it resolves to null, the server refuses to seed a judged task (422) and no repurpose
+# task can be scored 0 for want of a key. Every episode starts one sandbox from a task image of a few gigabytes,
+# so the episode cap keeps a run from starting all 100 at once.
 harbor_environment_server:
   environment_servers:
     harbor:
       secrets:
-        NVINFERENCE_API_KEY: ${oc.env:NVINFERENCE_API_KEY,${oc.env:INFERENCE_API_KEY,""}}
+        NVINFERENCE_API_KEY: ${oc.env:NVINFERENCE_API_KEY,${oc.env:INFERENCE_API_KEY,null}}
       max_concurrent_episodes: 12
       queue_timeout_seconds: 43200
       # Cold task images build at prepare; a pull into the sandbox provider can still take minutes.

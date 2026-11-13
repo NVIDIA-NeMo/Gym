@@ -2,24 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Write the pinned Agentic-VBench tasks as Harbor task folders for Gym's `harbor` environment server.
 
-`prepare.py` writes the JSONL rows the `agentic_vbench_agent` path runs through Harbor's own runtime; this script
-writes the same 100 pinned tasks into the dataset entry `environments/harbor/agentic_vbench/`, where the generic
+The 100 pinned tasks are written into the dataset entry `environments/harbor/agentic_vbench/`, where the generic
 `harbor` environment server seeds each task's image as a sandbox for any sandboxed harness and runs the task's own
-verifier. Each task gets the adjustments that `harbor_runner.py` applies to a trial (the Hub judge protocol, the
-assembly judge guard and the longer golden-asset retries), so both paths grade alike; the records of what changed
+verifier. Each task gets the adjustments in `staging.py` (Hub judge protocol, assembly judge guard, longer
+golden-asset retries, inconclusive verdicts for verifier-side infrastructure failures); the records of what changed
 land under `.records/<task>/` in the entry.
 
 Environment: AGENTIC_VBENCH_ROOT names an existing pinned checkout (else it is fetched into the cache root),
 AGENTIC_VBENCH_HARBOR_FAMILIES selects families (comma-separated; default all four) and
-AGENTIC_VBENCH_JUDGE_PROTOCOL selects the judge protocol (default nvinference-hybrid).
+AGENTIC_VBENCH_JUDGE_PROTOCOL selects the judge protocol (default nvinference-native, the upstream judge pair).
 """
 
 import os
 import shutil
 from pathlib import Path
 
-from responses_api_agents.agentic_vbench_agent.core import BENCHMARK_FAMILIES, ensure_checkout, inventory
-from responses_api_agents.agentic_vbench_agent.harbor_runner import (
+from benchmarks.agentic_vbench.checkout import BENCHMARK_FAMILIES, ensure_checkout, inventory
+from benchmarks.agentic_vbench.staging import (
+    DEFAULT_JUDGE_PROTOCOL,
     JUDGE_PROTOCOLS,
     stage_assembly_judge_guard,
     stage_judge,
@@ -40,11 +40,10 @@ ENTRY_SUFFIXES = (".yaml",)
 RECORDS_DIR = ".records"
 FAMILIES_ENV_VAR = "AGENTIC_VBENCH_HARBOR_FAMILIES"
 PROTOCOL_ENV_VAR = "AGENTIC_VBENCH_JUDGE_PROTOCOL"
-DEFAULT_PROTOCOL = "nvinference-hybrid"
 
 
 def adapt_task(source: Path, destination: Path, *, protocol: str, records: Path) -> None:
-    """Write ``source`` (a pinned task folder, under its family folder) at ``destination`` with the trial adjustments.
+    """Write ``source`` (a pinned task folder, under its family folder) at ``destination`` with the adjustments.
 
     The three stages each copy the task only when they change it, so an untouched task is the upstream folder
     byte for byte. Every stage reads the previous stage's output and writes beside it, so no stage copies onto
@@ -74,7 +73,7 @@ def _is_entry_file(path: Path) -> bool:
     return path.is_file() and (path.name in ENTRY_FILES or path.suffix in ENTRY_SUFFIXES)
 
 
-def write_entry(task_dirs: list[Path], entry: Path = ENTRY_DIR, *, protocol: str = DEFAULT_PROTOCOL) -> Path:
+def write_entry(task_dirs: list[Path], entry: Path = ENTRY_DIR, *, protocol: str = DEFAULT_JUDGE_PROTOCOL) -> Path:
     """Write the adjusted tasks into ``entry`` as a flat folder of task folders, keeping the entry's committed files.
 
     The tasks are prepared in a staging folder, the entry's committed files are copied in, and the result replaces
@@ -125,7 +124,7 @@ def prepare() -> Path:
     root = ensure_checkout(Path(os.environ["AGENTIC_VBENCH_ROOT"]) if os.environ.get("AGENTIC_VBENCH_ROOT") else None)
     setting = os.environ.get(FAMILIES_ENV_VAR, "")
     families = [name.strip() for name in setting.split(",") if name.strip()] or sorted(BENCHMARK_FAMILIES)
-    protocol = os.environ.get(PROTOCOL_ENV_VAR, DEFAULT_PROTOCOL)
+    protocol = os.environ.get(PROTOCOL_ENV_VAR, DEFAULT_JUDGE_PROTOCOL)
     task_dirs = selected_task_dirs(root, families)
     entry = write_entry(task_dirs, protocol=protocol)
     print(f"Prepared {len(task_dirs)} Agentic-VBench tasks ({', '.join(families)}; judge {protocol}) at {entry}")

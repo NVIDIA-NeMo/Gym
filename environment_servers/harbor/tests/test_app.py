@@ -1714,6 +1714,35 @@ class TestVerify:
         assert "pytest exploded" in result.failure_reason
         assert result.verifier_return_code == 1
 
+    async def test_inconclusive_verifier_is_masked_not_scored(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(
+            verifier_files={
+                "inconclusive.json": json.dumps({"reason": "judge service HTTP 403 (not available for this key)"}),
+                "test-stdout.txt": "Rejecting verifier result",
+            },
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=1),
+        )
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is True
+        assert result.failure_kind == "harbor:verifier_inconclusive"
+        assert (
+            "judge service HTTP 403" in result.failure_reason and "Rejecting verifier result" in result.failure_reason
+        )
+        # A reward beside the note wins: the note is only read when no reward was written.
+        sandbox = FakeSandbox(
+            verifier_files={
+                "inconclusive.json": json.dumps({"reason": "late"}),
+                "reward.json": json.dumps({"reward": 1}),
+            }
+        )
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 1.0 and response.result.failure_kind is None
+        # A malformed note still masks, with its text as the reason.
+        sandbox = FakeSandbox(verifier_files={"inconclusive.json": "curl: (22) 429 Too Many Requests"})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.mask_sample is True and "429 Too Many Requests" in response.result.failure_reason
+
     async def test_invalid_reward_scores_zero(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.txt": "maybe"})
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)

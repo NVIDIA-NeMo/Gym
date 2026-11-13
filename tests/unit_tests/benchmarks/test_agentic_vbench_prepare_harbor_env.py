@@ -10,12 +10,9 @@ import pytest
 
 import benchmarks.agentic_vbench.prepare_harbor_env as prepare_module
 from benchmarks.agentic_vbench.prepare_harbor_env import ENTRY_DIR, RECORDS_DIR, adapt_task, write_entry
+from benchmarks.agentic_vbench.staging import HUB_JUDGE, JUDGE_PROTOCOLS, MATERIALS_FETCH_GUARD
 from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
 from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
-from responses_api_agents.agentic_vbench_agent.harbor_runner import JUDGE_PROTOCOLS
-
-
-HUB_JUDGE = Path("responses_api_agents/agentic_vbench_agent/hub_judge.py")
 
 
 def _write_task(folder: Path, *, judged: bool, materials: bool = False) -> None:
@@ -96,6 +93,8 @@ def test_adapt_task_stretches_the_golden_asset_retries(tmp_path: Path) -> None:
     verifier = (destination / "steps" / "solve" / "tests" / "test.sh").read_text()
     assert "--retry 12 --retry-delay 20 --retry-all-errors" in verifier
     assert "--retry 5 --retry-delay 3" not in verifier
+    # A download that still fails is reported as inconclusive, not left without a reward.
+    assert verifier.count(MATERIALS_FETCH_GUARD) == 1
 
 
 def test_adapt_task_refuses_an_unknown_judge_protocol(tmp_path: Path) -> None:

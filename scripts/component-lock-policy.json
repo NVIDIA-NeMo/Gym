@@ -87,11 +87,6 @@
       "opencv-python-headless>=4.10"
     ]
   },
-  "responses_api_agents/agentic_vbench_agent": {
-    "override-dependencies": [
-      "pathspec"
-    ]
-  },
   "responses_api_agents/harbor_agent": {
     "override-dependencies": [
       "pathspec"

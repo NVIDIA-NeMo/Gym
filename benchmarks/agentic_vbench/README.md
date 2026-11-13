@@ -1,82 +1,32 @@
 # Agentic-VBench
 
 Evaluate video-editing agents on the 100 pinned [Agentic-VBench](https://github.com/PhiloLabs/agentic-vbench)
-tasks: Repair (18), Assembly (18), Sequencing (28) and Repurpose (36). The `agentic_vbench_agent`
-adapter runs each task verbatim through the benchmark's own harness, upstream Harbor 0.6.6 with
-OpenCode 1.14.39, in the task's own container, and reads the reward the task's own verifier wrote.
-It does not re-implement the benchmark as a question-answering task and never re-scores a trajectory.
+tasks: Repair (18), Assembly (18), Sequencing (28) and Repurpose (36). The tasks are Harbor task folders and run
+through Gym's generic [`harbor` environment server](../../environment_servers/harbor/README.md) with any sandboxed
+session harness; the committed entry is [`environments/harbor/agentic_vbench/`](../../environments/harbor/agentic_vbench/README.md).
+This folder holds the code that prepares it.
+
+| File | Role |
+| --- | --- |
+| `prepare_harbor_env.py` | Writes the 100 pinned tasks into the entry (`python -m benchmarks.agentic_vbench.prepare_harbor_env`) |
+| `checkout.py` | Fetches the pinned upstream revision into the Gym cache root and lists the four families' tasks |
+| `staging.py` | The per-task adjustments: Hub judge routing, assembly judge guard, golden-asset retries and inconclusive verdicts |
+| `hub_judge.py` | Drop-in for the repurpose tasks' `judge.py`: the unchanged rubric judge with both providers served by the NVIDIA Inference Hub |
 
 ## Measurement contract
 
 | | |
 |---|---|
 | Source | `PhiloLabs/agentic-vbench` @ `410a75fe3dae37de4344fc9e5317da089505330a` (Apache-2.0); the four leaderboard families, the "understanding" family is excluded as upstream does |
-| Task contract | The task prompt is handed to OpenCode unchanged; the model works in the task container with OpenCode's tools and must inspect extracted frames itself (no media is injected into the prompt) |
-| Harness | Harbor 0.6.6, OpenCode 1.14.39, OpenCode's default agent configuration (subagents off: `opencode_subagents_enabled: false`); the policy is reached through Gym's policy model server, so served model name, seed and sampling overrides apply |
-| Model budget | 262,144 context tokens and 100,000 output tokens advertised to OpenCode; each task's own agent and verifier time limits apply (verifiers get `verifier_timeout_multiplier` x their limit) |
-| Reward | The task's `reward.json`, 0..1, higher is better; `equal_family_reward` = reward x 25 / family size, whose task-weighted mean is the leaderboard number |
-| Aggregate | `mean/equal_family_reward` (equal mean of the four family means), reported as the average of three complete rollouts with request seeds 201, 202 and 203; Gym's task-weighted `mean/reward` is kept alongside |
-| Judge | Repurpose tasks carry an LLM rubric. `judge_protocol: nvinference-hybrid` (default) scores it through the NVIDIA Inference Hub (Claude Opus 4.7 + Gemini 3.5 Flash) on `INFERENCE_API_KEY`/`NVINFERENCE_API_KEY`; `null` keeps the task's native Anthropic/Gemini judges, which then need `ANTHROPIC_API_KEY`/`GEMINI_API_KEY` in `credentials_file`. Hub-judged scores are protocol-equivalent, not byte-identical, to the native judges; the protocol used is recorded per trial in `judge_protocol.json` |
+| Task contract | The task's own `instruction.md` is the prompt; the model works in the task's own image with the harness's tools and must inspect extracted frames itself (no media is injected into the prompt). Reference solutions stay under `solution/`, which the agent's sandbox does not see |
+| Harness | Any session harness the `harbor` server can run in a sandbox; `opencode_agent` with `image_input` is the one under validation (the published numbers come from OpenCode 1.14.39 inside the task container) |
+| Budget | Each task declares 1800 s for the agent and 1800 s for the verifier; `[gym.defaults] timeout_multiplier` scales both |
+| Reward | The task's `reward.json`, 0..1, higher is better; the leaderboard number is the equal-family mean (`reward x 25 / family size` averaged over the four families), computed from the rows by task family |
+| Judge | Repurpose tasks carry an LLM rubric judged over the NVIDIA Inference Hub on `NVINFERENCE_API_KEY` (or `INFERENCE_API_KEY`). `AGENTIC_VBENCH_JUDGE_PROTOCOL=nvinference-native` (default) uses the upstream pair, Claude Opus 4.7 and Gemini 3.1 Pro; `nvinference-hybrid` uses Claude Opus 4.8 and Gemini 3.5 Flash with bounded thinking. Hub-judged scores are protocol-equivalent, not byte-identical, to the native SDK judges; the protocol is recorded per task in the entry's `.records/` |
+| Infrastructure failures | A judge-service outage, a missing judge key or a failed golden-asset download writes `inconclusive.json`; the server masks the rollout (`harbor:verifier_inconclusive`) instead of scoring 0 |
 | Determinism | Stochastic (sampling, container timing, judge) |
 
-## Runtime
-
-Task containers need a Docker API. With Docker available locally the stock Harbor environment is
-used (`backend: podman` for rootless Podman). On clusters where the Gym job itself cannot run
-containers, `backend: remote` (the default) talks over mTLS to a rootless Podman backend on
-another node, found through `backend_dir/client.env` (`DOCKER_HOST`, `DOCKER_TLS_VERIFY`,
-`DOCKER_CERT_PATH`); the Eval Factory configuration for this benchmark ships the backend job
-(`scripts/agentic_vbench/` there). About 12 concurrent trials saturate one 64-core backend
-node, and the first trial of each task builds its image there (task Dockerfiles download their
-media from Hugging Face), so prebuild the images or expect long first trials.
-
-Inside a Gym job everything else is materialized once under the cache root
-(`$AGENTIC_VBENCH_CACHE_ROOT`, else `$HF_HOME/../agentic_vbench`): the pinned benchmark checkout
-and a static Docker CLI. The agent's own venv hosts `harbor==0.6.6`. Explicit paths
-(`AGENTIC_VBENCH_ROOT`, `AGENTIC_VBENCH_HARBOR_PYTHON`, `AGENTIC_VBENCH_DOCKER_CLI_DIR`) serve
-launchers that stage these themselves; `AGENTIC_VBENCH_MODEL_BASE_URL`/`AGENTIC_VBENCH_MODEL_ID`
-point OpenCode at an endpoint the launcher serves instead of Gym's policy server.
-
-Run-level knobs (`agentic_vbench_*` in `config.yaml`): `concurrency` (12), `judge_protocol`,
-`verifier_timeout_multiplier` (3), `context_tokens`, `output_tokens`, `max_turns` (unlimited),
-`agent_timeout_multiplier` (null, a fraction of each task's agent time limit),
-`tool_output_max_lines`/`tool_output_max_bytes` (null, native OpenCode observation bounds),
-`subagents_enabled` (false) and `episode_timeout_seconds` (12 h). The training variant of this
-configuration, with NeMo-RL token capture and OpenCode compaction/subagent policy knobs, is
-`responses_api_agents/agentic_vbench_agent/configs/agentic_vbench_train.yaml`. `AGENTIC_VBENCH_TASKS`
-selects `all` (default) or a space-separated list of families and exact task ids for
-preparation; preparation validates the whole pinned inventory even for a subset.
-
-```bash
-export AGENTIC_VBENCH_ROOT=/path/to/pinned/agentic-vbench      # optional: reuse an existing checkout
-export AGENTIC_VBENCH_BACKEND_DIR=/path/with/client.env          # remote backend
-export INFERENCE_API_KEY=...                                     # Hub judge (Repurpose)
-gym eval prepare --benchmark agentic_vbench
-gym eval run --benchmark agentic_vbench --split benchmark --num-repeats 1 \
-    --output results/agentic_vbench_seed201.jsonl \
-    ++policy_model.responses_api_models.vllm_model.sampling_overrides.seed=201
-```
-
-Set `++observability_enabled=true ++model_call_capture_dir=<absolute dir>` for a local run;
-`gym eval submit` switches capture on itself. OpenCode's calls go through the
-`/ng-rollout/<id>` prefix of the policy server, so they are captured per rollout.
-
-## Results and failure handling
-
-Every scored row keeps reward, family, task id, verifier status, the original Harbor trajectory
-and the episode artifact path (`<rollouts>/agentic_vbench_episodes/<task>-<key>/`). A completed
-zero-reward trajectory is a result and is never rerun. An infrastructure failure (environment
-start timeout, unreachable backend, Harbor runner crash) raises instead of inventing a zero:
-with `route_failures_to_sidecar` the run continues and the rollout lands in the failures
-sidecar, and a resumed job (`resume_from_cache`) redispatches it; the episode a killed job left
-behind is archived as `*.incomplete-<timestamp>` and run again, which is an infrastructure
-retry, not a second trajectory. `count_failure_classes_as_zero: [agent_run_error]` scores what
-is still unscored as 0, the leaderboard's convention for failed rollouts.
-
-The adapter produces no token ids or logprobs; it is for evaluation, not RL training. Do not
-report a subset or a single-seed result as the benchmark score.
-
-## Reference results (100 tasks x 3 seeds, Hub judge, OpenCode 1.14.39)
+## Reference results
 
 | Model | Avg | Repurpose | Sequencing | Repair | Assembly |
 |---|---:|---:|---:|---:|---:|
@@ -84,26 +34,10 @@ report a subset or a single-seed result as the benchmark score.
 | Kimi K3 (NVIDIA Inference Hub) | 36.3 ± 1.8 | 39.2 | 40.8 | 25.6 | 39.5 |
 | Qwen3.8-Flash-Next (vLLM, temperature 1.0, top-p 0.95) | 37.5 ± 2.5 | 46.4 | 30.0 | 17.9 | 55.8 |
 
-Avg is the unweighted mean of the four family means in percent; ± is the population standard
-deviation across the three seeds; failed rollouts score 0. Measured through NVIDIA Eval Factory
-on an internal Slurm cluster with this agent (2026-10).
-
-## Multi-harness: the Harbor path
-
-The same 100 pinned tasks also run as plain Harbor task folders through Gym's generic
-[`harbor` environment server](../../environment_servers/harbor/README.md), where Gym seeds each task's image as a
-sandbox, a sandboxed session harness (`opencode_agent` today) works on the clips inside it, and the task's own
-`tests/test.sh` writes the reward. That is the harness-swappable path for evaluation and for NeMo-RL training through
-the Environment Server; this adapter stays the published baseline (Harbor's own runtime with OpenCode 1.14.39) and
-the training variant with token capture. The committed entry is
-[`environments/harbor/agentic_vbench/`](../../environments/harbor/agentic_vbench/README.md):
-
-```sh
-python -m benchmarks.agentic_vbench.prepare_harbor_env
-gym dataset validate agentic_vbench --sandbox docker
-gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
-  --config environments/harbor/agentic_vbench/harbor_sandbox.yaml --model-type openai_model --model <model> ...
-```
-
-`prepare_harbor_env.py` applies the same per-task adjustments this adapter applies to a trial (Hub judge protocol,
-assembly judge guard, longer golden-asset retries) and records them under the entry's `.records/`.
+Avg is the unweighted mean of the four family means in percent over three complete rollouts (request seeds 201,
+202 and 203); ± is the population standard deviation across the seeds. These numbers were measured in 2026-10 with
+the benchmark's own runtime (Harbor 0.6.6 with OpenCode 1.14.39 in the task container) driven from NVIDIA Eval
+Factory, with the `nvinference-hybrid` judge pair and failed rollouts scored 0. They are the reference the entry is
+compared against, not results of the entry: the entry has not been baselined with `gym eval run` yet (no oracle
+validate output and no full-set run are recorded), so `experimental` stays true. Do not report a subset or a
+single-seed result as the benchmark score.

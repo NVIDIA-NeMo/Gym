@@ -15,7 +15,8 @@ version = "0.1.0"
 type = "benchmark"
 domain = "agent"
 license = "Apache 2.0"
-# Session harnesses that ran the tasks end to end in this folder's checks. The task prompt is text and the
-# videos are files in the task's own image, so any harness that works inside a lent sandbox can run it; add a
-# harness here after a run of the full set shows it completing and scoring.
+# The task prompt is text and the videos are files in the task's own image, so any harness that works inside a
+# lent sandbox can run the tasks. `opencode_agent` is the harness the benchmark's published numbers use (OpenCode
+# inside the task container) and the one this entry is being validated with; a full-set run through this entry
+# with per-family scored and masked counts is still to be recorded in the README before more harnesses are added.
 allowed_agents = ["opencode_agent"]

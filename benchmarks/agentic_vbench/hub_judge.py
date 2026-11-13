@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run the unchanged repurpose judge with both providers served by NVIDIA Inference Hub.
+"""Run the unchanged repurpose judge with both providers served by the NVIDIA Inference Hub.
 
-Rubric prompts, evidence, deterministic checks and aggregation are the original task's.
-Opus items keep the original Anthropic Messages request and change only the model
-name to Hub's Claude Opus 4.7. Gemini items keep the original prompts and media but
-use Hub's Gemini model, sent as inline native generateContent parts.
-Repeated transport or authentication failures reject the verification instead of becoming zero
-rewards; a 4xx that persists for one request (e.g. Gemini refusing empty audio) is raised to the judge,
-which scores that rubric item as a judge error exactly as it does with the native SDK.
+Rubric prompts, evidence, deterministic checks and aggregation are the original task's. Claude items keep the
+original Anthropic Messages request and change only the model name to the Hub route; Gemini items keep the
+original prompts and media and go to the Hub's Gemini route as inline native generateContent parts.
+
+Transport or authentication failures that persist, and a missing judge configuration, are not scored: the
+verifier writes ``/logs/verifier/inconclusive.json`` and exits nonzero, which the ``harbor`` environment server
+masks (``harbor:verifier_inconclusive``). A 4xx that persists for one request (e.g. Gemini refusing empty audio)
+is raised to the judge, which scores that rubric item as a judge error exactly as it does with the native SDK.
 """
 
 import base64
@@ -31,6 +32,13 @@ from google import genai
 ATTEMPTS = 5
 FAILURES = []
 _LOCK = threading.Lock()
+VERIFIER_DIR = Path(os.environ.get("AVB_VERIFIER_DIR", "/logs/verifier"))
+
+
+def inconclusive(reason: str) -> None:
+    """Record that the verification could not be completed, so the episode is masked rather than scored."""
+    VERIFIER_DIR.mkdir(parents=True, exist_ok=True)
+    (VERIFIER_DIR / "inconclusive.json").write_text(json.dumps({"reason": reason}) + "\n")
 
 
 def post(path: str, payload: dict, headers: dict | None = None) -> dict:
@@ -51,8 +59,8 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
             with urllib.request.urlopen(request, timeout=300) as response:
                 return json.load(response)
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            # Never print request headers, media or credentials. Of the provider error
-            # body keep only the short status message so a persistent 4xx is diagnosable.
+            # Never print request headers, media or credentials. Of the provider error body keep only the
+            # short status message so a persistent 4xx is diagnosable.
             error = f"Hub judge {type(exc).__name__}"
             request_error = False
             if isinstance(exc, urllib.error.HTTPError):
@@ -63,17 +71,16 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
                 # Authentication failures are permanent and mean the run is misconfigured.
                 if exc.code in (401, 403):
                     break
-                # Other 4xx are about this request (e.g. Gemini rejecting an empty audio
-                # extract). Hub occasionally returns transient ones, so they are retried,
-                # but when they persist the native SDK would raise the same error to the
-                # judge, which scores that rubric item as a judge error and carries on.
+                # Other 4xx are about this request (e.g. Gemini rejecting an empty audio extract). Hub
+                # occasionally returns transient ones, so they are retried, but when they persist the native
+                # SDK would raise the same error to the judge, which scores that rubric item as a judge error.
                 request_error = exc.code not in (408, 429) and 400 <= exc.code < 500
             if attempt < ATTEMPTS - 1:
                 time.sleep(2 ** (attempt + 1))
     if request_error:
         raise RuntimeError(error)
-    # Transport or authentication failures must not silently become zero scores: record
-    # them so the verification is rejected and the trial is retried as infrastructure.
+    # Transport or authentication failures must not silently become zero scores: record them so the
+    # verification is reported inconclusive once the judge returns.
     with _LOCK:
         FAILURES.append(f"{path}: {error}")
     raise RuntimeError(error)
@@ -146,8 +153,7 @@ class HubGemini:
                 parts.append(media_part(Path(content.name)))
             else:
                 raise ValueError("Unsupported Gemini evidence part")
-        # The original Pro model always reasons; Flash with thinking disabled is a
-        # weaker judge, so use a bounded thinking level instead of a zero budget.
+        # A thinking model with thinking disabled is a weaker judge; use a bounded thinking level instead.
         generation = {"thinkingConfig": {"thinkingLevel": os.environ.get("AVB_JUDGE_GEMINI_THINKING", "low")}}
         if config.temperature is not None:
             generation["temperature"] = config.temperature
@@ -165,6 +171,7 @@ class HubGemini:
 def main() -> None:
     for key in ("NVINFERENCE_API_KEY", "AVB_JUDGE_BASE_URL", "AVB_JUDGE_CLAUDE_MODEL", "AVB_JUDGE_GEMINI_MODEL"):
         if not os.environ.get(key):
+            inconclusive(f"missing verifier configuration: {key}")
             raise ValueError(f"Missing verifier configuration: {key}")
     original = Path(__file__).with_name("avb-original-judge.py")
     anthropic.Anthropic = HubAnthropic
@@ -176,9 +183,10 @@ def main() -> None:
         flush=True,
     )
     namespace = runpy.run_path(str(original), run_name="__main__")
-    # The original judge turns some provider errors into zero-score items. Reject
-    # the whole verification so an outage is retried, not scored as a failure.
+    # The original judge turns some provider errors into zero-score items. Report the whole verification as
+    # inconclusive instead, so an outage is masked and retried, not scored as a failure.
     if FAILURES:
+        inconclusive(f"{len(FAILURES)} Hub judge failures: {FAILURES[:3]}")
         raise RuntimeError(f"Rejecting verifier result after {len(FAILURES)} Hub failures: {FAILURES[:3]}")
     provenance = {
         "judge_provider": "nvidia-inference-hub",
