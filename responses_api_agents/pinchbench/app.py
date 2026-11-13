@@ -575,7 +575,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     def _usage_from_transcript(events: list[dict]) -> NeMoGymResponseUsage:
         input_tokens = 0
         output_tokens = 0
-        cached_tokens = 0
+        cached_tokens: Optional[int] = None
+        cache_measured = True
         reasoning_tokens = 0
 
         def as_int(value) -> int:
@@ -597,19 +598,32 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             output_tokens += as_int(
                 usage.get("output") or usage.get("output_tokens") or usage.get("completion_tokens")
             )
-            cached_tokens += as_int(usage.get("cacheRead"))
             input_details = usage.get("input_tokens_details")
             if not isinstance(input_details, dict):
                 input_details = {}
             output_details = usage.get("output_tokens_details")
             if not isinstance(output_details, dict):
                 output_details = {}
-            cached_tokens += as_int(input_details.get("cached_tokens"))
+            if "cacheRead" in usage:
+                # OpenClaw's provider layer writes cacheRead=0 when the backend reported no cache details,
+                # so only a positive count is a measurement.
+                cache_read = usage["cacheRead"]
+                call_cached = cache_read if type(cache_read) is int and cache_read > 0 else None
+            else:
+                cache_read = input_details.get("cached_tokens")
+                call_cached = cache_read if type(cache_read) is int and cache_read >= 0 else None
+            # One call without a measured cache count makes the rollout's sum unknown, not a subtotal.
+            if call_cached is None:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + call_cached
             reasoning_tokens += as_int(usage.get("reasoning") or output_details.get("reasoning_tokens"))
 
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(
+                cached_tokens=cached_tokens if cache_measured else None
+            ),
             output_tokens=output_tokens,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
             total_tokens=input_tokens + output_tokens,

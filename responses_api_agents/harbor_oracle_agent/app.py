@@ -345,9 +345,10 @@ class OracleAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
+            # The oracle applies the reference solution without calling a model, so every count is a known zero.
             usage=NeMoGymResponseUsage(
                 input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),  # known-zero
                 output_tokens=0,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=0,

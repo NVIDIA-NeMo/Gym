@@ -398,7 +398,8 @@ def _default_response_object() -> dict[str, Any]:
         "truncation": "disabled",
         "usage": {
             "input_tokens": 0,
-            "input_tokens_details": {"cached_tokens": 0},
+            # Unknown unless a model response's usage replaces this placeholder.
+            "input_tokens_details": {"cached_tokens": None},
             "output_tokens": 0,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 0,

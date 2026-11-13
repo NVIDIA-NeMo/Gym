@@ -148,6 +148,9 @@ def test_trajectory_contains_actual_reasoning_tools_and_usage():
     assert response.usage.total_tokens == 120
     assert response.usage.input_tokens_details.cached_tokens == 10
     assert response.status == "completed"
+    del result["usage"]["cached_tokens"]
+    unknown = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="problem"), "real-model")
+    assert unknown.usage.input_tokens_details.cached_tokens is None
 
 
 @pytest.mark.parametrize(

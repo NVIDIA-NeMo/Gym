@@ -33,6 +33,7 @@ from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
+    _as_response_usage,
     _NoStoreCookieJar,
     _rollout_error_fact,
 )
@@ -1149,3 +1150,19 @@ class TestRolloutErrorFact:
     def test_a_clean_rollout_has_no_field(self) -> None:
         body = self._run(None)
         assert "rollout_error" not in body and "rollout_error" not in body["response"]
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens_details", "expected"),
+    [(None, None), ({"cached_tokens": None}, None), ({"cached_tokens": 0}, 0), ({"cached_tokens": 12}, 12)],
+)
+def test_usage_reports_cache_reads_only_when_the_model_does(prompt_tokens_details, expected) -> None:
+    usage = openai.types.CompletionUsage.model_validate(
+        {
+            "prompt_tokens": 20,
+            "completion_tokens": 5,
+            "total_tokens": 25,
+            "prompt_tokens_details": prompt_tokens_details,
+        }
+    )
+    assert _as_response_usage(usage).input_tokens_details.cached_tokens == expected

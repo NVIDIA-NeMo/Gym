@@ -202,7 +202,7 @@ class TestParseClineEvents:
     def test_empty_stream(self) -> None:
         items, metadata = parse_cline_events("")
         assert items == []
-        assert metadata == {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
+        assert metadata == {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "cached_tokens": None}
 
     def test_malformed_lines_skipped(self) -> None:
         stream = "not json\n" + _lines(_text_end("answer is 4")) + "\n{ broken"
@@ -343,6 +343,7 @@ class TestParseClineEvents:
         assert metadata["input_tokens"] == 105
         assert metadata["output_tokens"] == 20
         assert metadata["reasoning_tokens"] == 7
+        assert metadata["cached_tokens"] == 5
 
     def test_usage_falls_back_to_events_without_run_result(self) -> None:
         # A killed run never prints run_result; the per-turn totals are what remains.
@@ -350,6 +351,16 @@ class TestParseClineEvents:
         assert metadata["input_tokens"] == 50
         assert metadata["output_tokens"] == 10
         assert metadata["reasoning_tokens"] == 3
+        # These usage events carry no cache-read total, so cache reads stay unknown.
+        assert metadata["cached_tokens"] is None
+
+    @pytest.mark.parametrize(("cache_read", "expected"), [(0, 0), (5, 5), (None, None)])
+    def test_cached_tokens_are_reported_only_when_cline_reports_them(self, cache_read, expected) -> None:
+        usage = {"inputTokens": 10, "outputTokens": 2}
+        if cache_read is not None:
+            usage["cacheReadTokens"] = cache_read
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage=usage)))
+        assert metadata["cached_tokens"] == expected
 
     def test_reasoning_usage_falls_back_to_output_details(self) -> None:
         _, metadata = parse_cline_events(
@@ -621,6 +632,18 @@ class TestModelServer:
         response = asyncio.run(agent.responses(request=request, body=body))
         assert response.usage.output_tokens_details.reasoning_tokens == 6
         assert response.usage.total_tokens == 20
+        # Cline reported no cache reads, so the response does not claim zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
+
+    def test_response_propagates_reported_cached_tokens(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(
+            return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": 6, "cached_tokens": 4}, "m")
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage.input_tokens_details.cached_tokens == 4
 
     def test_host_budget_refusal_precedes_cli_setup_and_corrected_request_runs(self, tmp_path) -> None:
         workspace = tmp_path / "ws"

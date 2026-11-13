@@ -139,6 +139,8 @@ async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope
     assert result.output[0].content[0].text == "fixed"
     assert result.model == "configured-model"
     assert result.usage.total_tokens == 3
+    # Pi reported no cache reads, so the response does not claim zero.
+    assert result.usage.input_tokens_details.cached_tokens is None
     assert agent.config.max_output_tokens == 128
     assert body.model_dump() == original
 
@@ -199,7 +201,7 @@ class TestLocalRuntimeSetup:
         # a run stopped at its deadline keeps what pi printed before the kill, with or without observations (pi's
         # stdout is read as it streams, and communicate() after the kill has nothing left to return)
         assert items[0].content[0].text == "partial"
-        assert usage == {"input_tokens": 2, "output_tokens": 1}
+        assert usage == {"input_tokens": 2, "output_tokens": 1, "cached_tokens": None}
 
     def test_startup_does_not_install_host_pi(self) -> None:
         with patch("responses_api_agents.pi_agent.app.ensure_pi") as install:
@@ -314,12 +316,12 @@ class TestParsePiEvents:
         assert [item.type for item in items] == ["reasoning", "message"]
         assert items[0].summary[0].text == "Check the result."
         assert items[1].content[0].text == solution
-        assert usage == {"input_tokens": 100, "output_tokens": 20}
+        assert usage == {"input_tokens": 100, "output_tokens": 20, "cached_tokens": None}
 
     def test_empty(self) -> None:
         items, usage = parse_pi_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_assistant_text_and_usage(self) -> None:
         line = _msg_end(
@@ -333,6 +335,23 @@ class TestParsePiEvents:
         assert items[0].content[0].text == "the answer is 4"
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
+        assert usage["cached_tokens"] == 5
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5, 7], 12), ([5, 0], None), ([5, None], None), ([0], None)],
+    )
+    def test_cached_tokens_sum_only_measured_cache_reads(self, cache_reads, expected) -> None:
+        lines = "\n".join(
+            _msg_end(
+                "assistant",
+                [{"type": "text", "text": "ok"}],
+                usage={"input": 10, "output": 1, **({} if cache_read is None else {"cacheRead": cache_read})},
+            )
+            for cache_read in cache_reads
+        )
+        # Pi writes cacheRead=0 when the backend reported no cache details, so zero is not a measurement.
+        assert parse_pi_events(lines)[1]["cached_tokens"] == expected
 
     def test_user_messages_ignored(self) -> None:
         line = _msg_end("user", [{"type": "text", "text": "hi"}])
@@ -370,7 +389,7 @@ class TestParsePiEvents:
         items, usage = parse_pi_events(line)
         assert len(items) == 1
         assert items[0].content[0].text == "ok"
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
 
 class TestEnv:

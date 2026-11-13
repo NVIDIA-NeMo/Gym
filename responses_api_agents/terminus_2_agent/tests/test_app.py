@@ -222,6 +222,8 @@ class TestResponses:
         assert response.temperature == 0.7
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
+        # final_metrics reported no cache reads, so they stay unknown rather than zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
         called_instruction = agent._run_terminus.await_args.args[1]
         assert called_instruction == "system config\n\ninput system\n\nsolve it"

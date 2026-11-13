@@ -243,8 +243,30 @@ def test_response_from_transcript_common_output_items_and_usage(tmp_path):
     assert resp.output[3].content[0].text == "Done."
     assert resp.usage.input_tokens == 18
     assert resp.usage.output_tokens == 8
-    assert resp.usage.input_tokens_details.cached_tokens == 2
+    # The second call reported no cache details, so the rollout's cache reads are unknown, not 2.
+    assert resp.usage.input_tokens_details.cached_tokens is None
     assert resp.usage.total_tokens == 26
+
+
+def _assistant_usage_event(usage: dict) -> dict:
+    return {"type": "message", "message": {"role": "assistant", "content": [], "usage": usage}}
+
+
+@pytest.mark.parametrize(
+    ("usages", "expected_cached"),
+    [
+        ([{"input": 11, "output": 5, "cacheRead": 2}, {"input": 7, "output": 3, "cacheRead": 4}], 6),
+        ([{"input_tokens": 7, "output_tokens": 3, "input_tokens_details": {"cached_tokens": 0}}], 0),
+        # OpenClaw writes cacheRead=0 when the backend reported no cache details.
+        ([{"input": 11, "output": 5, "cacheRead": 2}, {"input": 7, "output": 3, "cacheRead": 0}], None),
+        ([{"input": 11, "output": 5, "cacheRead": 2}, {"input_tokens": 7, "output_tokens": 3}], None),
+        ([], None),
+    ],
+)
+def test_usage_from_transcript_reports_cache_reads_only_when_every_call_measured_them(usages, expected_cached):
+    usage = PinchBenchAgent._usage_from_transcript([_assistant_usage_event(u) for u in usages])
+
+    assert usage.input_tokens_details.cached_tokens == expected_cached
 
 
 def test_collect_transcript_archives(tmp_path):

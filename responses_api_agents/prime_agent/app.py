@@ -119,11 +119,13 @@ def _kill_prime_processes(root_pid: int, agent_dir: Path) -> None:
         os.killpg(root_pid, signal.SIGKILL)
 
 
-def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
+def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, Optional[int]]]:
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
-    cached_tokens = 0
+    # Unknown until every assistant message reports a positive cacheRead; see the loop below.
+    cached_tokens: Optional[int] = None
+    cache_measured = True
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -143,15 +145,21 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
 
         if role == "assistant":
             usage = message.get("usage") or {}
-            input_tokens += int(usage.get("input") or 0) + int(usage.get("cacheRead") or 0)
+            cache_read = usage.get("cacheRead")
+            input_tokens += int(usage.get("input") or 0) + int(cache_read or 0)
             output_tokens += int(usage.get("output") or 0)
-            cached_tokens += int(usage.get("cacheRead") or 0)
+            # Pi's provider layer also writes cacheRead=0 when the backend reported no cache details, so
+            # only positive counts are measurements. One unmeasured call makes the sum unknown.
+            if type(cache_read) is not int or cache_read <= 0:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + cache_read
             if message.get("stopReason") in {"error", "aborted"}:
                 LOG.warning("Prime Agent stopped with an error: %s", message.get("errorMessage") or "unknown error")
                 return [], {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
-                    "cached_tokens": cached_tokens,
+                    "cached_tokens": cached_tokens if cache_measured else None,
                 }
             reasoning = [
                 block["thinking"]
@@ -215,7 +223,7 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     return output_items, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "cached_tokens": cached_tokens,
+        "cached_tokens": cached_tokens if cache_measured else None,
     }
 
 
@@ -415,7 +423,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
             if proc.returncode not in (0, None):
                 LOG.warning("Prime Agent exited %d: %s", proc.returncode, stderr.decode(errors="replace")[-1000:])
-                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, self.config.model, False
+                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}, self.config.model, False
             output_items, usage = parse_prime_agent_events(stdout.decode(errors="replace"))
             return output_items, usage, self.config.model, False
         finally:
@@ -459,7 +467,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
-        cached_tokens = usage.get("cached_tokens", 0)
+        cached_tokens = usage.get("cached_tokens")
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
