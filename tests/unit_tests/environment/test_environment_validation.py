@@ -1153,6 +1153,14 @@ def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> Non
         validate_environment(setup_path)
 
 
+def test_a_link_to_a_manifest_that_fails_to_load_says_so(tmp_path: Path) -> None:
+    setup_path = _linked_manifest(tmp_path, setup_of="demo")
+    (tmp_path / "benchmarks/demo/manifest.yaml").write_text("name: [broken\n", encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="fails to load"):
+        validate_environment(setup_path)
+
+
 def test_a_link_finds_its_target_by_name_not_by_folder(tmp_path: Path) -> None:
     main_path = _asset(tmp_path, kind="benchmark")
     _replace_manifest(main_path, name="main_id")
