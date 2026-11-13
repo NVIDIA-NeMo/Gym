@@ -1617,12 +1617,13 @@ def test_an_episode_with_an_empty_answer_keeps_its_plugin_log_mask(workdir, tmp_
 
 
 def test_a_think_block_is_stripped_before_the_judge(workdir) -> None:
-    """The judge grades what follows a reasoning model's <think> block, never the block itself."""
+    """The judge grades what follows a reasoning model's <think> block, never the block itself, which usually spans
+    several lines."""
     server = _server(workdir)
     client = TestClient(server.setup_webserver())
     judge = _mock_judge(server, CORRECT)
 
-    verified = client.post("/verify", json=_verify_body("<think>Marseille, perhaps</think>Exact Answer: Paris"))
+    verified = client.post("/verify", json=_verify_body("<think>Marseille,\nperhaps</think>Exact Answer: Paris"))
 
     assert _graded(verified) == (1.0, False, None, True)
     judge_request = judge.await_args.kwargs["json"].model_dump_json()
