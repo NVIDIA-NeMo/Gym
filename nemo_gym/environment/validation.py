@@ -106,6 +106,8 @@ class ResolvedComposition:
     components: tuple[ResolvedComponent, ...]
     # The implementation of the environment server each routed taskset runs on, from environment_server_routes.
     taskset_environment_servers: Mapping[str, str] = field(default_factory=dict)
+    # The Harbor target a Harbor-backed config runs (its `harbor_target`); its tasks are the rows.
+    harbor_target: str | None = None
 
 
 def _implementation_name(server: Any) -> str:
@@ -204,6 +206,8 @@ class _ConfigWiring:
     dataset_rs: Any | None
     resources_instance: Any | None
     model_server: str | None
+    # The Harbor target a Harbor-backed config runs (its `harbor_target`); its tasks are the rows.
+    harbor_target: str | None = None
 
 
 class _ServerLookupParser(GlobalConfigDictParser):
@@ -228,12 +232,35 @@ def _resolve_config_wiring(
     parser: GlobalConfigDictParser | None = None,
 ) -> _ConfigWiring:
     """Resolve which servers a workload config wires, without probing or materializing runtime services."""
-    initial = OmegaConf.merge(
-        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"config_paths": [str(config_path.resolve())]},
-    )
+    from nemo_gym.data.tasks.harbor.prepare import AGENT_OVERRIDES, HARBOR_TARGET_KEY, harbor_benchmark
+
+    config_paths = [str(config_path.resolve())]
     parser = parser or GlobalConfigDictParser()
-    with _with_component_root(config_path):
+    with _with_component_root(config_path), tempfile.TemporaryDirectory() as scratch:
+        try:
+            benchmark = harbor_benchmark(config_path)
+        except ValueError as error:
+            raise EnvironmentValidationError(str(error)) from error
+        except (OSError, YAMLError):
+            benchmark = None  # The parser below reports a file it cannot read.
+        if benchmark is not None and benchmark.agent.impl_name in AGENT_OVERRIDES:
+            # Resolve the agent as the generated Harbor run binds it (``build_run``): a shipped template may leave a
+            # setting such as ``resources_server.name`` for benchmark composition, which the Harbor run clears.
+            normalized = Path(scratch) / "harbor_agent.yaml"
+            agent = benchmark.agent
+            normalized.write_text(
+                json.dumps(
+                    {
+                        agent.instance_name: {
+                            "responses_api_agents": {agent.impl_name: AGENT_OVERRIDES[agent.impl_name]}
+                        }
+                    }
+                )
+            )
+            config_paths.append(str(normalized))
+        initial = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, {"config_paths": config_paths}
+        )
         try:
             resolved = parser.parse(
                 GlobalConfigDictParserConfig(
@@ -248,13 +275,26 @@ def _resolve_config_wiring(
     servers = parser.filter_for_server_instance_configs(resolved)
     by_instance = {server.name: server for server in servers}
     agents = [server for server in servers if server.SERVER_TYPE == "responses_api_agents"]
+    harbor_target = None
+    if resolved.get(HARBOR_TARGET_KEY) is not None:
+        # Harbor-backed: the config's one agent instance runs the target's tasks, the rows prepare writes.
+        if benchmark is None:
+            # harbor_benchmark refuses a target only an include sets; this covers one it could not read.
+            raise EnvironmentValidationError(f"{config_path} must set {HARBOR_TARGET_KEY} in the file itself.")
+        harbor_target = benchmark.target
 
     # Datasets may live on a resources server (decoupled layout) or on an agent (legacy and
     # self-contained layouts). The agent is resolved by `resolve_dataset_agent` — the same
     # resolver rollout dispatch uses — so a config that validates is a config that routes.
     rs_with_data = [s for s in servers if s.SERVER_TYPE == "resources_servers" and s.datasets]
     dataset_rs = None
-    if dataset_owner is not None:
+    if harbor_target is not None:
+        if dataset_owner is not None:
+            raise EnvironmentValidationError(
+                f"dataset_owner does not apply to {HARBOR_TARGET_KEY}, whose rows it writes."
+            )
+        selected_agent = by_instance[benchmark.agent.instance_name]
+    elif dataset_owner is not None:
         owner = by_instance.get(dataset_owner)
         if (
             owner is None
@@ -305,6 +345,7 @@ def _resolve_config_wiring(
         dataset_rs=dataset_rs,
         resources_instance=resources_instance,
         model_server=model_ref.get("name") if isinstance(model_ref, DictConfig) else None,
+        harbor_target=harbor_target,
     )
 
 
@@ -371,6 +412,7 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         grading_mode=str(grading_mode) if grading_mode is not None else None,
         components=tuple(components),
         taskset_environment_servers=_taskset_environment_servers(wiring),
+        harbor_target=wiring.harbor_target,
     )
 
 
@@ -390,6 +432,9 @@ def _taskset_environment_servers(wiring: _ConfigWiring) -> dict[str, str]:
 
 def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
     """The resources binding selected by all dataset routes, or unknown when they do not identify one instance."""
+    if wiring.harbor_target is not None:
+        # The generated Harbor environment server grades the target's tasks; no resources server is bound.
+        return None
     if wiring.dataset_rs is not None:
         return _implementation_name(wiring.dataset_rs)
 
@@ -462,9 +507,11 @@ def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:
         "resources_server": composition.resources_server,
         "agent_server": composition.agent_server,
         "model_server": composition.model_server,
-        "datasets": list(composition.datasets) or None,
+        # A Harbor-backed config declares no datasets: its rows are the target's tasks.
+        "datasets": list(composition.datasets) or (None if composition.harbor_target is None else []),
         "rollout_driver": composition.rollout_driver,
         "grading_mode": composition.grading_mode,
+        "harbor_target": composition.harbor_target,
     }
 
 
@@ -802,6 +849,29 @@ def _validate_task_row(
         ) from error
 
 
+def _validate_harbor_target(target: str) -> None:
+    """A Harbor target must name a committed entry, an existing task folder or a ``harbor:`` reference.
+
+    Nothing is fetched: a reference is checked by its shape, and its tasks are validated by ``gym dataset validate``.
+    """
+    from nemo_gym.data.tasks.harbor.entries import entry_target
+    from nemo_gym.data.tasks.harbor.hub import HubError, HubRef, is_hub_ref
+    from nemo_gym.data.tasks.harbor.prepare import HARBOR_TARGET_KEY
+
+    if is_hub_ref(target):
+        try:
+            HubRef.parse(target)
+        except HubError as error:
+            raise EnvironmentValidationError(str(error)) from error
+        return
+    if entry_target(target) is not None or Path(target).expanduser().is_dir():
+        return
+    raise EnvironmentValidationError(
+        f"{HARBOR_TARGET_KEY} {target!r} is not an entry under environments/harbor/, an existing task folder "
+        "or a harbor: reference."
+    )
+
+
 def _validate_benchmark_prompt_contract(manifest: EnvironmentManifest) -> None:
     if manifest.kind != EnvironmentKind.BENCHMARK:
         return
@@ -914,6 +984,8 @@ def validate_environment(
         synchronized = tuple(differences)
 
     with _with_component_root(resolved_config_path):
+        if composition.harbor_target is not None:
+            _validate_harbor_target(composition.harbor_target)
         inferred_profile, profile_evidence = _infer_profile(composition)
         _validate_benchmark_prompt_contract(manifest)
         if manifest.rollout_driver:

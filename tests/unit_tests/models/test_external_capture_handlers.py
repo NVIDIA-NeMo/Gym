@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from nemo_gym.models.token_capture.external_capture import (
+    DynamoWorkerCaptureHandler,
     MegatronWorkerCaptureHandler,
     VLLMWorkerCaptureHandler,
     make_external_capture_handler,
@@ -30,8 +31,8 @@ from nemo_gym.models.token_capture.staging.records import (
 
 HANDLER_CLASSES = pytest.mark.parametrize(
     "handler_cls",
-    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler, DynamoWorkerCaptureHandler],
+    ids=["vllm", "megatron", "dynamo"],
 )
 
 
@@ -492,8 +493,8 @@ async def test_handler_logs_and_continues_when_poisoning_also_fails(handler_cls,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "handler",
-    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler()],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler(), DynamoWorkerCaptureHandler()],
+    ids=["vllm", "megatron", "dynamo"],
 )
 async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
     store = InMemoryLineageStore()
@@ -515,8 +516,8 @@ async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "handler",
-    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler()],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler(), DynamoWorkerCaptureHandler()],
+    ids=["vllm", "megatron", "dynamo"],
 )
 async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
     payload = _transport_payload()
@@ -528,7 +529,11 @@ async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
 
 @pytest.mark.parametrize(
     ("backend", "handler_type"),
-    [("vllm_worker", VLLMWorkerCaptureHandler), ("megatron_worker", MegatronWorkerCaptureHandler)],
+    [
+        ("vllm_worker", VLLMWorkerCaptureHandler),
+        ("megatron_worker", MegatronWorkerCaptureHandler),
+        ("dynamo_worker", DynamoWorkerCaptureHandler),
+    ],
 )
 def test_factory_selects_the_typed_backend_strategy(backend, handler_type) -> None:
     assert isinstance(make_external_capture_handler(backend), handler_type)
