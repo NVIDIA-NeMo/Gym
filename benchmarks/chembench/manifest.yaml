@@ -13,6 +13,7 @@ authors:
 - gnalbandyan
 maintainers:
 - gnalbandyan
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

@@ -11,6 +11,7 @@ authors:
 - fsiino-nvidia
 maintainers:
 - gnalbandyan
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

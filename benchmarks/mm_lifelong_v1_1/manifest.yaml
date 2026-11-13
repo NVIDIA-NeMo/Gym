@@ -12,6 +12,7 @@ authors:
 - Guo Chen
 maintainers:
 - cg1177
+primary_metric: mean/rubric_score
 requirements:
   gpu: false
   network: allowlist

@@ -12,6 +12,7 @@ authors:
 - Julien Veron Vialard
 maintainers:
 - jveronvialard
+primary_metric: win_rate
 requirements:
   gpu: false
   network: allowlist

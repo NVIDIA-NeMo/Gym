@@ -12,6 +12,7 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - fsiino-nvidia
+primary_metric: subtask_accuracy
 requirements:
   gpu: false
   network: no-network

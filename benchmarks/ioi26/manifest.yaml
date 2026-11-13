@@ -11,6 +11,7 @@ authors:
 - gwarmstrong
 maintainers:
 - SeanNaren
+primary_metric: total_score
 requirements:
   gpu: false
   network: no-network

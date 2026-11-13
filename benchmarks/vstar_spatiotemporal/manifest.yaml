@@ -13,6 +13,7 @@ authors:
 - Pulkit Khandelwal
 maintainers:
 - pulkitkumar95
+primary_metric: mAM
 requirements:
   gpu: false
   network: allowlist

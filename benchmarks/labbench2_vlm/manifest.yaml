@@ -12,6 +12,7 @@ authors:
 - Sergey Kolchenko
 maintainers:
 - azkalot1
+primary_metric: pass@1[avg-of-3]/accuracy
 requirements:
   gpu: false
   network: allowlist

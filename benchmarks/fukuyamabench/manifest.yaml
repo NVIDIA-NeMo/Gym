@@ -13,6 +13,7 @@ authors:
 - Rima Shahbazyan
 maintainers:
 - rimashahbazyan
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

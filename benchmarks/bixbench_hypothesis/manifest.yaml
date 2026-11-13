@@ -11,6 +11,7 @@ authors:
 - Sanyam Kapoor
 maintainers:
 - activatedgeek
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

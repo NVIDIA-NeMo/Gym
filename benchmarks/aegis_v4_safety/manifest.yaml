@@ -11,6 +11,7 @@ authors:
 - muskank7
 maintainers:
 - muskank7
+primary_metric: aegis/response_unsafe_rate_resolved
 requirements:
   gpu: false
   network: allowlist

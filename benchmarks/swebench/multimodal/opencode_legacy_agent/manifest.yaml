@@ -13,6 +13,7 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - trintamaki
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

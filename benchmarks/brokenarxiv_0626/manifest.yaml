@@ -12,6 +12,7 @@ authors:
 - Kipok
 maintainers:
 - Kipok
+primary_metric: pass@1[avg-of-1]/score
 requirements:
   gpu: false
   network: allowlist

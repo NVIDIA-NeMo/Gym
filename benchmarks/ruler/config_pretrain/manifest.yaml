@@ -12,6 +12,7 @@ authors:
 - Jonathan Li
 maintainers:
 - bxyu-nvidia
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

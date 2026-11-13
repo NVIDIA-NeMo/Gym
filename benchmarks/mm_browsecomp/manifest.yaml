@@ -12,6 +12,7 @@ authors:
 - smohsenitahe
 maintainers:
 - DanialTaheri
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: allowlist

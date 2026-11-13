@@ -12,6 +12,7 @@ authors:
 - Eric Yang
 maintainers:
 - ericyang0
+primary_metric: composite/complete_accuracy
 requirements:
   gpu: false
   network: allowlist

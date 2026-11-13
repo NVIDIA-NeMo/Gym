@@ -11,6 +11,7 @@ authors:
 - cmunley1
 maintainers:
 - cmunley1
+primary_metric: collab_intel/score
 requirements:
   gpu: false
   network: allowlist

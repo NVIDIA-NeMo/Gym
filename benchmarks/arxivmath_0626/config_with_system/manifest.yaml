@@ -12,6 +12,7 @@ authors:
 - Kipok
 maintainers:
 - Kipok
+primary_metric: unknown
 requirements:
   gpu: false
   network: allowlist

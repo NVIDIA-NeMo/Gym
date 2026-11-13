@@ -12,6 +12,7 @@ authors:
 - Guo Chen
 maintainers:
 - cg1177
+primary_metric: mean/Video_MME_agentic
 requirements:
   gpu: false
   network: allowlist

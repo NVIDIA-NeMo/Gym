@@ -11,6 +11,7 @@ authors:
 - eric-tramel
 maintainers:
 - eric-tramel
+primary_metric: pass@1[avg-of-8]/accuracy
 requirements:
   gpu: false
   network: no-network

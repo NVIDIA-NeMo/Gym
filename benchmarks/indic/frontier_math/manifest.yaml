@@ -12,6 +12,7 @@ authors:
   - anushakamathofficial
 maintainers:
 - anushaknvidia
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

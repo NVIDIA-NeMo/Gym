@@ -12,6 +12,7 @@ authors:
 - Maria Bagdasarova
 maintainers:
 - pachmu
+primary_metric: mean_reward
 requirements:
   gpu: false
   network: no-network

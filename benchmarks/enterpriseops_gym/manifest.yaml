@@ -13,6 +13,7 @@ authors:
 - Khushi Bhardwaj
 maintainers:
 - kbhardwaj-nvidia
+primary_metric: pass@1[avg-of-3]/success
 requirements:
   gpu: false
   network: allowlist

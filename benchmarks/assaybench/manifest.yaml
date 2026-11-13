@@ -12,6 +12,7 @@ authors:
 - lilithgrigoryan
 maintainers:
 - lilithgrigoryan
+primary_metric: pass@1[avg-of-5]/adjusted_ndcg@100
 requirements:
   gpu: false
   network: no-network

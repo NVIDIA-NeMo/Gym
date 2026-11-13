@@ -12,6 +12,7 @@ authors:
 - Maria Bagdasarova
 maintainers:
 - pachmu
+primary_metric: judge/avg_simple_no_mt
 requirements:
   gpu: false
   network: allowlist

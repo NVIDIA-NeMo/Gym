@@ -14,6 +14,7 @@ authors:
 maintainers:
 - gwarmstrong
 - YoavMiron
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

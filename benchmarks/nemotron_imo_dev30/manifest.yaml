@@ -11,6 +11,7 @@ authors:
 - i-vainn
 maintainers:
 - i-vainn
+primary_metric: pass@1[avg-of-4]/score
 requirements:
   gpu: false
   network: allowlist

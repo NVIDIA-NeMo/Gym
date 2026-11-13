@@ -13,6 +13,7 @@ authors:
 maintainers:
 - cmunley1
 - d-molinari
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

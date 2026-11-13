@@ -11,6 +11,7 @@ authors:
 - SaaS-Bench Authors
 maintainers:
 - bpritam14
+primary_metric: unknown
 requirements:
   gpu: false
   network: public

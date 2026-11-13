@@ -13,6 +13,7 @@ authors:
 - cparisien
 maintainers:
 - jin-nvidia
+primary_metric: overall_score
 requirements:
   gpu: false
   network: allowlist

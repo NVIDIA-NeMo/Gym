@@ -11,6 +11,7 @@ authors:
 - anushaknvidia
 maintainers:
 - anushaknvidia
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

@@ -12,6 +12,7 @@ authors:
 - arti4nvj
 maintainers:
 - gwarmstrong
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: no-network

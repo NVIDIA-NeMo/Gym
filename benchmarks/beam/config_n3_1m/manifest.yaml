@@ -12,6 +12,7 @@ authors:
 - chsieh
 maintainers:
 - hsiehjackson
+primary_metric: pass@1[avg-of-4]/overall
 requirements:
   gpu: false
   network: allowlist

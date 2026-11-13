@@ -13,6 +13,7 @@ authors:
 - NVIDIA
 maintainers:
 - bpritam14
+primary_metric: agentvista/mean_score
 requirements:
   gpu: false
   network: public

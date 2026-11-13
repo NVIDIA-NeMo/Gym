@@ -12,6 +12,7 @@ authors:
 - jeffwillette
 maintainers:
 - jeffwillette
+primary_metric: unknown
 requirements:
   gpu: true
   network: no-network

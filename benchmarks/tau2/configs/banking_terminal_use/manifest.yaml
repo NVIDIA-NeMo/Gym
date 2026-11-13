@@ -13,6 +13,7 @@ authors:
 maintainers:
 - bxyu-nvidia
 - jkyi-nvidia
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: allowlist

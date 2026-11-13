@@ -13,6 +13,7 @@ authors:
 - Serge Panev
 maintainers:
 - AdamRajfer
+primary_metric: unknown
 requirements:
   gpu: false
   network: allowlist

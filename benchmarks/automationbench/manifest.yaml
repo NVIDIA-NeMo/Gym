@@ -13,6 +13,7 @@ authors:
 maintainers:
 - cmunley1
 - d-molinari
+primary_metric: pass@1[avg-of-1]/aa_headline
 requirements:
   gpu: false
   network: no-network

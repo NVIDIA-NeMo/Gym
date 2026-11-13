@@ -12,6 +12,7 @@ authors:
 - Maria Bagdasarova
 maintainers:
 - pachmu
+primary_metric: unknown
 requirements:
   gpu: false
   network: allowlist

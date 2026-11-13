@@ -14,6 +14,7 @@ authors:
 - gnalbandyan
 maintainers:
 - gnalbandyan
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

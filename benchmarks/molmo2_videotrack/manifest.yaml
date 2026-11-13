@@ -12,6 +12,7 @@ authors:
 - Pulkit Khandelwal
 maintainers:
 - pulkitkumar95
+primary_metric: f1
 requirements:
   gpu: false
   network: no-network

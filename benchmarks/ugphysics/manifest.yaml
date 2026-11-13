@@ -12,6 +12,7 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+primary_metric: pass@1[avg-of-1]/judge_accuracy
 requirements:
   gpu: false
   network: allowlist

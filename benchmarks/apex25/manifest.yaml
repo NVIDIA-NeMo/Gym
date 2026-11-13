@@ -11,6 +11,7 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+primary_metric: pass@1[avg-of-1]/symbolic_accuracy
 requirements:
   gpu: false
   network: no-network

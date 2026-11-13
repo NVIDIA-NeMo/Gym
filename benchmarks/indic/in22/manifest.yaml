@@ -12,6 +12,7 @@ licensing: CC-BY-4.0
 authors: [NVIDIA NeMo Gym contributors]
 maintainers:
 - anushaknvidia
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

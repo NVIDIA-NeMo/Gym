@@ -13,6 +13,7 @@ authors:
 maintainers:
 - hsiehjackson
 - trintamaki
+primary_metric: unknown
 requirements:
   gpu: false
   network: allowlist

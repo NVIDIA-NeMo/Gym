@@ -11,6 +11,7 @@ authors:
   - Julien Veron Vialard
 maintainers:
 - jveronvialard
+primary_metric: avg
 requirements:
   gpu: false
   network: no-network

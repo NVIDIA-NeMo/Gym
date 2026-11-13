@@ -11,6 +11,7 @@ authors:
 - jiacheng-xu
 maintainers:
 - jiacheng-xu
+primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false
   network: allowlist

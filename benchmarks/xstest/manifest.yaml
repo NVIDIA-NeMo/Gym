@@ -12,6 +12,7 @@ authors:
 - bxyu-nvidia
 maintainers:
 - dcfarris
+primary_metric: mean/reward
 requirements:
   gpu: true
   network: no-network

@@ -12,6 +12,7 @@ authors:
 - Daniel Burkhardt
 maintainers:
 - dburkhardt
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

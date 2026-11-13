@@ -12,6 +12,7 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+primary_metric: unknown
 requirements:
   gpu: false
   network: no-network

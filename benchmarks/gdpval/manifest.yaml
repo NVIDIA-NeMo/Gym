@@ -18,6 +18,7 @@ maintainers:
 - athitten
 - marta-sd
 - vadam5
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

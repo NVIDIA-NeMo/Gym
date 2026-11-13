@@ -11,6 +11,7 @@ authors:
 - rystewart-nvidia
 maintainers:
 - rystewart-nvidia
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

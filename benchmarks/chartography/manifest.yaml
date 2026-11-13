@@ -12,6 +12,7 @@ authors:
 - Tuomas Rintamaki
 maintainers:
 - trintamaki
+primary_metric: pass@1[avg-of-10]/all_pass
 requirements:
   gpu: false
   network: allowlist

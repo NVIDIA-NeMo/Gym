@@ -12,6 +12,7 @@ authors:
 maintainers:
 - fsiino-nvidia
 - AdamRajfer
+primary_metric: mean/accuracy
 requirements:
   gpu: false
   network: allowlist

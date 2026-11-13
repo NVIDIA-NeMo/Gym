@@ -12,6 +12,7 @@ authors:
 - bxyu-nvidia
 maintainers:
 - bxyu-nvidia
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: allowlist

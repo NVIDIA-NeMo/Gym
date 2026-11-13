@@ -12,6 +12,7 @@ authors:
 - Christian Munley
 maintainers:
 - cmunley1
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

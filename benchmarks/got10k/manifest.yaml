@@ -12,6 +12,7 @@ authors:
 - Pulkit Khandelwal
 maintainers:
 - pulkitkumar95
+primary_metric: visible_gt_AO
 requirements:
   gpu: false
   network: no-network

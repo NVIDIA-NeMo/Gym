@@ -13,6 +13,7 @@ authors:
 maintainers:
 - gwarmstrong
 - dkmisra
+primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false
   network: no-network

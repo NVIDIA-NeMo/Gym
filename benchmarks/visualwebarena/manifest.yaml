@@ -13,6 +13,7 @@ authors:
   - Jeff Peng
 maintainers:
 - JeffPengCoder
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: allowlist

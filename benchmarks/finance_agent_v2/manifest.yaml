@@ -12,6 +12,7 @@ authors:
 - ushnish-de
 maintainers:
 - ushnish-de
+primary_metric: mean/rubric_partial_credit
 requirements:
   gpu: false
   network: public

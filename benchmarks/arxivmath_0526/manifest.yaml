@@ -11,6 +11,7 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+primary_metric: unknown
 requirements:
   gpu: false
   network: allowlist

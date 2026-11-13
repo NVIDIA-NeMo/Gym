@@ -12,6 +12,7 @@ authors:
 - ushnish-de
 maintainers:
 - ushnish-de
+primary_metric: frontier_finance/macro_avg_qualification_rate_on_all_queries
 requirements:
   gpu: false
   network: public

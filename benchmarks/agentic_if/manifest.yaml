@@ -13,6 +13,7 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - katherineh123
+primary_metric: unknown
 requirements:
   gpu: false
   network: public

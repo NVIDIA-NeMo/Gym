@@ -16,6 +16,7 @@ maintainers:
 - ananthsub
 - init-nikhil
 - yaoyu-33
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: public

@@ -11,6 +11,7 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+primary_metric: wer
 requirements:
   gpu: false
   network: no-network

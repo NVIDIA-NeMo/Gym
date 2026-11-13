@@ -12,6 +12,7 @@ authors:
 - George Armstrong
 maintainers:
 - bxyu-nvidia
+primary_metric: pass@1[avg-of-3]/accuracy
 requirements:
   gpu: false
   network: allowlist

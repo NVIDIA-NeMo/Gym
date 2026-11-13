@@ -12,6 +12,7 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - lafrancef
+primary_metric: mean/reward
 requirements:
   gpu: true
   network: public

@@ -15,6 +15,7 @@ maintainers:
 - hemildesai
 - laszkiewiczp
 - sdevare-nv
+primary_metric: mean/reward
 requirements:
   gpu: false
   network: allowlist
