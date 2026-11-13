@@ -26,3 +26,10 @@ gym eval run --no-serve \
     --model-type vllm_model \
     --output results/gpqa.jsonl
 ```
+
+## Indic base-model likelihood evaluation
+
+The [Indic pretraining recipe](indic-pretrain/README.md) provides a separate
+five-shot, 12-language likelihood evaluation for base checkpoints. It freezes
+prompts from translated GPQA Diamond data and submits one resumable Slurm job per
+model and language.
