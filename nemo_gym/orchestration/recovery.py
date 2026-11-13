@@ -3377,6 +3377,12 @@ def _observed_trial_operations(
         status = event.get("http_status") if isinstance(event, dict) else None
         if (
             operation.get("outcome") != "failed"
+            # One recorded event is the whole operation: one failed HTTP attempt, or one terminal transport failure
+            # (which the producer counts inside the same retry-loop entry). Any further attempt is unrecorded.
+            or type(operation.get("http_attempts")) is not int
+            or operation["http_attempts"] != 1
+            or type(operation.get("transport_failures")) is not int
+            or operation["transport_failures"] != int(status is None)
             or not nonempty(op_id)
             or not nonempty(attempt_id)
             or op_id in populations[2]
@@ -3803,8 +3809,6 @@ def _observed_trial_operations(
                 retried = [item for item in owned if not any(matches(item, call) for call in judge_calls)]
                 if len(owned) - len(retried) != len(judge_calls):
                     return False
-                final_started = min(call.get("started_at", math.inf) for call in judge_calls)
-                judge_ref = judge_calls[0]["response_metadata"]["model_ref"]
                 failed_attempts = []
                 for ref in retried:
                     hit = [call for call in calls if matches(ref, call)]
@@ -3812,7 +3816,16 @@ def _observed_trial_operations(
                         hit[0] is seen for seen in [*judge_calls, *(c for c, *_ in failed_attempts)]
                     ):
                         return False
-                    found = failed_judge_attempt(hit[0], judge_ref, final_started)
+                    # A retry belongs to a later completed dependency of the same judge model; timestamps are
+                    # inspected only here, so a grading without retries needs none.
+                    found = None
+                    for judge in judge_calls:
+                        started = judge.get("started_at")
+                        if type(started) not in (int, float) or not math.isfinite(started):
+                            continue
+                        found = failed_judge_attempt(hit[0], judge["response_metadata"]["model_ref"], started)
+                        if found is not None:
+                            break
                     if found is None:
                         return False
                     failed_attempts.append((hit[0], *found))
@@ -3895,6 +3908,15 @@ def _observed_trial_operations(
             ):
                 return False
             for failed, key, event, op_id, attempt_id in failed_attempts:
+                # Recheck against the dependencies and the failed calls registered so far: the evidence must not
+                # contradict itself about one call, operation, attempt or event.
+                if (
+                    failed["model_call_id"] in populations[0]
+                    or op_id in populations[2]
+                    or attempt_id in populations[4]
+                    or key in recovered_events
+                ):
+                    return False
                 # A judge request the verifier retried is a recovered grading attempt, joined once like any other.
                 populations[0].add(failed["model_call_id"])
                 populations[2].add(op_id)
