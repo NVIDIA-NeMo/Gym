@@ -316,7 +316,8 @@ def test_the_agent_loads_the_staged_plugins_receipts_first_then_the_relay_agents
 
 
 # What OpenCode does with its plugins: it imports each, calls its factory, and runs the hooks the factories returned on
-# each model call; here, one call.
+# each model call and on each tool definition it sends; here, one call, and grep's definition with the two lines of its
+# stock description that name bash and the task tool.
 _PLUGIN_HOST = """
 import { pathToFileURL } from "node:url";
 const hooks = [];
@@ -325,12 +326,38 @@ for (const path of process.argv.slice(1)) {
   hooks.push(await plugin({ client: { session: { abort: async () => {} } } }));
 }
 for (const hook of hooks) await hook["chat.params"]?.({ sessionID: "session", message: {} });
+const grep = {
+  description: [
+    "- Fast content search tool",
+    "- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.",
+    "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead",
+  ].join("\\n"),
+};
+for (const hook of hooks) await hook["tool.definition"]?.({ toolID: "grep" }, grep);
 """
+# The lines the bash-off arm (NEMO_GYM_DISABLE_BASH=1 with NEMO_GYM_FIX_GREP_DESCRIPTION=1) also requires, in the
+# overlay that sets its environment.
+BASH_OFF_MARKERS = [
+    "[nemo-gym-plugin] tool_surface task=off bash=off",
+    "[nemo-gym-plugin] tool_surface grep_description=patched removed=2/2",
+    "[nemo-gym-plugin] web_guard version=2 contamination=on exclude_domains=47 search_transport=mcp",
+    "[nemo-gym-plugin] bash_guard=on",
+]
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is needed to run the OpenCode plugins")
-def test_the_staged_plugins_print_every_line_verify_requires(tmp_path: Path) -> None:
-    """verify refuses a run whose plugin log lacks a required line, so a line no plugin prints would refuse every run."""
+@pytest.mark.parametrize(
+    "arm",
+    [{}, {"NEMO_GYM_DISABLE_BASH": "1", "NEMO_GYM_FIX_GREP_DESCRIPTION": "1"}, {"OPENCODE_WEBSEARCH_TYPE": "deep"}],
+    ids=["bash_on", "bash_off", "deep"],
+)
+def test_the_staged_plugins_print_every_line_verify_requires(
+    arm: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """verify refuses a run whose plugin log lacks a required line, so a line no plugin prints would refuse every run.
+    The preset requires only lines that every arm prints; the bash-off arm's lines appear on that arm only."""
+    for name, value in arm.items():
+        monkeypatch.setenv(name, value)
     _, config = sessions()
     resources = settings(config, RESOURCES)
     log = tmp_path / "plugins.log"
@@ -350,6 +377,14 @@ def test_the_staged_plugins_print_every_line_verify_requires(tmp_path: Path) -> 
     assert ran.returncode == 0, ran.stderr
     plugin_log = log.read_text()
     assert [marker for marker in resources["required_plugin_markers"] if marker not in plugin_log] == []
+    if arm.get("NEMO_GYM_DISABLE_BASH") == "1":
+        assert [marker for marker in BASH_OFF_MARKERS if marker not in plugin_log] == []
+    else:
+        assert "tool_surface task=off bash=off" not in plugin_log
+        assert "grep_description=patched" not in plugin_log
+    # The deep arm searches over REST, the others over MCP.
+    deep = "OPENCODE_WEBSEARCH_TYPE" in arm
+    assert ("search_transport=rest" in plugin_log, "search_transport=mcp" in plugin_log) == (deep, not deep)
 
 
 def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
