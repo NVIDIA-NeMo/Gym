@@ -10396,6 +10396,8 @@ def test_transport_log_uses_capture_identity_over_trace_headers():
         }
     )
     assert _transport_log_context(request) == {"rollout_id": "0-0", "model_call_id": "unique-call"}
+
+
 def _capture_vllm_messages(tmp_path: Path, *, stream: bool, completions: bool, finish: str, stop: str | int | None):
     server = VLLMModel(
         config=VLLMModelConfig(
