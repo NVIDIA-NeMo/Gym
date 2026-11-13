@@ -14,8 +14,8 @@ grades them. Each episode holds one task:
 - the tools: two in c-Interact, nine in a-Interact with their BIRD-COIN budget.
 
 c-Interact follows the [BIRD-Interact ADK](https://github.com/bird-bench/BIRD-Interact/tree/451fe2c3518ee1cf908d8139e2913483bd519381/BIRD-Interact-ADK)
-(revision `451fe2c`): its protocol, its user simulator and its grading, for the query tasks of Lite and Full that
-auto-ontology-eval runs. [ADK parity](#adk-parity) lists what matches and the one deliberate difference.
+(revision `451fe2c`): its protocol, its user simulator and its grading, for the query and management tasks of Lite and
+Full. [ADK parity](#adk-parity) lists what matches and the one deliberate difference.
 
 ## Modes
 
@@ -123,9 +123,23 @@ The ADK's rules, kept for parity, include its edge cases: a comment at the very 
 stays; `COUNT(DISTINCT x)` keeps its `DISTINCT`; an array of decimals or dates fails the comparison, because it cannot
 be written as JSON; and a submission that writes runs twice, so a write that cannot run twice fails.
 
-A phase whose `category` is not `Query` and that has `test_cases` runs its custom test cases in the ADK, which this
-server does not do yet, so such a task fails at seed. A query phase is graded as above even when it has test cases.
-In Lite and Full, the management tasks are the only ones with such a phase; every query task's follow-up is a query.
+A query phase is graded as above even when it has test cases. A phase whose `category` is not `Query` and that has
+`test_cases`, a management task's, is graded by its test cases, as in the ADK: Python code from the ground truth that
+defines `test_case(pred_sqls, sol_sqls, db_name, conn)` and raises when the database is wrong. `grading.py` runs it in
+the episode's sandbox, never on the Gym host, on PostgreSQL only: with SQLite (Mini-Interact), the server refuses
+such a task at seed.
+
+- The phase runs on a copy of the episode's database, which `grading.py` drops afterwards. The submission runs first,
+  and its writes stay on the copy for the test cases. An error or a timeout is the debug message's `<error>`.
+- Each test case gets the ADK's six globals: `execute_queries` (each query committed, under the statement timeout;
+  it returns the rows of the last, an error, and whether it timed out), `ex_base` (the default test case's
+  comparison, 1 or 0), `remove_comments`, `remove_distinct` and `remove_round` (on lists of SQL), and
+  `pred_query_result` (the rows the submission returned).
+- The test cases run in order. The first that raises anything fails the phase. As in the ADK, the code's globals
+  are those six names and its locals its own, so a function in it does not see the code's top-level imports.
+- A sandbox command has time for the submission and two queries for each test case, each `sql_timeout_seconds`.
+
+In Lite and Full, only the management tasks have such a phase; every query task's follow-up is a query.
 
 ## Harnesses
 
@@ -197,12 +211,20 @@ What c-Interact takes from the ADK at revision `451fe2c3518ee1cf908d8139e2913483
 | `orchestrator/cinteract.py`: `max_turn`, the phase-1, debug and follow-up messages, two turns for each phase | `app.py` (`_first_request`, `_next_message`) |
 | `system_agent/agent.py`, `tools.py`, `callbacks_cinteract.py`: the instruction, `ask_user`, `submit_sql`, one submission for each turn | `app.py` (`CInteractTools`) |
 | `db_environment/server.py`: the grader's messages, the rewards by submission, the phase-1 snapshot, the knowledge the agent sees | `app.py` (`submit`), `grading.py` |
-| `shared/db_utils.py`: `test_case_default` and its rewrites | `grading.py` |
+| `shared/db_utils.py`: `test_case_default`, its rewrites, and the helpers of the management test cases | `grading.py` |
 | `user_simulator/`: the two stages, the `v2` prompts, the clause split | `simulator.py` |
 
 The texts (prompts, instruction, tool descriptions and messages) are the ADK's, verbatim, in `adk_prompts.py`; the
-code is Gym's. Two checks back the grading: the tests, and a run of the ADK's own `test_case_default` against
-`grading.py` on six Lite databases, where 863 of 863 submissions got the same verdict.
+code is Gym's. Checks back the grading: the tests, and runs of the ADK's own code against `grading.py` in the Lite
+image. For queries, `test_case_default` on six Lite databases gave the same verdict on 863 of 863 submissions. For
+management phases, the ADK's submit flow and its helpers gave the same verdict in 306 of 306 comparisons: 17
+scenarios with test cases written for the check (writes, views, functions, errors, imports, the helpers, and one task
+across both phases) on each of the 18 Lite databases. Each time, the episode's database was unchanged afterwards.
+The real management test cases arrive with the ground truth (GYMINT-685).
+
+The ADK's original evaluation (`evaluation/src`) gives a test case more names than the ADK does, such as
+`check_sql_function_usage` and `performance_compare_by_qep`. Gym gives the ADK's six; a test case that calls another
+fails, as in the ADK.
 
 The ADK's agent-side behavior that a Gym harness replaces is not reproduced: its agent stops at 60 model calls in an
 episode, where a Gym harness has its own limit (`simple_agent`'s `max_steps`, for each turn). The one deliberate
@@ -211,8 +233,6 @@ difference is in the simulator: the ADK fills its prompts' placeholders one afte
 
 ## Not supported yet
 
-- Rows graded by custom `test_cases`: a phase whose category is not `Query` (BIRD-Interact's management tasks). The
-  episode fails at seed, for good.
 - The data and catalog checks that `gym env test` runs for a Resources Server (GYMINT-643).
 
 ## Running
