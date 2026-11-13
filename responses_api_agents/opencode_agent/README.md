@@ -28,6 +28,10 @@ so `"*": allow` then overrides every rule for those keys (naming `bash` voids ev
 Other flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint and configuration for their
 Resources-owned lifecycle. HLE and APEX Shortlist run this agent from their plain-named OpenCode presets, with
 `configs/profiles/offline_science.yaml`; their `*_legacy_agent` presets keep the deprecated agent.
+BrowseComp's `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` runs this agent in the sandbox that
+`opencode_search` lends, with owner-staged plugins, `compaction.reserved` and `exclude_compaction_summaries`. The
+other BrowseComp OpenCode preset, `browsecomp_opencode.yaml`, keeps the deprecated agent; the BrowseComp README lists
+how the two differ.
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
 quoting is fixed for directories containing spaces.
