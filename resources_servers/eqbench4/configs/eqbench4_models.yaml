@@ -4,6 +4,7 @@
 # Completions endpoint, as EQ-Bench 4 does. Set these top-level keys on the command line (`++judge_api_key=...`) or in
 # env.yaml:
 #   judge_base_url, judge_api_key: the endpoint (NVIDIA's inference API by default) and its key; Gym's shared judge keys.
+#   eqbench4_persona_base_url, eqbench4_persona_api_key: the persona's own endpoint and key, when not the judges'.
 #   eqbench4_persona_model_name, eqbench4_gemini_judge_model_name, eqbench4_gpt_judge_model_name,
 #   eqbench4_claude_judge_model_name, eqbench4_trait_judge_model_name: model IDs, when the endpoint names them otherwise.
 # Chat Completions also avoids provider Responses translations whose reasoning items
@@ -23,8 +24,8 @@ eqbench4_persona_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
-      api_key: ${oc.select:judge_api_key,dummy}
+      base_url: ${oc.select:eqbench4_persona_base_url,${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}}
+      api_key: ${oc.select:eqbench4_persona_api_key,${oc.select:judge_api_key,dummy}}
       model: ${oc.select:eqbench4_persona_model_name,gcp/google/gemini-3.1-pro-preview}
       return_token_id_information: false
       uses_reasoning_parser: true

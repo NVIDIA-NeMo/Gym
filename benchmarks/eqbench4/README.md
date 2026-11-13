@@ -105,6 +105,7 @@ command line (`++judge_api_key=...`) or in `env.yaml`, which keeps a key out of 
 | --- | --- | --- |
 | `judge_api_key` | `dummy` | The endpoint's API key; required for a hosted endpoint |
 | `judge_base_url` | `https://inference-api.nvidia.com/v1` | The endpoint |
+| `eqbench4_persona_base_url`, `eqbench4_persona_api_key` | `judge_base_url`, `judge_api_key` | The persona simulator's own endpoint and key, when it is served apart from the judges |
 | `eqbench4_persona_model_name` | `gcp/google/gemini-3.1-pro-preview` | Persona simulator |
 | `eqbench4_gemini_judge_model_name` | `gcp/google/gemini-3.1-pro-preview` | Pairwise judge |
 | `eqbench4_gpt_judge_model_name` | `openai/openai/gpt-5.5` | Pairwise judge |

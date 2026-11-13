@@ -115,7 +115,9 @@ async def test_a_changed_reward_or_response_no_longer_matches_the_binding(tmp_pa
 async def test_an_order_without_a_verdict_keeps_the_score_but_leaves_the_grading_unknown(tmp_path: Path) -> None:
     # The first reading has no verdict in its only attempt; the comparison rests on its other order.
     transport = JudgeTransport(script=["no verdict here"])
-    result, invocation = await verify_observed(judged_server(tmp_path, transport, judge_max_attempts=1), make_request())
+    result, invocation = await verify_observed(
+        judged_server(tmp_path, transport, judge_max_attempts=1), make_request()
+    )
 
     assert not result.mask_sample and result.evaluation_completed is True
     assert sum(len(comparison.unreadable_orders) for comparison in result.comparisons) == 1
@@ -139,7 +141,9 @@ async def test_a_failed_judge_transport_is_a_failed_grading(tmp_path: Path) -> N
 
 
 async def test_a_lost_conversation_is_an_unmasked_low_score(tmp_path: Path) -> None:
-    result, invocation = await verify_observed(judged_server(tmp_path, JudgeTransport(winner="opponent")), make_request())
+    result, invocation = await verify_observed(
+        judged_server(tmp_path, JudgeTransport(winner="opponent")), make_request()
+    )
 
     assert result.reward == pytest.approx(0.5 - 5 / 15 / 2)
     assert (result.mask_sample, result.evaluation_completed, result.failure_kind) == (False, True, None)
@@ -151,7 +155,10 @@ async def test_a_lost_conversation_is_an_unmasked_low_score(tmp_path: Path) -> N
     ("fields", "failure_kind"),
     [
         ({"conversation_status": "policy_failed", "policy_stop_reason": "context_limit"}, "model_context_limit"),
-        ({"conversation_status": "policy_failed", "policy_stop_reason": "output_budget"}, "eqbench4:policy_output_budget"),
+        (
+            {"conversation_status": "policy_failed", "policy_stop_reason": "output_budget"},
+            "eqbench4:policy_output_budget",
+        ),
         ({"conversation_status": "persona_failed"}, "eqbench4:persona_failed"),
     ],
 )
