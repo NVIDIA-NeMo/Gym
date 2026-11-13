@@ -1855,6 +1855,16 @@ def test_a_graded_row_keeps_the_search_fields_and_echoes_its_request(workdir, se
 # Lifecycle: re-seeds, stops that fail, hang or are cancelled, and sandboxes the relay agent stopped
 # ---------------------------------------------------------------------------
 
+import anyio
+
+
+async def _seed_agent_run(server: SearchResourcesServer) -> AsyncSandbox:
+    """Seed an agent's own /run under the cookie session "run", and return the sandbox it started."""
+    await asyncio.wait_for(
+        server.seed_session(SimpleNamespace(session={SESSION_ID_KEY: "run"}), SearchSeedSessionRequest()), timeout=30
+    )
+    return server._agent_run_sandboxes["run"]
+
 
 @LENDING
 def test_a_reused_agent_run_cookie_stops_the_first_sandbox_before_it_starts_another(
@@ -1915,3 +1925,45 @@ def test_an_episode_seed_cannot_take_over_an_agent_run_session(workdir, started,
 
     assert refused.status_code == 409, refused.text
     assert len(started) == 1 and stopped == [] and server.has_session_state(cookie_session)
+
+
+async def test_an_agent_run_stop_finishes_when_its_release_is_cancelled(workdir, monkeypatch) -> None:
+    """A client that disconnects cancels every later await of its request. The stop of an agent run's sandbox is
+    shielded from that: it finishes, and the server lets the sandbox go."""
+    server = _server(None)
+    sandbox = await _seed_agent_run(server)
+    finished: list[AsyncSandbox] = []
+
+    async def stop(self: AsyncSandbox) -> None:
+        # An await, as a provider's request has: a cancellation delivered here cuts short a stop that is not shielded.
+        await anyio.sleep(0)
+        finished.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server.release_session_state("run")
+
+    assert finished == [sandbox] and server._agent_run_sandboxes == {}
+
+
+async def test_an_agent_run_stop_that_hangs_times_out_and_keeps_its_sandbox(workdir, monkeypatch) -> None:
+    """A provider stop that never returns would hold a re-seed, a verify or the shutdown forever. It gives up after
+    STOP_TIMEOUT_S, the bound LentSandboxes applies, and the server keeps the sandbox for a later stop."""
+    server = _server(None)
+    sandbox = await _seed_agent_run(server)
+    monkeypatch.setattr("resources_servers.opencode_search.app.STOP_TIMEOUT_S", 0.05)
+
+    async def stop(self: AsyncSandbox) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    release = asyncio.create_task(server.release_session_state("run"))
+    done, _ = await asyncio.wait({release}, timeout=5)
+
+    assert done == {release}
+    with pytest.raises(TimeoutError):
+        release.result()
+    assert server._agent_run_sandboxes == {"run": sandbox}
