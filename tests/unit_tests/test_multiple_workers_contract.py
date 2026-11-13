@@ -275,7 +275,6 @@ def test_the_scan_covers_entrypoints_outside_app_py() -> None:
 
     assert {
         "responses_api_agents/langgraph_agent/rewoo_agent.py",
-        "responses_api_agents/langchain_deepagents_agent/reasoning_search_agent.py",
         "resources_servers/aviary/gsm8k_app.py",
         "resources_servers/aviary/notebook_app.py",
         "resources_servers/legal_agent_bench/harbor_bridge.py",
