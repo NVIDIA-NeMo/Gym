@@ -207,7 +207,9 @@ claimed as a reproduction of a newer leaderboard without a matched revision.
 
 The protocol records the judge model and immutable sandbox image identity;
 merging different values is rejected. Native hidden model/thinking/image-model
-environment overrides are disabled. Select sampling in the policy profile and
+environment overrides are disabled. The policy provider explicitly declares
+reasoning and text/image input, so OpenClaw routes vision through the evaluated
+policy rather than an ambient auxiliary image model. Select sampling in the policy profile and
 retain the resolved Gym configuration with results. Required search and task
 `Env` credentials are checked before policy execution. A missing key masks the
 sample, with a namespaced failure reason, rather than producing a scored zero.

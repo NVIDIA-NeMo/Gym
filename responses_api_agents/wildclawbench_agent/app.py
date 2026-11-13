@@ -99,7 +99,7 @@ def worker_environment(config: WildClawConfig, output: Path) -> dict[str, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PATH"] = f"{Path(config.worker_python).parent}:{env['PATH']}"
     env["DOCKER_IMAGE"] = "wildclawbench-ubuntu:v1.3"
-    env.pop("DOCKER_NETWORK_MODE", None)
+    env["DOCKER_NETWORK_MODE"] = ""
     # Empty values also block native python-dotenv from restoring hidden overrides.
     for name in ("WILDCLAW_OPENCLAW_MODEL_PARAMS", "WILDCLAW_OPENCLAW_THINKING", "OPENCLAW_IMAGE_MODEL"):
         env[name] = ""
@@ -142,7 +142,10 @@ class WildClawAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         policy = get_first_server_config_dict(get_global_config_dict(), self.config.model_server.name)
         if "uses_reasoning_parser" in policy:
-            if policy.get("entrypoint") != "wildclawbench.py" or not policy.get("propagate_context_overflow_errors"):
+            if (
+                policy.get("entrypoint") != "wildclawbench.py"
+                or policy.get("propagate_context_overflow_errors") is not True
+            ):
                 raise ValueError("WildClaw vLLM requires wildclawbench.py and propagate_context_overflow_errors=true")
         if self.config.sandbox_runtime == "enroot":
             self._image_identity = "sha256:" + digest(
@@ -248,6 +251,8 @@ class WildClawAgent(SimpleResponsesAPIAgent):
                     thinking=self.config.thinking,
                     judge_model=self.config.judge_model,
                     sandbox_image=self._image_identity,
+                    model_input=["text", "image"],
+                    model_reasoning=True,
                 ),
             )
             config_file = output / "worker.json"

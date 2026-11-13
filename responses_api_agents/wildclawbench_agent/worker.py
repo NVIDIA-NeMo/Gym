@@ -127,7 +127,16 @@ def execute(config: dict) -> dict:
         baseUrl=config["policy_base_url"],
         apiKey="gym-policy",
         api="openai-completions",
-        models=[dict(id=model, name=model, contextWindow=config["context_window"], maxTokens=config["max_tokens"])],
+        models=[
+            dict(
+                id=model,
+                name=model,
+                reasoning=True,
+                input=["text", "image"],
+                contextWindow=config["context_window"],
+                maxTokens=config["max_tokens"],
+            )
+        ],
     )
     timeout = task["timeout_seconds"]
     # Match the native runner's actor instruction prefix without exposing task grading sections.

@@ -487,7 +487,7 @@ def test_worker_environment_blocks_hidden_native_overrides(tmp_path, monkeypatch
         for name in ("WILDCLAW_OPENCLAW_MODEL_PARAMS", "WILDCLAW_OPENCLAW_THINKING", "OPENCLAW_IMAGE_MODEL")
     )
     assert env["JUDGE_MODEL"] == agent.config.judge_model
-    assert "DOCKER_NETWORK_MODE" not in env
+    assert env["DOCKER_NETWORK_MODE"] == ""
 
 
 @pytest.mark.parametrize("changed", ["judge_model", "sandbox_image"])

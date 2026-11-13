@@ -136,6 +136,22 @@ def test_fixed_port_agent_rejects_multiple_workers(tmp_path, workers):
         ),
         ({"entrypoint": "app.py", "uses_reasoning_parser": True, "propagate_context_overflow_errors": True}, False),
         ({"entrypoint": "wildclawbench.py", "uses_reasoning_parser": True}, False),
+        (
+            {
+                "entrypoint": "wildclawbench.py",
+                "uses_reasoning_parser": True,
+                "propagate_context_overflow_errors": False,
+            },
+            False,
+        ),
+        (
+            {
+                "entrypoint": "wildclawbench.py",
+                "uses_reasoning_parser": True,
+                "propagate_context_overflow_errors": "false",
+            },
+            False,
+        ),
         ({"entrypoint": "app.py"}, True),
     ],
 )

@@ -112,7 +112,10 @@ def test_execute_preserves_original_rewards_and_cleans_up(episode, reward):
     assert state["calls"].index("stop") < state["calls"].index("grade")
     assert state["spec"].prompt.endswith(config["input_prompt"])
     assert "SECRET" not in state["spec"].prompt
-    assert state["spec"].models_config["providers"]["gym-policy"]["baseUrl"] == config["policy_base_url"]
+    provider = state["spec"].models_config["providers"]["gym-policy"]
+    assert provider["baseUrl"] == config["policy_base_url"]
+    assert provider["models"][0]["reasoning"] is True
+    assert provider["models"][0]["input"] == ["text", "image"]
 
 
 @pytest.mark.parametrize(
