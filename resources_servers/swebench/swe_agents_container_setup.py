@@ -35,9 +35,10 @@ MAVEN_SETTINGS_PATH = "/root/.m2/settings.xml"
 GRADLE_INIT_PATH = "/root/.gradle/init.d/nemo_gym_mirror.gradle"
 CHROME_WRAPPER_PATH = "/tmp/chrome-wrapper.sh"
 
-LEGACY_CONTAINER_ENV: dict[str, str] = {
-    # preferIPv6Addresses: dual-stack networks misrouted Maven/Gradle over IPv6. Robolectric's
-    # MavenArtifactFetcher bypasses project repositories, so it is pointed at the mirror directly.
+SWE_AGENTS_CONTAINER_ENV: dict[str, str] = {
+    # preferIPv6Addresses is kept for parity with the harness; swe_rebench measured no effect from
+    # it (see JVM_MIRROR_ENV in swe_rebench/app.py). Robolectric's MavenArtifactFetcher bypasses
+    # project repositories, so it is pointed at the mirror directly.
     "_JAVA_OPTIONS": f"-Djava.net.preferIPv6Addresses=false -Drobolectric.dependency.repo.url={MAVEN_MIRROR_URL}",
     # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d.
     "GRADLE_USER_HOME": "/root/.gradle",
@@ -63,17 +64,19 @@ _CHROME_WRAPPER = (
     "exit 1\n"
 )
 
-# Uploaded files arrive without the execute bit. Some images point GRADLE_USER_HOME at another
-# home through gradle.properties or a wrapper script, so the init script is copied there too.
-LEGACY_CONTAINER_SETUP_COMMAND = (
-    f"chmod +x {CHROME_WRAPPER_PATH}; "
+# Uploaded files arrive without the execute bit, and Karma cannot start Chrome without it, so a
+# failed chmod fails the setup. Some images point GRADLE_USER_HOME at another home through
+# gradle.properties or a wrapper script, so the init script is copied there too; those copies
+# are best effort.
+SWE_AGENTS_CONTAINER_SETUP_COMMAND = (
+    f"chmod +x {CHROME_WRAPPER_PATH} || exit 1; "
     "for d in /home/gradle/.gradle/init.d /home/user/.gradle/init.d; do "
     f'mkdir -p "$d" 2>/dev/null && cp {GRADLE_INIT_PATH} "$d/" 2>/dev/null; done; true'
 )
 
 
-def legacy_container_files(*, maven_settings: bool = True) -> dict[str, str]:
-    """Files every legacy container got: the Maven/Gradle mirror and the Chrome wrapper.
+def swe_agents_container_files(*, maven_settings: bool = True) -> dict[str, str]:
+    """Files the Apptainer swe_agents harness gave each container: the Maven/Gradle mirror and the Chrome wrapper.
 
     ``maven_settings=False`` leaves ``~/.m2/settings.xml`` to the provider, for providers that
     mount their own read-only copy.
@@ -88,11 +91,11 @@ def legacy_container_files(*, maven_settings: bool = True) -> dict[str, str]:
     return files
 
 
-async def apply_legacy_container_setup(sandbox: AsyncSandbox) -> None:
-    """Finish the setup ``legacy_container_files`` started; pass to ``AsyncSandbox.start_with_setup``."""
-    result = await sandbox.exec(LEGACY_CONTAINER_SETUP_COMMAND, timeout_s=120)
+async def apply_swe_agents_container_setup(sandbox: AsyncSandbox) -> None:
+    """Finish the setup ``swe_agents_container_files`` started; pass to ``AsyncSandbox.start_with_setup``."""
+    result = await sandbox.exec(SWE_AGENTS_CONTAINER_SETUP_COMMAND, timeout_s=120)
     if result.return_code != 0 or result.error_type:
         raise RuntimeError(
-            f"legacy container setup failed: return_code={result.return_code} "
+            f"swe_agents container setup failed: return_code={result.return_code} "
             f"error_type={result.error_type} stderr={(result.stderr or '')[-500:]!r}"
         )

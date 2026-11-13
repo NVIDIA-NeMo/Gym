@@ -598,7 +598,7 @@ class _RecordingAsyncSandbox:
         self.setup = setup
 
 
-class TestLegacyContainerSetup:
+class TestSweAgentsContainerSetup:
     """sandbox_config.legacy_container_setup gives the agent's and the evaluator's sandbox the
     toolchain setup the Apptainer swe_agents harness applied to both of its containers."""
 
@@ -628,7 +628,7 @@ class TestLegacyContainerSetup:
         return await app.SWERebenchResourcesServer._create_sandbox(server, body, files=files)
 
     async def test_off_by_default(self, monkeypatch) -> None:
-        from resources_servers.swebench.legacy_container_setup import CHROME_WRAPPER_PATH
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
 
         sandbox = await self._create(monkeypatch, {})
         assert "CHROME_BIN" not in sandbox.spec.env and "_JAVA_OPTIONS" not in sandbox.spec.env
@@ -636,19 +636,19 @@ class TestLegacyContainerSetup:
         assert sandbox.setup is None
 
     async def test_agent_sandbox_gets_the_env_files_and_setup(self, monkeypatch) -> None:
-        from resources_servers.swebench.legacy_container_setup import (
-            LEGACY_CONTAINER_ENV,
-            apply_legacy_container_setup,
-            legacy_container_files,
+        from resources_servers.swebench.swe_agents_container_setup import (
+            SWE_AGENTS_CONTAINER_ENV,
+            apply_swe_agents_container_setup,
+            swe_agents_container_files,
         )
 
         sandbox = await self._create(monkeypatch, {"legacy_container_setup": True})
-        assert LEGACY_CONTAINER_ENV.items() <= sandbox.spec.env.items()
-        assert sandbox.spec.files == legacy_container_files()
-        assert sandbox.setup is apply_legacy_container_setup
+        assert SWE_AGENTS_CONTAINER_ENV.items() <= sandbox.spec.env.items()
+        assert sandbox.spec.files == swe_agents_container_files()
+        assert sandbox.setup is apply_swe_agents_container_setup
 
     async def test_eval_sandbox_keeps_its_verification_files(self, monkeypatch) -> None:
-        from resources_servers.swebench.legacy_container_setup import CHROME_WRAPPER_PATH
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
 
         files = verification_files(_inputs())
         sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, files=files)
@@ -660,9 +660,9 @@ class TestLegacyContainerSetup:
         assert sandbox.spec.env["CHROME_BIN"] == "/custom"
 
     async def test_maven_settings_stay_with_the_provider_when_not_overwritten(self, monkeypatch) -> None:
-        """overwrite_maven_settings: false must hold for the agent sandbox too, or the legacy files
+        """overwrite_maven_settings: false must hold for the agent sandbox too, or the swe_agents files
         would write the settings.xml the provider mounts read-only."""
-        from resources_servers.swebench.legacy_container_setup import GRADLE_INIT_PATH, MAVEN_SETTINGS_PATH
+        from resources_servers.swebench.swe_agents_container_setup import GRADLE_INIT_PATH, MAVEN_SETTINGS_PATH
 
         sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, overwrite_maven_settings=False)
         assert MAVEN_SETTINGS_PATH not in sandbox.spec.files
@@ -672,7 +672,6 @@ class TestLegacyContainerSetup:
         """Both ship the same files to the same paths; a second Gradle init script under another
         name would add the mirror repository twice."""
         from resources_servers.swe_rebench.verification import _mirror_files
-        from resources_servers.swebench.legacy_container_setup import legacy_container_files
+        from resources_servers.swebench.swe_agents_container_setup import swe_agents_container_files
 
-        legacy = legacy_container_files()
-        assert _mirror_files().items() <= legacy.items()
+        assert _mirror_files().items() <= swe_agents_container_files().items()
