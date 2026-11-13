@@ -638,6 +638,8 @@ async def test_reconnect_reuses_owner_tunnel_and_disconnect_keeps_task_alive(
         pytest.param({"exec_port": 65536}, "Invalid ECS exec-server port", id="out-of-range-port"),
         pytest.param({"sandbox_id": ""}, "Missing ECS task identity", id="empty-task"),
         pytest.param({"sandbox_id": 123}, "Missing ECS task identity", id="non-string-task"),
+        pytest.param({"exec_identity": None}, "exec-server identity", id="missing-identity"),
+        pytest.param({"exec_identity": "invalid"}, "exec-server identity", id="malformed-identity"),
     ],
 )
 async def test_reconnect_rejects_invalid_descriptor_before_attaching(

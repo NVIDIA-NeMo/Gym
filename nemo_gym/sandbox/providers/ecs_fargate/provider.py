@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import os
 import socket
+import string
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -145,6 +146,7 @@ class EcsFargateProvider:
             "hostname": socket.gethostname(),
             "uid": os.getuid(),
             "exec_port": port,
+            "exec_identity": sandbox.exec_identity,
             "cluster": self._cfg.cluster,
             "region": self._cfg.region,
             "image": sandbox.spec.image,
@@ -166,11 +168,15 @@ class EcsFargateProvider:
         task_arn = descriptor.get("sandbox_id")
         if not isinstance(task_arn, str) or not task_arn:
             raise ValueError("Missing ECS task identity")
+        identity = descriptor.get("exec_identity")
+        if not isinstance(identity, str) or len(identity) != 32 or any(c not in string.hexdigits for c in identity):
+            raise ValueError("Missing or invalid ECS exec-server identity; request a fresh owner descriptor")
         sandbox = await engine.EcsFargateSandbox.attach_exec_server(
             engine.SandboxSpec(image=descriptor["image"], workdir=descriptor.get("workdir")),
             ecs_config=self._cfg,
             task_arn=task_arn,
             port=port,
+            sandbox_identity=identity,
         )
         self._borrowed.append(sandbox)
         return SandboxHandle(sandbox_id=task_arn, provider_name=self.name, raw=sandbox)

@@ -838,12 +838,16 @@ from urllib.parse import parse_qs, urlparse
 _BASH = shutil.which("bash")
 _PORT = int(os.environ.get("TB_EXEC_PORT", "19542"))
 _BIND = os.environ.get("TB_EXEC_BIND", "127.0.0.1")
+_IDENTITY = os.environ.pop("NEMO_GYM_EXEC_IDENTITY", "")
 class _H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a): pass
     def do_GET(self):
         p = urlparse(self.path)
-        if p.path == "/health": self._ok({"ok": True})
-        elif p.path == "/download":
+        path = self._route(p.path)
+        if path is None: return
+        if path == "/health":
+            self._ok({"ok": True, "sandbox_identity": _IDENTITY} if _IDENTITY else {"ok": True})
+        elif path == "/download":
             qs = parse_qs(p.query)
             paths = qs.get("path", [])
             if not paths: self._err(400, "missing ?path=")
@@ -851,10 +855,25 @@ class _H(BaseHTTPRequestHandler):
         else: self._err(404, f"not found: {p.path}")
     def do_POST(self):
         p = urlparse(self.path)
+        path = self._route(p.path)
+        if path is None: return
         body = self._body()
-        if p.path == "/exec": self._exec(body)
-        elif p.path == "/upload": self._up(body)
+        if path == "/exec": self._exec(body)
+        elif path == "/upload": self._up(body)
         else: self._err(404, f"not found: {p.path}")
+    def _route(self, path):
+        if path.startswith("/sandbox/"):
+            identity, _, route = path[len("/sandbox/"):].partition("/")
+            if not _IDENTITY or identity != _IDENTITY:
+                self._err(409, "sandbox identity mismatch")
+                return None
+            return "/" + route
+        # Keep the unqualified health endpoint for SSH readiness checks. Old
+        # standalone servers without an identity keep their existing API.
+        if _IDENTITY and path != "/health":
+            self._err(409, "sandbox identity required")
+            return None
+        return path
     def _exec(self, b):
         cmd = b.get("cmd")
         if not cmd: self._err(400, "missing 'cmd'"); return
@@ -932,8 +951,13 @@ class ExecClient:
     threads, scaling past asyncio's default thread-pool cap.
     """
 
-    def __init__(self, *, port: int, connect_timeout: float = 30.0) -> None:
+    def __init__(self, *, port: int, connect_timeout: float = 30.0, sandbox_identity: str | None = None) -> None:
+        self._sandbox_identity = sandbox_identity
         self._base = f"http://127.0.0.1:{port}"
+        if sandbox_identity is not None:
+            # Older exec servers return 404 for this path, rather than executing
+            # an unqualified request after their port replaces a dead forward.
+            self._base += f"/sandbox/{sandbox_identity}"
         self._timeout = connect_timeout
         # Lazy: aiohttp.ClientSession needs a running loop, but ExecClient is built inside a
         # to_thread; create it on the first request.
@@ -988,6 +1012,17 @@ class ExecClient:
         return await self._request(
             label=f"download {remote_path}", url=url, method="GET", timeout=self._timeout, max_retries=max_retries
         )
+
+    async def verify_identity(self) -> None:
+        """Refuse a stale forward or a server that cannot identify its sandbox."""
+        raw = await self._request(label="identity", url=f"{self._base}/health", method="GET", timeout=5, max_retries=1)
+        response = json.loads(raw)
+        if (
+            not self._sandbox_identity
+            or not isinstance(response, dict)
+            or response.get("sandbox_identity") != self._sandbox_identity
+        ):
+            raise RuntimeError("ECS exec-server sandbox identity mismatch; request a fresh owner descriptor")
 
     async def health(self) -> bool:
         try:
@@ -1478,7 +1513,7 @@ _task_def_inflight: dict[str, threading.Event] = {}
 # Env keys whose values vary per invocation. Routed via RunTask containerOverrides (not baked into
 # the task def) so the task-def hash cache stays stable across invocations. OutsideEndpoint routing
 # keys are merged in dynamically at call time; this set holds the rest.
-_PER_INVOCATION_ENV_KEYS: frozenset[str] = frozenset({"_NEL_EFS_SESSION"})
+_PER_INVOCATION_ENV_KEYS: frozenset[str] = frozenset({"_NEL_EFS_SESSION", "NEMO_GYM_EXEC_IDENTITY"})
 
 
 def _compute_task_def_hash(payload: dict[str, Any]) -> str:
@@ -1509,6 +1544,7 @@ class EcsFargateSandbox:
     def __init__(self, spec: SandboxSpec, *, ecs_config: EcsFargateConfig) -> None:
         self._spec = spec
         self._cfg = ecs_config
+        self._exec_identity = uuid.uuid4().hex
         self._task_arn: str | None = None
         self._task_def_arn: str | None = None
         self._task_ip: str | None = None
@@ -1550,6 +1586,11 @@ class EcsFargateSandbox:
     @property
     def task_arn(self) -> str | None:
         return self._task_arn
+
+    @property
+    def exec_identity(self) -> str:
+        """Per-sandbox identity used to detect stale local port forwards, not an AWS credential."""
+        return self._exec_identity
 
     @property
     def local_port(self) -> int | None:
@@ -1599,12 +1640,19 @@ class EcsFargateSandbox:
         ecs_config: EcsFargateConfig,
         task_arn: str,
         port: int,
+        sandbox_identity: str,
     ) -> EcsFargateSandbox:
         """Borrow the owner's same-host SSH forward; do not launch a task or another tunnel."""
         sandbox = cls(spec, ecs_config=ecs_config)
         await asyncio.to_thread(sandbox._init_aws_clients)
         sandbox._task_arn = task_arn
-        sandbox._exec_client = ExecClient(port=port)
+        sandbox._exec_identity = sandbox_identity
+        sandbox._exec_client = ExecClient(port=port, sandbox_identity=sandbox_identity)
+        try:
+            await sandbox._exec_client.verify_identity()
+        except BaseException:
+            await sandbox._exec_client.close()
+            raise
         sandbox._started = True
         return sandbox
 
@@ -1671,7 +1719,9 @@ class EcsFargateSandbox:
                             timeout=60.0,
                         )
                         old_client = self._exec_client
-                        self._exec_client = ExecClient(port=self._ssh_tunnel.local_port)  # type: ignore[union-attr]
+                        self._exec_client = ExecClient(
+                            port=self._ssh_tunnel.local_port, sandbox_identity=self._exec_identity
+                        )  # type: ignore[union-attr]
                         if old_client is not None:
                             await old_client.close()
                         return await self._exec_client.exec(shell_cmd, timeout=int(timeout_sec))
@@ -1795,7 +1845,7 @@ class EcsFargateSandbox:
         if has_exec_server:
             health_url = f"http://127.0.0.1:{self._ssh_tunnel.local_port}/health"  # type: ignore[union-attr]
             self._ssh_tunnel.wait_ready(health_url=health_url, timeout=sidecar.ssh_ready_timeout_sec)  # type: ignore[union-attr]
-            self._exec_client = ExecClient(port=self._ssh_tunnel.local_port)  # type: ignore[union-attr]
+            self._exec_client = ExecClient(port=self._ssh_tunnel.local_port, sandbox_identity=self._exec_identity)  # type: ignore[union-attr]
 
     # ── Internal helpers ─────────────────────────────────────────────
 
@@ -1898,6 +1948,9 @@ class EcsFargateSandbox:
             for k, v in cfg.extra_env.items():
                 env[k] = self._render_env_value(v)
         env.update(self._outside_endpoint_routing.env_overrides())
+        if cfg.ssh_sidecar is not None and cfg.ssh_sidecar.exec_server_port is not None:
+            # A task override keeps this per-sandbox value out of cached task definitions.
+            env["NEMO_GYM_EXEC_IDENTITY"] = self._exec_identity
         return env
 
     def _split_env(self, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:

@@ -2328,7 +2328,7 @@ async def test_borrower_disconnect_deletes_only_its_s3_uploads(tmp_path: Path, e
         patch(f"{_ENG}.ExecClient", return_value=borrower_client),
     ):
         borrower = await engine.EcsFargateSandbox.attach_exec_server(
-            owner.spec, ecs_config=owner._cfg, task_arn="task-arn", port=19000
+            owner.spec, ecs_config=owner._cfg, task_arn="task-arn", port=19000, sandbox_identity=owner.exec_identity
         )
         await owner.upload(payload, "/workspace/owner.bin")
         owner_key = s3.put_object.call_args.kwargs["Key"]
