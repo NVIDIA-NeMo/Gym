@@ -6,7 +6,7 @@
 Workflows import this module with bare `python3` before Gym is installed, so it must not import `nemo_gym` or
 third-party packages.
 
-`download_artifacts`, `artifact_download_urls` and `post_check_run` run the `gh` CLI, which reads `GH_TOKEN`. The
+`download_artifacts` and `post_check_run` run the `gh` CLI, which reads `GH_TOKEN`. The
 token needs `actions: read` to download and list artifacts, and `checks: write` to publish a check run.
 """
 
@@ -84,18 +84,89 @@ def write_ci_result(output: Path, *, subject: str, status: str, subject_key: str
     (output / CI_RESULT).write_text(json.dumps({subject_key: subject, "sha": tested_sha(), "status": status}) + "\n")
 
 
+def _list_items(endpoint: str, key: str) -> list[dict]:
+    listing = subprocess.check_output(["gh", "api", "--paginate", endpoint, "--jq", f".{key}[] | @json"], text=True)
+    return [json.loads(line) for line in listing.splitlines()]
+
+
+def _job_artifact(
+    subject: str,
+    job_name: str,
+    jobs: list[dict],
+    files: list[dict],
+    *,
+    artifact_prefix: str,
+    run_id: str,
+    attempt: str,
+) -> dict | None:
+    jobs = [job for job in jobs if job["name"].rsplit(" / ", 1)[-1] == job_name]
+    if len(jobs) != 1 or jobs[0]["status"] != "completed":
+        return None
+    job = jobs[0]
+    if not job.get("started_at") or not job.get("completed_at"):
+        return None
+    prefix = f"{artifact_prefix}-{subject}-{run_id}-"
+    candidates = []
+    for artifact in files:
+        suffix = artifact["name"].removeprefix(prefix)
+        if (
+            artifact["name"].startswith(prefix)
+            and suffix.isdecimal()
+            and 1 <= int(suffix) <= int(attempt)
+            and not artifact["expired"]
+            # GitHub retains successful jobs on partial reruns, copying their
+            # original times but assigning the new run_attempt. Match the actual
+            # execution so a missing upload cannot reuse a previous run's result.
+            and job["started_at"] <= artifact["created_at"] <= job["completed_at"]
+        ):
+            candidates.append(artifact)
+    return max(candidates, key=lambda artifact: int(artifact["name"].removeprefix(prefix)), default=None)
+
+
 def download_artifacts(
     subjects: list[str],
     *,
     artifact_prefix: str,
+    job_names: dict[str, str],
     repo: str,
     run_id: str,
     attempt: str,
     output: Path,
     result_file: str,
-) -> None:
-    """Download one attempt only; failed/partial downloads invalidate that subject's `result_file`."""
+) -> dict[str, int]:
+    """Download each selected job's evidence and return its artifact ID for links.
+
+    `job_names` maps each artifact subject to its job name without reusable-workflow prefixes.
+    Match the selected job's execution window, including retained jobs from earlier attempts.
+    """
+    if not subjects:
+        return {}
+    endpoint = f"repos/{repo}/actions/runs/{run_id}"
+    try:
+        jobs = _list_items(f"{endpoint}/attempts/{attempt}/jobs?per_page=100", "jobs")
+        files = _list_items(f"{endpoint}/artifacts?per_page=100", "artifacts")
+    except (subprocess.CalledProcessError, ValueError):
+        print("::warning::Could not list check jobs and artifacts; measurements are unavailable.")
+        jobs, files = [], []
+    downloaded = {}
     for subject in subjects:
+        result = output / subject / result_file
+        result.unlink(missing_ok=True)
+        try:
+            artifact = _job_artifact(
+                subject,
+                job_names[subject],
+                jobs,
+                files,
+                artifact_prefix=artifact_prefix,
+                run_id=run_id,
+                attempt=attempt,
+            )
+        except (KeyError, TypeError, ValueError):
+            artifact = None
+        if artifact is None:
+            print(f"::warning::No evidence matches the selected {subject} job; its measurement is unavailable.")
+            continue
         try:
             subprocess.run(
                 [
@@ -106,7 +177,7 @@ def download_artifacts(
                     "--repo",
                     repo,
                     "--name",
-                    f"{artifact_prefix}-{subject}-{run_id}-{attempt}",
+                    artifact["name"],
                     "--dir",
                     str(output / subject),
                 ],
@@ -114,8 +185,11 @@ def download_artifacts(
             )
         except subprocess.CalledProcessError:
             # Do not let partially extracted or older files qualify this attempt.
-            (output / subject / result_file).unlink(missing_ok=True)
+            result.unlink(missing_ok=True)
             print(f"::warning::Could not download {subject} evidence; its measurement is unavailable.")
+        else:
+            downloaded[subject] = artifact["id"]
+    return downloaded
 
 
 class CheckOutput(TypedDict):
@@ -140,31 +214,12 @@ def markdown_table(columns: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-def artifact_download_urls(
-    subjects: list[str], *, artifact_prefix: str, repo: str, run_id: str, attempt: str, server_url: str
-) -> dict[str, str]:
-    """Map each subject to the download page of its unexpired artifact in this run attempt."""
-    urls = {}
-    try:
-        listing = subprocess.check_output(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                f"repos/{repo}/actions/runs/{run_id}/artifacts",
-                "--jq",
-                ".artifacts[] | select(.expired == false) | [.name, .id] | @tsv",
-            ],
-            text=True,
-        )
-        by_name = dict(line.split("\t") for line in listing.splitlines())
-        for subject in subjects:
-            artifact_id = by_name.get(f"{artifact_prefix}-{subject}-{run_id}-{attempt}")
-            if artifact_id:
-                urls[subject] = f"{server_url}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}"
-    except (subprocess.CalledProcessError, ValueError):
-        print("::warning::Could not link individual artifacts; use the workflow artifacts page.")
-    return urls
+def artifact_download_urls(artifact_ids: dict[str, int], *, repo: str, run_id: str, server_url: str) -> dict[str, str]:
+    """Link exactly the uploads selected by `download_artifacts`, including retained jobs."""
+    return {
+        subject: f"{server_url}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}"
+        for subject, artifact_id in artifact_ids.items()
+    }
 
 
 def post_check_run(payload: CheckRun, *, repo: str) -> None:

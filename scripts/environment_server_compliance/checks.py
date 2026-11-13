@@ -102,18 +102,17 @@ def main() -> int:
     except (ValueError, TypeError, KeyError):
         components = None
     names = [subject(component) for component in components or []]
-    download_artifacts(
+    artifact_ids = download_artifacts(
         names,
         artifact_prefix=ARTIFACT_PREFIX,
+        job_names={subject(component): f"{component} compliance" for component in components or []},
         repo=repo,
         run_id=run_id,
         attempt=attempt,
         output=artifacts,
         result_file=RESULT_FILE,
     )
-    artifact_urls = artifact_download_urls(
-        names, artifact_prefix=ARTIFACT_PREFIX, repo=repo, run_id=run_id, attempt=attempt, server_url=server_url
-    )
+    artifact_urls = artifact_download_urls(artifact_ids, repo=repo, run_id=run_id, server_url=server_url)
     payload = compliance_check(components, artifacts=artifacts, sha=tested_sha(), artifact_urls=artifact_urls)
     payload["head_sha"] = os.environ["GITHUB_SHA"]
     run_url = f"{server_url}/{repo}/actions/runs/{run_id}/attempts/{attempt}"

@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.check_suites.github_actions import download_artifacts
 from scripts.harness_conformance import checks
 from scripts.harness_conformance.ci import report
 from scripts.harness_conformance.feedback import failure_details
@@ -94,7 +93,7 @@ def test_missing_invalid_or_stale_evidence_never_passes(tmp_path, evidence):
     "probe_exit_code,probe_job_result",
     [(0, "success"), (1, "success"), (2, "failure"), (0, "failure"), (0, "cancelled"), (0, "skipped")],
 )
-def test_publisher_downloads_current_attempt_and_posts_check(
+def test_publisher_downloads_retained_job_evidence_and_posts_check(
     tmp_path, monkeypatch, download_failure, listing_failure, probe_exit_code, probe_job_result, tested_sha
 ):
     if tested_sha is None:
@@ -119,7 +118,7 @@ def test_publisher_downloads_current_attempt_and_posts_check(
 
     def run(args, **kwargs):
         if args[:3] == ["gh", "run", "download"]:
-            assert args[3:9] == ["123", "--repo", "example/Gym", "--name", "harness-conformance-pi-123-2", "--dir"]
+            assert args[3:9] == ["123", "--repo", "example/Gym", "--name", "harness-conformance-pi-123-1", "--dir"]
             write_probe_result(Path(args[9]).parent, "pi", probe_exit_code)
             if download_failure:
                 raise subprocess.CalledProcessError(1, args)
@@ -132,10 +131,27 @@ def test_publisher_downloads_current_attempt_and_posts_check(
     def artifact_listing(*args, **kwargs):
         if listing_failure:
             raise subprocess.CalledProcessError(1, args[0])
-        return "harness-conformance-pi-123-2\t456\n"
+        if "/attempts/2/jobs?per_page=100" in args[0][3]:
+            return json.dumps(
+                {
+                    "name": "Harness conformance (non-blocking) / pi conformance probes",
+                    "run_attempt": 2,
+                    "status": "completed",
+                    "started_at": "2026-11-06T15:00:00Z",
+                    "completed_at": "2026-11-06T15:10:00Z",
+                }
+            )
+        return json.dumps(
+            {
+                "name": "harness-conformance-pi-123-1",
+                "id": 456,
+                "expired": False,
+                "created_at": "2026-11-06T15:05:00Z",
+            }
+        )
 
     monkeypatch.setattr(subprocess, "check_output", artifact_listing)
-    failed_conformance = download_failure or probe_exit_code != 0
+    failed_conformance = listing_failure or download_failure or probe_exit_code != 0
     assert checks.main() == int(failed_conformance or probe_job_result not in ("success", "skipped"))
     assert len(posted) == 1
     assert posted[0]["head_sha"] == "tested-sha"
@@ -144,7 +160,7 @@ def test_publisher_downloads_current_attempt_and_posts_check(
     assert posted[0]["conclusion"] == ("failure" if failed_conformance else "success")
     assert posted[0]["details_url"] == "https://github.com/example/Gym/actions/runs/123/attempts/2"
     assert posted[0]["external_id"] == "harness-conformance-p0-123-2"
-    if not listing_failure:
+    if not listing_failure and not download_failure:
         assert "https://github.com/example/Gym/actions/runs/123/artifacts/456" in posted[0]["output"]["summary"]
     assert "Harness conformance (non-blocking)" in (tmp_path / "summary.md").read_text()
 
@@ -257,31 +273,6 @@ def test_head_stamped_evidence_is_unavailable_when_merge_was_tested(tmp_path, mo
     assert check["conclusion"] == "failure"
     assert check["output"]["title"] == "0 passed, 0 failed, 1 unavailable"
     assert "Tested commit: `merge-sha`" in check["output"]["summary"]
-
-
-def test_failed_download_invalidates_partial_result_and_continues(tmp_path, monkeypatch):
-    calls = []
-
-    def download(command, **kwargs):
-        calls.append(command)
-        if "harness-conformance-pi-12-2" in command:
-            partial = tmp_path / "pi" / "probes" / "ci-result.json"
-            partial.parent.mkdir(parents=True)
-            partial.write_text('"partial result"')
-            raise subprocess.CalledProcessError(1, command)
-
-    monkeypatch.setattr(subprocess, "run", download)
-    download_artifacts(
-        ["pi", "hermes"],
-        artifact_prefix="harness-conformance",
-        repo="NVIDIA-NeMo/Gym",
-        run_id="12",
-        attempt="2",
-        output=tmp_path,
-        result_file="probes/ci-result.json",
-    )
-    assert len(calls) == 2 and "harness-conformance-hermes-12-2" in calls[1]
-    assert not (tmp_path / "pi" / "probes" / "ci-result.json").exists()
 
 
 def test_p0_reporter_imports_without_gym_or_site_packages():
