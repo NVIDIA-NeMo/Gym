@@ -4,11 +4,12 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -59,6 +60,7 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
+    CleanupHandle,
     DirectHTTPToolAccess,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
@@ -73,6 +75,7 @@ from nemo_gym.server_runtime import (
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
+    seed_rebinds_tool_accesses,
     seed_restarts,
     seed_verify_step_type,
 )
@@ -85,6 +88,9 @@ from nemo_gym.trajectory import (
     VerifierInvocation,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ToolSession(BaseModel):
@@ -106,6 +112,9 @@ class SessionHandles(BaseModel):
     observation: str | None = None
     # Keyed by tool server name.
     tool_sessions: dict[str, ToolSession] = Field(default_factory=dict)
+    # Whether the agent borrows a sandbox the resources server lent in its seed reply.
+    # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
+    borrowed_sandbox: bool = False
 
     @classmethod
     def new(cls, tool_servers: Sequence[str] = ()) -> "SessionHandles":
@@ -130,6 +139,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Resources server's. Unset, the bound agent's own `tool_servers`, so an agent moved off the legacy_agent relay
     # keeps the tool servers its /run seeded.
     tool_servers: list[ResourcesServerRef] | None = None
+    forward_agent_evidence: bool = False
     # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
@@ -269,11 +279,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             await self.checkpoint_boundary(request, {"next": "seed", "handles": handles.model_dump()})
             # Seeds are idempotent for a caller-assigned session ID, so a checkpoint need not wait for them.
             async with self.checkpoint_step(request, "replay"):
-                seed = await self._seed_resources(request, handles)
-                tool_accesses = await self._seed_tool_servers(request, handles)
-                agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
-                await self._seed_agent(request, handles, seed, tool_accesses)
+                agent_cleanup = await self.seed_episode_sessions(
+                    request,
+                    handles,
+                    register_agent_cleanup=lambda: cleanup.register_cleanup("agent session", close_agent),
+                )
             stage = "invoke_agent"
+        elif continuation and stage in ("invoke_agent", "close_agent"):
+            # Restored before the agent's work ended: the sandbox the agent borrowed was rebuilt under a new id.
+            # Re-seeding is idempotent, so a checkpoint need not wait for it, and a crash during it re-seeds again.
+            async with self.checkpoint_step(request, "replay"):
+                await self.reseed_after_restore(request, handles)
 
         if stage == "invoke_agent":
             await self.checkpoint_boundary(request, {"next": "invoke_agent", "handles": handles.model_dump()})
@@ -425,6 +441,42 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ),
         )
 
+    async def seed_episode_sessions(
+        self,
+        request: SingleAgentTurnRequest,
+        handles: "SessionHandles",
+        *,
+        register_agent_cleanup: Callable[[], CleanupHandle] | None = None,
+    ) -> CleanupHandle | None:
+        """Seed the episode's resources and tool server sessions, then its agent session with what they lent.
+
+        ``register_agent_cleanup`` runs before the agent seed, so a lost agent seed reply is still closed;
+        its result is returned.
+        An episode whose agent holds resources MCP grants restarts after a crash
+        unless the agent borrows a sandbox the resources seed lent and re-binds them;
+        one that grants a tool server's MCP tools always does.
+        """
+        seed = await self._seed_resources(request, handles)
+        tool_accesses = await self._seed_tool_servers(request, handles)
+        registered = register_agent_cleanup() if register_agent_cleanup is not None else None
+        await self._seed_agent(request, handles, seed, tool_accesses)
+        return registered
+
+    async def reseed_after_restore(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> None:
+        """Seed both sessions again for a replacement attempt that continues a checkpoint before the agent closed.
+
+        The resources server returns the sandbox its restore forked, without setting the task up again;
+        the agent re-binds its restored session to that sandbox and to this attempt's tool grants.
+        Without a borrowed sandbox nothing changed hands, and nothing is seeded.
+        """
+        if not handles.borrowed_sandbox:
+            return
+        LOGGER.info(
+            "Re-seeding the sessions of %s after a restore: the agent's sandbox was rebuilt",
+            request.episode_id.capture_key,
+        )
+        await self.seed_episode_sessions(request, handles)
+
     async def _seed_resources(
         self, request: SingleAgentTurnRequest, handles: "SessionHandles"
     ) -> ResourcesSeedSessionResponse:
@@ -450,6 +502,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             seed = ResourcesSeedSessionResponse.model_validate(await get_response_json(seed_http_response))
             if seed.resources_session_id != handles.resources_session_id:
                 raise ValueError("Resources seed returned a different resources_session_id")
+            handles.borrowed_sandbox = seed.sandbox_access is not None
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -542,10 +595,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
         if "mcp" in self.config.resources_tool_transports:
             tool_accesses.append(self._mcp_tool_access(self.config.resources_server.name, seed))
-            # The MCP session token names this attempt, and the Resources Server refuses it once a restore replaces it.
-            # An agent continued from a checkpoint would keep that token and see every tool call fail.
-            # So the episode restarts from its input after a crash, and its new seed mints a token for the new attempt.
-            await self.checkpoint_restart(request)
+            if seed.sandbox_access is None:
+                # The MCP session token names this attempt, and only a restore's re-seed hands the agent the token
+                # of the attempt that replaces it. A restore re-seeds only an episode whose agent borrows a sandbox,
+                # so without one the agent would keep a token the Resources Server refuses, whatever it declares:
+                # the episode restarts from its input after a crash.
+                # Marked before the agent seed, so no checkpoint exports the agent session it creates.
+                await self.checkpoint_restart(request)
         tool_accesses.extend(tool_server_accesses)
 
         try:
@@ -558,6 +614,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
                     sandbox_access=seed.sandbox_access,
+                    agent_context=request.task.task_input.agent_seed_context,
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(agent_create_http_response)
@@ -567,7 +624,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if agent_session.agent_session_id != handles.agent_session_id:
                 raise ValueError("Agent seed returned a different agent_session_id")
             handles.agent_cookies = _cookies(agent_create_http_response)
-            if seed_restarts(agent_create_http_response.headers):
+            # The agent cannot capture its session, or holds an MCP session token it cannot exchange for the one a
+            # restore's re-seed carries: the Resources Server refuses the token once a restore replaces this attempt,
+            # so the episode restarts from its input after a crash.
+            # Such an agent reports the restart on its own seed reply, so no checkpoint exports its session;
+            # the MCP check covers an agent whose own check misses that case.
+            if seed_restarts(agent_create_http_response.headers) or (
+                "mcp" in self.config.resources_tool_transports
+                and not seed_rebinds_tool_accesses(agent_create_http_response.headers)
+            ):
                 await self.checkpoint_restart(request)
         except Exception as error:
             raise dependency_failure(
@@ -672,7 +737,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
+                json=self._verify_body(request, agent_response)
+                | verification_failure_fields(agent_response)
+                | (
+                    {"ng_trajectory": trajectory.model_dump(mode="json")}
+                    if self.config.forward_agent_evidence and trajectory is not None
+                    else {}
+                )
+                | (
+                    {"ng_agent_observations": observations.model_dump(mode="json")}
+                    if self.config.forward_agent_evidence and observations is not None
+                    else {}
+                ),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
@@ -740,7 +816,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     @staticmethod
     def _model_request_not_sent(response: NeMoGymResponse) -> bool:
-        """A selected connector failure is safe only if every attempt of that operation never connected."""
+        """A selected connector failure is safe only if every attempt of that operation never connected.
+
+        A connection that was refused and one that timed out connecting were both never made.
+        """
         report = FailureReport.model_validate(response.model_extra["failure_report"])
         selected = report.events[report.failure_id]
         if (
@@ -758,12 +837,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if any(not event.operation_id or not event.attempt_id for event in observed):
             return False
         attempts = [event for event in observed if event.operation_id == selected.operation_id]
-        connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+        unconnected_types = {
+            f"{error_type.__module__}.{error_type.__qualname__}"
+            for error_type in (ClientConnectorError, ConnectionTimeoutError)
+        }
         return len({event.attempt_id for event in attempts}) == len(attempts) and all(
             isinstance(event.details, ModelFailureDetails)
             and event.details.request_upload_complete is False
             and event.foreign_error is not None
-            and event.foreign_error.exception_type == connector_type
+            and event.foreign_error.exception_type in unconnected_types
             for event in attempts
         )
 
@@ -811,8 +893,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             self.server_client.global_config_dict,
             self.config.agent_server.name,
         )
-        token_capture = bool(block.get("enabled", False)) and (
-            bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        token_capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled", False))
+            and (bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         # The agent is the one the training framework trains, so its model calls carry the episode's values.
