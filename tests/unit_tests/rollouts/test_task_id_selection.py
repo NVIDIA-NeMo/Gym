@@ -152,6 +152,33 @@ def test_a_resume_after_a_crash_before_the_record_write_records_the_selection(tm
     assert record_path(tmp_path).read_bytes() == written
 
 
+def test_an_unsafe_resume_with_another_selection_does_not_record_it(tmp_path: Path) -> None:
+    start(tmp_path, run_config(tmp_path, task_ids=["a"]))
+    record_path(tmp_path).unlink()
+
+    config = run_config(tmp_path, resume=True, allow_unsafe_resume=True, task_ids=["b"])
+
+    def prepare_inputs(selection):
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config, selection)
+        return rows, RunManifest.create(Path(config.input_jsonl_fpath), rows, config.model_dump(), SERVERS)
+
+    with _start_or_resume_store(Path(config.output_jsonl_fpath), config, prepare_inputs) as store:
+        assert store.manifest.identity_overridden
+        assert {row["task_id"] for row in store.pending()} == {"a"}
+
+    assert not record_path(tmp_path).exists()
+
+
+def test_a_matching_unsafe_resume_rebuilds_the_deleted_record(tmp_path: Path) -> None:
+    start(tmp_path, run_config(tmp_path, task_ids=["a"]))
+    written = record_path(tmp_path).read_bytes()
+    record_path(tmp_path).unlink()
+
+    start(tmp_path, run_config(tmp_path, resume=True, allow_unsafe_resume=True, task_ids=["a"]))
+
+    assert record_path(tmp_path).read_bytes() == written
+
+
 def test_a_resume_without_a_selection_writes_no_record(tmp_path: Path) -> None:
     start(tmp_path, run_config(tmp_path))
 

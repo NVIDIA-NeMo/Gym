@@ -593,8 +593,9 @@ def _start_or_resume_store(
 ) -> RolloutStore:
     """``RolloutStore.start_or_resume`` for a collection run, which records the run's task selection once its inputs
     are accepted on a fresh start (the store removes an earlier run's record then). An accepted resume keeps the record
-    its run wrote, or writes it if a crash before the write left none; a refused resume changes nothing. The ids are
-    read once per preparation, so the rows and the record agree."""
+    its run wrote, or writes it if a crash before the write left none (never when the identity was overridden: the
+    run then holds its saved inputs, not these); a refused resume changes nothing. The ids are read once per
+    preparation, so the rows and the record agree."""
     prepared: dict[str, Any] = {}
 
     def prepare() -> tuple[list[dict], RunManifest]:
@@ -611,7 +612,8 @@ def _start_or_resume_store(
         resubmit=config.resubmit,
     )
     if prepared.get("selection") is not None and (
-        store.started_fresh or not task_selection_path_for(output_fpath).exists()
+        store.started_fresh
+        or (not store.manifest.identity_overridden and not task_selection_path_for(output_fpath).exists())
     ):
         _write_task_selection_record(output_fpath, prepared["selection"], prepared["rows"])
     return store
