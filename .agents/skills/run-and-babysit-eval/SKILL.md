@@ -197,6 +197,8 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
 - `gate_task.failures` (response failures: `truncated`, `empty`, `malformed`; trial failures by cause:
   `request`, `judge`, `sandbox`, `harness`, `timeout`, `allocation` (a rollout in flight at repeated ends
   of its allocation), `other`; `output_budget_refits`: model calls sent again with a lowered output budget;
+  `repetition_stops`: policy calls the serving engine stopped for repetition, the model's own loops, scored
+  as answered and never a failure;
   `agent_adaptations`: what an agent adapted on its own, for example a GDP-PDF input-limit rejection),
   `trial_counts` (`observed_healthy`,
   `unhealthy`, `unobserved`: unobserved trials are unverified, not healthy), `scored_samples`,

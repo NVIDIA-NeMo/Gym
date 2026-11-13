@@ -141,6 +141,17 @@ def model_call_facts(r):
                                        for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
                     "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
     return out
+def repetition_stop(call):
+    # Whether the provider stopped the call's generation for repetition (vLLM's repetition detection): a `repetition`
+    # finish reason or a `repetition_detected` stop reason, recorded on the call or kept on its saved response.
+    response = call.get("response") if isinstance(call.get("response"), dict) else {}
+    meta = call.get("response_metadata") if isinstance(call.get("response_metadata"), dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    finish = (meta.get("finish_reason"), response.get("native_finish_reason"), response.get("finish_reason"),
+              choice.get("native_finish_reason"), choice.get("finish_reason"))
+    stop = (response.get("native_stop_reason"), response.get("stop_reason"), choice.get("stop_reason"))
+    return "repetition" in finish or "repetition_detected" in stop
 def trial_metadata(value):
     if not isinstance(value, dict):
         return None
@@ -570,7 +581,7 @@ def rows(name, skip=0):
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
                     "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
-                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")),
+                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")), "repetition_stop": repetition_stop(item),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
                                      "input_items": trial_items(item.get("request"), "input", ("type", "call_id"))}
                                     if isinstance(item, dict) else None for item in trajectory.get("model_calls")] if isinstance(trajectory.get("model_calls"), list) else None,
