@@ -159,12 +159,12 @@ def test_recipe_manifest_retains_license_and_metadata():
 
 @pytest.mark.parametrize("category", ["cid002", "cid003", "cid004", "cid007", "cid016"])
 @pytest.mark.parametrize("multifile", [False, True])
-def test_generated_rows_follow_owner_and_verifier_contracts(raw_task, category, multifile):
+async def test_generated_rows_follow_owner_and_verifier_contracts(raw_task, category, multifile):
     from nemo_gym.data import normalize_task_fields
     from resources_servers.cvdp.app import CVDPVerifierMetadata
     from resources_servers.cvdp.task_data import TaskData
 
-    raw_task["categories"] = [category]
+    raw_task["categories"] = [category, raw_task["difficulty"]]
     if multifile:
         raw_task["output"]["context"]["rtl/second.sv"] = "reference"
     row = benchmark_prepare.convert_task(raw_task)
@@ -186,3 +186,43 @@ def test_generated_rows_follow_owner_and_verifier_contracts(raw_task, category, 
         assert field.is_required() == other.is_required(), name
         if not field.is_required():
             assert field.get_default(call_default_factory=True) == other.get_default(call_default_factory=True), name
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nemo_gym.client import ServerClient
+    from resources_servers.cvdp.app import CVDPResourcesServer, CVDPResourcesServerConfig, CVDPVerifyRequest
+
+    server = CVDPResourcesServer(
+        config=CVDPResourcesServerConfig(host="127.0.0.1", port=0, entrypoint="", name="cvdp"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = CVDPVerifyRequest.model_validate(
+        row
+        | {
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "fixture",
+                "object": "response",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "module latch; endmodule", "annotations": []}],
+                    }
+                ],
+            }
+        }
+    )
+    objective = AsyncMock()
+    with patch.object(CVDPResourcesServer, "_verify_objective", objective):
+        await server.verify(body)
+    objective.assert_awaited_once()
+    _, delivered, routed_category, routed_difficulty, _ = objective.call_args.args
+    assert delivered.target_files == owner.target_files
+    assert routed_category == category and routed_difficulty == raw_task["difficulty"]
