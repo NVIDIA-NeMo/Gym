@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.core.failure_kinds import PROVIDER_STATUS_UNAVAILABLE
+from nemo_gym.core.failure_kinds import PROVIDER_IO_TIMEOUT, PROVIDER_STATUS_UNAVAILABLE
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxHandle
@@ -18,6 +18,9 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 
 
 pytestmark = pytest.mark.sandbox
+
+# A guard against a hang, not a bound on the provider: the first typed failure imports the SDK on the event loop.
+HANG_GUARD_S = 30
 
 
 class Commands:
@@ -337,7 +340,7 @@ async def test_a_status_timeout_without_a_park_still_fails_the_command(monkeypat
     commands = ScriptedStatus(unanswered)
     # Without a park the status-recovery window runs out, as for any sandbox that stops answering.
     with pytest.raises(NgFailureEvent) as failed:
-        await asyncio.wait_for(provider.exec(handle("lost", commands), "work", timeout_s=300), 2)
+        await asyncio.wait_for(provider.exec(handle("lost", commands), "work", timeout_s=300), HANG_GUARD_S)
     assert failed.value.failure_kind == PROVIDER_STATUS_UNAVAILABLE
     assert commands.status_calls == 1
 
@@ -356,13 +359,137 @@ async def test_a_park_forgives_one_failed_request_and_a_sandbox_still_lost_after
             # Longer than the status-recovery window: the park, not the sandbox, kept the request unanswered.
             await asyncio.sleep(0.5)
         with pytest.raises(NgFailureEvent) as failed:
-            await asyncio.wait_for(task, 2)
+            await asyncio.wait_for(task, HANG_GUARD_S)
         assert failed.value.failure_kind == PROVIDER_STATUS_UNAVAILABLE
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     assert commands.status_calls == 2
     assert provider._command_polls == {} and provider._parked_poll_scopes == {}
+
+
+class ScriptedLogs(ScriptedStatus):
+    """Status steps as ``ScriptedStatus``; each log request runs the next log step.
+
+    ``log_asked`` is set once a log request has started, and a request that starts while the sandbox is parked is
+    counted and never answered, as by a sandbox being snapshotted.
+    """
+
+    def __init__(self, provider: Any, sandbox_id: str, *, status: list[Any], logs: list[Any]) -> None:
+        super().__init__(*status)
+        self.provider = provider
+        self.sandbox_id = sandbox_id
+        self.log_steps = list(logs)
+        self.log_calls = 0
+        self.log_calls_while_parked = 0
+        self.log_asked = asyncio.Event()
+
+    async def get_background_command_logs(self, execution_id: str) -> Any:
+        self.log_calls += 1
+        self.log_asked.set()
+        if self.sandbox_id in self.provider._parked_poll_scopes:
+            self.log_calls_while_parked += 1
+            await asyncio.Event().wait()
+        return await self.log_steps.pop(0)()
+
+
+async def output() -> Any:
+    return SimpleNamespace(content="the command's output")
+
+
+@pytest.mark.asyncio
+async def test_the_logs_of_a_command_seen_finished_during_a_park_are_read_once_the_park_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = make_parked_provider(monkeypatch)
+    # The status request below stays in flight across the start of the park, so it must not time out first.
+    object.__setattr__(provider._operations, "status_poll_timeout_s", HANG_GUARD_S)
+    answer = asyncio.Event()
+
+    async def finished_with_exit_code_3() -> Any:
+        await answer.wait()
+        return SimpleNamespace(running=False, exit_code=3, error=None)
+
+    commands = ScriptedLogs(provider, "parked", status=[finished_with_exit_code_3], logs=[output])
+    sandbox_handle = handle("parked", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=300))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        with provider.parked_exec_polling(sandbox_handle):
+            answer.set()
+            # Long enough for the status answer to be handled and a log request, if any, to start.
+            for _ in range(20):
+                await asyncio.sleep(0)
+            assert commands.log_calls == 0, "a parked sandbox is not asked for the logs"
+            assert not task.done()
+        result = await asyncio.wait_for(task, HANG_GUARD_S)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert (result.return_code, result.stdout) == (3, "the command's output")
+    assert (commands.log_calls, commands.log_calls_while_parked) == (1, 0)
+    assert provider._command_polls == {} and provider._parked_poll_scopes == {}
+
+
+@pytest.mark.asyncio
+async def test_a_log_timeout_without_a_park_still_fails_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_parked_provider(monkeypatch)
+    # The log read uses the connection's request timeout; the fixture's 5 s would only slow the test.
+    object.__setattr__(provider._connection, "request_timeout_s", 0.05)
+    commands = ScriptedLogs(provider, "lost", status=[finished], logs=[unanswered])
+    with pytest.raises(NgFailureEvent) as failed:
+        await asyncio.wait_for(provider.exec(handle("lost", commands), "work", timeout_s=300), HANG_GUARD_S)
+    assert failed.value.failure_kind == PROVIDER_IO_TIMEOUT
+    assert commands.log_calls == 1, "retries is 0 and no park forgives the read"
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_scope_opened_during_a_status_request_is_not_slept_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    provider = make_provider(monkeypatch)
+    answer = asyncio.Event()
+
+    async def answered_late() -> Any:
+        await answer.wait()
+        return SimpleNamespace(running=True, exit_code=None, error=None)
+
+    commands = ScriptedStatus(answered_late, finished)
+    sandbox_handle = handle("mid-request", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=300))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        # The scope opens while the first status request is in flight: no poll is waiting to be woken yet.
+        with provider.checkpoint_exec_polling(sandbox_handle):
+            answer.set()
+            result = await asyncio.wait_for(task, 1)
+        assert result.return_code == 0
+        assert commands.status_calls == 2
+        assert sleeps == [], "the wakeup delivered before the wait replaced the 30-second backoff"
+        assert provider._command_polls == {} and provider._checkpoint_poll_scopes == {}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_a_sandbox_delegates_its_parked_scope_to_a_provider_that_has_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_parked_provider(monkeypatch)
+    sandbox = AsyncSandbox(provider=provider)
+    sandbox._handle = handle("parked", Commands())
+    sandbox._stopped = False
+
+    with sandbox.parked_exec_polling():
+        with sandbox.parked_exec_polling():
+            assert provider._parked_poll_scopes == {"parked": 2}
+        assert provider._parked_poll_scopes == {"parked": 1}
+    assert provider._parked_poll_scopes == {}
 
 
 def test_provider_without_parked_polling_gets_a_no_op_scope() -> None:

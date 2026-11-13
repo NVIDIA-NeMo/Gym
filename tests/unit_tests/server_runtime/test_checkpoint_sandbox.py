@@ -4,8 +4,14 @@
 
 import asyncio
 import dataclasses
+import errno
+import fcntl
 import json
+import logging
+import os
+import shutil
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,6 +24,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
     SandboxResources,
     SandboxSidecarSpec,
+    SandboxSnapshotInfo,
+    SandboxSnapshotInUseError,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
@@ -30,6 +38,7 @@ from nemo_gym.server_runtime._checkpoint.sandbox import (
     SandboxCheckpointError,
     SandboxCheckpointState,
     SandboxSessionCheckpointer,
+    SnapshotReleaseError,
     checkpoint_state_dir,
     name_hash,
     read_run_id,
@@ -154,10 +163,10 @@ class FakeSnapshotProvider:
         self._maybe_fail("delete_snapshot", snapshot_id)
         self.snapshots.pop(snapshot_id, None)  # 404 is not an error
 
-    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
         self.calls.append(("list_snapshots", prefix))
         return [
-            {"id": snapshot_id, "name": snapshot["name"]}
+            SandboxSnapshotInfo(snapshot_id=snapshot_id, name=snapshot["name"])
             for snapshot_id, snapshot in self.snapshots.items()
             if (snapshot["name"] or "").startswith(prefix)
         ]
@@ -238,11 +247,14 @@ async def test_export_snapshots_each_sandbox_and_leaves_it_running(state_dir: Pa
     provider = FakeSnapshotProvider()
     checkpointer = await seeded(provider, state_dir, "s1", "s2")
 
+    before = time.time()
     states = await checkpointer.export(["s1", "s2"], checkpoint_id="c1")
+    after = time.time()
 
     assert set(states) == {"s1", "s2"}
     for key in states:
         state = state_of(states, key)
+        assert states[key]["version"] == 1 and before <= states[key]["snapshot_ready_ts"] <= after
         sandbox_id = state.descriptor["sandbox_id"]
         assert provider.boxes[sandbox_id]["state"] == "running"
         assert provider.snapshots[state.snapshot_id]["sandbox_id"] == sandbox_id
@@ -486,6 +498,7 @@ async def test_the_export_fails_once_every_snapshot_attempt_failed(state_dir: Pa
 
     assert ops(provider, "snapshot") == ["sb-1", "sb-1"]
     assert provider.boxes["sb-1"]["state"] == "running"
+    await checkpointer.settle()
 
 
 async def test_an_export_cancelled_mid_wait_still_indexes_the_snapshot(state_dir: Path) -> None:
@@ -538,6 +551,150 @@ async def test_create_rejects_a_key_that_already_has_a_sandbox(state_dir: Path) 
     checkpointer = await seeded(FakeSnapshotProvider(), state_dir, "s1")
     with pytest.raises(ValueError, match="'s1' already has a sandbox"):
         await checkpointer.create("s1", SPEC)
+
+
+async def test_two_creates_for_one_key_at_once_start_one_sandbox(state_dir: Path) -> None:
+    """A retried request can reach create while the first is still starting; the key has one sandbox either way."""
+    provider = FakeSnapshotProvider()
+    checkpointer = make_checkpointer(state_dir, provider)
+    gate = asyncio.Event()
+    original_create = provider.create
+
+    async def held_create(spec: SandboxSpec) -> SandboxHandle:
+        await gate.wait()
+        return await original_create(spec)
+
+    provider.create = held_create  # type: ignore[method-assign]
+
+    first = asyncio.create_task(checkpointer.create("s1", SPEC))
+    other = asyncio.create_task(checkpointer.create("s2", SPEC))
+    await asyncio.sleep(0)
+    with pytest.raises(ValueError, match="'s1' already has a sandbox"):
+        await checkpointer.create("s1", SPEC)
+    gate.set()
+    sandbox = await first
+    await other
+
+    assert checkpointer.get("s1") is sandbox and sorted(provider.boxes) == ["sb-1", "sb-2"]
+    await checkpointer.stop("s1")
+    await checkpointer.stop("s2")
+    assert all(box["state"] == "stopped" for box in provider.boxes.values()), "no sandbox is left unreachable"
+
+
+async def test_a_create_that_failed_or_was_cancelled_can_be_retried(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = make_checkpointer(state_dir, provider)
+    provider.fail[("create", "sb-1")] = RuntimeError("quota")
+    with pytest.raises(RuntimeError, match="quota"):
+        await checkpointer.create("s1", SPEC)
+
+    gate = asyncio.Event()
+    original_create = provider.create
+
+    async def held_create(spec: SandboxSpec) -> SandboxHandle:
+        await gate.wait()
+        return await original_create(spec)
+
+    provider.create = held_create  # type: ignore[method-assign]
+    cancelled = asyncio.create_task(checkpointer.create("s1", SPEC))
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    provider.create = original_create  # type: ignore[method-assign]
+
+    await checkpointer.create("s1", SPEC)
+    assert checkpointer.keys == ["s1"]
+
+
+async def test_a_spec_that_cannot_be_written_fails_the_export_before_any_snapshot(state_dir: Path) -> None:
+    """A tuple, a path or bytes in the spec is not JSON: every commit would fail, each after its snapshot."""
+    provider = FakeSnapshotProvider()
+    checkpointer = make_checkpointer(state_dir, provider)
+    spec = dataclasses.replace(SPEC, provider_options={"volumes": ({"name": "data"},)})
+    await checkpointer.create("s1", spec)
+
+    with pytest.raises(SandboxCheckpointError, match="'s1' has a spec that cannot be checkpointed"):
+        await checkpointer.export(["s1"], checkpoint_id="c1")
+
+    assert ops(provider, "snapshot") == [] and provider.snapshots == {}
+    assert checkpointer.indexed_snapshots == {}
+
+
+async def test_a_sandbox_cannot_start_from_a_snapshot_on_a_backend_without_snapshots() -> None:
+    provider = NoSnapshotProvider()
+    sandbox = AsyncSandbox(provider, SPEC, owns_provider=False)
+
+    with pytest.raises(NotImplementedError, match="'fake-plain' does not support snapshots"):
+        await sandbox.start(snapshot_id="snap-1")
+
+    assert provider.boxes == {} and sandbox.handle is None, "refused before anything was created"
+
+
+async def test_settle_only_waits_and_cancelling_it_leaves_the_background_work_running(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
+    gate = asyncio.Event()
+    original_close = provider.close
+
+    async def held_close(handle: SandboxHandle) -> None:
+        await gate.wait()
+        await original_close(handle)
+
+    provider.close = held_close  # type: ignore[method-assign]
+    fresh = make_checkpointer(state_dir, provider)
+    await fresh.restore(states)  # stops the superseded sb-1 in the background
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(fresh.settle(), timeout=0.05)
+    assert provider.boxes["sb-1"]["state"] == "running" and len(fresh._background) == 1
+    gate.set()
+    await fresh.settle()
+
+    assert provider.boxes["sb-1"]["state"] == "stopped", "the stop the cancelled settle was waiting for still ran"
+
+
+def test_a_mark_is_made_again_when_an_unmark_removes_its_folder_between_the_mkdir_and_the_touch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The folder is removed exactly where a concurrent unmark of the checkpoint's only other snapshot would."""
+    index = checkpoint_sandbox._SnapshotIndex(tmp_path / "snapshots")
+    real_touch = Path.touch
+    removed: list[Path] = []
+
+    def touch_after_an_unmark(self: Path, *args: object, **kwargs: object) -> None:
+        if not removed:
+            removed.append(self.parent)
+            self.parent.rmdir()
+        real_touch(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", touch_after_an_unmark)
+
+    index.mark("c1", "snap-1")
+
+    assert removed == [tmp_path / "snapshots" / "c1"]
+    assert index.snapshot_ids() == {"c1": ["snap-1"]}
+
+
+async def test_a_mark_that_keeps_losing_its_folder_fails_the_export_after_a_bounded_number_of_tries(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    tries: list[Path] = []
+
+    def touch_never_lands(self: Path, *args: object, **kwargs: object) -> None:
+        tries.append(self)
+        self.parent.rmdir()
+        raise FileNotFoundError(str(self))
+
+    monkeypatch.setattr(Path, "touch", touch_never_lands)
+
+    with pytest.raises(SandboxCheckpointError, match="snapshot 'snap-2' could not be indexed"):
+        await checkpointer.export(["s1"], checkpoint_id="c1")
+
+    assert len(tries) == checkpoint_sandbox._MARK_ATTEMPTS
+    assert ops(provider, "snapshot") == ["sb-1"], "an index failure is not retried as a failed snapshot"
 
 
 async def test_a_backend_without_snapshots_cannot_be_checkpointed(state_dir: Path) -> None:
@@ -627,6 +784,7 @@ async def test_a_none_state_restores_no_sandbox(state_dir: Path) -> None:
     await fresh.restore(states)
 
     assert fresh.keys == ["s1"] and "s2" not in fresh
+    await fresh.settle()
 
 
 async def test_after_a_crash_the_next_process_releases_what_the_dead_one_created(state_dir: Path) -> None:
@@ -653,6 +811,7 @@ async def test_after_a_crash_the_next_process_releases_what_the_dead_one_created
     again = make_checkpointer(state_dir, provider)
     await again.restore(states)
     assert provider.files(again.get("s1").handle.sandbox_id) == ["s1: one"]
+    await again.settle()
 
 
 async def test_restore_returns_before_the_superseded_sandboxes_are_stopped(state_dir: Path) -> None:
@@ -720,6 +879,7 @@ async def test_restore_rolls_back_when_one_sandbox_cannot_be_rebuilt(state_dir: 
     # A retried restore starts over cleanly.
     await fresh.restore(states)
     assert sorted(fresh.keys) == ["s1", "s2"]
+    await fresh.settle()
 
 
 async def test_restore_retries_a_fork_the_backend_cannot_find_yet(
@@ -737,6 +897,7 @@ async def test_restore_retries_a_fork_the_backend_cannot_find_yet(
     await fresh.restore(states)
 
     assert fresh.get("s1").handle.sandbox_id == "sb-5" and provider.files("sb-5") == ["s1: one"]
+    await fresh.settle()
 
 
 async def test_restore_forks_through_the_providers_create_from_snapshot(state_dir: Path) -> None:
@@ -750,6 +911,7 @@ async def test_restore_forks_through_the_providers_create_from_snapshot(state_di
     assert box["snapshot_id"] == state_of(states, "s1").snapshot_id
     # The provider decides how a snapshot replaces the image: the spec carries no provider convention for it.
     assert box["spec"].image is None and "snapshot_id" not in box["spec"].provider_options
+    await fresh.settle()
 
 
 async def test_not_found_retries_stop_after_the_configured_attempts(
@@ -800,10 +962,113 @@ async def test_restore_refuses_a_state_from_another_provider_or_a_key_already_he
         await make_checkpointer(state_dir, NoSnapshotProvider()).restore({"s1": plain})
 
 
+async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_dir: Path) -> None:
+    """A restore cancelled at shutdown must not leave the forks it already made running."""
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
+    # sb-1, sb-2 are the originals and snap-3, snap-4 their snapshots: the forks are sb-5, then sb-6.
+    gate = asyncio.Event()
+    second_started = asyncio.Event()
+    original_fork = provider.create_from_snapshot
+
+    async def fork_then_hang(snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        if "sb-5" in provider.boxes:
+            second_started.set()
+            await gate.wait()
+        return await original_fork(snapshot_id, spec)
+
+    provider.create_from_snapshot = fork_then_hang  # type: ignore[method-assign]
+
+    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    restore = asyncio.create_task(fresh.restore(states))
+    await asyncio.wait_for(second_started.wait(), timeout=5)
+    assert provider.boxes["sb-5"]["state"] == "running", "the first fork is complete; the second is in flight"
+    restore.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await restore
+    await fresh.settle()
+
+    assert fresh.keys == [], "nothing is installed"
+    assert provider.boxes["sb-5"]["state"] == "stopped" and "sb-6" not in provider.boxes
+    assert provider.boxes["sb-1"]["state"] == "running" and provider.boxes["sb-2"]["state"] == "running"
+    # The keys are not left taken: a retried restore installs both.
+    provider.create_from_snapshot = original_fork  # type: ignore[method-assign]
+    await fresh.restore(states)
+    assert sorted(fresh.keys) == ["s1", "s2"]
+    await fresh.settle()
+
+
+async def test_a_fork_whose_rollback_stop_failed_is_logged_and_stopped_by_the_next_restore(
+    state_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
+    # The forks are sb-5 and sb-6: the second cannot be created, and the rollback's stop of the first fails once.
+    provider.fail[("create", "sb-6")] = RuntimeError("quota")
+    provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
+
+    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    with caplog.at_level(logging.WARNING, logger=checkpoint_sandbox.__name__):
+        with pytest.raises(SandboxCheckpointError, match="could not be re-created.*quota"):
+            await fresh.restore(states)
+
+    assert provider.boxes["sb-5"]["state"] == "running" and fresh.keys == []
+    assert "fork sb-5 of a restore that failed was not stopped" in caplog.text and "HTTP 503" in caplog.text
+    assert provider.boxes["sb-1"]["state"] == "running" and provider.boxes["sb-2"]["state"] == "running"
+
+    # The retried restore stops the fork the failed one left, then installs both sandboxes.
+    await fresh.restore(states)
+    assert provider.boxes["sb-5"]["state"] == "stopped"
+    assert sorted(fresh.keys) == ["s1", "s2"]
+    await fresh.settle()
+
+
+async def test_restore_refuses_a_state_of_a_format_version_it_does_not_know(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
+    calls_before = list(provider.calls)
+
+    fresh = make_checkpointer(state_dir, provider)
+    with pytest.raises(
+        SandboxCheckpointError, match="'s1' has checkpoint state version 2; this server reads version 1"
+    ):
+        await fresh.restore({"s1": {**states["s1"], "version": 2}})
+
+    assert provider.calls == calls_before and fresh.keys == []
+
+
+async def test_a_key_being_restored_cannot_be_created_or_added_meanwhile(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
+    gate = asyncio.Event()
+    forking = asyncio.Event()
+    original_fork = provider.create_from_snapshot
+
+    async def held_fork(snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        forking.set()
+        await gate.wait()
+        return await original_fork(snapshot_id, spec)
+
+    provider.create_from_snapshot = held_fork  # type: ignore[method-assign]
+    fresh = make_checkpointer(state_dir, provider)
+    restore = asyncio.create_task(fresh.restore(states))
+    await asyncio.wait_for(forking.wait(), timeout=5)
+
+    with pytest.raises(ValueError, match="'s1' already has a sandbox"):
+        await fresh.create("s1", SPEC)
+    with pytest.raises(ValueError, match="'s1' already has a sandbox"):
+        fresh.add("s1", AsyncSandbox(provider, SPEC, owns_provider=False), SPEC)
+    gate.set()
+    await restore
+
+    assert fresh.get("s1").handle.sandbox_id == "sb-3", "the restore's fork is the key's sandbox"
+    await fresh.settle()
+
+
 # -- stop -----------------------------------------------------------------------------------------------------
 
 
-async def test_stop_frees_the_sandbox_keeps_its_snapshots_and_tolerates_repeats(state_dir: Path) -> None:
+async def test_stop_stops_the_sandbox_keeps_its_snapshots_and_tolerates_repeats(state_dir: Path) -> None:
     provider = FakeSnapshotProvider()
     checkpointer = await seeded(provider, state_dir, "s1")
     await checkpointer.export(["s1"], checkpoint_id="c1")
@@ -939,14 +1204,17 @@ async def test_a_failed_delete_keeps_its_file_and_the_next_release_retries_it(st
     provider = FakeSnapshotProvider()
     checkpointer = await seeded(provider, state_dir, "s1", "s2")
     await checkpointer.export(["s1", "s2"], checkpoint_id="c1")
-    provider.fail[("delete_snapshot", "snap-3")] = RuntimeError("HTTP 409: snapshot in use")
+    provider.fail[("delete_snapshot", "snap-3")] = SandboxSnapshotInUseError("HTTP 409: snapshot in use")
 
-    await checkpointer.release(frozenset({"c2"}))
-    await checkpointer.settle()
+    # Every delete is tried before the release reports the one that failed.
+    with pytest.raises(
+        SnapshotReleaseError, match=r"1 snapshots of checkpoints outside \['c2'\] were not deleted"
+    ) as raised:
+        await checkpointer.release(frozenset({"c2"}))
+    assert raised.value.failed == 1
     assert checkpointer.indexed_snapshots == {"c1": ["snap-3"]} and set(provider.snapshots) == {"snap-3"}
 
     await checkpointer.release(frozenset({"c2"}))
-    await checkpointer.settle()
     assert checkpointer.indexed_snapshots == {} and provider.snapshots == {}
 
 
@@ -955,46 +1223,80 @@ async def test_a_failed_listing_keeps_the_indexed_deletes(state_dir: Path) -> No
     checkpointer = await seeded(provider, state_dir, "s1")
     await checkpointer.export(["s1"], checkpoint_id="c1")
 
-    async def broken_listing(prefix: str) -> list[dict[str, Any]]:
+    async def broken_listing(prefix: str) -> list[SandboxSnapshotInfo]:
         raise RuntimeError("HTTP 503")
 
     provider.list_snapshots = broken_listing  # type: ignore[method-assign]
 
-    await checkpointer.release(frozenset())
-    await checkpointer.settle()
+    # The release reports that it could not look for unindexed snapshots, after the indexed ones are deleted.
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        await checkpointer.release(frozenset())
 
     assert provider.snapshots == {} and checkpointer.indexed_snapshots == {}
 
 
-async def test_release_returns_before_its_deletes_and_releases_run_one_after_another(state_dir: Path) -> None:
-    provider = FakeSnapshotProvider()
-    checkpointer = await seeded(provider, state_dir, "s1")
-    await checkpointer.export(["s1"], checkpoint_id="c1")
-    await checkpointer.export(["s1"], checkpoint_id="c2")
+def hold_delete(provider: FakeSnapshotProvider) -> tuple[asyncio.Event, list[str]]:
+    """Hold every ``delete_snapshot`` of ``provider`` until the returned gate is set; the list records each start."""
     gate = asyncio.Event()
     deleting: list[str] = []
     original_delete = provider.delete_snapshot
 
-    async def slow_delete(snapshot_id: str) -> None:
+    async def held_delete(snapshot_id: str) -> None:
         deleting.append(snapshot_id)
         await gate.wait()
         await original_delete(snapshot_id)
 
-    provider.delete_snapshot = slow_delete  # type: ignore[method-assign]
+    provider.delete_snapshot = held_delete  # type: ignore[method-assign]
+    return gate, deleting
 
-    await asyncio.wait_for(checkpointer.release(frozenset({"c2"})), timeout=1)
-    await asyncio.wait_for(checkpointer.release(frozenset()), timeout=1)
+
+async def test_release_returns_only_once_its_deletes_finished(state_dir: Path) -> None:
+    """The participant awaits release before it admits a commit, so a later checkpoint is never among the dropped."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c1")
+    kept = state_of(await checkpointer.export(["s1"], checkpoint_id="c2"), "s1").snapshot_id
+    gate, deleting = hold_delete(provider)
+
+    release = asyncio.create_task(checkpointer.release(frozenset({"c2"})))
     await until(lambda: deleting)
     for _ in range(20):
         await asyncio.sleep(0.001)
-    # The second release waits for the first, which is still deleting c1's snapshot.
-    assert deleting == ["snap-2"]
+    assert not release.done(), "the release is still deleting, so its caller still excludes the next commit"
     gate.set()
-    await checkpointer.settle()
+    await release
 
-    # The second release read the index after the first finished, so it deletes only c2's snapshot.
-    assert deleting == ["snap-2", "snap-3"]
+    # The checkpoint committed once the release returned is not something that release could have dropped.
+    later = state_of(await checkpointer.export(["s1"], checkpoint_id="c3"), "s1").snapshot_id
+    assert deleting == ["snap-2"] and set(provider.snapshots) == {kept, later}
+    assert checkpointer.indexed_snapshots == {"c2": [kept], "c3": [later]}
+    assert checkpointer._background == set(), "a release leaves nothing running behind it"
+
+
+async def test_a_release_cancelled_while_deleting_leaves_the_rest_for_the_next_release(state_dir: Path) -> None:
+    """A release that misses its deadline is cancelled; what it had not deleted is still indexed."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c1")
+    gate, deleting = hold_delete(provider)
+
+    release = asyncio.create_task(checkpointer.release(frozenset()))
+    await until(lambda: deleting)
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    assert checkpointer.indexed_snapshots == {"c1": ["snap-2"]} and "snap-2" in provider.snapshots
+
+    gate.set()
+    await asyncio.wait_for(checkpointer.release(frozenset()), timeout=5)
     assert provider.snapshots == {} and checkpointer.indexed_snapshots == {}
+
+
+def lock_index(checkpointer: SandboxSessionCheckpointer) -> int:
+    """Hold the index's release lock as another worker's release would; returns the descriptor to close."""
+    descriptor = os.open(checkpointer._index.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return descriptor
 
 
 async def test_a_release_waits_for_another_process_holding_the_index_lock(state_dir: Path) -> None:
@@ -1002,17 +1304,142 @@ async def test_a_release_waits_for_another_process_holding_the_index_lock(state_
     provider = FakeSnapshotProvider()
     checkpointer = await seeded(provider, state_dir, "s1")
     await checkpointer.export(["s1"], checkpoint_id="c1")
-    index = checkpointer._index
-    held = index.lock()  # as another worker's release would hold it
+    held = lock_index(checkpointer)
     try:
-        await checkpointer.release(frozenset())
+        release = asyncio.create_task(checkpointer.release(frozenset()))
         for _ in range(50):
             await asyncio.sleep(0.002)
+        assert not release.done()
         assert ops(provider, "delete_snapshot") == [], "nothing is deleted while another process holds the lock"
     finally:
-        index.unlock(held)
-    await checkpointer.settle()
+        os.close(held)
+    await asyncio.wait_for(release, timeout=5)
     assert provider.snapshots == {} and checkpointer.indexed_snapshots == {}
+
+
+async def test_a_release_cancelled_while_waiting_for_the_index_lock_leaves_it_free(state_dir: Path) -> None:
+    """A release cancelled at its deadline while another worker holds the lock must not end up holding it."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c1")
+    held = lock_index(checkpointer)
+    try:
+        release = asyncio.create_task(checkpointer.release(frozenset()))
+        for _ in range(20):
+            await asyncio.sleep(0.002)
+        release.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await release
+    finally:
+        os.close(held)
+
+    # Nothing of the cancelled release holds the lock: this checkpointer and another process both take it at once.
+    os.close(lock_index(checkpointer))
+    await asyncio.wait_for(checkpointer.release(frozenset()), timeout=5)
+    assert ops(provider, "delete_snapshot") == ["snap-2"]
+    assert provider.snapshots == {} and checkpointer.indexed_snapshots == {}
+
+
+async def test_a_release_that_cannot_lock_the_index_says_why_and_deletes_nothing(
+    monkeypatch: pytest.MonkeyPatch, state_dir: Path
+) -> None:
+    """A filesystem without flock (ENOSYS on Lustre mounted without it) must not fail every release in silence."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c1")
+    seen: list[int] = []
+
+    def no_flock(descriptor: int, operation: int) -> None:
+        seen.append(descriptor)
+        raise OSError(errno.ENOSYS, "Function not implemented")
+
+    monkeypatch.setattr(checkpoint_sandbox.fcntl, "flock", no_flock)
+
+    with pytest.raises(RuntimeError, match="cannot lock the snapshot index .*snapshots.lock: .*flock") as raised:
+        await checkpointer.release(frozenset())
+
+    assert "Function not implemented" in str(raised.value)
+    assert checkpointer.indexed_snapshots == {"c1": ["snap-2"]} and "snap-2" in provider.snapshots
+    [descriptor] = seen
+    with pytest.raises(OSError) as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF, "a release that cannot lock does not leak its descriptor"
+
+
+async def test_the_sweep_leaves_names_under_its_prefix_that_it_never_gives(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c2")
+    prefix = checkpointer.snapshot_name_prefix
+    foreign = [
+        provider.add_snapshot(f"{prefix}manual01-backup-daily"),  # three parts and eight characters, but no hashes
+        provider.add_snapshot(f"{prefix}{name_hash('c1')}-backup-1"),
+        provider.add_snapshot(f"{prefix}{name_hash('c1')}-{name_hash('s1')}-latest"),
+        provider.add_snapshot(f"{prefix}{name_hash('c1')}-{name_hash('s1')}-0"),
+    ]
+    # Names it does give, for a dropped checkpoint, are still swept, whatever the attempt.
+    orphans = [provider.add_snapshot(checkpointer.snapshot_name("c1", "s1", attempt)) for attempt in (1, 10)]
+
+    await checkpointer.release(frozenset({"c2"}))
+
+    assert all(snapshot_id not in provider.snapshots for snapshot_id in orphans)
+    assert [snapshot_id for snapshot_id in foreign if snapshot_id not in provider.snapshots] == []
+
+
+async def test_a_release_after_the_index_was_lost_still_sweeps_by_name_and_keeps_kept_checkpoints(
+    state_dir: Path,
+) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c1")
+    kept = state_of(await checkpointer.export(["s1"], checkpoint_id="c2"), "s1").snapshot_id
+    shutil.rmtree(state_dir / "server" / "snapshots")
+    assert checkpointer.indexed_snapshots == {}
+
+    await checkpointer.release(frozenset({"c2"}))
+
+    # The names, not the index, say which checkpoint each snapshot belongs to.
+    assert set(provider.snapshots) == {kept}
+    assert ops(provider, "delete_snapshot") == ["snap-2"]
+
+
+async def test_a_release_on_a_backend_without_snapshots_leaves_the_index_alone(state_dir: Path) -> None:
+    """A server restarted on a provider that cannot delete snapshots must keep the record of what it owes."""
+    provider = FakeSnapshotProvider()
+    await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
+
+    plain = make_checkpointer(state_dir, NoSnapshotProvider())
+    await plain.release(frozenset())
+    assert plain.indexed_snapshots == {"c1": ["snap-2"]}
+
+    # A later process on the snapshot provider still finds and deletes it.
+    again = make_checkpointer(state_dir, provider)
+    await again.release(frozenset())
+    assert provider.snapshots == {} and again.indexed_snapshots == {}
+
+
+async def test_a_release_skips_a_checkpoint_folder_that_vanishes_while_the_index_is_read(
+    monkeypatch: pytest.MonkeyPatch, state_dir: Path
+) -> None:
+    """An unmark of a failed attempt, which takes no lock, can empty and remove a folder while a release lists it."""
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    await checkpointer.export(["s1"], checkpoint_id="c1")
+    await checkpointer.export(["s1"], checkpoint_id="c2")
+    vanishing = state_dir / "server" / "snapshots" / "c2"
+    real_iterdir = Path.iterdir
+
+    def iterdir(self: Path) -> Any:
+        if self == vanishing:
+            shutil.rmtree(vanishing)
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+
+    await checkpointer.release(frozenset({"c2"}))
+
+    assert ops(provider, "delete_snapshot") == ["snap-2"], "the other dropped checkpoint is still released"
+    assert checkpointer.indexed_snapshots == {}
 
 
 async def test_servers_sharing_a_state_dir_release_only_their_own_snapshots(state_dir: Path) -> None:
@@ -1039,10 +1466,13 @@ async def test_a_snapshot_id_that_cannot_name_a_file_fails_the_export(state_dir:
         return "../escape"
 
     provider.snapshot = odd_snapshot  # type: ignore[method-assign]
+    before = sorted(path.relative_to(state_dir) for path in state_dir.rglob("*"))
 
     with pytest.raises(SandboxCheckpointError, match="could not be indexed"):
         await checkpointer.export(["s1"], checkpoint_id="c1")
-    assert not (state_dir / "server" / "escape").exists()
+    # ``<index>/c1/../escape`` would be ``<state_dir>/server/snapshots/escape``: nothing was written anywhere.
+    assert sorted(path.relative_to(state_dir) for path in state_dir.rglob("*")) == before
+    assert checkpointer.indexed_snapshots == {}
 
 
 async def test_without_a_state_dir_sandboxes_are_tracked_but_never_exported() -> None:

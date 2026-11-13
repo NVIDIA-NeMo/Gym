@@ -57,10 +57,14 @@ sandbox:
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
-      # Optional lease, off by default (recommended with partial-rollout checkpoints): each sandbox is created
-      # with renew_ttl_s (capped by the spec's ttl_s) and the creating process renews it every
-      # renew_interval_s, never past the spec's ttl_s, so a crashed process's sandboxes are deleted by the
-      # service within renew_ttl_s instead of running out the spec's lifetime.
+      # Optional lease, off by default: each sandbox is created with renew_ttl_s (capped by the spec's ttl_s)
+      # and the creating process renews it every renew_interval_s, never past the spec's ttl_s.
+      # With a lease, a sandbox whose creating process crashed is deleted within one renew_ttl_s instead of at
+      # its full TTL, which suits runs that checkpoint and can restore.
+      # But every live sandbox then depends on its process reaching the management API each interval: an API
+      # outage longer than renew_ttl_s minus renew_interval_s ends them.
+      # Many benchmark configs that do not checkpoint compose this file, so the lease stays off here; a config
+      # that checkpoints sandboxes should set these keys.
       #   renew_ttl_s: 1200
       #   renew_interval_s: 300
       #   renew_timeout_s: 30
@@ -111,6 +115,8 @@ sandbox:
       # management API has only just created is waited out.
       snapshot_timeout_s: 240
       snapshot_lookup_grace_s: 60
+      # Budget of one management API request for a snapshot (lookup, delete, listing page).
+      snapshot_request_timeout_s: 30
       # Per-request budget for status polls, which are small idempotent GETs:
       # without their own short budget, each poll against an unreachable
       # sandbox hangs for the full connection request_timeout_s (tuned for

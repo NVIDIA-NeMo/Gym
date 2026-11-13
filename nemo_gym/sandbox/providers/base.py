@@ -331,6 +331,36 @@ class SandboxSnapshotNotFoundError(LookupError):
     """
 
 
+class SandboxSnapshotError(RuntimeError):
+    """Raised when a provider cannot complete an operation on a snapshot; ``snapshot_id`` names it when known."""
+
+    def __init__(self, message: str, *, snapshot_id: str | None = None) -> None:
+        super().__init__(message)
+        self.snapshot_id = snapshot_id
+
+
+class SandboxSnapshotFailedError(SandboxSnapshotError):
+    """Raised when a snapshot failed on the provider or did not become ready in time; it cannot create sandboxes."""
+
+
+class SandboxSnapshotInUseError(SandboxSnapshotError):
+    """Raised when a provider refuses to delete a snapshot because something still uses it."""
+
+
+@dataclass(frozen=True)
+class SandboxSnapshotInfo:
+    """One snapshot in a provider's listing.
+
+    ``state`` is the provider's own lifecycle word, lowercased, and ``sandbox_id`` the sandbox the snapshot was
+    taken from; either is ``None`` when the provider does not report it.
+    """
+
+    snapshot_id: str
+    name: str | None
+    state: str | None = None
+    sandbox_id: str | None = None
+
+
 class SandboxProvider(Protocol):
     """Runtime/infra provider contract used by the public sandbox API."""
 
@@ -565,15 +595,23 @@ class SupportsSandboxSnapshot(Protocol):
         ...
 
     async def wait_snapshot_ready(self, snapshot_id: str) -> None:
-        """Return once the snapshot can create sandboxes; raise if it failed or is not ready in time."""
+        """Return once the snapshot can create sandboxes.
+
+        Raises ``SandboxSnapshotFailedError`` when the snapshot failed or is not ready in time, and
+        ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
         ...
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
-        """Delete a snapshot; a snapshot that is already gone is not an error."""
+        """Delete a snapshot; a snapshot the provider confirms is already gone is not an error.
+
+        Raises ``SandboxSnapshotInUseError`` when the provider refuses because something still uses the snapshot,
+        and ``SandboxSnapshotError`` when the delete fails otherwise.
+        """
         ...
 
-    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
-        """Every snapshot whose name starts with ``prefix``, each a mapping with at least ``id`` and ``name``."""
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
+        """Every snapshot whose name starts with ``prefix``; raises ``SandboxSnapshotError`` if the listing fails."""
         ...
 
     async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:

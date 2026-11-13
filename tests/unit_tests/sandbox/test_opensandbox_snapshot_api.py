@@ -2,15 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """OpenSandbox snapshots: start through the SDK, then wait, list and delete over the management API."""
 
+import asyncio
+import json
 import logging
 import time
 from types import SimpleNamespace
 from typing import Any
 
+import aiohttp
 import pytest
 
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
+    SandboxSnapshotError,
+    SandboxSnapshotFailedError,
+    SandboxSnapshotInfo,
+    SandboxSnapshotInUseError,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SupportsSandboxSnapshot,
@@ -25,9 +33,12 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 
 
 class _ManagementResponse:
-    def __init__(self, status: int, payload: Any = None) -> None:
+    """A management API reply; ``body`` is its text, by default the payload as JSON (empty without a payload)."""
+
+    def __init__(self, status: int, payload: Any = None, *, body: str | None = None) -> None:
         self.status = status
         self._payload = {} if payload is None else payload
+        self._body = body if body is not None else json.dumps(payload) if payload else ""
 
     async def __aenter__(self) -> "_ManagementResponse":
         return self
@@ -38,10 +49,23 @@ class _ManagementResponse:
     async def json(self, content_type: object = None) -> Any:
         return self._payload
 
+    async def text(self, errors: str = "strict") -> str:
+        return self._body
+
 
 class _TextResponse(_ManagementResponse):
     async def json(self, content_type: object = None) -> Any:
         raise ValueError("not JSON")
+
+
+class _CutOffBody(_ManagementResponse):
+    """A reply whose connection drops while its body is read."""
+
+    async def json(self, content_type: object = None) -> Any:
+        raise aiohttp.ClientPayloadError("Response payload is not completed")
+
+    async def text(self, errors: str = "strict") -> str:
+        raise aiohttp.ClientPayloadError("Response payload is not completed")
 
 
 def _management(monkeypatch: pytest.MonkeyPatch, responses: list[Any]) -> list[dict[str, Any]]:
@@ -62,6 +86,35 @@ def _management(monkeypatch: pytest.MonkeyPatch, responses: list[Any]) -> list[d
 
     monkeypatch.setattr(http_client, "request", fake_request)
     return calls
+
+
+class _ScriptedClient:
+    """Stands in for Gym's shared aiohttp control client, below the retry loop of ``http_client.request``.
+
+    Each wire attempt takes the next step; the last one repeats. An exception step is raised instead.
+    """
+
+    timeout = aiohttp.ClientTimeout(total=5)
+
+    def __init__(self, *script: Any) -> None:
+        self.script = list(script)
+        self.attempts: list[dict[str, Any]] = []
+
+    async def request(self, **kwargs: Any) -> Any:
+        self.attempts.append(kwargs)
+        step = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+
+def _wire(monkeypatch: pytest.MonkeyPatch, *script: Any) -> _ScriptedClient:
+    """Script the wire itself, so the shared client's own retries are part of what a test counts."""
+    import nemo_gym.client.http_client as http_client
+
+    client = _ScriptedClient(*script)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_control_client", lambda: client)
+    return client
 
 
 def _provider(**operations: Any) -> Any:
@@ -135,14 +188,16 @@ async def test_a_failed_snapshot_raises_with_the_servers_reason(monkeypatch: pyt
         monkeypatch,
         [_ManagementResponse(200, {"id": "snap-1", "status": {"state": "Failed", "message": "registry push failed"}})],
     )
-    with pytest.raises(RuntimeError, match="snapshot 'snap-1' failed: registry push failed"):
+    with pytest.raises(SandboxSnapshotFailedError, match="snapshot 'snap-1' failed: registry push failed") as raised:
         await _provider().wait_snapshot_ready("snap-1")
+    assert raised.value.snapshot_id == "snap-1"
 
 
 async def test_a_snapshot_that_is_not_ready_in_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _management(monkeypatch, [_ManagementResponse(200, {"id": "snap-1", "status": {"state": "Creating"}})])
-    with pytest.raises(TimeoutError, match="snapshot 'snap-1' to be ready after 0.05s"):
+    with pytest.raises(SandboxSnapshotFailedError, match="snapshot 'snap-1' to be ready after 0.05s") as raised:
         await _provider(snapshot_timeout_s=0.05).wait_snapshot_ready("snap-1")
+    assert raised.value.snapshot_id == "snap-1"
 
 
 @pytest.mark.parametrize(
@@ -184,7 +239,9 @@ async def test_a_snapshot_still_unknown_after_the_grace_fails_before_the_snapsho
     calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
     started = time.monotonic()
 
-    with pytest.raises(RuntimeError, match=r"lookup failed -> HTTP 404 \(\d+ lookups over"):
+    with pytest.raises(
+        SandboxSnapshotNotFoundError, match=r"'snap-1' lookup failed -> HTTP 404 \(\d+ lookups over .*NOT_FOUND"
+    ):
         await _provider(snapshot_timeout_s=30, snapshot_lookup_grace_s=0.05).wait_snapshot_ready("snap-1")
 
     assert len(calls) > 1, "the 404s within the grace were retried"
@@ -201,7 +258,7 @@ async def test_a_404_after_the_snapshot_appeared_fails_at_once(monkeypatch: pyte
         ],
     )
 
-    with pytest.raises(RuntimeError, match=r"lookup failed -> HTTP 404$"):
+    with pytest.raises(SandboxSnapshotNotFoundError, match=r"'snap-1' lookup failed -> HTTP 404: .*NOT_FOUND"):
         await _provider(snapshot_timeout_s=5, snapshot_lookup_grace_s=60).wait_snapshot_ready("snap-1")
 
     assert len(calls) == 2
@@ -209,38 +266,105 @@ async def test_a_404_after_the_snapshot_appeared_fails_at_once(monkeypatch: pyte
 
 @pytest.mark.parametrize("status", [400, 403])
 async def test_client_errors_other_than_404_and_429_fail_at_once(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    calls = _management(monkeypatch, [_ManagementResponse(status)])
+    calls = _management(monkeypatch, [_ManagementResponse(status, body="key lacks the snapshot scope")])
 
-    with pytest.raises(RuntimeError, match=rf"lookup failed -> HTTP {status}$"):
+    with pytest.raises(
+        SandboxSnapshotError, match=rf"lookup failed -> HTTP {status}: key lacks the snapshot scope$"
+    ) as raised:
         await _provider(snapshot_timeout_s=5, snapshot_lookup_grace_s=60).wait_snapshot_ready("snap-1")
 
     assert len(calls) == 1
+    # Not a verdict on the snapshot: the lookup, not the snapshot, failed.
+    assert not isinstance(raised.value, SandboxSnapshotFailedError) and raised.value.snapshot_id == "snap-1"
 
 
 @pytest.mark.parametrize(
-    ("response", "detail"),
+    ("response", "detail", "failed"),
     [
-        (_TextResponse(200), "a body that is not JSON"),
-        (_ManagementResponse(200, ["not", "an", "object"]), "a body that is not a JSON object"),
-        (_ManagementResponse(200, {"id": "snap-1"}), "returned no state"),
+        (_TextResponse(200), "a body that is not JSON", False),
+        (_ManagementResponse(200, ["not", "an", "object"]), "a body that is not a JSON object", False),
+        (_ManagementResponse(200, {"id": "snap-1"}), "returned no state", True),
     ],
 )
 async def test_a_lookup_answer_without_a_state_fails_at_once_instead_of_polling_until_the_timeout(
-    monkeypatch: pytest.MonkeyPatch, response: _ManagementResponse, detail: str
+    monkeypatch: pytest.MonkeyPatch, response: _ManagementResponse, detail: str, failed: bool
 ) -> None:
     calls = _management(monkeypatch, [response])
-    with pytest.raises(RuntimeError, match=detail):
+    with pytest.raises(SandboxSnapshotError, match=detail) as raised:
         await _provider(snapshot_timeout_s=5).wait_snapshot_ready("snap-1")
     assert len(calls) == 1
+    assert isinstance(raised.value, SandboxSnapshotFailedError) == failed
 
 
-async def test_delete_snapshot_tolerates_a_snapshot_that_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
+_NOT_FOUND = {"code": "SNAPSHOT::NOT_FOUND"}
+_SNAPSHOT_URL = "https://cell.example/v1/snapshots/snap-1"
+
+
+async def test_delete_snapshot_tolerates_a_snapshot_that_a_lookup_confirms_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(404, _NOT_FOUND), _ManagementResponse(404, _NOT_FOUND)])
 
     await _provider().delete_snapshot("snap-1")
 
-    [call] = calls
-    assert call["method"] == "DELETE" and call["url"] == "https://cell.example/v1/snapshots/snap-1"
+    assert [(call["method"], call["url"]) for call in calls] == [("DELETE", _SNAPSHOT_URL), ("GET", _SNAPSHOT_URL)]
+
+
+async def test_a_404_to_the_delete_of_a_snapshot_that_still_exists_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _management(
+        monkeypatch,
+        [
+            _ManagementResponse(404, _NOT_FOUND),  # a replica that has not seen the snapshot yet
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Ready"}}),
+            _ManagementResponse(204),
+        ],
+    )
+
+    await _provider(retries=1).delete_snapshot("snap-1")
+
+    assert [call["method"] for call in calls] == ["DELETE", "GET", "DELETE"]
+
+
+async def test_a_snapshot_still_visible_after_every_404_to_its_delete_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    rounds = [_ManagementResponse(404, _NOT_FOUND), _ManagementResponse(200, {"id": "snap-1"})] * 3
+    calls = _management(monkeypatch, [*rounds, _ManagementResponse(204)])
+
+    with pytest.raises(
+        SandboxSnapshotError, match="snapshot 'snap-1' delete answered 404 but the snapshot still exists"
+    ) as raised:
+        await _provider(retries=2).delete_snapshot("snap-1")
+
+    assert [call["method"] for call in calls] == ["DELETE", "GET"] * 3, "retries + 1 rounds within one budget"
+    assert raised.value.snapshot_id == "snap-1" and not isinstance(raised.value, SandboxSnapshotInUseError)
+
+
+@pytest.mark.parametrize(
+    "unconfirmed", [_ManagementResponse(503), _ManagementResponse(429), aiohttp.ServerDisconnectedError()]
+)
+async def test_a_404_to_a_delete_that_cannot_be_confirmed_is_retried(
+    monkeypatch: pytest.MonkeyPatch, unconfirmed: Any
+) -> None:
+    calls = _management(
+        monkeypatch,
+        [_ManagementResponse(404, _NOT_FOUND), unconfirmed, _ManagementResponse(404, _NOT_FOUND)],
+    )
+
+    await _provider(retries=1).delete_snapshot("snap-1")
+
+    assert [call["method"] for call in calls] == ["DELETE", "GET", "DELETE", "GET"]
+
+
+async def test_a_confirming_lookup_that_is_refused_fails_the_delete_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(404, _NOT_FOUND), _ManagementResponse(403, body="denied")])
+
+    with pytest.raises(
+        SandboxSnapshotError, match="delete answered 404 and its confirming lookup failed -> HTTP 403: denied"
+    ):
+        await _provider(retries=2).delete_snapshot("snap-1")
+
+    assert len(calls) == 2
 
 
 async def test_delete_snapshot_retries_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,13 +377,40 @@ async def test_delete_snapshot_retries_transient_failures(monkeypatch: pytest.Mo
 
 
 async def test_delete_snapshot_gives_up_after_the_operation_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _management(monkeypatch, [_ManagementResponse(500)])
-    with pytest.raises(RuntimeError, match="snapshot 'snap-1' delete failed -> HTTP 500"):
+    calls = _management(monkeypatch, [_ManagementResponse(500, body="registry unavailable")])
+    with pytest.raises(
+        SandboxSnapshotError, match="snapshot 'snap-1' delete failed -> HTTP 500: registry unavailable$"
+    ) as raised:
         await _provider(retries=2).delete_snapshot("snap-1")
     assert len(calls) == 3
-    _management(monkeypatch, [_ManagementResponse(409)])
-    with pytest.raises(RuntimeError, match="delete failed -> HTTP 409"):
+    assert raised.value.snapshot_id == "snap-1" and not isinstance(raised.value, SandboxSnapshotInUseError)
+
+
+async def test_deleting_a_snapshot_that_is_in_use_raises_the_servers_reason_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(409, {"message": "snapshot is used by sandbox sb-9"})])
+
+    with pytest.raises(
+        SandboxSnapshotInUseError, match="'snap-1' delete failed -> HTTP 409: .*snapshot is used by sandbox sb-9"
+    ) as raised:
         await _provider(retries=2).delete_snapshot("snap-1")
+
+    assert len(calls) == 1 and raised.value.snapshot_id == "snap-1"
+
+
+async def test_a_long_error_body_is_cut_to_its_first_500_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [_ManagementResponse(403, body="x" * 2000)])
+    with pytest.raises(SandboxSnapshotError) as raised:
+        await _provider().delete_snapshot("snap-1")
+    assert str(raised.value).endswith("delete failed -> HTTP 403: " + "x" * 500)
+
+
+async def test_an_error_status_whose_body_cannot_be_read_is_still_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_CutOffBody(403)])
+    with pytest.raises(SandboxSnapshotError, match="delete failed -> HTTP 403$"):
+        await _provider(retries=2).delete_snapshot("snap-1")
+    assert len(calls) == 1, "the status, not the unreadable body, decides: a 403 is not retried"
 
 
 async def test_list_snapshots_reads_every_page_and_filters_by_name_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,8 +436,8 @@ async def test_list_snapshots_reads_every_page_and_filters_by_name_prefix(monkey
     found = await _provider(retries=1).list_snapshots("ng-run-srv-")
 
     assert found == [
-        {"id": "a", "name": "ng-run-srv-1", "state": "ready", "sandbox_id": "sb-1"},
-        {"id": "d", "name": "ng-run-srv-2", "state": "creating", "sandbox_id": None},
+        SandboxSnapshotInfo(snapshot_id="a", name="ng-run-srv-1", state="ready", sandbox_id="sb-1"),
+        SandboxSnapshotInfo(snapshot_id="d", name="ng-run-srv-2", state="creating", sandbox_id=None),
     ]
     assert [call["params"]["page"] for call in calls] == ["1", "2", "2"], "the failed page was asked again"
     assert all(call["url"] == "https://cell.example/v1/snapshots" for call in calls)
@@ -298,8 +449,127 @@ async def test_list_snapshots_reads_every_page_and_filters_by_name_prefix(monkey
 )
 async def test_a_malformed_listing_raises(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> None:
     _management(monkeypatch, [_ManagementResponse(200, payload)])
-    with pytest.raises(RuntimeError, match="snapshot listing"):
+    with pytest.raises(SandboxSnapshotError, match="snapshot listing"):
         await _provider().list_snapshots("ng-")
+
+
+async def test_a_listed_snapshot_that_reports_no_state_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = {"items": [{"id": "a", "name": "ng-1"}], "pagination": {"hasNextPage": False}}
+    _management(monkeypatch, [_ManagementResponse(200, listing)])
+    assert await _provider().list_snapshots("ng-") == [SandboxSnapshotInfo(snapshot_id="a", name="ng-1")]
+
+
+@pytest.mark.parametrize(("status", "requests"), [(403, 1), (503, 3)])
+async def test_a_listing_page_that_keeps_failing_raises_instead_of_returning_a_partial_listing(
+    monkeypatch: pytest.MonkeyPatch, status: int, requests: int
+) -> None:
+    first = _ManagementResponse(
+        200, {"items": [{"id": "a", "name": "ng-run-srv-1"}], "pagination": {"hasNextPage": True}}
+    )
+    calls = _management(monkeypatch, [first, _ManagementResponse(status, body="try later")])
+
+    # A partial listing would let a sweep treat the rest as absent; a client error is not retried, a 5xx is.
+    with pytest.raises(SandboxSnapshotError, match=rf"snapshot listing failed -> HTTP {status}: try later"):
+        await _provider(retries=2).list_snapshots("ng-run-")
+
+    assert [call["params"]["page"] for call in calls] == ["1", *["2"] * requests]
+
+
+async def test_a_snapshot_the_sdk_returns_without_an_id_raises() -> None:
+    class _NoId:
+        async def create_snapshot(self, name: str | None = None) -> Any:
+            return SimpleNamespace(id=None)
+
+    with pytest.raises(RuntimeError, match="returned no snapshot id for sandbox 'sb-1'"):
+        await _provider().snapshot(SandboxHandle("sb-1", "opensandbox", _NoId()), name="ng-s1")
+
+
+async def test_a_snapshot_id_is_one_escaped_path_segment(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(200, {"id": "a/b c", "status": {"state": "Ready"}})])
+    provider = _provider()
+
+    await provider.wait_snapshot_ready("a/../b c")
+    await provider.delete_snapshot("a/../b c")
+
+    assert [(call["method"], call["url"]) for call in calls] == [
+        ("GET", "https://cell.example/v1/snapshots/a%2F..%2Fb%20c"),
+        ("DELETE", "https://cell.example/v1/snapshots/a%2F..%2Fb%20c"),
+    ]
+
+
+# -- one wire attempt per operation try -------------------------------------------------------------------------
+
+_EMPTY_LISTING = {"items": [], "pagination": {"hasNextPage": False}}
+_READY = {"id": "snap-1", "status": {"state": "Ready"}}
+
+
+def _operation(provider: Any, name: str) -> Any:
+    if name == "delete":
+        return provider.delete_snapshot("snap-1")
+    if name == "list":
+        return provider.list_snapshots("ng-")
+    return provider.wait_snapshot_ready("snap-1")
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        aiohttp.ClientOSError(111, "Connect call failed"),
+        aiohttp.ClientConnectorError(
+            SimpleNamespace(host="cell.example", port=443, ssl=False), OSError(111, "Connect call failed")
+        ),
+    ],
+    ids=["os-error", "connector-error"],
+)
+@pytest.mark.parametrize("operation", ["delete", "list"])
+async def test_a_refused_connection_is_tried_once_per_operation_try_and_then_raises(
+    monkeypatch: pytest.MonkeyPatch, operation: str, refused: BaseException
+) -> None:
+    client = _wire(monkeypatch, refused)
+
+    # The shared client would otherwise resend a refused connection without a bound, under every operation try.
+    with pytest.raises(SandboxSnapshotError, match="failed: Client") as raised:
+        await asyncio.wait_for(_operation(_provider(retries=2), operation), 30)
+
+    assert len(client.attempts) == 3
+    assert raised.value.__cause__ is refused
+
+
+@pytest.mark.parametrize(
+    "transient",
+    [aiohttp.ServerDisconnectedError(), asyncio.TimeoutError(), _CutOffBody(200)],
+    ids=["disconnected", "request-timeout", "body-cut-off"],
+)
+@pytest.mark.parametrize("operation", ["delete", "list", "wait"])
+async def test_a_transport_failure_is_retried_by_the_operation_alone(
+    monkeypatch: pytest.MonkeyPatch, operation: str, transient: Any
+) -> None:
+    answer = _EMPTY_LISTING if operation == "list" else _READY
+    client = _wire(monkeypatch, transient, _ManagementResponse(200, answer))
+
+    await asyncio.wait_for(_operation(_provider(retries=2, snapshot_timeout_s=5), operation), 30)
+
+    assert len(client.attempts) == 2
+
+
+async def test_a_refused_delete_is_one_wire_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _wire(monkeypatch, _ManagementResponse(403, body="denied"))
+    with pytest.raises(SandboxSnapshotError, match="HTTP 403: denied"):
+        await _provider(retries=2).delete_snapshot("snap-1")
+    assert len(client.attempts) == 1
+
+
+async def test_a_management_request_has_its_own_short_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _wire(monkeypatch, _ManagementResponse(200, _READY))
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://cell.example", "api_key": "k", "request_timeout_s": 300},
+        operations={"snapshot_request_timeout_s": 7},
+    )
+
+    await provider.wait_snapshot_ready("snap-1")
+
+    # Not the connection's request timeout, which is sized for long submits.
+    assert [attempt["timeout"].total for attempt in client.attempts] == [7]
 
 
 async def test_snapshot_operations_require_a_domain() -> None:
@@ -314,6 +584,8 @@ async def test_snapshot_operations_require_a_domain() -> None:
         ({"snapshot_timeout_s": 0}, "snapshot_timeout_s"),
         ({"snapshot_lookup_grace_s": -1}, "snapshot_lookup_grace_s"),
         ({"snapshot_lookup_grace_s": float("nan")}, "snapshot_lookup_grace_s"),
+        ({"snapshot_request_timeout_s": 0}, "snapshot_request_timeout_s"),
+        ({"snapshot_request_timeout_s": float("inf")}, "snapshot_request_timeout_s"),
     ],
 )
 def test_snapshot_budgets_are_validated(operations: dict[str, float], match: str) -> None:
@@ -321,6 +593,7 @@ def test_snapshot_budgets_are_validated(operations: dict[str, float], match: str
         opensandbox_provider.OpenSandboxOperationConfig(**operations)
     defaults = opensandbox_provider.OpenSandboxOperationConfig()
     assert (defaults.snapshot_timeout_s, defaults.snapshot_lookup_grace_s) == (240.0, 60.0)
+    assert defaults.snapshot_request_timeout_s == 30.0
 
 
 def _recording_create(monkeypatch: pytest.MonkeyPatch, provider: Any, outcome: Any) -> list[SandboxSpec]:
@@ -351,7 +624,48 @@ async def test_create_from_snapshot_creates_with_the_snapshot_in_place_of_the_im
     assert created[0].provider_options == {"network_policy": {"egress": "none"}, "snapshot_id": "snap-1"}
 
 
+def _sdk_snapshot_not_found() -> Exception:
+    """What the SDK raises for HTTP 404 ``{"code": "SNAPSHOT::NOT_FOUND", "message": "snapshot snap-1 not found"}``."""
+    from opensandbox.exceptions import SandboxApiException
+    from opensandbox.exceptions.sandbox import SandboxError
+
+    return SandboxApiException(
+        message="Create sandbox failed: snapshot snap-1 not found",
+        status_code=404,
+        error=SandboxError(code="SNAPSHOT::NOT_FOUND", message="snapshot snap-1 not found"),
+    )
+
+
+def _failing_create_once(monkeypatch: pytest.MonkeyPatch, provider: Any, error: Exception) -> list[SandboxSpec]:
+    """Fail the SDK create below ``provider.create``, whose retry loop wraps the SDK's error in a typed failure."""
+    attempts: list[SandboxSpec] = []
+
+    async def create_once(spec: SandboxSpec) -> SandboxHandle:
+        attempts.append(spec)
+        raise error
+
+    monkeypatch.setattr(provider, "_create_once", create_once)
+    return attempts
+
+
 async def test_create_from_a_missing_snapshot_raises_snapshot_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider()
+    sdk_error = _sdk_snapshot_not_found()
+    attempts = _failing_create_once(monkeypatch, provider, sdk_error)
+
+    with pytest.raises(SandboxSnapshotNotFoundError, match="'snap-1'") as raised:
+        await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
+
+    # The server's code sits under the create path's own failure, and its text is not in the outer message.
+    wrapper = raised.value.__cause__
+    assert isinstance(wrapper, NgFailureEvent) and wrapper.__cause__ is sdk_error
+    assert "SNAPSHOT::NOT_FOUND" not in f"{wrapper!s}"
+    assert len(attempts) == 1 and attempts[0].provider_options == {"snapshot_id": "snap-1"}
+
+
+async def test_a_not_found_code_only_in_an_error_text_is_still_snapshot_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _provider()
     _recording_create(monkeypatch, provider, RuntimeError("Create sandbox failed: HTTP 404: SNAPSHOT::NOT_FOUND"))
 
@@ -360,9 +674,18 @@ async def test_create_from_a_missing_snapshot_raises_snapshot_not_found(monkeypa
 
 
 async def test_other_failures_to_create_from_a_snapshot_keep_their_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = _provider()
-    _recording_create(monkeypatch, provider, RuntimeError("quota exceeded"))
+    from opensandbox.exceptions import SandboxApiException
+    from opensandbox.exceptions.sandbox import SandboxError
 
-    with pytest.raises(RuntimeError, match="quota exceeded") as raised:
+    provider = _provider()
+    quota = SandboxApiException(
+        message="Create sandbox failed: quota exceeded",
+        status_code=403,
+        error=SandboxError(code="QUOTA::EXCEEDED", message="quota exceeded"),
+    )
+    _failing_create_once(monkeypatch, provider, quota)
+
+    with pytest.raises(NgFailureEvent) as raised:
         await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
+    assert raised.value.__cause__ is quota
     assert not isinstance(raised.value, SandboxSnapshotNotFoundError)
