@@ -6730,7 +6730,7 @@ def operator_verdict(
             f"unverified: the collector has no distinct affected-rollout count, and {findings} rollout_ended_on_failed_"
             f"model_call findings could cover all {expected} rollouts or fewer",
             "none: report the run as unverified and do not present it as verified; re-collect the evidence with a "
-            "current runtime, then inspect again",
+            "current runtime, then inspect again" + (f"; {delivery[1]}" if delivery else ""),
         )
     if flagged := _flagged_everything(gate_task, decision, expected):
         what, count = flagged

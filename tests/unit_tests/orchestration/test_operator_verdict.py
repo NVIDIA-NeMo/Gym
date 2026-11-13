@@ -721,6 +721,21 @@ def test_a_collector_without_the_distinct_count_leaves_a_flagged_run_unknown_not
     assert "re-collect the evidence with a current runtime" in verdict["action"]
 
 
+def test_the_unknown_for_a_missing_distinct_count_keeps_a_pending_mlflow_delivery_action():
+    collected = _ready(_run(32))
+    collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 32
+    collected.quality.pop("ended_on_failed_model_call", None)
+    collected.quality["provenance"]["mlflow"]["tracking_required"] = True
+    collected.quality["provenance"]["mlflow"]["configured"] = True
+    collected.mlflow = {"live_run_id": None, "receipt": None}
+
+    verdict, task, _ = _verdict(collected)
+
+    assert task["mlflow_delivery"]["state"] == "pending"
+    assert verdict["state"] == "unknown", verdict
+    assert "export the results to MLflow" in verdict["action"]
+
+
 def test_a_collector_without_the_distinct_count_does_not_hold_back_a_run_with_few_findings():
     collected = _ready(_run(32))
     collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 5
