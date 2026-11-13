@@ -26,6 +26,11 @@ from .engine import KINDS
 ROOT = Path(__file__).resolve().parents[2]
 COMPONENT = re.compile(rf"^({'|'.join(KINDS)})/([^/]+)/")
 FINDINGS_FILE = "findings.json"
+SUITE_PATHS = (
+    "scripts/environment_server_compliance/",
+    "scripts/check_suites/",
+    ".github/workflows/environment-server-compliance.yml",
+)
 
 
 def subject(component: str) -> str:
@@ -44,7 +49,9 @@ def all_components(root: Path = ROOT) -> list[str]:
 
 
 def select_components(paths: list[str], *, root: Path = ROOT) -> list[str]:
-    """Components with a changed file; a deleted component directory selects nothing."""
+    """Components with a changed file, or all of them when the suite changed; a deleted component selects nothing."""
+    if any(path.startswith(SUITE_PATHS) for path in paths):
+        return all_components(root)
     selected = {match.group(0).rstrip("/") for path in paths if (match := COMPONENT.match(path))}
     return sorted(component for component in selected if (root / component).is_dir())
 
