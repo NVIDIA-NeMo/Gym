@@ -10,6 +10,10 @@ modality: text, image
 licensing: MIT
 authors:
 - Danial MohseniTaheri
+maintainers:
+- yfw
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

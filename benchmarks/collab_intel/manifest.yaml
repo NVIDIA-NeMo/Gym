@@ -9,6 +9,10 @@ modality: text
 licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0 AND MIT
 authors:
 - cmunley1
+maintainers:
+- cmunley1
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

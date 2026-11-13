@@ -10,6 +10,10 @@ modality: text
 licensing: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
 authors:
 - Dane
+maintainers:
+- OliviaViessmann
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

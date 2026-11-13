@@ -9,6 +9,10 @@ modality: text
 licensing: unknown
 authors:
 - wedu-nvidia
+maintainers:
+- wedu-nvidia
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

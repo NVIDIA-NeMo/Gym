@@ -10,6 +10,10 @@ modality: image,text
 licensing: Apache-2.0
 authors:
 - Fuxiao Liu
+maintainers:
+- yfw
+intended_use:
+- training
 reward:
   range:
   - 0.0

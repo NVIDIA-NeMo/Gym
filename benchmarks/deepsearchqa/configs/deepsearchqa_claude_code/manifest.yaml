@@ -10,6 +10,10 @@ modality: text
 licensing: unknown
 authors:
 - Christian Munley
+maintainers:
+- cmunley1
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

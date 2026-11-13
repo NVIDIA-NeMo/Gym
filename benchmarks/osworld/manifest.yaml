@@ -11,6 +11,11 @@ modality: text, image
 licensing: Apache-2.0
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- JeffPengCoder
+intended_use:
+- evaluation
+- training
 reward:
   range:
   - 0.0

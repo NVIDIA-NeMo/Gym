@@ -10,6 +10,10 @@ licensing: unknown
 authors:
   - ai4bharat
   - anushakamathofficial
+maintainers:
+- anushaknvidia
+intended_use:
+- evaluation
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

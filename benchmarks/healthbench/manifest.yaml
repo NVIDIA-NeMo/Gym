@@ -11,6 +11,10 @@ modality: text
 licensing: MIT
 authors:
 - cparisien
+maintainers:
+- jin-nvidia
+intended_use:
+- evaluation
 reward:
   range:
   - 0

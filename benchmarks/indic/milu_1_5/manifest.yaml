@@ -9,6 +9,10 @@ modality: text
 licensing: CC-BY-4.0
 authors:
 - anushaknvidia
+maintainers:
+- anushaknvidia
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

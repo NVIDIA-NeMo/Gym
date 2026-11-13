@@ -11,6 +11,10 @@ modality: image
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- katerynaCh
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0
