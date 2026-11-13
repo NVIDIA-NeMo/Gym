@@ -1426,6 +1426,7 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
+    reasoning: str | None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

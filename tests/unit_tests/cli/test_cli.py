@@ -404,6 +404,57 @@ class TestResolveServerDir:
         rel = Path("resources_servers/arc_agi")
         assert _resolve_server_dir(rel) == PARENT_DIR / rel
 
+    def test_refuses_a_local_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # NVIDIA-NeMo/Gym#4725: a local server dir without requirements.txt silently resolved to the installed one.
+        local = tmp_path / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(
+            ConfigError, match=r"contains server code but no requirements.txt or pyproject.toml, so Gym would use"
+        ):
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+
+    def test_a_local_data_copy_without_server_code_still_resolves_to_the_installed_server(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Data paths such as resources_servers/<env>/data/example.jsonl resolve by name, so a local data copy
+        # beside a built-in server name is legitimate and must not be mistaken for a server.
+        data = tmp_path / "resources_servers" / "arc_agi" / "data"
+        data.mkdir(parents=True)
+        (data / "example.jsonl").write_text("{}\n", encoding="utf-8")
+        # A helper script or package marker beside the data is not a server entrypoint.
+        (data.parent / "__init__.py").write_text("", encoding="utf-8")
+        (data.parent / "prepare_data.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_a_local_server_without_install_marker_and_no_installed_one_resolves_locally(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "resources_servers" / "only_here"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/only_here")) == local
+
+    def test_refuses_a_search_dir_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # --search-dir and NEMO_GYM_EXTRA_ROOTS roots outrank cwd and the install root, so they get the same check.
+        search_dir = tmp_path / "search"
+        local = search_dir / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(search_dir))
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ConfigError, match="contains server code") as error:
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+        assert f"Server directory {local} contains" in str(error.value)
+
     def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
@@ -2151,6 +2202,38 @@ class TestListEnvironments:
             },
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
+
+    @pytest.mark.parametrize(
+        ("kind", "harbor_target", "usage"),
+        [
+            (
+                "benchmark",
+                "terminal_bench_4",
+                "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model",
+            ),
+            (
+                "environment",
+                "terminal_bench_4",
+                "gym eval run terminal_bench_4 --agent <harness> --sandbox <provider> --model-type vllm_model",
+            ),
+            ("benchmark", None, "gym env start --benchmark tb4 --model-type vllm_model"),
+        ],
+    )
+    def test_inspect_shows_how_a_harbor_backed_entry_runs(
+        self, monkeypatch: MonkeyPatch, capsys, kind, harbor_target, usage
+    ) -> None:
+        """`gym env start` does not compose a Harbor-backed entry's environment server; `gym eval run` does."""
+        entry = replace(self._ALPHA, name="tb4", kind=kind, harbor_target=harbor_target)
+        self._mock_catalog(monkeypatch, overrides={"component_name": "tb4", "json": True}, entries=(entry,))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {"domain": "agent", "description": "", "value": None, "datasets": []},
+        )
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out)["usage_example"] == usage
 
     def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"component_name": "alfa"}, entries=(self._ALPHA,))
