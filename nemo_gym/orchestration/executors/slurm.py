@@ -969,7 +969,7 @@ def _reader_command(
         "_gym_err=$(mktemp)",
         *run_reader,
         'echo "__GYM_READER_RC:$_gym_rc"',
-        "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\n' ' ')\"",
+        "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\r\\n' '  ')\"",
         'rm -f -- "$_gym_err"',
     ]
     if not watchdog:
@@ -1026,7 +1026,7 @@ def _reader_command_in_step(
         'rm -f -- "$_gym_step_out" "$_gym_payload"',
         *_report_placement_lines(),
         'echo "__GYM_READER_RC:$_gym_rc"',
-        "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\n' ' ')\"",
+        "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\r\\n' '  ')\"",
         'rm -f -- "$_gym_err"',
     ]
     if not watchdog:
