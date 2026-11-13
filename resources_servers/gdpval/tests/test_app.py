@@ -24,11 +24,14 @@ from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
+    JUDGE_FAILED,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
+from nemo_gym.verification import judge_failsafe
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -360,8 +363,9 @@ class TestStrictComparisonTrials:
             assert response.model_dump()["_ng_failure_terminal"] is True
             assert "manual_imputation" not in response.judge_response
         else:
-            with pytest.raises(RuntimeError, match="all 1 judge matchup"):
+            with pytest.raises(NgFailureEvent, match="all 1 judge matchup") as raised:
                 await self._verify_with_trials(server, body, [RuntimeError("judge API unavailable")])
+            assert raised.value.failure_kind == JUDGE_FAILED
 
     @pytest.mark.asyncio
     async def test_a_permanent_judge_error_is_a_masked_terminal_failure(self, tmp_path) -> None:
@@ -1609,7 +1613,7 @@ class TestMultiReference:
     @pytest.mark.asyncio
     async def test_verify_all_references_fail_raises(self, tmp_path) -> None:
         """When every matchup fails the rollout is genuinely unjudgeable and
-        verify raises (surfacing as a failure) rather than faking a reward."""
+        verify raises a judge_failed event rather than faking a reward."""
         server, body = self._two_ref_server_and_body(tmp_path)
 
         def always_fail(**_kwargs):
@@ -1621,11 +1625,40 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match="all .* judge matchup"):
+            with pytest.raises(NgFailureEvent, match="all .* judge matchup") as raised:
                 await server.verify(_NO_SESSION, body)
+        assert raised.value.failure_kind == JUDGE_FAILED
 
     @pytest.mark.asyncio
-    async def test_a_permanent_and_a_transient_matchup_error_together_stay_retryable(self, tmp_path) -> None:
+    async def test_a_judge_outage_is_a_masked_judge_failed_row_that_keeps_the_answer(self, tmp_path) -> None:
+        """Through the failsafe every verify call runs under, the row is typed and masked, so recovery grades
+        the saved answer again instead of an HTTP 500 that reruns the whole episode."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        def timed_out(**_kwargs):
+            raise TimeoutError("Request timed out.")
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=timed_out),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            reply = await judge_failsafe(server.verify)(_NO_SESSION, body=body)
+
+        row = json.loads(reply.body)
+        assert reply.status_code == 200
+        assert (row["_ng_failure_class"], row["failure_kind"], row["mask_sample"]) == (
+            JUDGE_FAILED,
+            JUDGE_FAILED,
+            True,
+        )
+        assert row["reward"] == 0.0
+        assert row["response"] == body.response.model_dump(mode="json")
+        assert "all 2 judge matchup(s) failed" in row["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_and_a_transient_matchup_error_together_are_a_judge_failure(self, tmp_path) -> None:
         server, body = self._two_ref_server_and_body(tmp_path)
         errors = iter([RuntimeError("Error code: 413 - payload too large"), RuntimeError("500 Internal Server Error")])
 
@@ -1638,8 +1671,11 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"):
+            with pytest.raises(
+                NgFailureEvent, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"
+            ) as raised:
                 await server.verify(_NO_SESSION, body)
+        assert raised.value.failure_kind == JUDGE_FAILED
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config import AggregateMetricsRequest

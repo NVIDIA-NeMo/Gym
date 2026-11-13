@@ -63,6 +63,9 @@ if mode != 'missing':
 class LocalSandbox:
     """Only substitute installation; execute every other sandbox command locally."""
 
+    # Uploads are local file copies, so a stop request never waits behind a running exec.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.events = []
         self.disconnected = False
@@ -173,13 +176,18 @@ async def test_real_stage_run_collect_close(tmp_path, ending):
     mode = "term" if ending in ("timeout", "close") else ending
     state, sandbox = session(tmp_path, mode)
     await state.install(version="v1.0.16", accept_eula=True, timeout=10)
-    task = asyncio.create_task(execute(state, timeout=2 if ending in ("timeout", "stubborn") else 20))
+    # The timeout cases expire the activation on purpose once the fake Pool is ready, so no deadline races the
+    # runner, its proxy and the fake Pool starting up and installing the TERM handler.
+    task = asyncio.create_task(execute(state, timeout=60))
     try:
-        if ending == "close":
-            async with asyncio.timeout(10):
+        if ending in ("close", "timeout", "stubborn"):
+            async with asyncio.timeout(30):
                 while not (Path(state.session.workdir) / "ready").exists():
                     await asyncio.sleep(0.02)
+        if ending == "close":
             await asyncio.wait_for(state.close(timeout=10), timeout=30)
+        elif ending in ("timeout", "stubborn"):
+            assert await state.session.expire(timeout=10)
         artifacts = await asyncio.wait_for(task, timeout=30)
         assert state.session.cleanup_confirmed
         assert artifacts.runner_pid > 0
