@@ -344,9 +344,11 @@ def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
     assert agent["concurrency"] >= pairing["max_concurrent_episodes"]
     # Everything before the judge, each step counted at its configured bound: the seed (the sandbox start, its workdir
     # and OpenCode's install), the run, the agent's close, and verify's plugin-log read, export copy (counted since an
-    # overlay can turn it on) and sandbox stop. The sum is nominal: opencode_agent's supervised run can outlast
-    # `timeout` by up to session_close_timeout_seconds and 30 s for its cleanup, and its finish can take another
-    # session_close_timeout_seconds.
+    # overlay can turn it on) and sandbox stop. The sum is nominal. OpenCode's setup runs several commands, each
+    # bounded by sandbox_install_timeout_seconds. opencode_agent's supervised run can outlast `timeout` by up to
+    # session_close_timeout_seconds and 30 s for its cleanup, and its finish can take another
+    # session_close_timeout_seconds. The agent's close gets session_close_timeout_seconds for each phase, and
+    # cleanup_timeout_seconds in all.
     before_judge = (
         sandbox["ready_timeout_s"]
         + WORKDIR_CREATE_S
