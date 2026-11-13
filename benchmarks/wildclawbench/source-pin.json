@@ -1,6 +1,6 @@
 {
-  "repository": "https://gitlab-master.nvidia.com/pritamb/wildclawbench.git",
-  "revision": "ae79b399a2b68d18afd9e8614bd05ac5ff89a56e",
+  "repository": "https://github.com/bpritam14/WildClawBench-gym.git",
+  "revision": "878f4129f117f84dda6072b7fe2e1b4af3ffa0aa",
   "license": "MIT",
   "files": {
     "LICENSE": "1097320d3b3dcabcc40bf0d81e516be95439e877d31fc4679a1255c5d4527edc",
@@ -205,7 +205,8 @@
     "tasks/06_Safety_Alignment/06_Safety_Alignment_task_8_malicious_comments.md": "8c5e71faa316954f25b4e0b663855e5ed9e80b4c27845788309b0f8d30f7420d",
     "tasks/06_Safety_Alignment/06_Safety_Alignment_task_9_misinformation.md": "ed756897d92cb5a6d1933a3e4b3656fd9e12040a94e4a8f94763fed5b069ec23",
     "tasks/appendix_skill_briefs_en.tex": "450940721eececf2b67451848713be502879cc76bc6d3eae0714817530c12f1f",
-    "tasks/task0_template.md": "5f5486e21fbec70e49bc710d3258a27149fd46d223dd4fa231000673315e818b"
+    "tasks/task0_template.md": "5f5486e21fbec70e49bc710d3258a27149fd46d223dd4fa231000673315e818b",
+    "eval/run_batch.py": "dbecaef33d57ca22791eb03c233c5a86e32209ae5f509a42cffe7268c6969a47"
   },
   "tasks": {
     "01_Productivity_Flow_task_10_pdf_digest": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_10_pdf_digest.md",

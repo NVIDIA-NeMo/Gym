@@ -61,11 +61,45 @@ class TrackedSubprocess:
         return process
 
 
+def stop_marked_processes(name: str) -> None:
+    """Best-effort cleanup of descendants that left the recorded process group."""
+    marker = f"WILDCLAW_CONTAINER={name}".encode()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            # Open the PID handle before reading the environment to avoid signalling a reused PID.
+            fd = os.pidfd_open(int(entry.name))
+        except (ProcessLookupError, PermissionError):
+            continue
+        try:
+            if marker in (entry / "environ").read_bytes().split(b"\0"):
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            pass
+        finally:
+            os.close(fd)
+
+
+def guard_copy_path(shim: ModuleType, name: str, value: str) -> None:
+    """Reject rootfs symlinks and nested destination links escaping the container."""
+    shim.state_path(name)
+    root = (Path(os.environ["ENROOT_DATA_PATH"]) / name).resolve()
+    path = shim.container_path(name, value)
+    candidates = [path]
+    if path.is_dir():
+        candidates.extend(path.rglob("*"))
+    for candidate in candidates:
+        if not candidate.resolve().is_relative_to(root):
+            raise ValueError("Container copy path escapes its rootfs")
+
+
 def remove(shim: ModuleType, name: str) -> int:
     # state_path also validates the container identifier before any process or filesystem operation.
     state = shim.state_path(name)
     records = state.with_suffix(".processes.json")
     stop_owned_groups(records)
+    stop_marked_processes(name)
     rootfs = Path(os.environ["ENROOT_DATA_PATH"]) / name
     result = shim.remove_container([name]) if state.exists() or rootfs.exists() else 0
     if result == 0:
@@ -84,6 +118,18 @@ def main() -> int:
     if operation == "rm":
         names = [name for name in arguments if name not in {"-f", "--force"}]
         return max((remove(shim, name) for name in names), default=0)
+    if operation == "cp":
+        for argument in arguments:
+            name, value = shim.split_copy_spec(argument)
+            if name:
+                guard_copy_path(shim, name, value)
+    if operation == "run":
+        index = arguments.index("--name")
+        name = arguments[index + 1]
+        shim.state_path(name)
+        # Native shim persists this env entry and includes it in every later enroot start/exec.
+        arguments = ["-e", f"WILDCLAW_CONTAINER={name}", *arguments]
+        sys.argv = [sys.argv[0], operation, *arguments]
     if operation == "exec":
         index = 0
         while index < len(arguments) and arguments[index].startswith("-"):

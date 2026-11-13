@@ -10,13 +10,13 @@ from responses_api_agents.wildclawbench_agent.data import prepare_rows, selected
 
 
 def prepare(output_fpath: str | Path | None = None, **kwargs: object) -> Path:
+    output = Path(output_fpath or os.environ["WILDCLAW_DATASET_PATH"])
     tasks = selected_tasks(
         os.environ.get("WILDCLAW_TASKS", "all"),
         shard_index=int(os.environ.get("WILDCLAW_SHARD_INDEX", "0")),
         shard_count=int(os.environ.get("WILDCLAW_SHARD_COUNT", "1")),
     )
     rows = prepare_rows(Path(os.environ["WILDCLAW_ROOT"]), tasks)
-    output = Path(output_fpath or os.environ["WILDCLAW_DATASET_PATH"])
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp")
     temporary.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))

@@ -8,10 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from omegaconf import OmegaConf
 
 from benchmarks.wildclawbench.merge import merge
 from nemo_gym.client import ServerClient
@@ -250,7 +251,29 @@ def make_agent(tmp_path, worker_python):
         model_server=dict(type="responses_api_models", name="policy_model"),
         sandbox_runtime="docker",
     )
-    return WildClawAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    with (
+        patch(
+            "responses_api_agents.wildclawbench_agent.app.get_global_config_dict",
+            return_value=OmegaConf.create(
+                {
+                    "policy_model": {
+                        "responses_api_models": {
+                            "vllm_model": {
+                                "entrypoint": "wildclawbench.py",
+                                "uses_reasoning_parser": True,
+                                "propagate_context_overflow_errors": True,
+                            }
+                        }
+                    }
+                }
+            ),
+        ),
+        patch(
+            "responses_api_agents.wildclawbench_agent.app.subprocess.run",
+            return_value=SimpleNamespace(stdout="sha256:" + "a" * 64),
+        ),
+    ):
+        return WildClawAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio
@@ -279,7 +302,10 @@ else:
     )
     request = WildClawRunRequest.model_validate(
         dict(
-            _ng_rollout_id="rollout-a",
+            _ng_task_index=3,
+            _ng_rollout_index=2,
+            _ng_attempt_index=0,
+            _ng_run_id="run-one",
             responses_create_params=dict(input=[dict(role="user", content="task")]),
             verifier_metadata=dict(
                 task_id="task", task_sha256="a" * 64, source_revision="b" * 40, timeout_seconds=300
@@ -293,8 +319,13 @@ else:
     assert (output / "cleaned").read_text() == "yes"
     assert (output / "executed").read_text() == "one execution only"
     saved = json.loads((output / "worker.json").read_text())
-    assert saved["policy_base_url"] == "http://localhost/rollouts/rollout-a/v1"
+    assert saved["policy_base_url"] == "http://localhost/rollouts/3-2/v1"
     assert (await agent.run(request)).reward == 0
+    for changes in ({"_ng_run_id": "run-two"}, {"_ng_attempt_index": 1}):
+        retried = request.model_copy(update=changes)
+        result = await agent.run(retried)
+        assert result.artifact_dir != first.artifact_dir
+        assert Path(result.artifact_dir, "executed").exists()
     changed = request.model_copy(deep=True)
     changed.verifier_metadata["task_id"] = "other-task"
     with pytest.raises(HTTPException) as exc:
@@ -418,3 +449,97 @@ else:
 
     with pytest.raises(ProcessLookupError):
         os.kill(int(started.read_text()), 0)
+
+
+def test_prepare_requires_output_before_hashing(monkeypatch):
+    from benchmarks.wildclawbench import prepare
+
+    monkeypatch.delenv("WILDCLAW_DATASET_PATH", raising=False)
+    hashed = MagicMock()
+    monkeypatch.setattr(prepare, "prepare_rows", hashed)
+    with pytest.raises(KeyError, match="WILDCLAW_DATASET_PATH"):
+        prepare.prepare()
+    hashed.assert_not_called()
+
+
+def test_explicit_output_path_is_honored(fixture_source, monkeypatch):
+    from benchmarks.wildclawbench.prepare import prepare
+
+    monkeypatch.setenv("WILDCLAW_ROOT", str(fixture_source))
+    monkeypatch.setenv("WILDCLAW_TASKS", "task")
+    monkeypatch.delenv("WILDCLAW_DATASET_PATH", raising=False)
+    target = fixture_source / "explicit.jsonl"
+    assert prepare(output_fpath=target) == target
+    assert json.loads(target.read_text())["verifier_metadata"]["task_id"] == "task"
+
+
+def test_worker_environment_blocks_hidden_native_overrides(tmp_path, monkeypatch):
+    from responses_api_agents.wildclawbench_agent.app import worker_environment
+
+    agent = make_agent(tmp_path, sys.executable)
+    for name in ("WILDCLAW_OPENCLAW_MODEL_PARAMS", "WILDCLAW_OPENCLAW_THINKING", "OPENCLAW_IMAGE_MODEL"):
+        monkeypatch.setenv(name, "unrecorded override")
+    monkeypatch.setenv("JUDGE_MODEL", "different-judge")
+    monkeypatch.setenv("DOCKER_NETWORK_MODE", "host")
+    env = worker_environment(agent.config, tmp_path)
+    assert all(
+        env[name] == ""
+        for name in ("WILDCLAW_OPENCLAW_MODEL_PARAMS", "WILDCLAW_OPENCLAW_THINKING", "OPENCLAW_IMAGE_MODEL")
+    )
+    assert env["JUDGE_MODEL"] == agent.config.judge_model
+    assert "DOCKER_NETWORK_MODE" not in env
+
+
+@pytest.mark.parametrize("changed", ["judge_model", "sandbox_image"])
+def test_merge_rejects_different_judge_or_image(changed):
+    rows = scored_rows()
+    for row in rows:
+        row["evaluation_protocol"].update(judge_model="judge-a", sandbox_image="sha256:a")
+    rows[-1]["evaluation_protocol"][changed] = "different"
+    with pytest.raises(ValueError, match="protocol"):
+        benchmark_metrics(rows)
+
+
+def test_copy_guards_nested_symlinks_in_both_directions(tmp_path, monkeypatch):
+    from responses_api_agents.wildclawbench_agent.enroot_docker import guard_copy_path
+
+    root = tmp_path / "data/episode"
+    root.mkdir(parents=True)
+    outside = tmp_path / "host-secret"
+    outside.write_text("unchanged")
+    (root / "escape").symlink_to(outside)
+    (root / "safe").mkdir()
+    (root / "safe/nested").symlink_to(outside)
+    shim = SimpleNamespace(
+        state_path=lambda name: tmp_path / (name + ".json"),
+        container_path=lambda name, value: root / value.lstrip("/"),
+    )
+    monkeypatch.setenv("ENROOT_DATA_PATH", str(tmp_path / "data"))
+    for value in ("/escape", "/safe", "/escape/child"):
+        with pytest.raises(ValueError, match="escapes"):
+            guard_copy_path(shim, "episode", value)
+    guard_copy_path(shim, "episode", "/normal/new")
+    assert outside.read_text() == "unchanged"
+
+
+def test_process_marker_cleans_setsid_descendant_but_not_other_process(tmp_path):
+    import os
+
+    from responses_api_agents.wildclawbench_agent.enroot_docker import stop_marked_processes
+
+    marker = "wildclaw-test-" + tmp_path.name
+    marked = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        env=dict(os.environ, WILDCLAW_CONTAINER=marker),
+    )
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        stop_marked_processes(marker)
+        assert marked.wait(timeout=5) < 0
+        assert other.poll() is None
+    finally:
+        for process in (marked, other):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)

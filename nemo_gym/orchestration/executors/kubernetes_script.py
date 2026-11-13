@@ -275,8 +275,6 @@ def build_job_manifest(
     manifest: str,
 ) -> dict[str, Any]:
     run_dir_str = str(run_dir)
-    if config.driver.container is None:
-        raise ValueError("A host driver (driver.container: null) is supported only on Slurm")
     manifest_writes = _manifest_write_commands(resolved_config, manifest, run_dir_str)
     _reject_unsupported_mounts(config.driver.mounts)
 

@@ -5,6 +5,9 @@ OpenClaw → the original task grader**. Gym owns preparation, episode dispatch,
 policy-call correlation, trace conversion and aggregation. Factory supplies
 launch composition. No OpenCode adapter or training changes are included.
 
+This is an evaluation-only baseline using the original runner, not a template for new Gym agents.
+Follow-up: [migrate to Gym agent sessions](https://github.com/bpritam14/WildClawBench-gym/issues/1).
+
 This is a development integration. Offline checks are not a fresh benchmark
 baseline, a leaderboard reproduction or live sandbox qualification.
 
@@ -14,6 +17,12 @@ Use Python satisfying Gym's `pyproject.toml` on the driver. The separate native
 worker needs Python 3.11+ with `python-dotenv`, `pyyaml` and `tokenizers>=0.20,<0.23`.
 The driver also needs Git, Bash and either Docker or Enroot already installed.
 The integration does not install a container runtime on a shared host.
+
+The Factory Slurm launch path depends on upstream [host-driver PR #4878](https://github.com/NVIDIA-NeMo/Gym/pull/4878)
+and [benchmark-directory PR #5932](https://github.com/NVIDIA-NeMo/Gym/pull/5932).
+Their shared orchestration changes are deliberately excluded here; compose those
+prerequisites before using Factory on Slurm. Standalone Gym execution below does
+not need them. Both prerequisites were still open during this review update.
 
 From a Gym checkout:
 
@@ -33,14 +42,14 @@ export WILDCLAW_PYTHON="$WILDCLAW_ROOT/.venv/bin/python"
 "$WILDCLAW_PYTHON" -m pip install python-dotenv pyyaml 'tokenizers>=0.20,<0.23'
 ```
 
-`source-pin.json` selects the MIT-licensed NVIDIA fork at
-`ae79b399a2b68d18afd9e8614bd05ac5ff89a56e` and hashes all tracked native
-source, task and skill files used by this protocol. **NVIDIA GitLab access is
-required** to provision that fork; use Git's credential helper/askpass, never a
-token-bearing URL. Teammates may reuse a verified, read-only shared source.
-The fork carries gateway isolation/readiness, bounded process cleanup,
-compaction and LF-only transcript fixes. The public upstream checkout is not
-an interchangeable dependency at this pin. No benchmark implementation is
+`source-pin.json` selects the public MIT-licensed
+[Gym execution snapshot](https://github.com/bpritam14/WildClawBench-gym/tree/878f4129f117f84dda6072b7fe2e1b4af3ffa0aa)
+at `878f4129f117f84dda6072b7fe2e1b4af3ffa0aa` and hashes all 204 native
+source, task, skill and instruction-prefix files used by this protocol.
+Public source provisioning requires no NVIDIA network or credentials.
+The snapshot carries gateway isolation/readiness, bounded process cleanup,
+compaction and LF-only transcript fixes. The upstream checkout is not an
+interchangeable dependency at this pin. No benchmark implementation is
 vendored into Gym; native execution and graders remain in that source.
 
 Download and prepare the official `internlm/WildClawBench` Hugging Face task
@@ -51,16 +60,13 @@ video download access. Source cloning alone does not supply these assets.
 
 For Docker, load the image as `wildclawbench-ubuntu:v1.3` and set
 `WILDCLAW_SANDBOX_RUNTIME=docker`. For Enroot, convert the official image with
-the source's `cluster/build_enroot_image.sbatch` after adapting it to the
-site's storage/account policy. The required result is
+a site-approved Docker-to-Enroot conversion. The required result is
 `$WILDCLAW_ROOT/.cache/wildclawbench-ubuntu_v1.3.sqsh`; set
 `WILDCLAW_SANDBOX_RUNTIME=enroot`. Review asset-preparation scripts before
 running them on a shared cluster. Their historical defaults are not current
 cluster-policy recommendations.
 
-The fork's prepared asset locations described in historical handoff documents
-are examples, not verified assets on a new cluster. Provision and inspect your
-own workspace and image before any GPU allocation.
+Provision and inspect your own workspace and image before any GPU allocation.
 
 ## Credentials and storage
 
@@ -112,8 +118,9 @@ gym eval run --config benchmarks/wildclawbench/config.yaml \
 
 Configure the policy key via the model config's runtime environment reference;
 avoid putting secrets on a command line. The endpoint must be reachable from
-the task sandbox. Enroot uses the host network. A Docker deployment must permit
-host networking or supply an equivalent reachable model-server address.
+the task sandbox. Docker uses its normal bridge network. Expose only the model proxy with
+`+use_absolute_ip=true '+absolute_ip_server_types=[responses_api_models]'`;
+keep the head and agent servers on loopback. Enroot shares host networking.
 
 The working context follows the fork's tested convention: serving context
 131072, completion cap 8192, working context 98304, compaction reserve/floor
@@ -175,3 +182,36 @@ the allocation after 25 idle minutes (including startup), fail closed on missing
 telemetry and require every node's acknowledgement before model startup. Model
 readiness has a 20-minute budget; limit pending/warming replicas to two at
 submission. This benchmark adapter does not submit or monitor serving GPUs.
+
+## Execution and scoring limitations
+
+Enroot is an opt-in trusted-host compatibility mode: it shares the host PID and
+network namespaces. Use a dedicated trusted allocation; it is not a Docker
+security boundary. A policy process can reach loopback services and host PIDs.
+Use environment references for credentials rather than literal keys in service
+registries. Process markers permit best-effort cleanup of detached descendants;
+processes that erase their environment can evade this mechanism. Copy-path
+checks reject known rootfs escapes, but shared-host concurrent filesystem mutation
+is not a supported security boundary.
+
+The original grader runs in the policy-used writable container, so policy
+modification of grader dependencies is an upstream score-trust limitation.
+Seven graders expose machine-readable judge fallback methods; these are masked.
+Eleven other upstream graders only log certain judge failures, without a
+machine-readable flag. Those failures cannot all be detected by this adapter;
+inspect private grader logs before reporting a baseline. The pinned task text
+predates upstream November 4/5 fixes: scores are version-specific and cannot be
+claimed as a reproduction of a newer leaderboard without a matched revision.
+
+The protocol records the judge model and immutable sandbox image identity;
+merging different values is rejected. Native hidden model/thinking/image-model
+environment overrides are disabled. Select sampling in the policy profile and
+retain the resolved Gym configuration with results. Required search and task
+`Env` credentials are checked before policy execution. A missing key masks the
+sample, with a namespaced failure reason, rather than producing a scored zero.
+
+Agent-session follow-up scope: gateway mode, image layout/OpenClaw version,
+configuration and compaction passthrough, image/search/skills tools, and transcript
+compatibility with all nine safety graders. The current PR does not implement
+this migration. Live four-task plus full-suite leaderboard validation remain required before
+claiming integration qualification.

@@ -3289,33 +3289,3 @@ def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: 
     cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
     assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
     assert cache.stat().st_mode & 0o777 == 0o700
-
-
-def test_host_driver_omits_pyxis_flags_and_retains_bound_artifact_directory(submit_config, bench_dir):
-    submit_config.driver.container = None
-    submit_config.driver.env["NEMO_GYM_BENCH_DIR"] = "__GYM_RUNTIME_ENV__PWD"
-    script = build_sbatch_script(
-        submit_config,
-        "gsm8k",
-        submit_config.driver.benchmarks["gsm8k"],
-        next(iter(submit_config.compute.values())),
-        bench_dir,
-    )
-    driver = next(line for line in script.splitlines() if "--output=logs/driver-" in line)
-    assert "--container-" not in driver and "--no-container-mount-home" not in driver
-    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in driver
-    assert "--container-image=vllm:latest" in script
-    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
-
-
-def test_host_driver_refuses_unapplied_container_mounts(submit_config, bench_dir):
-    submit_config.driver.container = None
-    submit_config.driver.mounts = ["/data:/mounted-data"]
-    with pytest.raises(ValueError, match="cannot apply container mounts"):
-        build_sbatch_script(
-            submit_config,
-            "gsm8k",
-            submit_config.driver.benchmarks["gsm8k"],
-            next(iter(submit_config.compute.values())),
-            bench_dir,
-        )

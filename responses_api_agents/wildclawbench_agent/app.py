@@ -10,15 +10,23 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import time
 from pathlib import Path
 from uuid import uuid4
 
+import anyio
 from fastapi import HTTPException
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -28,6 +36,7 @@ from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import build_openclaw_observations
+from responses_api_agents.wildclawbench_agent.data import digest
 from responses_api_agents.wildclawbench_agent.metrics import benchmark_metrics
 
 
@@ -40,7 +49,8 @@ class WildClawConfig(BaseResponsesAPIAgentConfig):
     context_window: int = Field(default=131072, gt=0)
     max_tokens: int = Field(default=8192, gt=0)
     thinking: str = "high"
-    sandbox_runtime: str = "enroot"
+    sandbox_runtime: str = "docker"
+    judge_model: str = "azure/openai/gpt-5.4"
 
     @model_validator(mode="after")
     def validate_execution(self) -> WildClawConfig:
@@ -52,6 +62,7 @@ class WildClawConfig(BaseResponsesAPIAgentConfig):
 
 
 class WildClawRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
     verifier_metadata: dict
 
 
@@ -88,7 +99,11 @@ def worker_environment(config: WildClawConfig, output: Path) -> dict[str, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PATH"] = f"{Path(config.worker_python).parent}:{env['PATH']}"
     env["DOCKER_IMAGE"] = "wildclawbench-ubuntu:v1.3"
-    env["DOCKER_NETWORK_MODE"] = "host"
+    env.pop("DOCKER_NETWORK_MODE", None)
+    # Empty values also block native python-dotenv from restoring hidden overrides.
+    for name in ("WILDCLAW_OPENCLAW_MODEL_PARAMS", "WILDCLAW_OPENCLAW_THINKING", "OPENCLAW_IMAGE_MODEL"):
+        env[name] = ""
+    env["JUDGE_MODEL"] = config.judge_model
     if config.sandbox_runtime == "enroot":
         commands = storage / "bin"
         commands.mkdir(parents=True, exist_ok=True)
@@ -120,12 +135,34 @@ def worker_environment(config: WildClawConfig, output: Path) -> dict[str, str]:
 class WildClawAgent(SimpleResponsesAPIAgent):
     config: WildClawConfig
     _semaphore: asyncio.Semaphore = PrivateAttr()
+    _image_identity: str = PrivateAttr()
     _inflight: dict[str, tuple[str, asyncio.Task]] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        policy = get_first_server_config_dict(get_global_config_dict(), self.config.model_server.name)
+        if "uses_reasoning_parser" in policy:
+            if policy.get("entrypoint") != "wildclawbench.py" or not policy.get("propagate_context_overflow_errors"):
+                raise ValueError("WildClaw vLLM requires wildclawbench.py and propagate_context_overflow_errors=true")
+        if self.config.sandbox_runtime == "enroot":
+            self._image_identity = "sha256:" + digest(
+                Path(self.config.source_root) / ".cache/wildclawbench-ubuntu_v1.3.sqsh"
+            )
+        else:
+            inspected = subprocess.run(
+                ["docker", "image", "inspect", "--format", "{{.Id}}", "wildclawbench-ubuntu:v1.3"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            if not inspected.startswith("sha256:") or len(inspected) != 71:
+                raise ValueError("Docker did not return an immutable sandbox image ID")
+            self._image_identity = inspected
         # Warmup services can use fixed ports: serialize native episodes on each worker.
         self._semaphore = asyncio.Semaphore(1)
+
+    def multiple_workers_unsupported_reason(self) -> str:
+        return "fixed warmup ports and episode ownership are local to one process"
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run with prepared WildClawBench task metadata")
@@ -134,7 +171,8 @@ class WildClawAgent(SimpleResponsesAPIAgent):
         rollout_id = maybe_rollout_id_from_run_body(body)
         if not rollout_id:
             raise HTTPException(400, "WildClawBench requires Gym observability and a rollout ID")
-        identity = hashlib.sha256(rollout_id.encode()).hexdigest()
+        namespace = [str(Path(self.config.output_root).resolve()), getattr(body, "_ng_run_id", None), rollout_id]
+        identity = hashlib.sha256(json.dumps(namespace).encode()).hexdigest()
         fingerprint = hashlib.sha256(
             json.dumps(
                 dict(request=body.model_dump(), config=self.config.model_dump()),
@@ -147,13 +185,23 @@ class WildClawAgent(SimpleResponsesAPIAgent):
         if existing is None:
             task = asyncio.create_task(self._episode(body, rollout_id, identity, fingerprint))
             self._inflight[identity] = (fingerprint, task)
+            task.add_done_callback(lambda done: self._inflight.pop(identity, None))
         else:
             task = existing[1]
         try:
-            return await task
-        finally:
-            if task.done():
-                self._inflight.pop(identity, None)
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Disconnect middleware may repeatedly cancel the caller; cleanup owns the semaphore
+            # until worker termination and sandbox removal have both completed.
+            if not task.cancelling():
+                task.cancel()
+            with anyio.CancelScope(shield=True):
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+            raise
 
     async def _episode(
         self,
@@ -198,11 +246,15 @@ class WildClawAgent(SimpleResponsesAPIAgent):
                     context_window=self.config.context_window,
                     max_tokens=self.config.max_tokens,
                     thinking=self.config.thinking,
+                    judge_model=self.config.judge_model,
+                    sandbox_image=self._image_identity,
                 ),
             )
             config_file = output / "worker.json"
             config_file.write_text(json.dumps(worker_config, indent=2))
             env = worker_environment(self.config, output)
+            if self.config.sandbox_runtime == "docker":
+                env["DOCKER_IMAGE"] = self._image_identity
             command = [
                 self.config.worker_python,
                 "-m",

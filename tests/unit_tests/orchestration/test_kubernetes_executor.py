@@ -44,25 +44,6 @@ def _submit_config(tmp_path, benchmarks, services=None, compute_overrides=None):
     )
 
 
-def test_host_driver_is_refused_before_building_a_kubernetes_pod(tmp_path):
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
-
-    config = _submit_config(tmp_path, ["bench_a"])
-    config.driver.container = None
-    with pytest.raises(ValueError, match="supported only on Slurm"):
-        build_job_manifest(
-            config,
-            "bench_a",
-            config.driver.benchmarks["bench_a"],
-            next(iter(config.compute.values())),
-            tmp_path / "run",
-            name="gym-test",
-            gym_job_id="test",
-            resolved_config="",
-            manifest="",
-        )
-
-
 class _FakeKubectl:
     """Answers `_kubectl(...)` calls in the order they are made, without touching a cluster.
 

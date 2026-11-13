@@ -2,8 +2,8 @@
 
 The worker preserves the native actor instruction prefix from
 `eval/run_batch.py` in
-`https://gitlab-master.nvidia.com/pritamb/wildclawbench`, revision
-`ae79b399a2b68d18afd9e8614bd05ac5ff89a56e`. Other new orchestration and binding
+`https://github.com/internlm/WildClawBench`, revision
+`0c6551f798f8028bdfdd065f10d8d6b048a7fd06`. Other new orchestration and binding
 code is independently implemented. Original task definitions, skills, native
 execution and grading remain external pinned dependencies, not vendored code.
 

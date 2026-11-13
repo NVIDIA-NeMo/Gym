@@ -1125,7 +1125,7 @@ def build_sbatch_script(
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    driver_env = {**config.driver.env, "NEMO_GYM_BENCH_DIR": str(remote_bench_dir)}
+    driver_env = dict(config.driver.env)
     if instrumented:
         driver_env = {
             **driver_telemetry_env(
@@ -1219,16 +1219,10 @@ def build_sbatch_script(
     # nothing to say so. Logs survive only because srun resolves `--output` on
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
-    if config.driver.container is None and config.driver.mounts:
-        raise ValueError("A host driver cannot apply container mounts; provision paths on the Slurm host")
-    driver_container_flags = (
-        f" --no-container-mount-home --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-        f" --container-image={shlex.quote(config.driver.container)}"
-        if config.driver.container is not None
-        else ""
-    )
+    driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
     driver_srun = (
-        f"{driver_env_prefix}{failure_file}srun --overlap{driver_node_flags}{driver_container_flags} "
+        f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f" --container-image={shlex.quote(config.driver.container)} "
         f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if resume and benchmark.command is None:
@@ -1255,7 +1249,8 @@ def build_sbatch_script(
         )
         admission_command = (
             f'{driver_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '
-            f"{driver_container_flags} {admission_entrypoint}"
+            f"--no-container-mount-home{driver_mounts_flag} "
+            f"--container-image={shlex.quote(config.driver.container)} {admission_entrypoint}"
         )
         resume_prologue = render_resume_prologue(resume, admission_command=admission_command)
 
