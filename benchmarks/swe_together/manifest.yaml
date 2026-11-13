@@ -16,7 +16,7 @@ reward:
   range: [0.0, 1.0]
   higher_is_better: true
 determinism: stochastic
-environment_server: swe_together
+resources_server: null
 agent_server: swe_together_candidate
 dataset_owner: swe_together_candidate
 model_server: policy_model
