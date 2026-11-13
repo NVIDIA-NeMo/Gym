@@ -615,3 +615,20 @@ def test_the_strict_saved_completion_gate_never_covers_an_unsettled_masked_resul
     coverage_path_for(output).write_bytes(orjson.dumps(coverage))
     with pytest.raises(IncompleteEvaluationError, match=note):
         _check_saved_completion(output)
+
+
+@pytest.mark.parametrize("action", ["retry", "fail"])
+def test_a_namespaced_kind_that_starts_with_transport_follows_its_recorded_action(tmp_path, action):
+    row = _masked("transport_demo:time_cap") | {
+        "failure_outcome_action": action,
+        "failure_outcome_attribution": "evaluation",
+    }
+    output, _ = _run(tmp_path, [[row]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert [r["_ng_task_index"] for r in store.pending()] == ([1] if action == "retry" else [])
+    assert store.coverage()["masked_retryable"] == (1 if action == "retry" else 0)
+
+
+def test_a_built_in_transport_kind_keeps_its_masked_result(tmp_path):
+    output, _ = _run(tmp_path, [[_masked("transport_timeout") | {"failure_outcome_action": "retry"}]])
+    assert RolloutStore.read(output, import_legacy=False).pending() == []

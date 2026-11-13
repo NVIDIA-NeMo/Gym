@@ -453,7 +453,7 @@ def _masked_evaluation_side_kind(
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
     ``failure_kind`` is registered, or namespaced with the ``retry`` action its owner recorded and no model
     attribution. The kind is evaluation-side through the shared classifier (or carries a recorded ``retry``), not one
-    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a built-in ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
@@ -485,7 +485,7 @@ def _masked_evaluation_side_kind(
         or not (is_registered(kind) or (is_namespaced(kind) and namespaced_retry))
         or (selected_class != FailureClass.EVALUATION and not retry_declared)
         or kind in _MASKED_REGRADE_KINDS
-        or kind.startswith("transport_")
+        or (not is_namespaced(kind) and kind.startswith("transport_"))
     ):
         return None
     return kind
@@ -503,7 +503,7 @@ def masked_infrastructure_kind(
     attempt and a later attempt supersedes it. A recorded ``retry`` is honored for a registered kind whatever its
     attribution, but for a namespaced kind only when it is not attributed to the model. A model-class kind, no kind,
     an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
-    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a built-in ``transport_*`` verify call) keep the
     masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its
     verifier could grade of it.
     """
