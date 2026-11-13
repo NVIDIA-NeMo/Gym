@@ -4,10 +4,14 @@
 config_paths:
   - benchmarks/opencode_multimodal_benchmarks/agentx/config.yaml
   - benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml
+  - benchmarks/opencode_multimodal_benchmarks/agentx/web_filter.yaml
 visual_agent:
   responses_api_agents:
     opencode_agent:
       network_access: inherit
+      sandbox_config:
+        env:
+          OPENCODE_ENABLE_EXA: "true"
       opencode_config:
         permission:
           webfetch: allow

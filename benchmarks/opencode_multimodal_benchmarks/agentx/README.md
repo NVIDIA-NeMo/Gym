@@ -90,9 +90,37 @@ Configure `webfetch` and `websearch` independently under the pairing's
 `visual_agent.responses_api_agents.opencode_agent.opencode_config.permission`
 using `allow` or `deny`.
 Both tools are allowed in this pairing, with `network_access: inherit`.
+The preset also sets `OPENCODE_ENABLE_EXA=true` in the sandbox to expose native
+WebSearch; allowing its permission alone does not activate it in OpenCode 1.17.11.
 Bash and Python retain the sandbox's existing network access as well. Denying a
 web tool prevents its use; it does not change sandbox egress. Record
 both the network policy and tool settings with the score.
+
+The pairing also loads the benchmark-local
+[`web_filter.yaml`](web_filter.yaml)
+overlay. Its JavaScript and JSON policy are staged with the existing
+`sandbox_config.files` mechanism and loaded through the stock agent's `plugins`
+setting. The same overlay is inherited by [`training.yaml`](training.yaml).
+There are no changes to the shared agent, tool transports, judge or reward logic.
+
+This is **best-effort answer-source filtering**, not network isolation. The plugin
+blocks known Agent-X source URLs and narrow benchmark identifiers in native
+WebSearch/WebFetch requests and Bash commands. It checks returned text, titles
+and metadata; matching results become `No content available.`. For truncated
+output it also scans the full saved file and overwrites rejected content before
+returning the tool result. Clean results and native execution behavior are retained.
+The policy never contains the task's reference answer. `[gym-web-filter]` records
+in the OpenCode stderr log identify load events and blocked calls by tool, phase
+and rule index without copying queries, URLs or page content into the log.
+
+Unlisted mirrors, dynamically constructed URLs, encoded content, shell-created
+files and concurrent reads can bypass this filter. It does not inspect arbitrary
+files or all network traffic, and OpenCode may persist internal execution records
+before the result hook. The filter is tested against the pinned OpenCode 1.17.11;
+recheck hook behavior when upgrading. Record the policy and enabled state with
+results; earlier unfiltered evaluations are a different setup. To disable this
+overlay's plugin explicitly, override
+`visual_agent.responses_api_agents.opencode_agent.plugins=[]`.
 
 The OpenCode pairing uses the stock agent, shared media staging and
 `single_agent_turn`. Its evaluation overlay disables token capture and auxiliary
