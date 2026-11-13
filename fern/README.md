@@ -1,14 +1,10 @@
 # NeMo Gym — Fern Docs
 
-This directory holds the Fern MDX source for the NeMo Gym documentation site at **[docs.nvidia.com/nemo/gym](https://docs.nvidia.com/nemo/gym)**.
+This directory holds the source for the NeMo Gym documentation site, [docs.nvidia.com/nemo/gym](https://docs.nvidia.com/nemo/gym).
 
-**How to write, preview, check and publish pages is in the [`nemo-gym-docs` skill](../.agents/skills/nemo-gym-docs/SKILL.md).** It is the single source for docs conventions and commands, for people and coding agents alike. This README only covers the one-time setup a person has to do.
+This README covers only setting up your machine to preview the docs locally. For how to write, check and publish pages, follow the [`nemo-gym-docs` skill](../.agents/skills/nemo-gym-docs/SKILL.md), which people and coding agents both use.
 
-## Do you need setup at all?
-
-No, to contribute a page. Edit MDX under `fern/versions/latest/pages/` and open a PR; CI checks it and comments a preview URL.
-
-Yes, to preview locally with the Python API reference (`make docs`). That needs a Fern account in the `nvidia` org.
+You don't need local setup to contribute. Edit pages under `fern/versions/latest/pages/` and open a PR: CI checks your changes and comments a link to a preview of the site.
 
 ## One-time local setup
 
@@ -26,11 +22,7 @@ make docs-login   # or `make docs-login-remote` on a headless remote machine
 make docs
 ```
 
-`make docs-login` is required. Without it, `fern docs md generate` returns `HTTP 403: User does not belong to organization`: `fern login` alone is not enough, because Fern needs you to sign in to the dashboard first so your account exists.
-
-## Getting `nvidia` org access
-
-External contributors do not need it; use the CI preview. If you need local library generation and hit the 403, [open a GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) titled `Fern nvidia org access request` (label `community-request` if available). NVIDIA employees can also ask in the `#fern` Slack channel.
+Local preview builds the Python API reference, which needs a Fern account in the `nvidia` org. Run `make docs-login` first. It signs you in to the Fern dashboard before running `fern login`; `fern login` alone is not enough, and `fern docs md generate` then fails with `HTTP 403: User does not belong to organization`.
 
 ## Maintainer secrets
 
