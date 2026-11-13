@@ -1280,7 +1280,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         The files go to <episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/, emptied first, so a
         retried episode never finds an earlier attempt's files there. The copy is evidence about the run, not part of
         its grade: one that fails, runs past _EXPORT_COPY_TIMEOUT_S or is refused is logged and reported, never raised,
-        and a copy that did not finish keeps no file.
+        and one that fails or runs out of time keeps no file, unless its verify is cancelled mid-copy.
         """
         sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
         identity = self.session_identity(session_id)
