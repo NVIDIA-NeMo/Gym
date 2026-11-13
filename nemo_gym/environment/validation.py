@@ -311,7 +311,12 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
     agent_server = _implementation_name(selected_agent)
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     owner = wiring.dataset_rs if wiring.dataset_rs is not None else selected_agent
-    datasets = tuple(_manifest_dataset(dataset) for dataset in (owner.datasets or []))
+    # Dataset models retain interpolation text; resolve declarations in their owning config context.
+    declared = owner.get_inner_run_server_config_dict().get("datasets") or []
+    datasets = tuple(
+        _manifest_dataset(type(dataset).model_validate(OmegaConf.to_container(raw, resolve=True)))
+        for dataset, raw in zip(owner.datasets or [], declared, strict=True)
+    )
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")

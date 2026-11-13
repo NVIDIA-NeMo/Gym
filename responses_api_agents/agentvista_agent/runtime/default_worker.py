@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 from copy import deepcopy
@@ -16,6 +17,7 @@ from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
 from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.scoring import score
+from responses_api_agents.agentvista_agent.runtime.source import verify_source
 
 
 def _gym_messages(messages: list[dict]) -> list[dict]:
@@ -29,6 +31,23 @@ def _gym_messages(messages: list[dict]) -> list[dict]:
                     if isinstance(call.get("function"), dict):
                         call["function"].pop("index", None)
     return copied
+
+
+def _native_reply(reply: object) -> object:
+    """Remove Gym's inline reasoning envelope before the upstream answer/tool parser."""
+    if isinstance(reply, dict):
+        reply = {key: value for key, value in reply.items() if key != "function_call" or value is not None}
+    text = reply if isinstance(reply, str) else reply.get("content") if isinstance(reply, dict) else None
+    if not isinstance(text, str):
+        return reply
+    match = re.match(r"\s*<think>(.*?)</think>", text, re.DOTALL)
+    if not match:
+        # An interrupted reasoning block is never a final answer, even if it contains answer tags.
+        if re.match(r"\s*<think>", text):
+            return "" if isinstance(reply, str) else {**reply, "content": ""}
+        return reply
+    content = text[match.end() :]
+    return content if isinstance(reply, str) else {**reply, "content": content, "reasoning_content": match.group(1)}
 
 
 def run(config: dict) -> dict:
@@ -50,7 +69,12 @@ def run(config: dict) -> dict:
 
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
+        result["failure_kind"] = "agentvista:setup"
+        for key in ("VERIFIER_API_KEY", "VERIFIER_END_POINT", "VERIFIER_MODEL_NAME"):
+            if not os.environ.get(key):
+                raise ValueError(f"Missing judge environment variable: {key}")
         source = Path(config["source_root"]).resolve(strict=True)
+        result["source_provenance"] = verify_source(source)
         sys.path.insert(0, str(source))
         task = inventory(config["dataset"], config["image_folder"], config.get("task_selector", "all"))[
             config["task_id"]
@@ -76,7 +100,7 @@ def run(config: dict) -> dict:
         original_policy = api_model_caller.call_vision_api
 
         def gym_policy(model_name, messages, *args, **kwargs):
-            return original_policy(model_name, _gym_messages(messages), *args, **kwargs)
+            return _native_reply(original_policy(model_name, _gym_messages(messages), *args, **kwargs))
 
         api_model_caller.call_vision_api = gym_policy
 
@@ -90,8 +114,8 @@ def run(config: dict) -> dict:
             image_folder=config["image_folder"],
             inference_prompts_path=str(source / "prompts/inference_prompts.yaml"),
             system_prompt_key="multi_tool_agent_search",
-            max_turns=config.get("default_max_turns", 16),
-            max_images=config.get("default_max_images", 16),
+            max_turns=config.get("default_max_turns", 30),
+            max_images=config.get("default_max_images", 100),
             max_total_tokens=config.get("context_tokens", 65536),
             max_pixels=2000000,
             min_pixels=40000,
@@ -122,6 +146,7 @@ def run(config: dict) -> dict:
             "top_p": config.get("top_p", 1.0),
             "max_tokens": config.get("output_tokens", 8192),
         }
+        result["failure_kind"] = "agentvista:execution"
         original = api_processors.process_single_sample(task["record"], args, sampling)
         if original is None:
             raise RuntimeError("Original AgentVista harness returned no result")
@@ -141,6 +166,7 @@ def run(config: dict) -> dict:
             result["failure_kind"] = "agentvista:verifier"
             raise RuntimeError("Original answer judge did not complete: " + "; ".join(judge_errors))
         verdict = verdicts[0]
+        result.pop("failure_kind", None)
         result.update(
             verify=verdict,
             reward=verdict["reward"],

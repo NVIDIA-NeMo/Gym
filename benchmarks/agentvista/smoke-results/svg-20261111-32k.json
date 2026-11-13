@@ -2,7 +2,6 @@
   "scope": "Integration and execution evidence. Different harness limits and incomplete scoring prohibit treating these as comparable certified benchmark scores. No training qualification.",
   "observed_at": "2026-11-11T22:09:00.004210+00:00",
   "gym_runtime_and_composer_commit": "10f5459ed8c33f527c61f577488e1747e9e1cb7c",
-  "factory_commit": "794bd75abf5496c3a72801a81f35b41d050c705d",
   "original_source_commit": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
   "image_sha256": "d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5",
   "dataset_sha256": "0b9b973e9f9d23bd76cb431809f3f263bd4c2053d21ad1710259a0f6c2e6b54f",
@@ -34,13 +33,11 @@
       "agentvista-023",
       "agentvista-024"
     ],
-    "launch_mode": "Two-node allocations around Factory-resolved, Gym-rendered native jobs. Each node runs its own 13/12-task shard; no additional actor reruns.",
     "cases": [
       {
         "case": "super-default",
         "harness": "default",
-        "model": "local-nemotron-super-ga",
-        "slurm_job_id": "2589168",
+        "model": "local-policy",
         "slurm_state": "COMPLETED",
         "exit_code": "0:0",
         "collected": 25,
@@ -48,11 +45,6 @@
         "masked": 0,
         "passes": 7,
         "mean_over_scored": 0.28,
-        "nodes": 2,
-        "tasks_per_node": [
-          13,
-          12
-        ],
         "concurrency_per_node": 4,
         "configured_output_tokens": 32768,
         "actor_context_tokens": 65536,
@@ -75,8 +67,7 @@
       {
         "case": "kimi-opencode",
         "harness": "opencode",
-        "model": "nvidia/moonshotai/kimi-k3",
-        "slurm_job_id": "2589398",
+        "model": "hosted-policy",
         "slurm_state": "COMPLETED",
         "exit_code": "0:0",
         "collected": 25,
@@ -84,11 +75,6 @@
         "masked": 1,
         "passes": 11,
         "mean_over_scored": 0.4583333333333333,
-        "nodes": 2,
-        "tasks_per_node": [
-          13,
-          12
-        ],
         "concurrency_per_node": 4,
         "configured_output_tokens": 32768,
         "actor_context_tokens": 65536,
@@ -112,8 +98,7 @@
       {
         "case": "kimi-default",
         "harness": "default",
-        "model": "nvidia/moonshotai/kimi-k3",
-        "slurm_job_id": "2592202",
+        "model": "hosted-policy",
         "slurm_state": "COMPLETED",
         "exit_code": "0:0",
         "collected": 25,
@@ -121,11 +106,6 @@
         "masked": 0,
         "passes": 12,
         "mean_over_scored": 0.48,
-        "nodes": 2,
-        "tasks_per_node": [
-          13,
-          12
-        ],
         "concurrency_per_node": 4,
         "configured_output_tokens": 32768,
         "actor_context_tokens": 65536,
@@ -148,13 +128,6 @@
     ]
   },
   "super_opencode_full209": {
-    "launch_mode": "Normal Factory CLI submit and Gym native execution; four independent one-node batch jobs.",
-    "slurm_jobs": [
-      "2579675",
-      "2581161",
-      "2581169",
-      "2581179"
-    ],
     "all_jobs_completed_exit_zero": true,
     "collected": 209,
     "scored": 184,
@@ -168,10 +141,5 @@
     "actor_context_tokens": 65536,
     "episode_artifacts_missing": []
   },
-  "operational_notes": {
-    "opencode_cap": "OpenCode sent max_tokens=32000 with configured output_tokens=32768; the local startup gate was corrected to accept the observed cap. The provider accepted those requests.",
-    "cpu_admission": "cpu-short MaxSubmitPU=4. Rejected submissions created no jobs; Kimi default was admitted later after stable capacity. No completed tasks were rerun.",
-    "gpu_policy": "The two-node Super matrix wrapper acknowledged all 16 GPU monitors before model startup, enforced a 20-minute readiness budget and 25-minute per-GPU idle cancellation with fail-closed telemetry. These are site wrapper checks, not a generic renderer capability.",
-    "original_8k_run": "Retained unchanged: 209 collected, 188 scored, 21 old-worker masked reasoning-only length endings."
-  }
+  "qualification": "Historical harness 2.1.1 execution audit only; superseded by review fixes. Not valid benchmark-accuracy evidence for harness 3.0.0."
 }

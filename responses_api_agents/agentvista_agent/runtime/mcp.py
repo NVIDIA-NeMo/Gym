@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
-# Original file: agentvista_harness/mcp.py
 """Expose the four original tools, with an episode-local kernel/image registry."""
 
 import asyncio
@@ -124,10 +121,12 @@ async def serve(config: dict) -> None:
 
     @server.list_tools()
     async def list_tools():
-        return [
+        tools = [
             Tool(name=item["name"], description=item["description"], inputSchema=item["parameters"])
             for item in schemas
         ]
+        (session.output / "tools_listed").write_text(json.dumps([tool.name for tool in tools]))
+        return tools
 
     @server.call_tool()
     async def call_tool(name, arguments):

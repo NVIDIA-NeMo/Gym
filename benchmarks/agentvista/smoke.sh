@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 : "${AGENTVISTA_SMOKE_OUTPUT:?Set a new workspace output directory}"
-: "${AGENTVISTA_SUPER_URL:?Set the existing Super server base URL ending in /v1}"
+: "${AGENTVISTA_SUPER_URL:?Set the existing local server base URL ending in /v1}"
 : "${AGENTVISTA_ROOT:?Set the verified original source path}"
 : "${AGENTVISTA_WORKER_PYTHON:?Set the worker interpreter}"
 : "${AGENTVISTA_OPENCODE:?Set the pinned CLI path}"
@@ -17,6 +17,9 @@ umask 077
 : "${AGENTVISTA_VISIT_API_KEY:?Configure the fixed webpage summarizer}"
 : "${AGENTVISTA_VISIT_API_ENDPOINT:?Configure the fixed webpage summarizer URL}"
 : "${AGENTVISTA_VISIT_MODEL_NAME:?Configure the fixed webpage summarizer model}"
+: "${AGENTVISTA_SUPER_MODEL:?Set the local served-model name}"
+: "${AGENTVISTA_HOSTED_URL:?Set the hosted policy base URL ending in /v1}"
+: "${AGENTVISTA_HOSTED_MODEL:?Set the hosted policy model name}"
 export PYTHONDONTWRITEBYTECODE=1 AGENTVISTA_TASKS=agentvista-000
 mkdir "$AGENTVISTA_SMOKE_OUTPUT"
 export XDG_CACHE_HOME="$AGENTVISTA_SMOKE_OUTPUT/storage/cache"
@@ -33,11 +36,11 @@ mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 for model in super kimi; do
   if [[ "$model" == super ]]; then
     endpoint="$AGENTVISTA_SUPER_URL"
-    served_model=nemotron-super-ga
+    served_model="$AGENTVISTA_SUPER_MODEL"
     export AGENTVISTA_POLICY_API_KEY=EMPTY
   else
-    endpoint=https://inference-api.nvidia.com/v1
-    served_model=nvidia/moonshotai/kimi-k3
+    endpoint="$AGENTVISTA_HOSTED_URL"
+    served_model="$AGENTVISTA_HOSTED_MODEL"
     export AGENTVISTA_POLICY_API_KEY="$INFERENCE_API_KEY"
   fi
   for harness in default opencode; do

@@ -4,17 +4,14 @@
   "original_source_commit": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
   "dataset_revision": "61de767ad8c72e258ac71a0aef952b89ca920a16",
   "image": {
-    "path": "/lustre/fsw/portfolios/nemotron/users/pritamb/gameplay_home/vlm_eval/saas_bench_assets/serving_containers/agentvista-eval-default-opencode-1.17.11-svg-amd64.sqsh",
-    "sha256": "d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5",
-    "build_job": "2570639"
+    "sha256": "d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5"
   },
   "cases": [
     {
       "case": "default-super-ga",
       "harness": "default",
-      "model": "local-nemotron-super-ga",
+      "model": "local-policy",
       "worker_gym_commit": "31d141ce165615238d394c72d2249456307fbfaf",
-      "slurm_job_id": "2571363_0",
       "task_id": "agentvista-000",
       "driver_exit_code": 0,
       "rows": 1,
@@ -28,9 +25,8 @@
     {
       "case": "opencode-super-ga",
       "harness": "opencode",
-      "model": "local-nemotron-super-ga",
+      "model": "local-policy",
       "worker_gym_commit": "31d141ce165615238d394c72d2249456307fbfaf",
-      "slurm_job_id": "2571363_1",
       "task_id": "agentvista-000",
       "driver_exit_code": 0,
       "rows": 1,
@@ -44,9 +40,8 @@
     {
       "case": "opencode-kimi-k3-api",
       "harness": "opencode",
-      "model": "nvidia/moonshotai/kimi-k3",
+      "model": "hosted-policy",
       "worker_gym_commit": "31d141ce165615238d394c72d2249456307fbfaf",
-      "slurm_job_id": "2571363_1",
       "task_id": "agentvista-000",
       "driver_exit_code": 0,
       "rows": 1,
@@ -60,9 +55,8 @@
     {
       "case": "default-kimi-k3-api",
       "harness": "default",
-      "model": "nvidia/moonshotai/kimi-k3",
+      "model": "hosted-policy",
       "worker_gym_commit": "4911f14eae91a38319897b94697c208b5d10b16f",
-      "slurm_job_id": "2572709",
       "task_id": "agentvista-000",
       "driver_exit_code": 0,
       "rows": 1,
@@ -76,7 +70,7 @@
   ],
   "validation": {
     "factory_native_collector": "All four runs readable, one expected/collected rollout each; both manifest metrics present. All four have num_scored=1, num_masked=0, num_verifier_errors=0.",
-    "final_default_kimi_launch": "Normal Factory CLI, composer 31d141ce165615238d394c72d2249456307fbfaf, runtime 4911f14eae91a38319897b94697c208b5d10b16f; Slurm COMPLETED 0:0; 8 model calls HTTP 200.",
+    "final_default_kimi_launch": "Historical private execution details retained outside the public repository.",
     "provider_replay_fix": "Removes provider-only index fields from copied tool-call envelopes at the Gym transport boundary. Original recorded history and tool argument strings remain intact.",
     "super_request_equivalence": {
       "calls": 8,
@@ -85,5 +79,6 @@
       "capture_sha256": "e5961f635c2c221581eb1ae46deea4d823032ed0edb9491bd1d83dbfa7ad1de0"
     },
     "earlier_default_kimi_attempt": "Masked after local HTTP 422 from provider tool-call index fields; excluded from scored results. The fresh final case above validates the fix."
-  }
+  },
+  "qualification": "Historical harness 2.1.1 execution audit only; superseded by review fixes. Not valid benchmark-accuracy evidence for harness 3.0.0."
 }

@@ -1815,6 +1815,31 @@ class TestDeclaringInstanceValidation:
         )
         assert [c.name for c in out] == ["my_rs"]
 
+    def test_unused_train_input_does_not_resolve_missing_environment(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("AGENTVISTA_UNUSED_TRAIN_JSONL", raising=False)
+        example = _dataset(tmp_path, "selected", [{"responses_create_params": {"input": []}}])
+        train = {
+            **example,
+            "name": "unused",
+            "type": "train",
+            "jsonl_fpath": "${oc.env:AGENTVISTA_UNUSED_TRAIN_JSONL}",
+        }
+        selected = self._validate(
+            {
+                "example_path": example["jsonl_fpath"],
+                "fixture_agent": {
+                    "responses_api_agents": {
+                        "impl": {
+                            "entrypoint": "a.py",
+                            "resources_server": {"type": "resources_servers", "name": "fixture_rs"},
+                            "datasets": [{**example, "jsonl_fpath": "${example_path}"}, train],
+                        }
+                    }
+                },
+            }
+        )
+        assert selected[0].get_inner_run_server_config().datasets[0].jsonl_fpath == example["jsonl_fpath"]
+
     def test_model_server_datasets_rejected(self, tmp_path) -> None:
         d = _dataset(tmp_path, "d5", [{"responses_create_params": {"input": []}}])
         with raises(ValueError, match="cannot be declared on model servers"):

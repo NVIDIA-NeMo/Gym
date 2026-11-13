@@ -231,6 +231,8 @@ def _render_service_command(
     # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
     # lose a task while its srun stays alive and the driver's watch sees nothing.
     step_flags = " --kill-on-bad-exit=1 --wait=1" if end_step_on_task_exit else ""
+    # Some sites validate each step against the user default account unless it is explicit.
+    # Use the owning allocation account consistently for services, telemetry and drivers.
     account_flag = f" --account={shlex.quote(account)}" if account else ""
     return (
         f"# service: {name}\n"

@@ -16,8 +16,8 @@ agentvista_agent:
       output_root: ${agentvista_output_root}
       worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON}
       harness: ${oc.select:agentvista_harness,opencode}
-      default_max_turns: ${oc.select:agentvista_default_max_turns,16}
-      default_max_images: ${oc.select:agentvista_default_max_images,16}
+      default_max_turns: ${oc.select:agentvista_default_max_turns,30}
+      default_max_images: ${oc.select:agentvista_default_max_images,100}
       command: ${oc.env:AGENTVISTA_OPENCODE,opencode}
       opencode_version: 1.17.11
       concurrency: ${oc.select:agentvista_concurrency,1}
@@ -41,4 +41,4 @@ agentvista_environment_server:
       agent_server:
         type: responses_api_agents
         name: agentvista_agent
-      default_episode_timeout_seconds: 6120
+      default_episode_timeout_seconds: null

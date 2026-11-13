@@ -1,7 +1,3 @@
-# Reference: https://gitlab-master.nvidia.com/pritamb/saas-bench
-# Base revision: ad48579c1af66bb7100501f45460bb3e9ec5eaae (Apache-2.0).
-# Source: saas_bench/opencode/core.py; local reference file SHA-256:
-# c951f983457b09d884c89a05cd78e8d3a37494acc73892cfc860ee330d76c059
 """Native OpenCode events to Gym typed items. Adapted from SaaS harness 2.1.1."""
 
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

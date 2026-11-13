@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: agentvista
+version: 3.0.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: other
+description: AgentVista visual search and Python tasks, using the pinned original tools and answer judge with separate original-loop and OpenCode evaluation protocols.
+modality: multimodal
+licensing: CC-BY-4.0
+authors:
+- NVIDIA
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: null
+agent_server: agentvista_agent
+model_server: policy_model
+datasets:
+- name: agentvista
+  type: benchmark
+  jsonl_fpath: benchmarks/agentvista/data/agentvista_benchmark.jsonl
+  prepare_script: benchmarks/agentvista/prepare.py
+  num_repeats: 1
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

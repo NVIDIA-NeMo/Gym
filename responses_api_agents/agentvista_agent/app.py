@@ -1,9 +1,3 @@
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
-# Reference: https://gitlab-master.nvidia.com/pritamb/saas-bench
-# Base revision: ad48579c1af66bb7100501f45460bb3e9ec5eaae (Apache-2.0).
-# Source: integrations/gym/responses_api_agents/saas_bench_agent/app.py; local reference file SHA-256:
-# 8969ea961206540749eedd6dcfe1f86b42418651cb2b1482bf7d401c45e17da9
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Gym run endpoint for isolated original-harness and OpenCode AgentVista episodes."""
@@ -24,23 +18,18 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    maybe_rollout_id_from_run_body,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 
 
@@ -54,14 +43,16 @@ class AgentVistaConfig(BaseResponsesAPIAgentConfig):
     output_root: str
     worker_python: str | None = None
     harness: Literal["opencode", "default"] = "opencode"
-    default_max_turns: int = Field(default=16, ge=1)
-    default_max_images: int = Field(default=16, ge=1)
+    default_max_turns: int = Field(default=30, ge=1)
+    default_max_images: int = Field(default=100, ge=1)
     command: str = "opencode"
     opencode_version: str = "1.17.11"
     concurrency: int = Field(default=1, ge=1)
     max_steps: int = Field(default=150, ge=1)
     context_tokens: int = 65536
     output_tokens: int = 8192
+    temperature: float = 0.0
+    top_p: float = 1.0
     mcp_timeout_ms: int = Field(default=180000, ge=1000)
     agent_timeout: int = Field(default=5400, ge=1)
     episode_timeout: int = Field(default=7200, ge=1)
@@ -83,6 +74,7 @@ class AgentVistaVerifyResponse(BaseVerifyResponse):
     execution_health: dict = Field(default_factory=dict)
     harness_version: str | None = None
     verifier_diagnostics: dict = Field(default_factory=dict)
+    judge_response: str | None = None
     execution_error: str | None = None
 
 
@@ -164,6 +156,16 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                     )
                 return self._response(body, json.loads(result_path.read_text()))
             config = self.config.model_dump()
+            # Row sampling controls from the public CLI override the configured defaults.
+            sampling = body.responses_create_params
+            for name, target in (
+                ("temperature", "temperature"),
+                ("top_p", "top_p"),
+                ("max_output_tokens", "output_tokens"),
+            ):
+                value = getattr(sampling, name, None)
+                if value is not None:
+                    config[target] = value
             config.update(
                 output=str(output),
                 task_id=body.verifier_metadata["task_id"],
@@ -289,7 +291,9 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
                 "native_trajectory": native,
                 "execution_health": result.get("execution_health", {}),
                 "harness_version": result.get("harness_version"),
-                "verifier_diagnostics": result.get("verifier_diagnostics", {}),
+                "source_provenance": result.get("source_provenance", {}),
+                "verifier_diagnostics": result.get("verify", {}),
+                "judge_response": result.get("verify", {}).get("analysis"),
                 "task_success": result.get("task_success"),
                 "reward_kind": "llm_judged",
                 "deterministically_verified": False,
@@ -319,9 +323,13 @@ class AgentVistaAgent(SimpleResponsesAPIAgent):
             )
         if valid:
             metrics["agentvista/mean_score"] = sum(r["reward"] for r in valid) / len(valid)
-            metrics["agentvista/pass_rate"] = sum(r["verify_status"] == "PASS" for r in valid) / len(valid)
-            for domain in sorted({r["category_id"] for r in valid}):
-                subset = [r for r in valid if r["category_id"] == domain]
+            metrics["agentvista/pass_rate"] = sum(r.get("verify_status") == "PASS" for r in valid) / len(valid)
+            domains = [
+                (r.get("verifier_metadata") or {}).get("category_id", r.get("category_id", "agentvista"))
+                for r in valid
+            ]
+            for domain in sorted(set(domains)):
+                subset = [r for r, row_domain in zip(valid, domains, strict=True) if row_domain == domain]
                 metrics[f"agentvista/{domain}/mean_score"] = sum(r["reward"] for r in subset) / len(subset)
         return AggregateMetrics(
             agent_metrics=metrics,

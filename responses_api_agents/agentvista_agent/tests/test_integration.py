@@ -1,44 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
 """Validate adapters against actual Gym schemas; no hosted inference or GPU work."""
 
 import asyncio
 import hashlib
 import json
-import os
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-
-pytest.importorskip("nemo_gym")
-if not os.environ.get("AGENTVISTA_ROOT"):
-    pytest.skip("Set AGENTVISTA_ROOT to run the external benchmark integration contracts", allow_module_level=True)
-ROOT = Path(os.environ["AGENTVISTA_ROOT"]).resolve()
-sys.path.insert(0, str(ROOT))
-from nemo_gym.base_resources_server import AggregateMetricsRequest
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from responses_api_agents.agentvista_agent.app import (
     AgentVistaAgent,
     AgentVistaConfig,
     AgentVistaRunRequest,
 )
-from responses_api_agents.agentvista_agent.training import AgentVistaTrainingAgent
+from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION
 
 
 @pytest.fixture
 def agent(tmp_path):
+    (tmp_path / "infer.py").write_text("")
     config = AgentVistaConfig(
         host="127.0.0.1",
         port=1234,
         entrypoint="app.py",
         name="agentvista_test",
-        source_root=str(ROOT),
+        source_root=str(tmp_path),
         dataset=str(tmp_path / "tasks.json"),
         image_folder=str(tmp_path),
         output_root=str(tmp_path / "episodes"),
@@ -57,7 +47,7 @@ def request(identity="repeat-0", task="fixture"):
                 "task_id": task,
                 "source_sha256": "hash",
                 "category_id": "test",
-                "harness_version": "2.1.1",
+                "harness_version": HARNESS_VERSION,
             },
         }
     )
@@ -97,6 +87,28 @@ def test_real_gym_tool_transcript_and_measured_zero(agent):
 
 
 @pytest.mark.asyncio
+async def test_judge_evidence_and_counted_zero_rows_are_retained(agent):
+    value = result()
+    value["verify"] = {
+        "status": "PASS",
+        "reward": 1.0,
+        "prediction": "42",
+        "analysis": "Score: 1",
+        "model": "fixture-judge",
+    }
+    response = agent._response(request(), value)
+    assert response.verifier_diagnostics == value["verify"]
+    assert response.judge_response == "Score: 1"
+    # The collector's counted failures retain task fields but have no verifier-produced fields.
+    zero = {"reward": 0.0, "mask_sample": False, "verifier_metadata": {"category_id": "test"}}
+    metrics = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[response.model_dump(), zero]))
+    assert metrics.agent_metrics["agentvista/num_scored"] == 2
+    assert metrics.agent_metrics["agentvista/mean_score"] == 0.5
+    assert metrics.agent_metrics["agentvista/pass_rate"] == 0.5
+    assert metrics.agent_metrics["agentvista/test/mean_score"] == 0.5
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion_keeps_judged_zero_and_explicit_metrics(agent):
     value = result()
     value["native_trajectory"] = []
@@ -127,7 +139,7 @@ async def test_cached_rollout_retry_does_not_rerun_actor(agent):
             {
                 "request": body.model_dump(),
                 "config": agent.config.model_dump(),
-                "harness_version": "2.1.1",
+                "harness_version": HARNESS_VERSION,
             },
             sort_keys=True,
         ).encode()
@@ -164,64 +176,24 @@ async def test_episode_output_stays_in_mounted_path(agent, monkeypatch, tmp_path
     assert observed == [mounted / "episodes" / hashlib.sha256(b"repeat-0").hexdigest()]
 
 
-def test_training_terminal_is_witnessed_and_absence_masks(agent, tmp_path):
-    from types import SimpleNamespace
-
-    training = object.__new__(AgentVistaTrainingAgent)
-    object.__setattr__(
-        training,
-        "config",
-        SimpleNamespace(training_capture_root=str(tmp_path), model_name="fixture", harness="opencode"),
-    )
-    journal = tmp_path / (hashlib.sha256(b"repeat-0").hexdigest() + ".jsonl")
-    journal.write_text(
-        json.dumps(
-            {
-                "rollout_id": "repeat-0",
-                "response": {
-                    "id": "served-terminal",
-                    "choices": [{"message": {"content": "<answer>42</answer>"}}],
-                },
-            }
-        )
-        + "\n"
-    )
-    response = training._response(request(), result())
-    assert response.terminal_response_id == "served-terminal" and response.mask_sample is False
-    journal.unlink()
-    assert training._response(request(), result()).mask_sample is True
-
-
-@pytest.mark.parametrize("training", [False, True])
-def test_actual_gym_http_model_route_and_sampling_capture(tmp_path, monkeypatch, training):
+def test_actual_gym_http_model_route_and_sampling_capture(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from omegaconf import OmegaConf
 
-    import nemo_gym.global_config as global_config
-    from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, BaseServerConfig
-    from nemo_gym.openai_utils import NeMoGymChatCompletion
+    import nemo_gym.config.global_config as global_config
+    from nemo_gym.config import ROLLOUT_PATH_PREFIX, BaseServerConfig
+    from nemo_gym.core import NeMoGymChatCompletion
     from responses_api_models.vllm_model.agentvista_opencode import AgentVistaOpenCodeModel
-    from responses_api_models.vllm_model.agentvista_training import AgentVistaTrainingModel
     from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
     cfg = OmegaConf.create(
         {
             "observability_enabled": True,
             "model_call_capture_dir": str(tmp_path / "captures"),
-            "agentvista_training_capture_root": str(tmp_path),
         }
     )
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", cfg)
     identity = "episode-fixture"
-    journal = tmp_path / (hashlib.sha256(identity.encode()).hexdigest() + ".request.json")
-    journal.write_text(
-        json.dumps(
-            {
-                "rollout_id": identity,
-                "sampling": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 512},
-            }
-        )
-    )
     seen = []
 
     async def complete(self, request, body):
@@ -268,8 +240,7 @@ def test_actual_gym_http_model_route_and_sampling_capture(tmp_path, monkeypatch,
         return_token_id_information=False,
         uses_reasoning_parser=False,
     )
-    cls = AgentVistaTrainingModel if training else AgentVistaOpenCodeModel
-    policy = cls(config=model_config, server_client=client)
+    policy = AgentVistaOpenCodeModel(config=model_config, server_client=client)
     with TestClient(policy.setup_webserver()) as api:
         response = api.post(
             f"/{ROLLOUT_PATH_PREFIX}/{identity}/v1/chat/completions",
@@ -295,10 +266,6 @@ def test_actual_gym_http_model_route_and_sampling_capture(tmp_path, monkeypatch,
         payload = response.json()
         assert payload["choices"][0]["message"]["reasoning_content"] == "reasoning"
         assert payload["choices"][0]["message"]["tool_calls"][0]["id"] == "call-fixture"
-    if training:
-        assert seen[0]["temperature"] == 0.7 and seen[0]["max_tokens"] == 512
-        capture = json.loads(journal.with_name(journal.name.replace(".request.json", ".jsonl")).read_text())
-        assert capture["rollout_id"] == identity and capture["response"]["id"] == "served-fixture"
     assert list((tmp_path / "captures").rglob("*.json*"))
 
 
@@ -306,7 +273,7 @@ def test_actual_gym_http_model_route_and_sampling_capture(tmp_path, monkeypatch,
 def test_default_tool_history_replays_through_gym_without_changing_capture(stream_indices):
     from pydantic import ValidationError
 
-    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
     from responses_api_agents.agentvista_agent.runtime.default_worker import _gym_messages
 
     call = {"id": "call-fixture", "type": "function", "function": {"name": "index_tool", "arguments": '{"index":7}'}}

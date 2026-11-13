@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,23 +27,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("base-image", "python-distribution", "opencode", "uv", "source", "work-dir", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--opencode-sha256", required=True)
     args = parser.parse_args()
-    gym = Path(__file__).resolve().parents[3]
     work, output = args.work_dir.resolve(), args.output.resolve()
+    homes = {Path("/root"), Path.home(), Path(pwd.getpwuid(os.getuid()).pw_dir)}
     for path in (work, output):
-        if any(path.is_relative_to(home) for home in ("/root", "/home/pritamb")):
+        if any(path.is_relative_to(home) for home in homes):
             raise ValueError("Image build artifacts and caches must reside in the workspace")
     if output.exists():
         raise FileExistsError(output)
     work.mkdir(parents=True, exist_ok=False)
     output.parent.mkdir(parents=True, exist_ok=True)
-    pin = json.loads((gym / "benchmarks/agentvista/source-pin.json").read_text())
+    pin = json.loads((Path(__file__).parents[1] / "runtime/source-pin.json").read_text())
     for name, expected in pin["files"].items():
         if digest(args.source / name) != expected:
             raise ValueError(f"Original benchmark source differs from pin: {name}")
     version = subprocess.check_output([str(args.opencode), "--version"], text=True).strip()
     if version != "1.17.11":
         raise ValueError("The shared image requires OpenCode CLI 1.17.11")
+    if not re.fullmatch(r"[a-f0-9]{64}", args.opencode_sha256) or digest(args.opencode) != args.opencode_sha256:
+        raise ValueError("OpenCode binary does not match the trusted input SHA-256")
     env = dict(os.environ, ENROOT_MOUNT_HOME="no", ENROOT_LOGIN_SHELL="no", NVIDIA_VISIBLE_DEVICES="void")
     for key in ("DATA", "RUNTIME", "CACHE", "CONFIG", "TEMP"):
         folder = work / ("enroot-" + key.lower())
@@ -80,10 +85,9 @@ def main() -> None:
     install.write_text(
         "#!/bin/bash\nset -euo pipefail\n"
         "/opt/agentvista/bin/uv venv --python /opt/agentvista-python/bin/python3.13 /opt/agentvista-worker\n"
-        "/opt/agentvista/bin/uv pip install --python /opt/agentvista-worker/bin/python "
-        "--index-url https://download.pytorch.org/whl/cpu torch==2.8.0 torchvision==0.23.0\n"
-        "/opt/agentvista/bin/uv pip install --python /opt/agentvista-worker/bin/python "
-        "-r /opt/agentvista/requirements-worker.txt\n"
+        "/opt/agentvista/bin/uv --no-config pip install --python /opt/agentvista-worker/bin/python "
+        "--index-strategy unsafe-best-match --require-hashes -r /opt/agentvista/requirements-worker.txt\n"
+        "/opt/agentvista/bin/uv pip freeze --python /opt/agentvista-worker/bin/python > /opt/agentvista/installed-packages.txt\n"
         "/opt/agentvista-worker/bin/python -c 'import qwen_vl_utils,torch,jupyter_client,ipykernel,mcp'\n"
         "PYTHONPATH=/opt/agentvista/source /opt/agentvista-worker/bin/python -c "
         "'import infer; from tools import list_tools; "
@@ -97,10 +101,11 @@ def main() -> None:
             "--rw",
             "--mount",
             f"{work}:{work}:none:rbind,rw",
-            "--mount",
-            f"{empty_home}:/root:none:bind,ro,x-create=dir",
-            "--mount",
-            f"{empty_home}:/home/pritamb:none:bind,ro,x-create=dir",
+            *[
+                argument
+                for home in sorted(homes)
+                for argument in ("--mount", f"{empty_home}:{home}:none:bind,ro,x-create=dir")
+            ],
             "agentvista",
             "env",
             "PYTHONDONTWRITEBYTECODE=1",
@@ -123,6 +128,8 @@ def main() -> None:
         "opencode_version": version,
         "opencode_sha256": digest(args.opencode),
         "requirements_sha256": digest(Path(__file__).parents[1] / "requirements-worker.txt"),
+        "installed_packages_sha256": digest(rootfs / "opt/agentvista/installed-packages.txt"),
+        "installed_packages": (rootfs / "opt/agentvista/installed-packages.txt").read_text().splitlines(),
         "worker_python": "/opt/agentvista-worker/bin/python",
         "import_check_passed": True,
         "live_evaluation_validated": False,

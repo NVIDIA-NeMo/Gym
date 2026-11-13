@@ -1,5 +1,3 @@
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Restore Gym's reasoning field convention for the unchanged OpenCode client."""
@@ -8,11 +6,11 @@ import re
 
 from fastapi import Body, Request
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
 

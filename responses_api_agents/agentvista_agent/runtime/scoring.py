@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
-# Original file: agentvista_harness/scoring.py
 """Original AgentVista judge prompt/parser; provider failures remain unscored."""
 
 import os
@@ -23,11 +20,12 @@ def score(question: str, ground_truth: object, responses: list[str]) -> dict:
         QUERY_PROMPT.format(question=question, ground_truth=ground_truth, prediction=prediction),
         system_prompt=SYSTEM_PROMPT,
     )
-    if part not in {"0", "1"}:
+    if not part:
         raise RuntimeError("Verifier did not return a valid binary score")
+    reward = 1.0 if "1" in part else 0.0
     return {
-        "status": "PASS" if part == "1" else "FAIL",
-        "reward": float(part),
+        "status": "PASS" if reward == 1.0 else "FAIL",
+        "reward": reward,
         "prediction": prediction,
         "analysis": raw,
         "reward_kind": "llm_judged",

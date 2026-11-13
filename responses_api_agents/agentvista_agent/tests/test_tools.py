@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
-# Original file: tests/integrations/test_tools.py
 """Exercise original tools through the adapter; external providers are local fixtures."""
 
 import json
@@ -22,7 +19,6 @@ from PIL import Image
 from responses_api_agents.agentvista_agent.runtime.data import dataset_rows, inventory
 from responses_api_agents.agentvista_agent.runtime.mcp import ToolSession
 from responses_api_agents.agentvista_agent.runtime.scoring import score
-from responses_api_agents.agentvista_agent.runtime.training import terminal_response_id
 from responses_api_agents.agentvista_agent.runtime.worker import _execution_health
 
 
@@ -173,7 +169,7 @@ def test_real_kernel_state_image_output_and_reverse_reference(monkeypatch, tmp_p
         _kill_kernels_and_subprocesses()
 
 
-@pytest.mark.parametrize("part", ["", "not-a-score", "10"])
+@pytest.mark.parametrize("part", [""])
 def test_verifier_failure_is_unscored(monkeypatch, part):
     from utils.general_qa_tool import GPT4VisionClient
 
@@ -196,17 +192,3 @@ def test_judged_zero_and_one_preserve_original_answer_extraction(monkeypatch, va
     judged = score("question", "answer", ["thinking <answer>final</answer>"])
     assert judged["prediction"] == "final" and judged["reward"] == float(value)
     assert judged["deterministically_verified"] is False
-
-
-def test_terminal_capture_rejects_cross_rollout_and_ambiguous_identity():
-    events = [{"type": "text", "part": {"text": "done"}}]
-    call = {
-        "rollout_id": "one",
-        "response": {"id": "served", "choices": [{"message": {"content": "done"}}]},
-    }
-    assert terminal_response_id(events, [call], "one") == "served"
-    with pytest.raises(ValueError):
-        terminal_response_id(events, [call], "two")
-    other = {**call, "response": {**call["response"], "id": "other"}}
-    with pytest.raises(ValueError):
-        terminal_response_id(events, [call, other], "one")

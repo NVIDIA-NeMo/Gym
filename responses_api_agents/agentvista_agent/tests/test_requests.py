@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
 from responses_api_agents.agentvista_agent.app import AgentVistaAgent, AgentVistaConfig, AgentVistaRunRequest
 
 
@@ -62,8 +62,9 @@ async def test_missing_rollout_identity_never_starts_worker(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harness", ["default", "opencode"])
+@pytest.mark.parametrize("sampling", [None, {"temperature": 0.6, "top_p": 0.8, "max_output_tokens": 1234}])
 async def test_selected_worker_receives_gym_endpoint_and_isolated_storage(
-    tmp_path: Path, monkeypatch, harness: str
+    tmp_path: Path, monkeypatch, harness: str, sampling
 ) -> None:
     (tmp_path / "infer.py").write_text("")
     config = AgentVistaConfig(
@@ -88,6 +89,9 @@ async def test_selected_worker_receives_gym_endpoint_and_isolated_storage(
         worker = json.loads(Path(command[-1]).read_text())
         assert worker["endpoint"] == "http://gym/rollout/test/v1"
         assert worker["harness"] == harness
+        assert worker["temperature"] == (sampling["temperature"] if sampling else 0.0)
+        assert worker["top_p"] == (sampling["top_p"] if sampling else 1.0)
+        assert worker["output_tokens"] == (sampling["max_output_tokens"] if sampling else 8192)
         assert Path(kwargs["env"]["XDG_CACHE_HOME"]).is_relative_to(tmp_path)
         assert Path(kwargs["env"]["HOME"]).is_relative_to(tmp_path)
         Path(worker["output"], "result.json").write_text(
@@ -105,7 +109,7 @@ async def test_selected_worker_receives_gym_endpoint_and_isolated_storage(
     monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
     body = AgentVistaRunRequest.model_validate(
         {
-            "responses_create_params": {"input": "Act"},
+            "responses_create_params": {"input": "Act", **(sampling or {})},
             "_ng_rollout_id": "dispatch-test",
             "verifier_metadata": {"task_id": "fixture", "source_sha256": "source", "category_id": "test"},
         }
@@ -120,7 +124,7 @@ async def test_selected_worker_receives_gym_endpoint_and_isolated_storage(
 def test_benchmark_include_selects_execution_harness(harness: str) -> None:
     from omegaconf import OmegaConf
 
-    from nemo_gym.config.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
 
     _, documents = GlobalConfigDictParser().load_extra_config_paths([f"benchmarks/agentvista_{harness}/config.yaml"])
     composed = OmegaConf.merge(*documents)

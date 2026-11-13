@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
-# Original file: tests/integrations/test_cli.py
 """Real pinned CLI -> MCP -> Python/image roundtrip with a local model fixture."""
 
 import json
 import os
+import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +20,6 @@ sys.path.insert(0, os.environ["AGENTVISTA_ROOT"])
 from PIL import Image
 
 from responses_api_agents.agentvista_agent.runtime.data import inventory
-from responses_api_agents.agentvista_agent.runtime.worker import run
 
 
 @pytest.mark.skipif(
@@ -153,28 +150,36 @@ def test_real_cli_image_and_state_roundtrip(tmp_path, monkeypatch, budget_exhaus
     mounted = tmp_path / "mounted"
     mounted.symlink_to(persistent, target_is_directory=True)
     try:
-        result = run(
-            {
-                "output": str(mounted / "episode"),
-                "dataset": str(dataset),
-                "image_folder": str(tmp_path),
-                "task_id": "fixture",
-                "source_sha256": task["source_sha256"],
-                "command": os.environ["AGENTVISTA_TEST_OPENCODE"],
-                "endpoint": endpoint,
-                "model": "fixture",
-                "context_tokens": 65536,
-                "output_tokens": 2048,
-                "max_steps": 6,
-                "agent_timeout": 120,
-            }
+        config = {
+            "output": str(mounted / "episode"),
+            "dataset": str(dataset),
+            "image_folder": str(tmp_path),
+            "task_id": "fixture",
+            "source_sha256": task["source_sha256"],
+            "command": os.environ["AGENTVISTA_TEST_OPENCODE"],
+            "endpoint": endpoint,
+            "model": "fixture",
+            "context_tokens": 65536,
+            "output_tokens": 32768,
+            "max_steps": 6,
+            "agent_timeout": 120,
+        }
+        config_path = tmp_path / "worker.json"
+        config_path.write_text(json.dumps(config))
+        subprocess.run(
+            [sys.executable, "-m", "responses_api_agents.agentvista_agent.runtime.worker", str(config_path)],
+            check=True,
+            timeout=180,
         )
+        result = json.loads((mounted / "episode/result.json").read_text())
         assert result["mask_sample"] is judge_error, result
         assert result["reward"] == int(not budget_exhausted)
         assert result["agent_output"] == ("" if budget_exhausted else "<answer>42</answer>")
         assert result["artifacts"] == str(mounted / "episode")
         assert (persistent / "episode/events.jsonl").is_file()
         assert len(requests) == (1 if budget_exhausted else 3)
+        assert all(row["max_tokens"] == 32768 for row in requests)
+        assert (persistent / "episode/tools/tools_listed").is_file()
         expected = {"agentvista_" + name for name in ("web_search", "image_search", "visit", "code_interpreter")}
         assert {tool["function"]["name"] for tool in requests[0]["tools"]} == expected
 

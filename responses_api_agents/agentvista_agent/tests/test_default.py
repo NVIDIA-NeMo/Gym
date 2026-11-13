@@ -55,7 +55,7 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
         if len(calls) == 1:
             return {
                 "role": "assistant",
-                "content": None,
+                "content": "<think>Draft reasoning must not enter history.</think>",
                 "tool_calls": [
                     {
                         "id": "search-1",
@@ -74,11 +74,16 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
                 assert "index" not in call
                 assert "index" not in call["function"]
         assert any(row.get("role") == "tool" and "Evidence: 42" in str(row.get("content")) for row in messages)
-        return "<answer>42</answer>"
+        assert "Draft reasoning" not in json.dumps(messages)
+        return "<think>Considering <answer>draft</answer>.</think><answer>42</answer>"
 
     monkeypatch.setattr(api_model_caller, "call_vision_api", policy)
     monkeypatch.setattr(get_tool("web_search"), "call", lambda *args, **kwargs: "Evidence: 42")
-    monkeypatch.setattr(GPT4VisionClient, "query", lambda *args, **kwargs: (judge, "Explanation: fixture"))
+    monkeypatch.setattr(
+        GPT4VisionClient,
+        "query",
+        lambda *args, **kwargs: ("" if judge == "provider-error" else judge, "Explanation: fixture"),
+    )
     monkeypatch.setattr(api_processors, "compute_score", api_processors.compute_score)
     for key in (
         "VERIFIER_API_KEY",
@@ -116,5 +121,6 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
         assert result["mask_sample"] and result["verify"]["status"] == "ERROR"
     else:
         assert not result["mask_sample"], result
+        assert "failure_kind" not in result
         assert result["reward"] == float(judge)
         assert result["verify"]["status"] == ("PASS" if judge == "1" else "FAIL")

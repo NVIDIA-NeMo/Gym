@@ -1,30 +1,29 @@
 # AgentVista evaluation through NeMo Gym
 
-Two evaluation pipelines share the original AgentVista tasks, tools and answer judge:
+Two evaluation protocols share the pinned public AgentVista tasks, tools and
+answer judge:
 
-| Gym benchmark | Execution harness | Factory benchmark |
-|---|---|---|
-| `agentvista_opencode` | OpenCode CLI 1.17.11 with the original tools over MCP | `agentvista-opencode` |
-| `agentvista_default` | Original `engine.api.api_processors.process_single_sample` greedy loop | `agentvista-default` |
+| Benchmark | Harness |
+|---|---|
+| `agentvista_default` | Original greedy loop, with the upstream published run-command limits |
+| `agentvista_opencode` | OpenCode CLI 1.17.11 with the original tools exposed over MCP |
 
-Gym owns all custom integration code: `responses_api_agents/agentvista_agent/runtime/`
-contains both workers, the MCP transport, source/image bindings, original judge
-adapter and transcript handling. `prepare_dataset.py` materializes the public
-Parquet release; `prepare.py` creates Gym rows without actor or judge requests.
-Factory only composes the driver, serving service and collection configuration.
-There is no dependency on `agentvista_harness/`, AgentVista's `integrations/`, or
-SaaS Bench Python modules.
+Gym owns preparation, worker dispatch, tool transport, scoring and runtime build
+code. The [agent README](../../responses_api_agents/agentvista_agent/README.md)
+lists the complete configuration and test commands. This is an experimental,
+evaluation-only external-agent-loop integration. Swapping in another Gym harness
+requires new prepared inputs and a resources-server/session integration; the
+current rows alone are not a harness-independent visual benchmark.
 
-The original benchmark implementation is an external dependency pinned to public
-[AgentVista commit a3385d51](https://github.com/hkust-nlp/AgentVista/tree/a3385d51d0c3dd0c8501350a08d52065e3e94ab4).
-Its code is not vendored or relicensed here. `source-pin.json` records SHA256 for
-every execution, tool, prompt and judge source file; `setup.py` fetches that revision
-or verifies an existing checkout without changing it. The evaluation image embeds
-those verified source files. This does not require the separate AgentVista integration PR.
+## Public source and data
 
-## Provision a runtime
-
-From the Gym PR checkout, use workspace paths for all artifacts and caches:
+The original implementation is a runtime dependency pinned to
+[AgentVista a3385d51](https://github.com/hkust-nlp/AgentVista/tree/a3385d51d0c3dd0c8501350a08d52065e3e94ab4).
+It is not vendored or relicensed. The agent's
+[`runtime/source-pin.json`](../../responses_api_agents/agentvista_agent/runtime/source-pin.json)
+records 26 execution, prompt, tool and judge file hashes. Setup and both workers
+verify those hashes before any model call; the episode records the public source
+revision. The worker also checks the task/image binding from preparation.
 
 ```bash
 python benchmarks/agentvista/setup.py --source "$WORKSPACE/agentvista-source"
@@ -32,95 +31,82 @@ python benchmarks/agentvista/prepare_dataset.py --output "$WORKSPACE/agentvista-
   --revision 61de767ad8c72e258ac71a0aef952b89ca920a16
 ```
 
-The prepared release contains 209 tasks and 307 embedded images. Original records
-and image bytes are retained; stable IDs and `solution`/`category` aliases adapt the
-public Parquet schema. Source/image hashes bind preparation to execution. The
-upstream split name `train` is not a held-out evaluation protocol.
+The CC-BY-4.0 release contains 209 tasks and 307 embedded images. Preparation
+preserves original records and image bytes. The upstream split name `train` does
+not establish a held-out evaluation protocol. Generated datasets stay outside
+Git. The manifest uses `external-agent-loop` with canonical split `benchmark`;
+validate it after local data preparation with `gym env validate --sync agentvista`.
 
-For a host worker, install `responses_api_agents/agentvista_agent/requirements-worker.txt`
-in a separate environment. The default harness requires `qwen-vl-utils` and Torch
-for its original image loader. OpenCode additionally requires CLI 1.17.11. Supply
-`AGENTVISTA_ROOT`, `AGENTVISTA_DATASET`, `AGENTVISTA_IMAGES`,
-`AGENTVISTA_OUTPUT_ROOT`, `AGENTVISTA_WORKER_PYTHON`, and, for OpenCode,
-`AGENTVISTA_OPENCODE`. `PYTHONPATH` must contain the Gym PR checkout; the dispatcher
-passes the Gym and upstream source paths to each isolated worker.
+## Provision a worker
 
-The Gym server has a managed `responses_api_agents/agentvista_agent/pyproject.toml`
-and `uv.lock`, including Gym's shared resolver policy and optional telemetry extra.
-Install that server with `uv sync --locked --project responses_api_agents/agentvista_agent`.
-The original tools and Torch worker remain in the separate worker environment;
-they are not added to the Gym server's dependencies. Check managed dependency
-locks with `python scripts/component_locks.py` before publishing dependency changes.
+Install the server using its managed `pyproject.toml` and `uv.lock`. The separate
+CPU worker needs the original tools, Torch/image loader, MCP and Jupyter. Its
+`requirements-worker.in` holds upgrade constraints; `requirements-worker.txt`
+fully pins the resolved dependency set and artifact hashes for Linux x86-64 and
+Python 3.13. Both image builders install that same file with hash verification,
+and record the installed package set. Gym's server resolver exclusions must not
+be applied to this separate worker environment.
 
-`runtime-image/Dockerfile` under the agent directory builds the shared worker
-image from an approved Gym base. Supply a verified CLI binary as `opencode` in
-the build context. `runtime-image/build.py` builds a SQSH directly with Enroot on
-SVG, using explicit base image, standalone Python distribution, CLI, uv and source
-inputs. It verifies the source and CLI, imports the worker dependencies, and writes
-an image digest receipt. An import check does not establish live benchmark success.
-
-The shared SVG image has been built and import-checked at
-`/lustre/fsw/portfolios/nemotron/users/pritamb/gameplay_home/vlm_eval/saas_bench_assets/serving_containers/agentvista-eval-default-opencode-1.17.11-svg-amd64.sqsh`.
-Its SHA256 is `d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5`;
-the adjacent `.sqsh.json` records source, CLI and dependency provenance. Project
-storage access is required. Factory recipes accept `AGENTVISTA_SVG_ROOT` for a
-separately staged copy of the same assets.
-
-[SVG smoke evidence](smoke-results/svg-20261111.json) records one bounded task for
-each harness with local Super GA and hosted Kimi K3. All four completed execution
-and original answer judging with unmasked zero rewards. These are pipeline checks;
-they do not establish benchmark accuracy or published-score parity.
-
-SVG rebuild example (uses a new output filename):
+To regenerate the worker lock from the Gym checkout:
 
 ```bash
-base=/lustre/fsw/portfolios/nemotron/users/pritamb/gameplay_home/vlm_eval
-python responses_api_agents/agentvista_agent/runtime-image/build.py \
-  --base-image /lustre/fsw/portfolios/nemotron/projects/nemotron_n3_post/eval/containers/gym/nemo-gym_dev-2026-07-05T17-22-34b47edf_amd64.sqsh \
-  --python-distribution "$base/saas_bench_assets/runtime/python_references/20261102T012704Z/cpython313" \
-  --opencode "$base/.runtime/opencode-1.17.11/opencode" \
-  --uv "$base/.runtime/saas_eval_dual_harness/tools/uv-x86_64-unknown-linux-gnu/uv" \
-  --source "$base/agentvista" --work-dir "$base/.runtime/agentvista-image-build" \
-  --output "$base/saas_bench_assets/serving_containers/agentvista-eval-default-opencode-1.17.11-svg-amd64-rebuild.sqsh"
+uv --no-config pip compile responses_api_agents/agentvista_agent/requirements-worker.in \
+  --python-version 3.13 --python-platform x86_64-unknown-linux-gnu \
+  --index https://download.pytorch.org/whl/cpu --default-index https://pypi.org/simple \
+  --index-strategy unsafe-best-match --emit-index-url --generate-hashes --no-header \
+  -o responses_api_agents/agentvista_agent/requirements-worker.txt
 ```
 
-The builder does not submit a Slurm job. Run it in a suitable existing allocation.
-It refuses an existing output and uses workspace caches without mounting user homes.
+Build a new image using explicit, trusted inputs. Obtain `OPENCODE_SHA256` from
+trusted release/build provenance; the builder verifies it rather than accepting
+only the executable's version string.
 
-## Configure providers
+```bash
+python responses_api_agents/agentvista_agent/runtime-image/build.py \
+  --base-image "$WORKSPACE/images/gym-base.sqsh" \
+  --python-distribution "$WORKSPACE/python313" \
+  --opencode "$WORKSPACE/bin/opencode" --opencode-sha256 "$OPENCODE_SHA256" \
+  --uv "$WORKSPACE/bin/uv" --source "$WORKSPACE/agentvista-source" \
+  --work-dir "$WORKSPACE/image-build" --output "$WORKSPACE/images/agentvista-eval.sqsh"
+```
 
-Keep credentials in a private environment file, outside Git:
+The builder uses Enroot inside an appropriate existing allocation; it submits no
+jobs and refuses an existing output. The Dockerfile is an alternative build path
+using `BASE_IMAGE` and `OPENCODE_SHA256` build arguments. It supplies the same
+pinned worker dependencies and verifies the same source pin and executable.
+Import checks establish dependency availability, not evaluation accuracy.
 
-- `SERPAPI_KEY`: original Serper search and Google Lens tools.
+## Configure providers and execution
+
+Use a private environment file outside Git for policy/search/visit/judge settings:
+
+- `AGENTVISTA_ROOT`, `AGENTVISTA_DATASET`, `AGENTVISTA_IMAGES`: verified source,
+  original task records and image directory.
+- `AGENTVISTA_WORKER_PYTHON`, `AGENTVISTA_OPENCODE`: worker interpreter and pinned CLI.
+- `SERPAPI_KEY`: original search/Lens tool credential.
 - `JINA_API_KEY`, `IMGBB_API_KEY`: optional reader/upload backends.
 - `AGENTVISTA_VISIT_API_KEY`, `AGENTVISTA_VISIT_API_ENDPOINT`,
   `AGENTVISTA_VISIT_MODEL_NAME`: fixed webpage summarizer; endpoint is a full
-  `/chat/completions` URL.
-- `VERIFIER_API_KEY`, `VERIFIER_END_POINT`, `VERIFIER_MODEL_NAME`: original answer
-  judge; endpoint is the OpenAI-compatible base URL ending in `/v1`.
-- `INFERENCE_API_KEY`: hosted Kimi policy credential in Factory's API recipes.
+  chat-completions URL.
+- `VERIFIER_API_KEY`, `VERIFIER_END_POINT`, `VERIFIER_MODEL_NAME`: fixed answer
+  judge; endpoint is a base URL ending in `/v1`. Both workers check these before
+  any policy calls.
 
-The actor always calls Gym's rollout-correlated model proxy. The default worker
-sets the original runner's `REASONING_*` endpoint/model to that proxy and removes
-fallback policy endpoints. The fixed visit summarizer is configured in memory.
-The judge receives reference answers only after execution; the OpenCode actor
-process receives neither judge credentials nor reference answers.
-
-Rewards use the original binary answer-judge prompt and extraction. They are
-**LLM-judged**, not deterministic verification. A completed wrong answer remains
-an unmasked zero. Clean output-token exhaustion is reported as
-`execution_health.termination=output_budget_exhausted` and sent to the original
-judge, including an empty prediction when no answer was produced. Timeouts,
-process/native errors and capture/judge failures retain distinct failure kinds
-and remain masked and unscored;
-the adapter makes the original judge's otherwise swallowed errors visible.
+The code tool runs model-written Python on the worker host. Neither harness is a
+security sandbox. The OpenCode subprocess environment omits judge credentials,
+but a same-user kernel can still read host files and process environments,
+including task answers and credentials. Use dedicated disposable infrastructure
+with data and credentials you trust this execution to access. This adapter is not
+suitable for adversarial policies or reward-optimization training. A sandbox-backed
+resources server plus stock `opencode_agent` is a separate architectural follow-up.
 
 ## Run evaluation
 
-Choose one benchmark and keep its prepared input and output directories isolated:
+Keep each protocol's inputs and outputs separate, and use workspace storage:
 
 ```bash
 benchmark=agentvista_default  # or agentvista_opencode
+export AGENTVISTA_OUTPUT_ROOT="$OUTPUT/episodes"
 common=("+agentvista_dataset_path=$OUTPUT/input.jsonl" \
         "+agentvista_output_root=$OUTPUT/episodes" \
         "+policy_base_url=$POLICY_BASE_URL" "+policy_model_name=$POLICY_MODEL" \
@@ -128,79 +114,48 @@ common=("+agentvista_dataset_path=$OUTPUT/input.jsonl" \
 gym eval prepare --benchmark "$benchmark" "${common[@]}" \
   "+prepare_script_args.output_fpath=$OUTPUT/input.jsonl"
 gym eval run --benchmark "$benchmark" --model-type vllm_model \
-  --agent agentvista_agent --split benchmark --output "$OUTPUT/rollouts.jsonl" \
-  "${common[@]}" +observability_enabled=true
+  --agent agentvista_agent --split benchmark --concurrency 1 \
+  --output "$OUTPUT/rollouts.jsonl" "${common[@]}" +observability_enabled=true
 ```
 
-For OpenCode, add
-`++policy_model.responses_api_models.vllm_model.entrypoint=agentvista_opencode.py`
-to the run command; the Factory OpenCode binding supplies it automatically.
-The old `agentvista` Gym benchmark keeps its OpenCode behavior.
+For OpenCode, also pass
+`++policy_model.responses_api_models.vllm_model.entrypoint=agentvista_opencode.py`.
+The default harness uses the normal model entrypoint and removes Gym's leading
+reasoning envelope before the original parser sees an answer. Standard row/CLI
+`temperature`, `top_p` and `max_output_tokens` override agent defaults on both
+tracks. OpenCode advertises sampling support and receives its exact configured
+output-token ceiling, including budgets above its built-in 32,000-token default.
 
-Default-harness limits match `infer.py`: 16 turns, 16 images, 65,536 estimated
-context tokens and 8,192 completion tokens. OpenCode defaults to 150 steps and
-a 5,400-second actor timeout; OpenCode owns its history and compaction. These
-protocols are different evaluation identities; do not combine their scores or
-claim original published-score parity. Both retain original trajectories and Gym
-model-call captures under the run directory. `harness` identifies the selected path.
+The default loop now uses the published run command's 30 turns and 100 images,
+65,536 context tokens and 8,192 output tokens. OpenCode defaults to 150 steps and
+5,400 seconds of actor time, with its own history/compaction. The legacy relay
+has no queue-wide deadline; the worker's episode timeout starts after acquiring
+an active slot. OpenCode must list all four original MCP tools before a result
+can be scored. Input image attachments are not silently resized by OpenCode.
 
-## Validation and training compatibility
+## Scoring, evidence and compatibility
 
-```bash
-AGENTVISTA_ROOT=/path/to/verified/source \
-  pytest responses_api_agents/agentvista_agent/tests
-```
+Both paths use the upstream judge prompt and first-word extraction rule: a
+nonempty extracted word containing `1` is one, other nonempty words are zero.
+Punctuation is retained; an empty word after judge retries is unscored. An empty
+model prediction is still sent to the judge. For OpenCode, a clean reasoning-only stop and an
+actor deadline with retained model text/reasoning/tool output are model outcomes
+and are judged. A timeout with no retained event, failed MCP startup, provider or
+capture failure remains masked. Tool errors and recovery remain in the evidence.
+Rollout rows include `verifier_diagnostics`, `judge_response`, extracted prediction,
+judge model, native events and source/task bindings. Counted-zero collector rows
+remain in aggregate denominators even without verifier-generated fields.
 
-Worker/tool tests require the worker dependencies; the CLI fixture additionally
-requires `AGENTVISTA_TEST_OPENCODE` and local TCP/Jupyter socket access. The
-original-loop fixture tests image input, original tool feedback and valid zero,
-valid one and judge-failure behavior without hosted requests. A real model smoke
-must separately exercise both harnesses and inspect actor and judge artifacts.
-`benchmarks/agentvista/smoke.sh` runs one selected task per Super/Kimi × harness
-combination using an already served Super endpoint. It submits no allocations,
-uses at most eight turns/steps per episode and does not retry failed episodes.
+Harness version 3.0.0 changes scoring, reasoning, sampling and baseline limits.
+Prepare new rows and use new output directories. Older prepared rows are rejected;
+do not combine their scores with this version. The historical 2.1.1 smoke records
+under `smoke-results/` are retained for audit only: their default-harness reasoning
+handling, reduced 16/16 limits, OpenCode token cap and masked timeout policy do not
+qualify the corrected benchmark. They are not parity or accuracy claims.
 
-The existing NeMo RL adapters retain OpenCode-only sampling/token-capture
-compatibility. The default harness is evaluation-only. No training, GPU optimizer
-qualification or certified score is claimed by this PR. Live integration evidence
-is recorded separately from accuracy qualification.
-
-Episode outputs preserve the launcher-mounted path instead of resolving filesystem
-aliases. Slurm exports `NEMO_GYM_BENCH_DIR` as the actual bound benchmark directory
-for native and custom-command runs, so inputs, episode logs and result files survive
-container exit.
-
-## Completed 32K integration evaluations
-
-[Completed evaluation evidence](smoke-results/svg-20261111-32k.json) records the
-corrected runtime at `10f5459ed8c33f527c61f577488e1747e9e1cb7c` with Factory
-`794bd75abf5496c3a72801a81f35b41d050c705d`. The full local Super/OpenCode run
-collected all 209 tasks: 184 scored, 47 passed, and 25 actor timeouts remained
-masked. Its 25.54% mean is over the scored subset, not a qualified full score.
-All episode artifacts survived container exit.
-
-The matching first 25 tasks were also evaluated with 32,768 output tokens:
-
-| Model and harness | Collected | Scored | Passed | Mean over scored |
-|---|---:|---:|---:|---:|
-| Super GA, default | 25 | 25 | 7 | 28% |
-| Kimi K3 API, OpenCode | 25 | 24 | 11 | 45.83% |
-| Kimi K3 API, default | 25 | 25 | 12 | 48% |
-
-The Kimi/OpenCode masked case reached the 5,400-second actor timeout. The default
-harness retains its 16-turn limit; OpenCode retains its 150-step limit. These
-results demonstrate integration and judging, not equivalent evaluation protocols.
-OpenCode sent an effective `max_tokens=32000` with the configured 32,768-token
-budget; startup admission must inspect the actual request instead of assuming
-exact equality to the configured limit. Clean length endings and timeouts retain
-the distinct scoring behavior described above.
-
-For SVG GPU launches, the site wrapper must acknowledge real per-GPU monitoring
-on every allocated node before model startup, fail closed on missing telemetry,
-and release the allocation after 25 idle minutes, measured from allocation start
-before first activity. Use a 20-minute model-readiness deadline and admit at most
-two pending/warming replicas on the submission side. The tested matrix used one
-TP8 replica on each of two nodes; it did not leave allocated GPUs waiting on a
-startup lock. Generic Gym recipes do not install this site guard automatically.
-CPU-short currently admits four submitted/running jobs per user; check actual
-Slurm admission and keep credentials private when launching hosted evaluations.
+Tests without external assets exercise Gym routing, row sampling, metrics, source
+validation and model-versus-infrastructure outcomes. With a verified upstream
+checkout and worker dependencies, the additional fixtures exercise real original
+tools, Jupyter and the pinned CLI against local fake policy/judge endpoints.
+`smoke.sh` provides bounded real-provider checks with explicitly supplied endpoint
+and model settings. No training adapter or training qualification is included.

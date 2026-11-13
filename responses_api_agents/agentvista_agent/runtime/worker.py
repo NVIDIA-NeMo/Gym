@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://gitlab-master.nvidia.com/pritamb/agentvista
-# Revision: 06f6a8f1532766d876415757107a11731b6148ae (Apache-2.0 adapter files).
-# Original file: agentvista_harness/worker.py
 """One isolated OpenCode episode; inference always targets the Gym model proxy."""
 
 import json
@@ -14,13 +11,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
-from PIL import Image
-from utils.context_utils import pil_to_base64_data_uri
 
 from responses_api_agents.agentvista_agent.runtime import HARNESS_VERSION, OPENCODE_VERSION
 from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.scoring import score
+from responses_api_agents.agentvista_agent.runtime.source import verify_source
 
 
 def configuration(config: dict, workspace: Path, mcp_config: Path) -> dict:
@@ -51,6 +47,7 @@ def configuration(config: dict, workspace: Path, mcp_config: Path) -> dict:
                 "models": {
                     config["model"]: {
                         "name": config["model"],
+                        "temperature": True,
                         "limit": {
                             "context": config["context_tokens"],
                             "input": config["context_tokens"],
@@ -62,8 +59,14 @@ def configuration(config: dict, workspace: Path, mcp_config: Path) -> dict:
             }
         },
         "compaction": {"reserved": config["output_tokens"]},
+        "attachment": {"image": {"max_width": 2**31 - 1, "max_height": 2**31 - 1, "max_base64_bytes": 2**31 - 1}},
         "agent": {
-            "build": {"steps": config["max_steps"], "prompt": prompt},
+            "build": {
+                "steps": config["max_steps"],
+                "prompt": prompt,
+                "temperature": config.get("temperature", 0.0),
+                "top_p": config.get("top_p", 1.0),
+            },
             "general": {"disable": True},
             "explore": {"disable": True},
         },
@@ -85,7 +88,7 @@ def configuration(config: dict, workspace: Path, mcp_config: Path) -> dict:
 
 
 def actor_environment(workspace: Path) -> dict[str, str]:
-    # No reference answers or judge credentials in the CLI/MCP environment.
+    # Minimize inherited credentials. The local kernel is trusted execution, not a sandbox boundary.
     allowed = {
         "PATH",
         "AGENTVISTA_ROOT",
@@ -131,10 +134,10 @@ def _execution_health(events: list[dict], returncode: int, timed_out: bool, outp
     termination = "completed"
     if timed_out:
         termination = "timeout"
-    elif returncode:
-        termination = "process_exit"
     elif errors:
         termination = "native_error"
+    elif returncode:
+        termination = "process_exit"
     elif finish.get("reason") == "length":
         termination = "output_budget_exhausted"
     elif not any(event.get("type") == "text" for event in events):
@@ -182,14 +185,19 @@ def run(config: dict) -> dict:
     previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         result["failure_kind"] = "agentvista:setup"
+        source = Path(config.get("source_root") or os.environ["AGENTVISTA_ROOT"]).resolve()
+        result["source_provenance"] = verify_source(source)
+        os.environ["AGENTVISTA_ROOT"] = str(source)
+        sys.path.insert(0, str(source))
         tasks = inventory(config["dataset"], config["image_folder"], config.get("task_selector", "all"))
         task = tasks[config["task_id"]]
         if task["source_sha256"] != config["source_sha256"]:
             raise ValueError("Prepared task/image hashes changed")
         command = config["command"]
         version = subprocess.check_output([command, "--version"], text=True).strip()
-        if version != OPENCODE_VERSION:
-            raise ValueError(f"Expected OpenCode {OPENCODE_VERSION}, got {version}")
+        expected_version = config.get("opencode_version", OPENCODE_VERSION)
+        if expected_version != OPENCODE_VERSION or version != expected_version:
+            raise ValueError(f"Expected pinned OpenCode {expected_version}, got {version}")
         # The original visit configuration enables summarization. Require its fixed
         # auxiliary model explicitly instead of silently changing the tool contract.
         for key in (
@@ -210,6 +218,9 @@ def run(config: dict) -> dict:
         inputs.mkdir(exist_ok=True)
         attachments = []
         for index, path in enumerate(task["images"]):
+            from PIL import Image
+            from utils.context_utils import pil_to_base64_data_uri
+
             name = "original_image" + (f"_{index}" if index else "")
             uri = pil_to_base64_data_uri(Image.open(path))
             import base64
@@ -218,6 +229,7 @@ def run(config: dict) -> dict:
             target.write_bytes(base64.b64decode(uri.split(",", 1)[1]))
             attachments.extend(["--file", str(target)])
         mcp = output / "mcp.json"
+        (output / "tools/tools_listed").unlink(missing_ok=True)
         mcp.write_text(
             json.dumps(
                 {
@@ -251,7 +263,10 @@ def run(config: dict) -> dict:
                     instruction,
                 ],
                 cwd=workspace,
-                env=actor_environment(workspace),
+                env={
+                    **actor_environment(workspace),
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(config["output_tokens"]),
+                },
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
@@ -276,10 +291,18 @@ def run(config: dict) -> dict:
             timed_out=timed_out,
             execution_health=health,
         )
-        if health["termination"] not in {"completed", "output_budget_exhausted"}:
+        result["failure_kind"] = "agentvista:execution"
+        if not (output / "tools/tools_listed").is_file():
+            raise RuntimeError("OpenCode never listed the AgentVista MCP tools; inspect opencode.stderr")
+        kept_output = any(event.get("type") in {"text", "reasoning", "tool_use"} for event in events)
+        answered_timeout = health["termination"] == "timeout" and kept_output and not health["native_errors"]
+        if (
+            health["termination"] not in {"completed", "output_budget_exhausted", "missing_final_answer"}
+            and not answered_timeout
+        ):
             result["failure_kind"] = "agentvista:" + health["termination"]
             raise RuntimeError(f"OpenCode termination: {health['termination']}; inspect native artifacts")
-        # A clean token-limit termination is a model outcome, including an empty prediction.
+        # A model's empty answer or used actor deadline is judged; infrastructure loss stays unscored.
         result["failure_kind"] = "agentvista:verifier"
         verdict = score(task["question"], task["record"].get("solution"), texts)
         health["task_success"] = verdict["reward"] == 1
