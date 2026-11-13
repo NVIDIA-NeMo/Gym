@@ -33,7 +33,7 @@ The preview and publish workflows use the `DOCS_FERN_TOKEN` repository or organi
 | What | Where |
 |---|---|
 | Published site | https://docs.nvidia.com/nemo/gym |
-| Fern dashboard | https://dashboard.buildwithfern.com (NVIDIA org) |
 | Docs skill | [`.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs/SKILL.md) |
+| All agent skills | [Agent Skills](https://docs.nvidia.com/nemo/gym/main/contribute/agent-skills) |
 | CI workflows | [`.github/workflows/`](../.github/workflows/) (`fern-docs-*.yml`, `publish-fern-docs.yml`) |
 | Fern docs | https://buildwithfern.com/learn/docs/getting-started/overview |
