@@ -356,6 +356,8 @@ def execute(config: dict) -> dict:
                 events, text = parse_events(
                     (output / "events.jsonl").read_text(errors="replace")
                 )
+                from saas_bench.opencode.protocol import has_model_turn
+                model_turn = has_model_turn(events)
                 recovered = context_overflow_recovered(events)
                 health = execution_health(events, timed_out=timed_out)
                 (output / "execution_health.json").write_text(
@@ -368,12 +370,15 @@ def execute(config: dict) -> dict:
                     native_trajectory=events,
                     recovered_context_overflow=recovered,
                     timed_out=timed_out,
+                    model_turn_observed=model_turn,
                     returncode=process.returncode,
                     slot_id=slot_id,
                     port_map=port_map,
                     source_sha256=task["source_sha256"],
                     opencode_version=actual_version,
                 )
+                if timed_out and not model_turn:
+                    raise RuntimeError("OpenCode timed out before any model turn; endpoint/runtime unavailable")
                 # A permission abort after real activity still has a verifiable app
                 # state. Keep it explicitly incomplete, rather than losing grading.
                 permission_abort = any(

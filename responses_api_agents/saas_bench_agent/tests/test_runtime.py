@@ -50,9 +50,12 @@ def test_forbidden_cache_roots(root):
         ("PASS", False, "completed", False),
         ("FAIL", False, "completed", False),
         ("ERROR", True, "completed", True),
-        ("FAIL", False, "error", False),
-        ("FAIL", False, "timeout", False),
-        ("FAIL", False, "exception", False),
+        ("FAIL", False, "error", True),
+        ("FAIL", False, "model_error", False),
+        ("FAIL", False, "context_limit", False),
+        ("FAIL", False, "runtime_after_turn", True),
+        ("FAIL", False, "timeout", True),
+        ("FAIL", False, "exception", True),
     ],
 )
 def test_browser_worker_grades_live_state_and_always_stops(
@@ -87,7 +90,7 @@ def test_browser_worker_grades_live_state_and_always_stops(
         assert __import__("os").environ["LLM_API_KEY"] == "judge-fixture"
         return {"status": status, "score": 0.25 if status == "PASS" else 0.0}
 
-    verifier.run_verify = grade
+    verifier.run_verify = MagicMock(side_effect=grade)
     actor = types.ModuleType("saas_bench.agent")
 
     async def run_task(*args, **kw):
@@ -97,7 +100,15 @@ def test_browser_worker_grades_live_state_and_always_stops(
             raise RuntimeError("actor exception")
         assert __import__("os").environ["LLM_API_KEY"] == "EMPTY"
         return {
-            "status": actor_status,
+            "status": "completed" if actor_status == "completed" else "error",
+            **(
+                {
+                    "failure_origin": "model",
+                    "failure_kind": "context_limit" if actor_status == "context_limit" else "malformed_tool_call",
+                }
+                if actor_status in {"model_error", "context_limit"}
+                else {}
+            ),
             "trajectory": [
                 {
                     "actions": [{"click": {"index": 1}}, {"input_text": {"text": "fixture"}}],
@@ -130,12 +141,17 @@ def test_browser_worker_grades_live_state_and_always_stops(
         }
     )
     assert result["mask_sample"] is masked, result
-    assert result["verify"]["status"] == status
-    if actor_status in {"timeout", "exception"}:
-        assert result["reward"] == 0 and not result["mask_sample"]
-        assert result["execution_health"]["termination"] == ("timeout" if actor_status == "timeout" else "agent_error")
+    if actor_status in {"timeout", "exception", "error", "runtime_after_turn"}:
+        verifier.run_verify.assert_not_called()
+        assert result["status"] == "error" and result["failure_kind"] == "saas_bench:infrastructure"
         slot.stop_apps.assert_called_once_with(["fixture"])
         return
+    assert result["verify"]["status"] == status
+    if actor_status in {"model_error", "context_limit"}:
+        assert result["reward"] == 0 and not result["mask_sample"]
+        assert result["execution_health"]["termination"] == (
+            "context_limit" if actor_status == "context_limit" else "malformed_tool_call"
+        )
     assert result["native_trajectory"][0]["screenshot"] == "original.png"
     assert result["execution_health"]["tool_calls"] == 2
     assert result["execution_health"]["tool_errors"] == 1

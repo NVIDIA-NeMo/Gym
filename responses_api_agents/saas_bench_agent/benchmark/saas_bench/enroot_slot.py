@@ -45,7 +45,7 @@ _ENROOT = os.environ.get("SAAS_NRT_ENROOT", "").lower() in {"1", "true", "yes"}
 _IMAGE_DIR = Path(
     os.environ.get(
         "SAAS_ENROOT_IMAGE_DIR",
-        f"/lustre/fsw/portfolios/llmservice/users/{os.environ.get('USER', 'pritamb')}/saas_bench_enroot_images",
+        "/saas-images",
     )
 )
 _STATE_DIR = Path(
@@ -69,7 +69,7 @@ _ENROOT_TEMP_PATH = os.environ.get("ENROOT_TEMP_PATH", "/raid/containers/tmp")
 _ENROOT_RUNTIME_DIR = Path(
     os.environ.get(
         "SAAS_ENROOT_RUNTIME_DIR",
-        f"/lustre/fsw/portfolios/llmservice/users/{os.environ.get('USER', 'pritamb')}/saas_bench_enroot_runtime",
+        "/saas-enroot-runtime",
     )
 )
 _SLIRP_BIN = _ENROOT_RUNTIME_DIR / "usr/bin/slirp4netns"

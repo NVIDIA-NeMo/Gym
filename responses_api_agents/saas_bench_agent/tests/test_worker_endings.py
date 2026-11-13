@@ -13,7 +13,16 @@ from responses_api_agents.saas_bench_agent.runtime import BENCHMARK_ROOT
 
 
 @pytest.mark.parametrize(
-    "ending", ["context_limit", "output_token_limit", "timeout", "model_protocol_error", "setup_failure"]
+    "ending",
+    [
+        "context_limit",
+        "output_token_limit",
+        "timeout",
+        "model_protocol_error",
+        "timeout_empty",
+        "timeout_start",
+        "setup_failure",
+    ],
 )
 def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
     monkeypatch.syspath_prepend(str(BENCHMARK_ROOT))
@@ -56,7 +65,22 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
     executable.write_text(
         f"#!{sys.executable}\nimport sys, time\n"
         "if '--version' in sys.argv:\n print('1.17.11');sys.exit(0)\n"
-        + ("time.sleep(30)\n" if ending == "timeout" else f"print({json.dumps(event)!r}, flush=True)\nsys.exit(1)\n")
+        + (
+            (
+                (
+                    "print("
+                    + repr(json.dumps({"type": "text", "part": {"text": "I will inspect the app"}}))
+                    + ", flush=True)\n"
+                )
+                if ending == "timeout"
+                else ("print(" + repr(json.dumps({"type": "step_start"})) + ", flush=True)\n")
+                if ending == "timeout_start"
+                else ""
+            )
+            + "time.sleep(30)\n"
+            if ending.startswith("timeout")
+            else f"print({json.dumps(event)!r}, flush=True)\nsys.exit(1)\n"
+        )
     )
     executable.chmod(0o700)
     monkeypatch.delenv("SAAS_NRT_ENROOT", raising=False)
@@ -76,11 +100,11 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
             "max_steps": 5,
             "context_tokens": 1000,
             "output_tokens": 100,
-            "agent_timeout": 0.1 if ending == "timeout" else 10,
+            "agent_timeout": 0.5 if ending.startswith("timeout") else 10,
         }
     )
     slot.stop_apps.assert_called_once_with(["fixture"])
-    if ending == "setup_failure":
+    if ending in {"setup_failure", "timeout_empty", "timeout_start"}:
         assert result["mask_sample"] is True and result["failure_kind"] == "saas_bench:infrastructure"
         verifier.run_verify.assert_not_called()
     else:

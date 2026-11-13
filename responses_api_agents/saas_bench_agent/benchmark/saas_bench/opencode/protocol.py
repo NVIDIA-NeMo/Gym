@@ -56,6 +56,23 @@ def native_message(
     return result
 
 
+def has_model_turn(events: list[dict]) -> bool:
+    """Require generated content/action/token evidence, not process startup."""
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        if event.get("type") == "text" and str(part.get("text") or "").strip():
+            return True
+        if event.get("type") == "tool_use" and part.get("tool"):
+            return True
+        if event.get("type") == "step_finish":
+            tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            if any(type(tokens.get(k)) in (int, float) and tokens[k] > 0 for k in ("output", "reasoning")):
+                return True
+    return False
+
+
 def execution_health(events: list[dict], *, timed_out: bool = False) -> dict:
     """Report native execution independently from task score and process exit."""
     from saas_bench.opencode.core import context_overflow_recovered

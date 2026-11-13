@@ -266,7 +266,10 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
     def _response(self, body: SaasBenchRunRequest, result: dict) -> SaasBenchVerifyResponse:
         from saas_bench.opencode.core import measured_score, response_items
         from saas_bench.opencode.observability import native_trajectory
+        from saas_bench.opencode.protocol import has_model_turn
 
+        native = result.get("native_trajectory", result.get("trajectory", []))
+        model_turn = result.get("model_turn_observed") is True or has_model_turn(native)
         masked = result.get("mask_sample", True)
         kind = None
         decision = None
@@ -282,11 +285,20 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
             )
         elif result.get("failure_kind") == "saas_bench:verifier" or diagnostics.get("unavailable"):
             kind = VERIFIER_ERROR
+        elif (
+            result.get("failure_kind") == "saas_bench:infrastructure"
+            or result.get("failure_origin") == "evaluation"
+            or self.config.harness == "browser_use"
+            and result.get("failure_kind") == "saas_bench:model_ending"
+            and result.get("failure_origin") != "model"
+        ):
+            kind = AGENT_RUN_ERROR
         else:
+            termination = (result.get("execution_health") or {}).get("termination")
             kind = (
-                AGENT_TIMEOUT
-                if result.get("timed_out")
-                else _MODEL_ENDINGS.get((result.get("execution_health") or {}).get("termination"))
+                (AGENT_TIMEOUT if model_turn else AGENT_RUN_ERROR)
+                if result.get("timed_out") or termination == "timeout"
+                else _MODEL_ENDINGS.get(termination)
             )
             if kind is None and result.get("failure_kind"):
                 kind = AGENT_RUN_ERROR

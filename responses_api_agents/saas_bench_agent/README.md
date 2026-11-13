@@ -45,10 +45,11 @@ trajectory judge.
 
 ## SVG assets and runtime
 
-All paths below are beneath:
-`/lustre/fsw/portfolios/nemotron/users/pritamb/gameplay_home/vlm_eval/saas_bench_assets/`.
+Choose an asset root accessible to your deployment. The relative paths below
+identify the required releases; bind them to the listed container paths.
+Site-specific filesystem paths and Slurm settings belong in deployment configuration.
 
-| Asset | Relative SVG path | Container mount |
+| Asset | Relative asset path | Container mount |
 |---|---|---|
 | Evaluation image | `serving_containers/saas-bench-eval-browser-use-0.13.7-opencode-1.17.11-svg-amd64.sqsh` | driver image |
 | Task data | `artifacts/datasets/saas_bench_eval_task_data_31177a7/` | `/saas-data:ro` |
@@ -63,9 +64,8 @@ BusyBox, and a C compiler for the UID shim. These are runtime prerequisites,
 not packages to install into the public benchmark code. The shipped image builder
 and pinned worker requirements are in `runtime-image/`; an image receipt records
 its input/output hashes. Each task owns and tears down its own application state.
-Use account `nemotron_n4_omni`; CPU allocations on SVG use partition `cpu`, QoS
-`cpu-short`, with a four-hour limit. GPU-serving examples use `batch/normal`.
-Keep all caches/artifacts outside `/root` and `/home/pritamb`.
+Use the account, partition, QoS and walltime approved for your deployment.
+Keep caches and artifacts in the mounted workspace rather than user homes.
 Browser profiles and temporary data stay in the workspace cache. When its
 path is too long for Unix sockets, a process-owned short `/tmp` symlink points
 into that cache; the symlink is removed on exit. In containers, `/cache` itself
@@ -84,8 +84,8 @@ No SFT/v5-generation stages or training changes are part of this evaluation adap
 
 ## Source and licensing
 
-Runtime provenance: SaaS Bench commit
-`31177a7a80040edf588388dd982af4b678d1e544`,
+Public import snapshot `e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d` (original upstream
+release `31177a7a80040edf588388dd982af4b678d1e544`):
 https://github.com/bpritam14/Gym-evaluation/tree/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark .
 The Apache-2.0 runtime is vendored with source headers, licenses, and SHA manifests.
 Benchmark tasks/verifier scripts retain CC-BY-4.0 and attribution; see
@@ -119,11 +119,11 @@ wrapper. Only POST requests to the configured judge's `/chat/completions` endpoi
 receive the longer timeout and one transient retry. Native verifier scripts,
 criteria, weights and payloads remain unchanged; app requests keep their original
 timeouts, and exhausted judge errors remain masked. The opted-in verifier process
-budget is 600 seconds. With the option absent, the native launch path is unchanged.
+budget is 600 seconds. The fault channel is always active; this option controls the HTTP timeout.
 
 SQLCMD exec additionally enters the target PID namespace and root filesystem so
-its `/proc/self/exe`-relative resources can load. The ordinary namespace recipe
-is retained for other executables. Explicit native `context load failed` and
+its `/proc/self/exe`-relative resources can load. PHP reads use a stable target-root working directory; PostgreSQL retains its
+existing namespace recipe. Explicit native `context load failed` and
 `FATAL` diagnostics invalidate grading even if the task script emits zero-point
 checks afterwards; they are not model-quality zeros. Native stderr is preserved
 for diagnosis. Missing expected objects without a grader exception remain valid
@@ -138,9 +138,13 @@ requests and urllib judge calls even when a task catches the exception and print
 FAIL. The entire row is masked with a retry/evaluation outcome; legitimate NO
 answers remain task failures. Retry budgets remain owned by Gym/the caller.
 
-Malformed model output, output caps, unrecovered context limits and actor timeouts
-are explicit model failures counted as zero. Browser-use actor exceptions are
-also model failures. Both harnesses still run final-state verification before
+Confirmed malformed model output, output caps and unrecovered model context
+limits count as zero. Browser-use preserves explicit model-call failure metadata;
+unknown actor exceptions, Chrome/CDP startup, browser observation/screenshot faults
+and provider failures stay retryable evaluation faults, including after partial
+progress. An OpenCode timeout counts as `agent_timeout` only after generated
+content, an action or output-token evidence establishes a model turn. Empty or
+startup-only timeout traces remain retryable evaluation faults. Both harnesses run final-state verification for confirmed model endings before
 stopping applications, retaining measured checks for diagnostics. Verification
 unavailability takes precedence over an actor failure. The typed
 failure_outcome_action and failure_outcome_attribution fields survive JSON

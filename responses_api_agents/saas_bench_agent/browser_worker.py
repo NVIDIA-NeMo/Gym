@@ -107,7 +107,6 @@ def execute(config: dict) -> dict:
                 os.environ["SAAS_LLM_CONTEXT_WINDOW"] = str(config["context_tokens"])
                 from saas_bench.agent import run_task
 
-                actor_error = None
                 try:
                     actor = asyncio.run(
                         asyncio.wait_for(
@@ -126,32 +125,25 @@ def execute(config: dict) -> dict:
                             timeout=config["agent_timeout"],
                         )
                     )
-                except TimeoutError as exc:
-                    actor_error = "timeout"
-                    actor = {"status": "error", "error": str(exc), "trajectory": []}
-                except Exception as exc:
-                    actor_error = "agent_error"
-                    actor = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "trajectory": []}
                 finally:
                     for key, value in judge_env.items():
                         if value is None:
                             os.environ.pop(key, None)
                         else:
                             os.environ[key] = value
-                # Grading happens while all app state is still alive, including
-                # a legitimate wrong-answer zero or a step-limited rollout.
-                verify = run_verify(task, slot_id, ports, hostname, str(output), run_suffix="_r0")
-                diagnostics = verifier_diagnostics(verify)
                 native = actor.get("trajectory", [])
                 actor_failed = actor.get("status") != "completed"
-                if actor_failed and actor_error is None:
-                    detail = json.dumps({k: actor.get(k) for k in ["error", "error_steps", "stop_reason"]})
-                    actor_error = (
-                        "context_limit"
-                        if "context" in detail.lower()
-                        and any(word in detail.lower() for word in ["limit", "overflow", "exceed"])
-                        else "agent_error"
-                    )
+                actor_error = actor.get("failure_kind") if actor_failed else None
+                result.update(actor, native_trajectory=native)
+                if actor_failed and (
+                    actor.get("failure_origin") != "model"
+                    or actor_error not in {"context_limit", "malformed_tool_call", "output_token_limit", "agent_error"}
+                ):
+                    raise RuntimeError("Browser actor/runtime failed without a model-attributed ending")
+                # Only confirmed model endings reach final-state grading;
+                # browser/CDP/screenshot/provider faults stay retryable.
+                verify = run_verify(task, slot_id, ports, hostname, str(output), run_suffix="_r0")
+                diagnostics = verifier_diagnostics(verify)
                 result.update(actor)
                 result.update(
                     native_trajectory=native,
@@ -184,7 +176,12 @@ def execute(config: dict) -> dict:
                 if slot is not None:
                     slot.stop_apps(sites)
     except Exception as exc:
-        result.update(error=f"{type(exc).__name__}: {exc}")
+        result.update(
+            status="error",
+            mask_sample=True,
+            failure_kind="saas_bench:infrastructure",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         (output / "worker-error.txt").write_text(traceback.format_exc())
     return result
 

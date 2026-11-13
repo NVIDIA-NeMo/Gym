@@ -21,12 +21,19 @@ from responses_api_agents.saas_bench_agent.app import SaasBenchAgent, SaasBenchC
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
+    from responses_api_agents.saas_bench_agent.runtime import BENCHMARK_ROOT
+
+    monkeypatch.syspath_prepend(str(BENCHMARK_ROOT))
     source = tmp_path / "source"
     package = source / "saas_bench/opencode"
     package.mkdir(parents=True)
     for path in [source / "saas_bench/__init__.py", package / "__init__.py"]:
         path.write_text("")
     (package / "worker.py").write_text("import time\ntime.sleep(3600)\n")
+    protocol = types.ModuleType("saas_bench.opencode.protocol")
+    protocol_path = BENCHMARK_ROOT / "saas_bench/opencode/protocol.py"
+    exec(compile(protocol_path.read_text(), str(protocol_path), "exec"), protocol.__dict__)
+    monkeypatch.setitem(sys.modules, "saas_bench.opencode.protocol", protocol)
     core = types.ModuleType("saas_bench.opencode.core")
     core.HARNESS_VERSION = "2.1.1"
     core.measured_score = lambda result: result["score"]
@@ -198,7 +205,9 @@ def test_model_endings_are_explicit_counted_zeros(agent, ending, kind):
     from responses_api_agents.saas_bench_agent.app import SaasBenchVerifyResponse
 
     native = result(score=0.75, masked=True)
-    native.update(failure_kind="saas_bench:model_ending", execution_health={"termination": ending})
+    native.update(
+        failure_kind="saas_bench:model_ending", execution_health={"termination": ending}, model_turn_observed=True
+    )
     response = agent._response(request(), native)
     assert response.reward == 0 and response.mask_sample is False
     assert response.failure_kind == kind
@@ -222,11 +231,36 @@ def test_judge_fault_wins_over_model_ending_and_requests_row_retry(agent, kind):
     assert response.native_metrics == {}
 
 
-def test_timeout_flag_without_health_keeps_canonical_failure_kind(agent):
+def test_timeout_flag_with_model_turn_keeps_canonical_failure_kind(agent):
     native = result(score=0.75)
     native["timed_out"] = True
+    native["model_turn_observed"] = True
     response = agent._response(request(), native)
     assert response.failure_kind == "agent_timeout"
     assert response.failure_outcome_action == "count_as_zero"
     assert response.failure_outcome_attribution == "model"
     assert response.reward == 0 and response.mask_sample is False
+
+
+@pytest.mark.parametrize("infra_kind", [None, "saas_bench:infrastructure"])
+def test_timeout_without_model_turn_stays_retryable(agent, infra_kind):
+    native = result(score=0.75)
+    native.update(
+        timed_out=True, failure_kind=infra_kind, native_trajectory=[], execution_health={"termination": "timeout"}
+    )
+    response = agent._response(request(), native)
+    assert response.mask_sample and response.failure_outcome_action == "retry"
+    assert response.failure_outcome_attribution == "evaluation"
+    assert response.failure_kind == "agent_run_error"
+
+
+@pytest.mark.parametrize("origin,masked", [(None, True), ("model", False)])
+def test_browser_model_ending_requires_explicit_origin_even_for_cached_results(agent, origin, masked):
+    agent.config.harness = "browser_use"
+    native = result(score=0.75)
+    native.update(
+        failure_kind="saas_bench:model_ending", failure_origin=origin, execution_health={"termination": "agent_error"}
+    )
+    response = agent._response(request(), native)
+    assert response.mask_sample is masked
+    assert response.failure_outcome_attribution == ("evaluation" if masked else "model")

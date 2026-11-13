@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/agent.py
 # Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
+# Gym adaptation: explicit model/runtime fault boundaries; prompts and observations retained.
 """browser-use agent wrapper for SaaS-Bench."""
 
 import asyncio
@@ -100,6 +100,31 @@ def _positive_timeout(name: str, default: float) -> float:
 
 class TrajectoryNoProgressError(RuntimeError):
     """Stop an agent that is demonstrably repeating the same UI operation."""
+
+
+class ModelActionError(RuntimeError):
+    """A completed model response could not supply a valid action."""
+
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
+
+
+def _track_browser_runtime(browser, faults: dict) -> None:
+    """Retain failures swallowed by browser-use until that boundary recovers."""
+    for name in ("start", "get_browser_state_summary"):
+        original = getattr(browser, name)
+
+        async def tracked(*args, _call=original, _stage=name, **kwargs):
+            try:
+                value = await _call(*args, **kwargs)
+            except Exception as exc:
+                faults[_stage] = type(exc).__name__
+                raise
+            faults.pop(_stage, None)
+            return value
+
+        object.__setattr__(browser, name, tracked)
 
 
 class KimiK3ThinkingModeError(ValueError):
@@ -1514,6 +1539,22 @@ class _CleanOutputChatOpenAI(ChatOpenAI):
         return _ClientWithKimiOptions(client, extra_body, request_max_tokens, self)
 
     async def ainvoke(self, messages, output_format=None, **kwargs) -> Any:
+        self.last_actor_failure = None
+        self.last_actor_exception = None
+        try:
+            return await self._invoke_clean_output(messages, output_format=output_format, **kwargs)
+        except Exception as exc:
+            kind = exc.kind if isinstance(exc, ModelActionError) else (
+                "context_limit" if getattr(exc, "status_code", None) == 400 and _is_context_limit_error(exc) else None
+            )
+            self.last_actor_exception = exc
+            self.last_actor_failure = {
+                "failure_origin": "model" if kind else "evaluation",
+                "failure_kind": kind or "runtime_error",
+            }
+            raise
+
+    async def _invoke_clean_output(self, messages, output_format=None, **kwargs) -> Any:
         # Reset the slot so we get a fresh id for this call.
         _current_request_id.set(None)
         _current_raw_response_usage.set(None)
@@ -1549,12 +1590,15 @@ class _CleanOutputChatOpenAI(ChatOpenAI):
             messages, output_format=None, **kwargs
         )
         raw_completion = raw_result.completion
-        if not isinstance(raw_completion, str):
-            raw_completion = str(raw_completion)
+        if not isinstance(raw_completion, str) or not raw_completion.strip():
+            raise RuntimeError("Model endpoint returned no completion text")
 
         cleaned = _strip_tool_call_wrapper(raw_completion)
         cleaned = _rewrite_banned_actions(cleaned)
-        parsed = output_format.model_validate_json(cleaned)
+        try:
+            parsed = output_format.model_validate_json(cleaned)
+        except ValueError as exc:
+            raise ModelActionError("output_token_limit" if raw_result.stop_reason == "length" else "malformed_tool_call") from exc
         self.request_ids.append(self._last_response_request_id)
         return ChatInvokeCompletion(
             completion=parsed,
@@ -2596,6 +2640,7 @@ async def run_task(
     llm = None
     agent_directory: Path | None = None
     stop_reason: str | None = None
+    runtime_faults: dict[str, str] = {}
     dom_refresh = _dom_refresh_enabled()
     capture_sft = _sft_capture_enabled()
     sft_secrets = tuple(sorted(
@@ -2662,6 +2707,7 @@ async def run_task(
             wait_between_actions=0.2,
         )
 
+        _track_browser_runtime(browser, runtime_faults)
         tools = Tools(exclude_actions=["evaluate"])
         agent = Agent(
             task=prompt,
@@ -3016,6 +3062,11 @@ async def run_task(
         }
         if save_screenshots:
             result["screenshots_dir"] = shot_dir_name
+        failure = getattr(llm, "last_actor_failure", None)
+        if runtime_faults:
+            result.update(status="error", failure_origin="evaluation", failure_kind="browser_runtime_error")
+        elif failure and not history.is_done():
+            result.update(status="error", **failure)
 
     except Exception as e:
         partial_history = getattr(agent, "history", None) if agent is not None else None
@@ -3058,6 +3109,17 @@ async def run_task(
             }
             if stop_reason:
                 result["stop_reason"] = stop_reason
+        # Only a fault preserved at the model-call boundary, or the explicit
+        # repeated-model-action watchdog, establishes model responsibility.
+        if runtime_faults:
+            failure = {"failure_origin": "evaluation", "failure_kind": "browser_runtime_error"}
+        elif isinstance(e, TrajectoryNoProgressError):
+            failure = {"failure_origin": "model", "failure_kind": "agent_error"}
+        elif getattr(llm, "last_actor_exception", None) is e:
+            failure = llm.last_actor_failure
+        else:
+            failure = {"failure_origin": "evaluation", "failure_kind": "runtime_error"}
+        result.update(failure)
 
     finally:
         await _kill(chrome_proc, browser)

@@ -7,7 +7,7 @@
 #
 # Preferred sources:
 #   1) $SAAS_IMAGE_TAR_DIR
-#   2) /lustre/.../users/$USER/saas_bench_docker_images  (HF download)
+#   2) /saas-image-tars (deployment-provided mount)
 #   3) $REPO/docker/images
 #
 # Optional: SAAS_LOAD_ONLY="farmos grocy" to load a subset (faster smoke).
@@ -29,7 +29,7 @@ fi
 
 TAR_DIRS=(
   "${SAAS_IMAGE_TAR_DIR:-}"
-  "/lustre/fsw/portfolios/llmservice/users/${USER}/saas_bench_docker_images"
+  "/saas-image-tars"
   "${REPO_ROOT}/docker/images"
   "${SAAS_NRT_REAL_HOME:-}/saas_bench_docker_images"
 )
@@ -57,7 +57,7 @@ if [[ ${#tars[@]} -eq 0 ]]; then
   cat >&2 <<EOF
 ERROR: no image tarballs found.
 Download with: bash scripts/nrt/download_images_hf.sh
-Expected dir: /lustre/fsw/portfolios/llmservice/users/${USER}/saas_bench_docker_images
+Set SAAS_IMAGE_TAR_DIR to the downloaded image directory.
 EOF
   exit 2
 fi
