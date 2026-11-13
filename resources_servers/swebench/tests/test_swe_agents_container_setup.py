@@ -95,15 +95,26 @@ class TestSweAgentsContainerSetup:
         assert result.returncode != 0
 
     @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
-    def test_setup_command_succeeds_without_the_other_gradle_homes(self, tmp_path) -> None:
+    def test_setup_command_copies_the_init_script_and_tolerates_unwritable_homes(self, tmp_path) -> None:
         wrapper = tmp_path / "chrome-wrapper.sh"
         wrapper.write_text("#!/bin/sh\n")
-        command = SWE_AGENTS_CONTAINER_SETUP_COMMAND.replace(CHROME_WRAPPER_PATH, str(wrapper)).replace(
-            GRADLE_INIT_PATH, str(tmp_path / "missing.gradle")
+        init_script = tmp_path / "nemo_gym_mirror.gradle"
+        init_script.write_text("// mirror\n")
+        writable_home = tmp_path / "gradle" / ".gradle" / "init.d"
+        # A regular file where a parent directory should be, so mkdir -p fails for this home.
+        (tmp_path / "blocked").write_text("")
+        unwritable_home = tmp_path / "blocked" / ".gradle" / "init.d"
+        command = (
+            SWE_AGENTS_CONTAINER_SETUP_COMMAND.replace(CHROME_WRAPPER_PATH, str(wrapper))
+            .replace(GRADLE_INIT_PATH, str(init_script))
+            .replace("/home/gradle/.gradle/init.d", str(writable_home))
+            .replace("/home/user/.gradle/init.d", str(unwritable_home))
         )
+        assert "/home/" not in command
         result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
         assert result.returncode == 0
         assert os.access(wrapper, os.X_OK)
+        assert (writable_home / init_script.name).read_text() == "// mirror\n"
 
     @pytest.mark.parametrize(("return_code", "error_type"), [(1, None), (-1, "timeout")])
     async def test_a_failed_setup_raises_so_the_sandbox_is_stopped(self, return_code, error_type) -> None:
