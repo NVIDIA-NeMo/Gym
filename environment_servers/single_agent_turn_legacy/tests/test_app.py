@@ -322,6 +322,33 @@ def test_a_restored_attempt_runs_under_its_capture_key() -> None:
     assert client.calls[2][1] == "/ng-rollout/restored-a1/v1/responses"
 
 
+@pytest.mark.parametrize(
+    ("row_setting", "agent_path"),
+    [
+        ({}, "/ng-rollout/val-0/training-token-capture/v1/responses"),
+        ({"_ng_skip_token_capture": False}, "/ng-rollout/val-0/training-token-capture/v1/responses"),
+        ({"_ng_skip_token_capture": True}, "/ng-rollout/val-0/v1/responses"),
+    ],
+)
+def test_a_flat_row_can_skip_token_capture_for_its_episode(row_setting: dict, agent_path: str) -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={
+            "task_id": "task",
+            "_ng_rollout_id": "val-0",
+            "responses_create_params": {"input": "task"},
+            **row_setting,
+        },
+    )
+
+    assert response.status_code == 200
+    assert client.calls[2][1] == agent_path
+
+
 @pytest.mark.parametrize("task_source", ["resources", "agent"])
 def test_task_source_may_name_the_bound_resources_server_or_agent(task_source: str) -> None:
     # Collation stamps task_source with the instance that declares the dataset, usually the agent.
