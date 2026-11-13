@@ -3,7 +3,9 @@
 
 import ast
 import asyncio
+import builtins
 import fnmatch
+import importlib.metadata
 import json
 import os
 import re
@@ -14,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import ValidationError
@@ -321,6 +323,116 @@ def test_flashinfer_command_rejects_invalid_patterns(builder, pattern):
     builder.config.invalidate_modules = [pattern]
     with pytest.raises(ValueError, match="Invalid FlashInfer module"):
         builder.get_srun_command_str()
+
+
+@pytest.fixture
+def flashinfer_version_check(builder, tmp_path, monkeypatch):
+    builder._head_sha = "a" * 40
+    script = shlex.split(builder.get_srun_command_str())[2]
+    program = script.split("# Python 1:", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "version.txt").write_text("0.7.0.post1\n")
+    aot = tmp_path / "installed-aot"
+    aot.mkdir()
+    (aot / "module.so").write_bytes(b"existing module")
+    versions = {"flashinfer-python": "0.7.0.post1", "flashinfer-cubin": "0.7.0+g37b688d2e589.cu132"}
+
+    def version(name):
+        if name not in versions:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return versions[name]
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    monkeypatch.setattr(
+        importlib.metadata,
+        "distributions",
+        lambda: [SimpleNamespace(metadata={"Name": name}, version=value) for name, value in versions.items()],
+    )
+    monkeypatch.setenv("BUILD_DIR", str(tmp_path))
+    original_import = builtins.__import__
+    imports = []
+
+    def checked_import(name, *args, **kwargs):
+        if name in {"flashinfer", "flashinfer_cubin", "flashinfer.jit"}:
+            # Model the import-time guard from the failing worker environment.
+            assert versions["flashinfer-cubin"] == versions["flashinfer-python"], "Imported before aligning cubins"
+            imports.append(name)
+            return SimpleNamespace(
+                __version__=versions["flashinfer-python"],
+                env=SimpleNamespace(FLASHINFER_AOT_DIR=aot, FLASHINFER_CACHE_DIR=tmp_path / "cache"),
+            )
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", checked_import)
+
+    def install(*args, **kwargs):
+        versions["flashinfer-cubin"] = versions["flashinfer-python"]
+
+    installer = Mock(side_effect=install)
+    monkeypatch.setattr(subprocess, "run", installer)
+    return SimpleNamespace(
+        run=lambda: exec(compile(program, "flashinfer-version-check", "exec"), {}),
+        installer=installer,
+        versions=versions,
+        imports=imports,
+    )
+
+
+@pytest.mark.parametrize("pip_args", [["--system"], ["--python", "/opt/worker venv/bin/python"]])
+@pytest.mark.parametrize("cubin_version", ["0.7.0+g37b688d2e589.cu132", "0.7.0.post1", None])
+def test_flashinfer_aligns_cubins_before_import(
+    flashinfer_version_check, tmp_path, monkeypatch, pip_args, cubin_version
+):
+    check = flashinfer_version_check
+    if cubin_version is None:
+        check.versions.pop("flashinfer-cubin")
+    else:
+        check.versions["flashinfer-cubin"] = cubin_version
+    check.versions["flashinfer-jit-cache-sm100a"] = "0.7.0.post1+cu132"
+    monkeypatch.setattr(sys, "argv", ["-", *pip_args])
+    check.run()
+    if cubin_version == "0.7.0.post1":
+        check.installer.assert_not_called()
+    else:
+        check.installer.assert_called_once_with(
+            [
+                "uv",
+                "pip",
+                "install",
+                *pip_args,
+                "--no-deps",
+                "--only-binary=:all:",
+                "--index-url",
+                "https://flashinfer.ai/whl",
+                "flashinfer-cubin===0.7.0.post1",
+            ],
+            check=True,
+        )
+    assert check.imports == ["flashinfer", "flashinfer_cubin", "flashinfer.jit"]
+    assert (tmp_path / "aot/module.so").read_bytes() == b"existing module"
+    assert (tmp_path / "local-version").read_text() == ""
+    assert json.loads((tmp_path / "binary-packages.json").read_text()) == {
+        "flashinfer-cubin": "0.7.0.post1",
+        "flashinfer-jit-cache-sm100a": "0.7.0.post1+cu132",
+    }
+
+
+def test_flashinfer_release_mismatch_fails_without_import_or_install(flashinfer_version_check):
+    check = flashinfer_version_check
+    check.versions["flashinfer-python"] = "0.6.0"
+    with pytest.raises(RuntimeError, match="branch=0.7.0.post1, Python=0.6.0"):
+        check.run()
+    check.installer.assert_not_called()
+    assert check.imports == []
+
+
+def test_flashinfer_cubin_install_failure_stops_before_import(flashinfer_version_check):
+    check = flashinfer_version_check
+    check.installer.side_effect = subprocess.CalledProcessError(1, ["uv", "pip", "install"])
+    with pytest.raises(subprocess.CalledProcessError):
+        check.run()
+    assert check.imports == []
 
 
 @pytest.mark.parametrize("entrypoint", ["gym", "module"])

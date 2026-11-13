@@ -287,7 +287,7 @@ class FlashInferBuilder(BaseBuilder):
         self._head_sha = await self._preflight_check_git_repo(self.config.repo, self.config.branch)
 
     def get_srun_command_str(self) -> str:
-        """Installation preserves binary packages and invalidates selected modules without JIT."""
+        """Reuse matching binaries, align cubins if needed, and invalidate modules without JIT."""
         if self._head_sha is None:
             raise RuntimeError("Run FlashInfer preflight checks before generating the build command")
 
@@ -309,28 +309,47 @@ class FlashInferBuilder(BaseBuilder):
             git -C "$BUILD_DIR/source" checkout --detach FETCH_HEAD
             git -C "$BUILD_DIR/source" submodule update --init --recursive --depth=1
 
-            # Python 1: check that the branch and installed Python/cubin packages share
-            # a release. Save the version suffix, back up existing AOT overrides, and
-            # record binary-package versions for comparison after installation.
+            command -v uv >/dev/null || "$BUILD_PYTHON" -m pip install uv
+            # Python 1: check the Python release through metadata before importing
+            # FlashInfer, which rejects mismatched cubins at import time. Align only
+            # the cubin wheel when needed, then preserve the remaining binary packages.
+            # Save the version suffix and back up existing AOT overrides.
             # Run outside the checkout so imports refer to the base image's package.
             cd /
-            "$BUILD_PYTHON" - <<'PY'
+            "$BUILD_PYTHON" - "${BUILD_PIP_ARGS[@]}" <<'PY'
             import importlib.metadata as metadata
             import json
             import os
             import shutil
+            import subprocess
+            import sys
             from pathlib import Path
+
+            root = Path(os.environ["BUILD_DIR"])
+            release = (root / "source/version.txt").read_text().strip()
+            version = metadata.version("flashinfer-python")
+            if version.partition("+")[0] != release:
+                raise RuntimeError(f"Slim builds require matching releases: branch={release}, Python={version}")
+            try:
+                cubin_version = metadata.version("flashinfer-cubin")
+            except metadata.PackageNotFoundError:
+                cubin_version = None
+            if cubin_version != version:
+                print(f"Aligning flashinfer-cubin: {cubin_version or 'not installed'} -> {version}", flush=True)
+                subprocess.run(
+                    ["uv", "pip", "install", *sys.argv[1:], "--no-deps", "--only-binary=:all:",
+                     "--index-url", "https://flashinfer.ai/whl", f"flashinfer-cubin==={version}"],
+                    check=True,
+                )
+                if metadata.version("flashinfer-cubin") != version:
+                    raise RuntimeError(f"Failed to install flashinfer-cubin=={version} in {sys.executable}")
 
             import flashinfer
             import flashinfer_cubin
             from flashinfer.jit import env
 
-            root = Path(os.environ["BUILD_DIR"])
-            release = (root / "source/version.txt").read_text().strip()
-            version = flashinfer.__version__
-            if version != flashinfer_cubin.__version__ or version.partition("+")[0] != release:
-                raise RuntimeError(f"Slim builds require matching releases: branch={release}, Python={version}, "
-                                   f"cubins={flashinfer_cubin.__version__}")
+            if flashinfer.__version__ != version or flashinfer_cubin.__version__ != version:
+                raise RuntimeError("FlashInfer imports do not match the installed package metadata")
             (root / "local-version").write_text(version.partition("+")[2])
             if env.FLASHINFER_AOT_DIR.exists():
                 shutil.copytree(env.FLASHINFER_AOT_DIR, root / "aot")
@@ -346,8 +365,7 @@ class FlashInferBuilder(BaseBuilder):
             export BUILD_NVEP=0 BUILD_NIXL_EP=0 BUILD_NCCL_EP=0
             # Python 2 (pip): replace only flashinfer-python with this branch. Use the
             # image's build dependencies (--no-build-isolation) and leave runtime
-            # dependencies, including cubins/providers, installed as-is (--no-deps).
-            command -v uv >/dev/null || "$BUILD_PYTHON" -m pip install uv
+            # dependencies, including the aligned cubins/providers, installed as-is (--no-deps).
             uv pip install "${BUILD_PIP_ARGS[@]}" --no-deps --no-build-isolation --force-reinstall "$BUILD_DIR/source"
 
             # Python 3: restore unrelated AOT overrides, remove matching module families
