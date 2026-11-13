@@ -364,8 +364,10 @@ def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
 
 def test_the_readme_gives_each_time_limit_the_presets_value() -> None:
     """The README's time-limits section names each limit as `setting: value`. Every value the presets compose must be
-    the one it gives, so a preset change that leaves the section stale fails here. The judge's attempt count and the
-    timeout of its later attempts are opencode_search's defaults, which neither preset sets."""
+    the one it gives, so a preset change that leaves the section stale fails here. The judge's retry limits (the
+    timeout of each request of a later attempt, the attempt count and the delay between attempts) are opencode_search's
+    defaults, which neither preset sets: resources_servers/opencode_search/tests/test_browsecomp_presets.py checks
+    them."""
     _, config = sessions()
     _, relay = resolve(RELAY)
     pairing, agent, resources = settings(config, ENVIRONMENT), settings(config, AGENT), settings(config, RESOURCES)

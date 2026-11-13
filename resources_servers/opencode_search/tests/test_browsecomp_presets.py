@@ -5,6 +5,7 @@
 tests/unit_tests/benchmarks/test_browsecomp_opencode_configs.py checks the rest of the preset in the core suite, which
 imports neither server, so the core suite's coverage does not count them."""
 
+import re
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from tests.unit_tests.benchmarks.test_browsecomp_opencode_configs import EXPORT_
 
 
 ROOT = Path(__file__).resolve().parents[3]
+README = ROOT / "benchmarks/browsecomp/README.md"
 SESSIONS = "benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml"
 RELAY = "benchmarks/browsecomp/configs/browsecomp_opencode.yaml"
 AGENT = "browsecomp_opencode_agent"
@@ -170,6 +172,21 @@ def test_the_resources_server_copies_the_exports_from_where_the_agent_writes_the
 
     assert resources.episode_export_dir == agent.export_dir == export_dir
     assert resources.episode_export_copy_dir is None
+
+
+def test_the_readme_gives_the_judge_retry_limits_this_server_applies() -> None:
+    """The README's time-limits section names each limit as `setting: value`. Neither preset sets the judge's retry
+    limits, so they are this server's defaults, which the core suite's check of that section cannot read; a change to
+    one that leaves the section stale fails here."""
+    _, config = sessions()
+    resources = SearchResourcesServerConfig.model_validate(settings(config, RESOURCES) | {"name": RESOURCES})
+    section = README.read_text().split("\n### Time limits\n", 1)[1].split("\n### ", 1)[0]
+    documented = {name: float(value) for name, value in re.findall(r"`([\w.]+): (\d+)`", section)}
+
+    retry_limits = ("judge_retry_timeout_seconds", "judge_max_attempts", "judge_retry_delay_seconds")
+    applied = {name: getattr(resources, name) for name in retry_limits}
+    assert {name: documented.get(name) for name in retry_limits} == applied
+    assert applied == {name: SearchResourcesServerConfig.model_fields[name].default for name in retry_limits}
 
 
 def test_the_core_timing_check_counts_the_export_copy_at_this_servers_bound() -> None:
