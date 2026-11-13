@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
@@ -25,8 +27,9 @@ ensure_ether0()
 
 from ether0.model_prompts import extract_answer_loose  # noqa: E402
 from ether0.models import RewardFunctionInfo  # noqa: E402
+from pydantic import Field, PrivateAttr
 
-from nemo_gym.core.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -53,6 +56,9 @@ class Ether0ResourcesServerConfig(BaseResourcesServerConfig):
     local_oracles: bool = True
     moltrans_model_path: Optional[str] = None
     zinc20_bloom_path: Optional[str] = None
+    oracle_max_concurrency: int = Field(
+        default=8, ge=1, description="Maximum simultaneous oracle-backed grades per worker."
+    )
 
 
 class Ether0RunRequest(BaseRunRequest):
@@ -75,8 +81,10 @@ class Ether0ResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     config: Ether0ResourcesServerConfig
+    _oracle_semaphore: asyncio.Semaphore = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
+        self._oracle_semaphore = asyncio.Semaphore(self.config.oracle_max_concurrency)
         if self.config.local_oracles and not os.environ.get(local_oracles.REMOTE_ORACLES_ENV_VAR):
             local_oracles.install(self.config.moltrans_model_path, self.config.zinc20_bloom_path)
         super().model_post_init(context)
@@ -126,7 +134,10 @@ class Ether0ResourcesServer(SimpleResourcesServer):
             )
 
         try:
-            reward = eval_fn(answer, answer_info)
+            if eval_fn_name in local_oracles.ORACLE_EVAL_FUNCTIONS:
+                reward = await self._grade_oracle(eval_fn, answer, answer_info)
+            else:
+                reward = eval_fn(answer, answer_info)
         except local_oracles.OracleError as error:
             logger.exception("Oracle failed in %r for problem_type=%r", eval_fn_name, problem_type)
             return _response(
@@ -144,6 +155,26 @@ class Ether0ResourcesServer(SimpleResourcesServer):
             reward = 0.0
 
         return _response(body, reward, answer, eval_fn_name, problem_type)
+
+    async def _grade_oracle(self, eval_fn: Callable[[str, str], float], answer: str, answer_info: str) -> float:
+        async with self._oracle_semaphore:
+            # A cancelled HTTP request cannot stop a running thread. Keep its slot until the
+            # grade finishes, including across repeated cancellation, so the limit remains real.
+            task = asyncio.create_task(asyncio.to_thread(eval_fn, answer, answer_info))
+            cancelled = False
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    if not cancelled:
+                        raise
+            if cancelled:
+                if not task.cancelled():
+                    task.exception()
+                raise asyncio.CancelledError
+            return task.result()
 
 
 def _response(

@@ -68,7 +68,10 @@ def fetch_purchasable(query_smiles_list: list[str] | str) -> dict[str, bool]:
     import molbloom
 
     smiles = [query_smiles_list] if isinstance(query_smiles_list, str) else query_smiles_list
-    return {s: molbloom.buy(s, canonicalize=True, catalog="zinc20") for s in smiles}
+    try:
+        return {s: molbloom.buy(s, canonicalize=True, catalog="zinc20") for s in smiles}
+    except Exception as error:
+        raise OracleError(f"Purchasability lookup failed: {error}") from error
 
 
 def fetch_forward_rxn(query_rxn_smiles: str) -> dict[str, str]:

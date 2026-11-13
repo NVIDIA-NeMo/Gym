@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,14 +27,20 @@ from app import (
 )
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponse
-from nemo_gym.core.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponse
 from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.ether0 import graders, local_oracles
 
 
-def _make_server() -> Ether0ResourcesServer:
-    config = Ether0ResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="", local_oracles=False)
+def _make_server(*, oracle_max_concurrency: int = 8) -> Ether0ResourcesServer:
+    config = Ether0ResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        local_oracles=False,
+        oracle_max_concurrency=oracle_max_concurrency,
+    )
     return Ether0ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -274,6 +282,33 @@ class TestOracleRows:
         assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
         assert result.failure_reason == "model failed"
 
+    @pytest.mark.parametrize("catalog_fails", [False, True], ids=["not-purchasable", "catalog-failure"])
+    async def test_purchasability_failure_is_masked_but_a_negative_lookup_is_scored(self, catalog_fails: bool) -> None:
+        server = _make_server()
+        server.config.local_oracles = True
+        # The second reactant has more than four heavy atoms, so the grader cannot
+        # bypass its negative catalog result with the small-molecule exemption.
+        second_lookup = RuntimeError("catalog unavailable") if catalog_fails else False
+        with (
+            patch("molbloom.buy", side_effect=[True, second_lookup]),
+            patch.object(graders.rewards, "fetch_purchasable", local_oracles.fetch_purchasable),
+            patch.object(graders.rewards, "fetch_forward_rxn", return_value={"product": "CCCCCOC(C)=O"}),
+        ):
+            result = await server.verify(
+                _make_request(
+                    "<answer>CC(=O)Cl.CCCCCO>></answer>",
+                    "rxn_forward!:!CCCCCOC(C)=O!:!retro-synthesis",
+                    "retro-synthesis",
+                )
+            )
+        assert result.reward == 0.0
+        assert result.mask_sample is catalog_fails
+        assert result.failure_kind == (VERIFIER_ERROR if catalog_fails else None)
+        if catalog_fails:
+            assert result.failure_reason == "Purchasability lookup failed: catalog unavailable"
+        else:
+            assert result.failure_reason is None
+
     @pytest.mark.parametrize(("remote", "installs"), [(None, 1), ("http://example.invalid", 0)])
     def test_local_oracles_are_installed_by_default_unless_a_remote_is_configured(
         self, remote: str | None, installs: int, monkeypatch: pytest.MonkeyPatch
@@ -303,3 +338,113 @@ async def test_verifier_fixture() -> None:
         higher_is_better=True,
         determinism="unknown",
     )
+
+
+class TestOracleConcurrency:
+    @pytest.mark.parametrize("limit", [1, 3])
+    async def test_grades_run_off_the_event_loop_with_a_per_worker_limit(self, limit: int) -> None:
+        server = _make_server(oracle_max_concurrency=limit)
+        server.config.local_oracles = True
+        loop = asyncio.get_running_loop()
+        full = asyncio.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+        active = peak = started = 0
+
+        def grade(answer: str, target: str) -> float:
+            nonlocal active, peak, started
+            with lock:
+                active += 1
+                started += 1
+                peak = max(peak, active)
+                if active == limit:
+                    loop.call_soon_threadsafe(full.set)
+            try:
+                if not release.wait(timeout=10):
+                    raise TimeoutError("test did not release the blocked grades")
+                return float(answer == target)
+            finally:
+                with lock:
+                    active -= 1
+
+        with patch.dict(EVAL_FUNCTIONS, {"sol_eval": grade}):
+            jobs = [
+                asyncio.create_task(
+                    server.verify(_make_request(f"<answer>{i % 2}</answer>", "sol_eval!:!1!:!test", "test"))
+                )
+                for i in range(limit * 2)
+            ]
+            try:
+                # The event loop must remain responsive while the real worker threads are blocked.
+                await asyncio.wait_for(full.wait(), timeout=5)
+                assert started == limit
+                assert not any(job.done() for job in jobs)
+                # Ordinary chemistry grading must not wait behind a saturated oracle queue.
+                ordinary = await asyncio.wait_for(
+                    server.verify(_make_request("<answer>OCC</answer>", "str_eval!:!CCO!:!test", "test")),
+                    timeout=5,
+                )
+                assert ordinary.reward == 1.0
+            finally:
+                release.set()
+                results = await asyncio.gather(*jobs)
+        assert peak == limit
+        assert [result.reward for result in results] == [float(i % 2) for i in range(limit * 2)]
+        assert not any(result.mask_sample for result in results)
+
+    @pytest.mark.parametrize("fails_after_cancellation", [False, True])
+    async def test_cancelled_running_grade_keeps_its_slot_until_the_thread_finishes(
+        self, fails_after_cancellation: bool
+    ) -> None:
+        server = _make_server(oracle_max_concurrency=1)
+        server.config.local_oracles = True
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        def grade(answer: str, target: str) -> float:
+            calls.append(answer)
+            if answer == "blocked":
+                loop.call_soon_threadsafe(started.set)
+                if not release.wait(timeout=10):
+                    raise TimeoutError("test did not release the blocked grade")
+                if fails_after_cancellation:
+                    raise local_oracles.OracleError("failure after cancellation")
+            return 1.0
+
+        def request(answer: str) -> Ether0VerifyRequest:
+            return _make_request(f"<answer>{answer}</answer>", "sol_eval!:!target!:!test", "test")
+
+        with patch.dict(EVAL_FUNCTIONS, {"sol_eval": grade}):
+            running = asyncio.create_task(server.verify(request("blocked")))
+            waiting = replacement = None
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                waiting = asyncio.create_task(server.verify(request("cancelled while queued")))
+                await asyncio.sleep(0)
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+                running.cancel()
+                await asyncio.sleep(0)
+                running.cancel()
+                await asyncio.sleep(0)
+                replacement = asyncio.create_task(server.verify(request("replacement")))
+                await asyncio.sleep(0)
+                assert not running.done()
+                assert calls == ["blocked"]
+            finally:
+                release.set()
+                await asyncio.gather(
+                    *(job for job in (running, waiting, replacement) if job is not None), return_exceptions=True
+                )
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            assert replacement is not None
+            assert (await replacement).reward == 1.0
+            assert calls == ["blocked", "replacement"]
+
+    def test_nonpositive_limit_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="oracle_max_concurrency"):
+            _make_server(oracle_max_concurrency=0)
