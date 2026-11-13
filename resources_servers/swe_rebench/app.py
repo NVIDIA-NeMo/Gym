@@ -29,7 +29,7 @@ from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote as url_quote
 from uuid import uuid4
 
 from fastapi import Request
@@ -375,7 +375,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
 
         inputs = self._inputs(body, patch)
         log_dir = (
-            self.config.verification_log_dir / f"instance-{quote(body.instance_id, safe='')}" / uuid4().hex
+            self.config.verification_log_dir / f"instance-{url_quote(body.instance_id, safe='')}" / uuid4().hex
             if self.config.verification_log_dir is not None
             else None
         )
