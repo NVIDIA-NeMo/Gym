@@ -39,6 +39,15 @@ RUNTIME_ROOT = "/tmp/nemo-gym-goose-runtime"
 INSTALLER = "install_goose_runtime.sh"
 # Bounds the stderr tail copied back to the agent server.
 STDERR_TAIL_BYTES = 1024 * 1024
+# CA bundles the common distributions install. An image with one of these, or with SSL_CERT_FILE or
+# SSL_CERT_DIR already set, keeps its own trust store.
+SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",  # Debian, Ubuntu, Alpine, Arch
+    "/etc/pki/tls/certs/ca-bundle.crt",  # RHEL, Fedora
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # RHEL 9+
+    "/etc/ssl/ca-bundle.pem",  # openSUSE
+    "/etc/ssl/cert.pem",  # Alpine, LibreSSL
+)
 
 
 def goose_archive_name(arch: str) -> str:
@@ -66,6 +75,8 @@ class GooseSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     observations: AgentObservationBundle | None = None
+    # Certifi's bundle in the session directory, set only when the task image has no trust store.
+    ca_bundle: str | None = None
 
     @property
     def root(self) -> str:
@@ -91,9 +102,19 @@ class GooseSession(AgentSessionState):
             raise RuntimeError(f"Cannot prepare the Goose session directory: {prepared.stderr or prepared.stdout}")
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
-        # The static release still needs CA roots to construct its HTTP client,
-        # even for an HTTP model endpoint. Minimal task images may have none.
-        await sandbox.upload(Path(certifi.where()), f"{self.root}/ca-certificates.pem")
+        # The static release needs CA roots to construct its HTTP client, even for an HTTP model endpoint.
+        # Supply Certifi's only when the image has none: SSL_CERT_FILE also reaches the task's tool shells,
+        # and there it would replace a trust store the task relies on (or one the agent extends).
+        found = " || ".join(
+            ['test -n "${SSL_CERT_FILE:-}"', 'test -n "${SSL_CERT_DIR:-}"']
+            + [f"test -s {quote(bundle)}" for bundle in SYSTEM_CA_BUNDLES]
+        )
+        trust_store = await sandbox.exec(found, cwd="/", timeout_s=60)
+        if trust_store.error_type:
+            raise RuntimeError(f"Cannot check the sandbox trust store: {trust_store.stderr or trust_store.error_type}")
+        if trust_store.return_code != 0:
+            self.ca_bundle = f"{self.root}/ca-certificates.pem"
+            await sandbox.upload(Path(certifi.where()), self.ca_bundle)
         arch = await sandbox.exec("uname -m", cwd="/", timeout_s=60)
         if arch.return_code != 0 or arch.error_type:
             raise RuntimeError(f"Cannot read the sandbox architecture: {arch.stderr or arch.error_type}")

@@ -293,7 +293,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
             for key, value in (access.env if access else {}).items()
             if not key.startswith(("GOOSE_", "OPENAI_", "OTEL_", "LANGFUSE_"))
         }
-        env.setdefault("SSL_CERT_FILE", f"{state.root}/ca-certificates.pem")
+        if state.ca_bundle:
+            env.setdefault("SSL_CERT_FILE", state.ca_bundle)
         env |= {
             # Goose's config, sessions and state live in the session directory, so tool shells keep the task's HOME.
             "GOOSE_PATH_ROOT": state.root,
