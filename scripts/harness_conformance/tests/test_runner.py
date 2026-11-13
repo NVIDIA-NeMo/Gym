@@ -641,6 +641,34 @@ def test_terminal_model_error_must_be_reported_to_environment(retained_episode, 
     assert check["status"] == ("pass" if mutation is None else "fail")
 
 
+@pytest.mark.parametrize(
+    "outcome,passes",
+    [
+        # A harness that tells a request the endpoint refused as invalid from the model's own failure reports this
+        # kind, which carries no status: the witnessed 400 is the evidence of it.
+        ({"failure_kind": "model_request_rejected"}, True),
+        # Only model_request_error carries a status, so an outcome that adds one is not a valid outcome.
+        ({"failure_kind": "model_request_rejected", "status_code": 400}, False),
+    ],
+)
+def test_terminal_model_error_may_be_reported_as_a_rejected_request(retained_episode, outcome, passes):
+    directory, witness = retained_episode
+    witness["attempts"] = [
+        {"status_code": 400, "request": {}, "response": {"error": {"message": "controlled model failure"}}}
+    ]
+    witness["agent_responses"] = [
+        {
+            "status": "failed",
+            "error": {"code": "server_error", "message": "HTTP 400: controlled model failure"},
+            "metadata": {AGENT_OUTCOME_METADATA_KEY: json.dumps(outcome)},
+        }
+    ]
+    (directory / "witness.json").write_text(json.dumps(witness))
+    result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "model.terminal_error")
+    assert check["status"] == ("pass" if passes else "fail")
+
+
 @pytest.mark.parametrize("graded,masked,reward", [(True, False, 0.0), (True, False, 1.0), (False, True, 0.0)])
 def test_terminal_error_does_not_prescribe_grading_policy(retained_episode, graded, masked, reward):
     directory, witness = retained_episode

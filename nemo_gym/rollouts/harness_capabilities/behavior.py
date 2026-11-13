@@ -10,11 +10,15 @@ from collections.abc import Callable
 from pydantic import ValidationError
 
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR, MODEL_REQUEST_REJECTED
 from nemo_gym.models.chat_completions_converter import message_content_to_text
 
 from .checks import BehavioralCheck
 from .results import Results
+
+
+# The one HTTP status that can be a request the endpoint refused as invalid (``model_request_rejected``).
+INVALID_REQUEST_STATUS = 400
 
 
 def _mapping(value: object) -> dict:
@@ -26,7 +30,12 @@ def _objects(value: object) -> list[dict]:
 
 
 def _terminal_error_reported(attempts: list[dict], responses: list[dict], expected_status: int) -> bool:
-    """Compare the scripted provider error with the response received by the EnvironmentServer."""
+    """Compare the scripted provider error with the response received by the EnvironmentServer.
+
+    The outcome is ``model_request_error`` with the witnessed status. A harness that tells a request the endpoint
+    refused as invalid, an HTTP 400, from the model's own failure may instead report ``model_request_rejected``,
+    which carries no status: the witnessed attempts are the evidence of it.
+    """
     if not attempts or any(attempt["status_code"] != expected_status for attempt in attempts):
         return False
     if len(responses) != 1 or responses[0].get("status") != "failed":
@@ -36,7 +45,10 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
         outcome = AgentOutcome.model_validate_json(raw)
     except ValidationError:
         return False
-    if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code != expected_status:
+    if outcome.failure_kind == MODEL_REQUEST_REJECTED:
+        if expected_status != INVALID_REQUEST_STATUS:
+            return False
+    elif outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code != expected_status:
         return False
     message = _mapping(_mapping(attempts[-1].get("response")).get("error")).get("message")
     reported = _mapping(responses[0].get("error")).get("message")
@@ -250,7 +262,8 @@ def inspect_behavior(
             evidence=("TE-1",),
             location="witness.json",
             reason="the EnvironmentServer must receive a failed response retaining the model error and "
-            "ng_agent_outcome with model_request_error and the witnessed HTTP status",
+            "ng_agent_outcome with model_request_error and the witnessed HTTP status "
+            "(or model_request_rejected for an HTTP 400 the harness reports as an invalid request)",
             predicate=lambda: (
                 _terminal_error_reported(attempts, agent_responses, http_errors[-1]) if terminal_error else True
             ),
