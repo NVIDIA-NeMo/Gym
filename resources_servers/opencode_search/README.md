@@ -25,12 +25,25 @@ The verdict parser takes the LAST `correct: yes|no` match: reasoning judges echo
 their think block, and a first-match parse grades the echo. A reply that echoes the template instead
 of grading counts as unparsed.
 
-Both judge failures count toward `judge_max_consecutive_failures`: once that many rollouts in a row
-get no verdict, verify answers 500 for that rollout and for each later one without a verdict, until a
-verdict resets the count, rather than masking every remaining row. On the relay pairing that 500 fails
-the agent's `/run`: without `route_failures_to_sidecar` the first one ends the run, and with it each
-becomes a failures-sidecar row. On an episode session each becomes a non-terminal failure row, and
-collection continues. Watch the failure rows for judge failures.
+Each of the `judge_max_attempts` attempts (4 by default) is one `call_judge`, which sends the request
+up to three times on a timeout, a lost connection or a 408, 429 or 5xx reply, with at most 2 s and then
+4 s of backoff. With the defaults (`judge_timeout_seconds`, 300 s for each request of the first attempt;
+`judge_retry_timeout_seconds`, 120 s for each request of a retry; `judge_retry_delay_seconds`, 30 s
+between attempts), a judge that never answers holds a rollout for
+(3 × 300 + 6) + 3 × (3 × 120 + 6) + 3 × 30 = 2,094 s when each request is sent once. Gym's HTTP client
+also sends a timed-out or refused request again until `global_aiohttp_internal_retry_budget_seconds`
+(600 s by default) is spent, which stretches that to about two hours.
+
+Both judge failures count toward `judge_max_consecutive_failures` (default 25, counted by each worker; 0
+turns it off): once that many rollouts in a row are left without a verdict, verify answers 500 rather
+than masking every remaining row, and a verdict starts the count again. Changed: a reply without a
+parseable verdict now counts too; before, only a judge that never answered counted, and a reply without
+a verdict scored the row 0, as a wrong answer. The server does not refuse seeds after a trip: each later
+rollout whose judge also fails runs its agent and then answers 500, until a verdict resets the count. On
+the relay pairing that 500 fails the agent's `/run`: with `route_failures_to_sidecar` off (the default)
+the first one ends the run, and with it on each becomes a failures-sidecar row. On an episode session
+each becomes a non-terminal failure row, and collection continues. Watch the failure rows for judge
+failures.
 
 `inconclusive_verification_retries`, which `AGENTS.md` asks for when verification starts sandboxes,
 does not apply: verify starts no sandbox of its own, and an episode's plugin log exists only in the
