@@ -36,14 +36,14 @@ gym eval run --benchmark saas_bench_opencode --model-type vllm_model --split ben
 ```
 
 The two supported benchmark names are `saas_bench_opencode` and `saas_bench_browser_use`; the unused `saas_bench` alias has been removed.
-Every invocation requires an explicit, unique `saas_bench_run_root`. Reusing a run root resumes that run and reuses saved scores; use a fresh root for each model/checkpoint. Dispatch concurrency defaults to the agent concurrency so queued rows do not spend the episode deadline waiting for a slot.
+Every invocation requires an explicit, unique `saas_bench_run_root` (CLI override or `SAAS_BENCH_RUN_ROOT`). Static manifest validation rejects runtime CLI overrides; use `SAAS_BENCH_RUN_ROOT=/runs/validation gym env validate saas_bench_opencode` after preparing the dataset. Reusing a run root resumes that run and reuses saved scores; use a fresh root for each model/checkpoint. Dispatch concurrency defaults to the agent concurrency so queued rows do not spend the episode deadline waiting for a slot.
 For a smoke, set `+saas_bench_tasks=<native-task-id>` in BOTH prepare and run;
 prepare again when changing selectors; the two harnesses have separate prepared JSONLs.
 Prepared files stay in the per-job Gym checkout under `benchmarks/<harness>/data/`;
 Factory installs an isolated checkout for each job. Bundles and episodes use the run artifact directory.
 Provide actor authentication with `SAAS_BENCH_MODEL_API_KEY` if the endpoint needs it.
 Native judge-assisted verifier checks use `LLM_BASE_URL`, `LLM_API_KEY`, and
-`LLM_JUDGE_MODEL` at runtime; no credentials are committed. Deterministic checks
+`LLM_JUDGE_MODEL` at runtime; no actor/judge credentials are committed. Deterministic checks
 keep their original state readers and weights. Do not replace them with a generic
 trajectory judge.
 

@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from https://gitlab-master.nvidia.com/pritamb/saas-bench/-/blob/ad48579c1af66bb7100501f45460bb3e9ec5eaae/tests/opencode/test_model_adapter.py (Apache-2.0).
 """Use actual Gym response schemas at the OpenCode-specific adapter boundary."""
 
 import json

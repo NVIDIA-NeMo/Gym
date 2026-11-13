@@ -2,7 +2,7 @@ name: saas_bench_opencode
 version: 0.2.0
 experimental: true
 kind: benchmark
-integration_profile: external-agent-loop
+integration_profile: custom-gym-agent-loop
 domain: other
 description: Native SaaS Bench evaluation using opencode
 modality: text, image

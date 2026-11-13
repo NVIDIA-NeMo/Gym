@@ -5,6 +5,7 @@ policy_model_name: ${oc.select:saas_bench_policy_model_name,policy}
 policy_api_key: ${oc.env:SAAS_BENCH_MODEL_API_KEY,EMPTY}
 observability_enabled: true
 num_samples_in_parallel: ${oc.select:saas_bench_concurrency,1}
+saas_bench_run_root: ${oc.env:SAAS_BENCH_RUN_ROOT}
 saas_bench_output_root: ${saas_bench_run_root}/episodes
 saas_bench_sampling:
   temperature: 0.6

@@ -2,7 +2,7 @@ name: saas_bench_browser_use
 version: 0.2.0
 experimental: true
 kind: benchmark
-integration_profile: external-agent-loop
+integration_profile: custom-gym-agent-loop
 domain: other
 description: Native SaaS Bench evaluation using browser_use
 modality: text, image

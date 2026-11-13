@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 
 from responses_api_agents.saas_bench_agent import runtime
 
@@ -107,15 +108,18 @@ def test_bundle_start_checks_runtime_and_external_grader_bytes(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("harness", ["opencode", "browser_use"])
-def test_catalog_manifest_and_explicit_run_root(harness, tmp_path):
+def test_catalog_manifest_and_explicit_run_root(harness, tmp_path, monkeypatch):
     from nemo_gym.environment.manifest import load_manifest
 
     root = Path(__file__).resolve().parents[3]
+    monkeypatch.delenv("SAAS_BENCH_RUN_ROOT", raising=False)
     manifest = load_manifest(root / f"benchmarks/saas_bench_{harness}/manifest.yaml")
     assert manifest.name == f"saas_bench_{harness}"
     config = OmegaConf.load(root / f"benchmarks/saas_bench_{harness}/config.yaml")
-    with pytest.raises(Exception, match="saas_bench_run_root"):
+    with pytest.raises(InterpolationResolutionError, match="SAAS_BENCH_RUN_ROOT"):
         _ = config.saas_bench_output_root
+    monkeypatch.setenv("SAAS_BENCH_RUN_ROOT", str(tmp_path / "env-run"))
+    assert config.saas_bench_output_root == str(tmp_path / "env-run/episodes")
     config.saas_bench_run_root = str(tmp_path / "run")
     config.saas_bench_concurrency = 3
     assert config.saas_bench_output_root == str(tmp_path / "run/episodes")
