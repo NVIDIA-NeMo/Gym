@@ -1,0 +1,9 @@
+chess_resources_server:
+  resources_servers:
+    chess:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Chess against a built-in random, greedy, or lookahead opponent. The model moves in UCI notation through a make_move tool. Reward +1 win, 0 draw, -1 loss or forfeit.
+      value: Multi-step game play under full rules, with legal-move feedback and a seeded opponent
