@@ -51,6 +51,23 @@ def test_a_changed_file_selects_its_existing_component_only(tmp_path):
     assert all_components(tmp_path) == ["responses_api_agents/kept", "responses_api_agents/pi_agent"]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/environment_server_compliance/rules.py",
+        "scripts/check_suites/github_actions.py",
+        ".github/workflows/environment-server-compliance.yml",
+    ],
+)
+def test_a_change_to_the_suite_selects_every_component(tmp_path, path):
+    for component in ("responses_api_agents/pi_agent", "responses_api_agents/codex_agent"):
+        write(tmp_path, f"{component}/app.py", "")
+    assert select_components([path, "README.md"], root=tmp_path) == [
+        "responses_api_agents/codex_agent",
+        "responses_api_agents/pi_agent",
+    ]
+
+
 def test_run_defined_by_an_agent_is_reported_at_its_definition():
     from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 
