@@ -1,24 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
 # The run config binds the benchmark and harness through its own Environment Server.
 nooa_environment_server: null
 
-# Keep the selected instance direct: Harbor renames it for each taskset, and
-# nested _inherit_from moves would leave that generated agent unresolved.
 agent:
+  _inherit_from: nooa_agent
   responses_api_agents:
     nooa_agent:
-      entrypoint: app.py
-      num_workers: 1
       resources_server: null
-      model_server:
-        type: responses_api_models
-        name: policy_model
       nooa:
-        agent_class: nooa_bench.bench_agent:BenchAgent
-        invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
-        init_kwargs: {}
         execution_mode: sandboxed
       sandbox_runner_timeout_seconds: 21600
-      session_close_timeout_seconds: 30
       max_policy_calls: null
