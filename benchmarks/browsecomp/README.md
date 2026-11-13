@@ -69,19 +69,22 @@ and grades the final answer with an LLM judge:
 
 The session preset repeats the relay preset's settings where `opencode_agent` has them: OpenCode 1.17.11 with its
 stock system prompt and thinking on; the same questions and user turn (`prepare_opencode.py` writes them without the
-system prompt and tool list of `prepare.py`'s rows, which `opencode_agent` refuses or adds to its instructions); the same
-tools map and permission rules; the same four OpenCode plugins with the same settings (the web-search guard and its
-domain exclusion list, a 400-call turn cap, no subagents, and the opt-in arms through the same environment variables);
-compaction at 192,000 tokens of a 262,144-token window, with compaction summaries left out of the graded answer; no
-output cap; a 21,600-second run budget; and the same sandbox and grading. A run cut off by the turn cap or the context
-window keeps its judged reward and is masked on both.
+system prompt and tool list of `prepare.py`'s rows, which `opencode_agent` refuses or adds to its instructions);
+permission rules that resolve as the relay's; the same four OpenCode plugins with the same settings (the web-search
+guard and its domain exclusion list, a 400-call turn cap, no subagents, and the opt-in arms through the same
+environment variables); compaction at 192,000 tokens of a 262,144-token window, with compaction summaries left out of
+the graded answer; no output cap; a 21,600-second run budget; and the same sandbox and grading. A run that reaches the
+turn cap and then answers, or that the context window ends, keeps its judged reward and is masked on both; a run that
+the turn-budget plugin aborts is not (see [Failure accounting](#failure-accounting)).
 
 The two presets' scores are separate measurements until a paired comparison of them, on the same questions with the
-same model and judge in the same time window, shows they agree. What still differs:
+same model and judge in the same time window, shows they agree. The session preset is for evaluation only, as
+`opencode_agent`'s session path is; training keeps the relay preset. What still differs:
 
-- **Working directory.** OpenCode's system prompt names its working directory: `/workspace` in the session preset,
-  where the relay's runs use `/`, which `opencode_agent` refuses. Relative paths and the default root of OpenCode's glob
-  and grep tools move with it.
+- **Working directory.** The `Working directory` line of OpenCode's system prompt reads `/workspace` in the session
+  preset, where the relay's runs use `/`, which `opencode_agent` refuses; the `Workspace root folder` line below it is
+  the project root OpenCode finds from that directory. Relative paths, the default root of OpenCode's glob and grep
+  tools, and the default directory of bash commands (when bash is on) move with it.
 - **Truncation-file path.** When a tool result is too long, OpenCode saves it to a file and names that file in its
   notice to the model. The file lies in `opencode_agent`'s private OpenCode directories, so the path reads differently;
   the rest of the notice is the same.
