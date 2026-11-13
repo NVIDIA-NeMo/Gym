@@ -343,6 +343,8 @@ class ChartographyResourcesServer(SimpleResourcesServer):
             return result
 
         # The vLLM model server answers a context-window rejection with an empty message and this flag: a final 0.
+        # Only the simple_agent setting sees it; opencode_agent reports an overflow itself, and such a row scores 0
+        # through score_unfinished_as_zero without the typed kind.
         if (body.response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true":
             result.failure_kind = MODEL_CONTEXT_LIMIT
             result.failure_reason = "the policy model rejected the prompt for its context window"
@@ -402,9 +404,8 @@ class ChartographyResourcesServer(SimpleResourcesServer):
                 verdicts = scorer.parse_verdict(raw)
             except (scorer.ParseError, IndexError, AttributeError) as e:
                 last_error = e
-                if attempt < cfg.judge_max_attempts:
-                    # Asked again: the reply that replaces this one carries the verdict, so the grading can complete.
-                    record_rejected_judge_reply()
+                # Asked again: the reply that replaces this one carries the verdict, so the grading can complete.
+                record_rejected_judge_reply()
                 continue
             record_parsed_judge_verdict()
             return verdicts, raw, attempt
