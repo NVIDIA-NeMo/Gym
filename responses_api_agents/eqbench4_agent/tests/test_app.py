@@ -7,6 +7,7 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from responses_api_agents.eqbench4_agent.app import (
     EQBench4Agent,
     EQBench4AgentConfig,
@@ -169,6 +170,11 @@ async def test_full_conversation_alternates_and_ends_with_the_persona() -> None:
     assert verify["scenario_id"] == "s1"
     # Usage covers the whole conversation: two policy calls of 10 tokens and two persona calls of 99.
     assert result.response.usage.input_tokens == 218
+    # Gym binds the verifier's grading to the response the verifier saw, so the saved row must carry that response,
+    # usage included.
+    assert verify["response"]["usage"]["input_tokens"] == 218
+    graded = {"response": NeMoGymResponse.model_validate(verify["response"]).model_dump(mode="json"), "reward": 0.75}
+    assert grading_result_binding(result) == grading_result_binding(graded) is not None
     # Without model-call capture there is no trajectory record.
     assert "ng_trajectory" not in (result.model_extra or {})
     assert result.reward == 0.75 and result.comparisons == [{"opponent": "x", "fraction": 0.75}]

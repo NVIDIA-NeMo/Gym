@@ -372,6 +372,12 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
             )
             request.state.nemo_gym_agent_trajectory = record
 
+        # The verifier echoes the last policy reply, with usage covering every model call of the conversation, the
+        # policy's and the persona's: Gym's rollout usage covers the whole invocation tree, which includes the persona
+        # simulator. It is set before verify, because the verifier binds its grading to the response it saw, so a
+        # response changed afterwards no longer matches the grading.
+        if policy_response is not None:
+            policy_response = policy_response | {"usage": usage.model_dump(mode="json") if usage else None}
         verify_request = body.model_dump() | {
             "response": policy_response,
             "transcript": transcript,
@@ -390,9 +396,10 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
         if record is not None:
             payload["ng_trajectory"] = record.model_dump(mode="json")
         result = EQBench4AgentVerifyResponse.model_validate(payload)
-        # The verifier echoes the last policy reply. Its usage covers every model call of the conversation, the policy's
-        # and the persona's: Gym's rollout usage covers the whole invocation tree, which includes the persona simulator.
-        result.response.usage = usage
+        if policy_response is None:
+            # No policy reply to grade: the verifier masks the row with a placeholder response, which carries the
+            # usage of the calls that were made.
+            result.response.usage = usage
         return result
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
