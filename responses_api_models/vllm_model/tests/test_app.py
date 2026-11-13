@@ -84,6 +84,7 @@ from nemo_gym.models import (
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
     install_model_call_capture,
+    make_external_capture_handler,
     start_model_execution,
 )
 from nemo_gym.models.token_capture import (
@@ -903,6 +904,8 @@ class TestApp:
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
         session_key_headers: list[str] | None = None,
+        return_token_id_information: bool = False,
+        dynamo_frontend: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -912,7 +915,8 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
+            return_token_id_information=return_token_id_information,
+            dynamo_frontend=dynamo_frontend,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
             use_completions_api=use_completions_api,
@@ -1688,6 +1692,230 @@ class TestApp:
             "generation_log_probs",
         ):
             assert field_name not in served_message, field_name
+
+    @mark.parametrize(
+        ("capture", "result", "error"),
+        [
+            (False, {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5]}, None),
+            (False, None, "without nvext.nemo_rl"),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "generation_token_ids": [3]},
+                "without: generation_log_probs",
+            ),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5, -0.1]},
+                "mismatched generation token IDs and log probabilities",
+            ),
+            (True, None, None),
+            (
+                False,
+                {
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3],
+                    "generation_log_probs": [-0.5],
+                    # Router replay: the base64 routes envelope, as the native endpoint attaches it.
+                    "routed_experts": "cm91dGVz",
+                },
+                None,
+            ),
+        ],
+        ids=[
+            "token-information",
+            "missing-result",
+            "missing-logprobs",
+            "logprob-count-mismatch",
+            "capture",
+            "routed-experts",
+        ],
+    )
+    async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, result, error) -> None:
+        # The Dynamo frontend accepts only OpenAI fields plus nvext. NeMo RL's request fields ride in one
+        # `nemo_rl:gym:` annotation and its call result in `nvext.nemo_rl`, both under the native names.
+        server = self._setup_server(
+            monkeypatch,
+            dynamo_frontend=True,
+            return_token_id_information=not capture,
+            external_staging_backend="dynamo_worker" if capture else None,
+        )
+        context = None
+        if capture:
+            context = CaptureContext(
+                capture_key="rollout-1",
+                model_call_id="c1",
+                token_sink=None,
+                lineage_store=InMemoryLineageStore(),
+                external_staging=True,
+                request_items=[{"role": "user", "content": "go"}],
+                capture_admission=CaptureAdmission(capture_key="rollout-1", model_call_id="c1", mode="text"),
+            )
+            result = {
+                "ng_commit_coords": {
+                    "capture_key": "rollout-1",
+                    "model_call_id": "c1",
+                    "prev_len": 0,
+                    "delta_len": 3,
+                    "cum_len": 3,
+                    "weight_version": 7,
+                    "digest": "0" * 64,
+                    "extras_digest": "1" * 64,
+                    "staging_key": "rollout-1/c1",
+                    "chain_hash": "2" * 64,
+                    "cumulative_hash": "3" * 64,
+                }
+            }
+        engine_response = {
+            "id": "dynamo-1",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}},
+            ],
+        }
+        if result is not None:
+            engine_response["nvext"] = {"nemo_rl": result}
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=json.dumps(engine_response)))
+
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", fake_request)
+        server._clients = [
+            NeMoGymAsyncOpenAI(base_url="http://dynamo/v1", api_key="key", default_headers={"x-default": "kept"})
+        ]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {"role": "user", "content": "hi"},
+                # A token-information turn echoed back by the agent.
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "user", "content": "go"},
+            ],
+        )
+        token = set_token_sink(context) if capture else None
+        try:
+            with raises(RuntimeError, match=error) if error else nullcontext():
+                response = await server.chat_completions(request, body)
+            if capture:
+                await server._finalize_served_response(response)
+        finally:
+            if token is not None:
+                reset_token_sink(token)
+
+        outbound = sent[0]["json"]
+        assert "prompt_token_ids" not in outbound["messages"][1]
+        assert "generation_token_ids" not in outbound["messages"][1]
+        assert "generation_log_probs" not in outbound["messages"][1]
+        assert not {"ng_capture", "required_prefix_token_ids"} & outbound.keys()
+        # A capture call carries its admission; otherwise the echoed turn's tokens ride as the prefix the
+        # engine splices, as NeMo RL's native server derives it from the messages.
+        assert outbound["nvext"].keys() == {"annotations"}
+        (annotation,) = outbound["nvext"]["annotations"]
+        assert annotation.startswith("nemo_rl:gym:")
+        extras = json.loads(annotation.removeprefix("nemo_rl:gym:"))
+        if capture:
+            assert extras.keys() == {"ng_capture"}
+            assert CaptureAdmission.model_validate(extras["ng_capture"]) == context.capture_admission
+        else:
+            assert extras == {"required_prefix_token_ids": [1, 2]}
+        assert sent[0]["headers"]["x-default"] == "kept"
+        if error:
+            return
+        served = response.model_dump()
+        assert "nvext" not in served
+        if capture:
+            # The admission is the only capture field in the annotation. The call asks for the sampled
+            # tokens' log probabilities, which the engine generates with and stages.
+            assert (outbound["logprobs"], outbound["top_logprobs"]) == (True, 0)
+            assert outbound["stream"] is False
+            assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
+            assert context.committed is True
+            manifest = await context.lineage_store.manifest("rollout-1")
+            assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
+            assert "ng_commit_coords" not in served
+        else:
+            assert "x-dynamo-session-id" not in sent[0]["headers"]
+            message = served["choices"][0]["message"]
+            assert message["prompt_token_ids"] == [1, 2]
+            assert message["generation_token_ids"] == [3]
+            assert message["generation_log_probs"] == [-0.5]
+            assert message.get("routed_experts") == result.get("routed_experts")
+
+    @mark.parametrize(
+        ("settings", "error"),
+        [
+            # The dialect covers only the chat completions call.
+            ({"use_completions_api": True}, "dynamo_frontend is not supported with"),
+            ({"is_responses_native": True}, "dynamo_frontend is not supported with"),
+            # The frontend rejects the top-level required_prefix_token_ids field.
+            ({"supply_prefix_token_ids": True}, "dynamo_frontend is not supported with"),
+            # The frontend rejects the return_token_ids field this flag sends.
+            ({"request_prompt_and_generation_token_ids": True}, "return_token_ids"),
+            # The frontend rejects the conversation_params field this flag sends.
+            ({"forward_session_id_as_conversation_id": True}, "conversation_params"),
+            # An echoed reasoning turn would carry both `reasoning` and its alias.
+            ({"uses_reasoning_parser": True, "reasoning_field": "both"}, "duplicate field 'reasoning'"),
+            ({"uses_reasoning_parser": True, "reasoning_field": "reasoning_content"}, None),
+            # Reasoning is parsed from responses but never replayed, so no message carries both keys.
+            ({"uses_reasoning_parser": True, "uses_interleaved_reasoning": False, "reasoning_field": "both"}, None),
+            (
+                {
+                    "uses_reasoning_parser": True,
+                    "reasoning_field": "both",
+                    "preserve_reasoning_in_assistant_content": True,
+                },
+                None,
+            ),
+        ],
+    )
+    def test_dynamo_frontend_rejects_settings_it_cannot_serve(self, settings, error) -> None:
+        fields = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "base_url": "http://dynamo/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "dynamo_frontend": True,
+            "return_token_id_information": True,
+            "uses_reasoning_parser": False,
+            **settings,
+        }
+        with raises(ValueError, match=error) if error else nullcontext():
+            VLLMModelConfig(**fields)
+
+    @mark.parametrize(
+        ("backend", "dynamo_frontend", "error"),
+        [
+            # A judge shares the global dynamo_worker capture block without speaking the dialect.
+            ("dynamo_worker", False, None),
+            ("vllm_worker", True, "needs token_id_capture.external_staging_backend=dynamo_worker"),
+        ],
+    )
+    def test_dynamo_worker_backend_pairing(self, monkeypatch: MonkeyPatch, backend, dynamo_frontend, error) -> None:
+        with raises(ValueError, match=error) if error else nullcontext():
+            self._setup_server(monkeypatch, external_staging_backend=backend, dynamo_frontend=dynamo_frontend)
+
+    def test_dynamo_frontend_sends_an_empty_annotation_for_a_plain_call(self, monkeypatch: MonkeyPatch) -> None:
+        # NeMo RL's chat engine refuses a chat call without the annotation, so a call with no capture and no
+        # echoed turn still carries one.
+        server = self._setup_server(monkeypatch, dynamo_frontend=True)
+        outbound = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert outbound["nvext"] == {"annotations": ["nemo_rl:gym:{}"]}
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -6634,6 +6862,7 @@ def _make_top_logprobs_model(
     extra_body: dict[str, Any] | None = None,
     sampling_overrides: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
+    dynamo_frontend: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
@@ -6650,6 +6879,7 @@ def _make_top_logprobs_model(
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
         sampling_overrides=sampling_overrides,
+        dynamo_frontend=dynamo_frontend,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -6696,14 +6926,17 @@ class TestTopLogprobsHandling:
 
     @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
     @mark.parametrize("token_ids", [[1], list(range(16))])
-    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int]) -> None:
+    # The Dynamo handler sends the admission in the annotation, with no top-level ng_capture.
+    @mark.parametrize("backend", ["vllm_worker", "dynamo_worker"])
+    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int], backend: str) -> None:
         fields = {"logprob_token_ids": token_ids}
         model = _make_top_logprobs_model(
             return_token_id_information=False,
             extra_body=fields if source == "extra_body" else None,
             sampling_overrides=fields if source == "sampling_overrides" else None,
+            dynamo_frontend=backend == "dynamo_worker",
         )
-        model._external_capture_handler = VLLMWorkerCaptureHandler()
+        model._external_capture_handler = make_external_capture_handler(backend)
         body = {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 16}
         if source == "request":
             body.update(fields)
@@ -9427,6 +9660,10 @@ _REFIT_STATED_PROMPT_V029 = (
 _REFIT_NO_PROMPT_COUNT = (
     "max_tokens=131072 cannot be greater than max_model_len=8192. Please request fewer output tokens."
 )
+# How NeMo RL's chat engine, behind a Dynamo frontend, refuses a prompt that fills the window.
+_REFIT_DYNAMO_PROMPT_FILLS_WINDOW = (
+    "Prompt length (8200) fills or exceeds this model's maximum context length (8192). No room for output tokens."
+)
 
 
 def _refit_model(monkeypatch: MonkeyPatch, use_completions_api: bool) -> VLLMModel:
@@ -9565,6 +9802,22 @@ async def test_a_refit_counts_the_prompt_with_tokenize_when_the_refusal_does_not
         assert tokenize.kwargs == {"model": "dummy_model", "messages": first["messages"]}
     execution = request.state.nemo_gym_model_execution
     assert (execution["requested_max_tokens"], execution["applied_max_tokens"]) == (131072, _REFIT_APPLIED)
+
+
+async def test_a_refusal_through_dynamo_is_not_counted_with_tokenize(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
+    model = TestApp()._setup_server(monkeypatch, dynamo_frontend=True)
+    client = _refit_engine(_engine_bad_request_error(_REFIT_DYNAMO_PROMPT_FILLS_WINDOW))
+    model._clients = [client]
+
+    response = await model.chat_completions(_refit_request(), _refit_body({"max_tokens": 131072}))
+
+    assert response.choices[0].finish_reason == "length"
+    # The frontend has no /tokenize, and the budget is NeMo RL's to lower: one call, no count, no resend.
+    [call] = _generation_calls(client, False)
+    assert call["max_tokens"] == 131072
+    client.create_tokenize.assert_not_awaited()
 
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
