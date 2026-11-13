@@ -28,11 +28,13 @@ import hashlib
 import logging
 import os
 import posixpath
+import re
 import shlex
 import shutil
 import signal
 import stat
 import tempfile
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -47,7 +49,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SandboxUsageSample,
 )
+from nemo_gym.sandbox.providers.usage import ProcessTreeState, ProcfsUsageReader
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 
@@ -81,6 +85,23 @@ ENROOT_MISSING_CONTAINER_MARKERS = ("does not exist", "no such", "not found")
 # than passed as enroot's REGISTRY fragment) so enroot uses its configured Hub
 # default — the real Hub registry API is registry-1.docker.io, not "docker.io".
 DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
+
+
+# Runs ``enroot exec`` under a host shell that writes, to the report file named by its first argument, the CPU its
+# reaped children used: the exec's whole foreground process tree, which ``times`` reads from the kernel's rusage
+# of waited-for children. A command that starts and exits between two usage samples is otherwise missing from the
+# process tree. The report never touches the command's stdout or stderr.
+EXEC_TIMES_SCRIPT = 'report=$1; shift; "$@"; rc=$?; times >"$report"; exit $rc'
+
+
+def _exec_cpu_usec(report: str) -> int | None:
+    """The CPU microseconds of the reaped children in a ``times`` report, or None if it is not one."""
+    # Two lines of "<user> <system>" as XmY.Ys: the shell itself, then its reaped children. bash and dash differ
+    # only in decimals; busybox ash puts a space after the "m".
+    values = re.findall(r"(\d+)m\s*(\d+(?:\.\d+)?)s", report)
+    if len(values) != 4:
+        return None
+    return round(sum(int(minutes) * 60_000_000 + float(seconds) * 1_000_000 for minutes, seconds in values[2:]))
 
 
 class EnrootCreateError(SandboxCreateError):
@@ -228,6 +249,9 @@ class _EnrootInstance:
     container_pid: int | None = None  # host PID of the container init (for exec)
     start_pgid: int | None = None  # process group of the detached `enroot start`
     proc: Any = None  # asyncio subprocess handle for the detached start
+    usage_state: ProcessTreeState = field(default_factory=ProcessTreeState)
+    exec_cpu_usec: int = 0  # CPU of exec'd commands that ran to completion, from their reaped process trees
+    exec_count: int = 0
 
 
 def _translate_docker_uri(image: str) -> str:
@@ -331,6 +355,7 @@ class EnrootProvider:
         }
         # Serializes concurrent imports of the same image within this process.
         self._import_locks: dict[str, asyncio.Lock] = {}
+        self._usage_reader = ProcfsUsageReader()
 
     async def _run(
         self,
@@ -732,8 +757,19 @@ class EnrootProvider:
         ]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
+        descriptor, report_path = tempfile.mkstemp(prefix="nemo-gym-exec-cpu-")
+        os.close(descriptor)
         try:
-            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+            code, out, err = await self._run(
+                ["/bin/sh", "-c", EXEC_TIMES_SCRIPT, "sh", report_path, *argv],
+                timeout_s=effective_timeout,
+                stdin=stdin,
+            )
+            # A killed shell (timeout) leaves the report empty, so an unfinished exec counts no CPU.
+            try:
+                cpu_usec = _exec_cpu_usec(Path(report_path).read_text(errors="replace"))
+            except OSError:
+                cpu_usec = None
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None,
@@ -741,7 +777,13 @@ class EnrootProvider:
                 return_code=SANDBOX_RUNTIME_RETURN_CODE,
                 error_type="timeout",
             )
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(report_path)
 
+        if cpu_usec is not None:
+            instance.exec_cpu_usec += cpu_usec
+            instance.exec_count += 1
         if code != 0 and _is_runtime_failure(err):
             return SandboxExecResult(
                 stdout=out,
@@ -870,6 +912,34 @@ class EnrootProvider:
 
         if remove_error is not None:
             raise remove_error
+
+    async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+        """The process tree in the container's namespaces, the CPU of completed execs, and the cgroup the container
+        shares with Gym.
+
+        Enroot creates no cgroup per container, so every sandbox of this Gym process (and Gym itself) runs in
+        one cgroup: its totals are labelled ``shared_step``, never one sandbox's usage. ``exec_rusage`` is exact
+        for the commands that ``exec`` ran to completion through this provider instance and excludes processes they
+        left running; it overlaps the process tree, so the two are separate measurements, never added together.
+        """
+        instance = handle.raw
+        samples: tuple[SandboxUsageSample, ...] = ()
+        pid = instance.container_pid
+        if pid is not None and self._pid_has_container_marker(pid, instance.name):
+            samples = await asyncio.to_thread(
+                self._usage_reader.host_process_usage, pid, instance.usage_state, own_cgroup_scope="shared_step"
+            )
+        if instance.exec_count:
+            exec_sample = SandboxUsageSample(
+                source="exec_rusage",
+                scope="process_tree",
+                sampled_at=time.time(),
+                cpu_usage_usec_total=instance.exec_cpu_usec,
+                cpu_kind="counter",
+                process_count=instance.exec_count,
+            )
+            samples = (*samples, exec_sample)
+        return samples
 
     async def aclose(self) -> None:
         """No provider-wide resources to close."""

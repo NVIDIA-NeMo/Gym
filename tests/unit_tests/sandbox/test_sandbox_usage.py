@@ -3,6 +3,7 @@
 """Measured sandbox CPU and memory: the readers, their labels, and owner-side sampling."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,8 @@ from nemo_gym.sandbox.providers import usage as usage_readers
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxUsageSample
 from nemo_gym.sandbox.providers.usage import (
     IN_SANDBOX_CGROUP_COMMAND,
+    ProcessTreeState,
+    ProcfsUsageReader,
     cgroup_v2_sample,
     parse_cgroup_v2,
     parse_in_sandbox_cgroup,
@@ -123,7 +126,127 @@ class FakeProc:
 
 @pytest.fixture
 def proc(tmp_path: Path) -> FakeProc:
-    return FakeProc(tmp_path / "proc")
+    ProcfsUsageReader._scans.clear()
+    yield FakeProc(tmp_path / "proc")
+    ProcfsUsageReader._scans.clear()
+
+
+def _reader(proc: FakeProc, tmp_path: Path) -> ProcfsUsageReader:
+    reader = ProcfsUsageReader(proc_root=proc.root, cgroup_root=tmp_path / "cgroup")
+    reader.clock_ticks = 100
+    return reader
+
+
+def test_the_process_tree_is_the_sandbox_namespaces_and_a_labelled_lower_bound(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5), rss_kb=(1000, 500))  # container init
+    proc.add(101, pidns="B", mntns="M1", ticks=(200, 100), start=7, rss_kb=(30000, 2000), comm="python app.py")
+    proc.add(150, pidns="A", mntns="M1", ticks=(1, 1), rss_kb=(100, 0))  # runtime helper in the mount namespace
+    proc.add(300, pidns="A", mntns="M0", ticks=(9999, 9999), rss_kb=(900000, 0))  # Gym and the rest of the host
+    reader = _reader(proc, tmp_path)
+    state = ProcessTreeState()
+
+    sample = reader.process_tree_sample(100, state)
+
+    assert sample is not None
+    assert (sample.source, sample.scope) == ("procfs_pidns_mntns", "process_tree")
+    assert sample.cpu_kind == "sampled_lower_bound" and sample.peak_kind == "sampled_lower_bound"
+    assert sample.includes_page_cache is False
+    assert sample.process_count == 3
+    assert sample.cpu_usage_usec_total == (15 + 300 + 2) * 10_000
+    assert sample.memory_current_bytes == sample.memory_peak_bytes == (1500 + 32000 + 100) * 1024
+    assert sample.memory_anon_bytes == 31100 * 1024 and sample.memory_file_bytes == 2500 * 1024
+
+    # An exited process keeps the CPU last seen; a reused PID with a new start time is a new process.
+    proc.remove(101)
+    proc.add(101, pidns="B", mntns="M1", ticks=(3, 0), start=99, rss_kb=(10, 0))
+    ProcfsUsageReader._scans.clear()
+    later = reader.process_tree_sample(100, state)
+    assert later is not None and later.cpu_usage_usec_total == (15 + 300 + 2 + 3) * 10_000
+    assert later.memory_current_bytes == (1500 + 10 + 100) * 1024
+
+
+def test_a_host_process_reusing_a_cached_sandbox_pid_is_not_charged(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5), rss_kb=(1000, 0))
+    proc.add(101, pidns="B", mntns="M1", ticks=(200, 100), start=7, rss_kb=(30000, 0))
+    reader = _reader(proc, tmp_path)
+    state = ProcessTreeState()
+    assert reader.process_tree_sample(100, state).process_count == 2
+
+    # Within the scan's TTL, PID 101 exits and the host reuses it in Gym's own namespaces.
+    proc.remove(101)
+    proc.add(101, pidns="A", mntns="M0", ticks=(99999, 0), start=50, rss_kb=(900000, 0))
+    later = reader.process_tree_sample(100, state)
+
+    assert later.process_count == 1 and later.memory_current_bytes == 1000 * 1024
+    assert later.cpu_usage_usec_total == (15 + 300) * 10_000  # the exited process keeps what it was seen to use
+
+
+def test_a_container_in_gyms_pid_namespace_is_found_by_its_mount_namespace(proc: FakeProc, tmp_path: Path) -> None:
+    # Enroot nested in another container cannot unshare the PID namespace: only the mount namespace is its own.
+    proc.add(100, pidns="A", mntns="M1", ticks=(10, 5), rss_kb=(1000, 0))
+    proc.add(101, pidns="A", mntns="M1", ticks=(20, 0), rss_kb=(500, 0))
+    proc.add(300, pidns="A", mntns="M0", ticks=(9999, 0), rss_kb=(900000, 0))  # Gym and the host
+
+    sample = _reader(proc, tmp_path).process_tree_sample(100, ProcessTreeState())
+
+    assert sample is not None and sample.source == "procfs_mntns" and sample.process_count == 2
+    assert sample.cpu_usage_usec_total == 35 * 10_000
+
+
+def test_a_sandbox_sharing_every_namespace_with_gym_is_not_measured(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="A", mntns="M0", ticks=(10, 5))
+    reader = _reader(proc, tmp_path)
+
+    assert reader.members(100) is None
+    assert reader.process_tree_sample(100, ProcessTreeState()) is None
+    assert reader.process_tree_sample(424242, ProcessTreeState()) is None
+
+
+def test_the_cgroup_gym_shares_is_labelled_shared_step(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5), rss_kb=(1000, 0))
+    _write_cgroup(tmp_path / "cgroup" / "job" / "step")
+    reader = _reader(proc, tmp_path)
+
+    samples = reader.host_process_usage(100, ProcessTreeState(), own_cgroup_scope="container")
+
+    assert [(sample.source, sample.scope) for sample in samples] == [
+        ("procfs_pidns_mntns", "process_tree"),
+        ("cgroup_v2", "shared_step"),
+    ]
+
+
+def test_a_cgroup_of_its_own_replaces_the_process_tree_only_when_the_runtime_creates_one(
+    proc: FakeProc, tmp_path: Path
+) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5), cgroup="/job/step/instance-1")
+    _write_cgroup(tmp_path / "cgroup" / "job" / "step" / "instance-1")
+    reader = _reader(proc, tmp_path)
+
+    own = reader.host_process_usage(100, ProcessTreeState(), own_cgroup_scope="container")
+    assert [(sample.source, sample.scope) for sample in own] == [("cgroup_v2", "container")]
+
+    # A runtime that never creates a cgroup per sandbox (Enroot) never calls another cgroup the container's.
+    shared = reader.host_process_usage(100, ProcessTreeState(), own_cgroup_scope="shared_step")
+    assert [sample.scope for sample in shared] == ["process_tree", "shared_step"]
+
+
+def test_unreadable_processes_and_cgroups_are_skipped_not_guessed(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5), rss_kb=(1000, 0), cgroup="/gone (deleted)")
+    proc.add(101, pidns="B", mntns="M1", ticks=(1, 1))
+    (proc.root / "101" / "stat").write_text("101 (exiting")  # truncated as the process exited
+    (proc.root / "100" / "status").unlink()
+    reader = _reader(proc, tmp_path)
+
+    (tree,) = reader.host_process_usage(100, ProcessTreeState(), own_cgroup_scope="container")
+    assert tree.scope == "process_tree" and tree.process_count == 1 and tree.memory_current_bytes == 0
+    # The scan is reused within its TTL, so a process that appears meanwhile waits for the next scan.
+    proc.add(102, pidns="B", mntns="M1", ticks=(50, 0))
+    assert 102 not in reader.members(100)[0]
+
+    (proc.root / "100" / "stat").unlink()
+    (proc.root / "101" / "stat").unlink()
+    (proc.root / "102" / "stat").unlink()
+    assert reader.process_tree_sample(100, ProcessTreeState()) is None
 
 
 def test_a_process_without_a_unified_cgroup_has_no_cgroup_path(proc: FakeProc) -> None:
@@ -292,6 +415,35 @@ async def test_a_connected_sandbox_leaves_measurement_to_its_creator() -> None:
 
 
 @pytest.mark.sandbox
+async def test_enroot_reads_its_init_process_tree_and_labels_the_shared_cgroup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_gym.sandbox.providers.enroot import provider as enroot_provider
+
+    monkeypatch.setattr(enroot_provider, "_require_enroot", lambda: "/usr/bin/enroot")
+    provider = enroot_provider.EnrootProvider(create={"base_dir": "/tmp/nemo-gym-enroot-usage-test"})
+    calls = []
+
+    def host_process_usage(pid, state, *, own_cgroup_scope):
+        calls.append((pid, own_cgroup_scope))
+        return ()
+
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", host_process_usage)
+    monkeypatch.setattr(
+        enroot_provider.EnrootProvider, "_pid_has_container_marker", staticmethod(lambda pid, name: True)
+    )
+    instance = enroot_provider._EnrootInstance(
+        name="box", sqsh_path=Path("/x.sqsh"), staging_dir=Path("/s"), mount_point="/sandbox", image="img"
+    )
+    handle = SandboxHandle("box", "enroot", instance)
+
+    assert await provider.usage(handle) == ()  # no init PID yet
+    instance.container_pid = 4242
+    await provider.usage(handle)
+    assert calls == [(4242, "shared_step")]
+
+
+@pytest.mark.sandbox
 async def test_docker_reads_the_container_cgroup_on_this_host_or_from_inside(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -362,6 +514,46 @@ async def test_docker_reports_nothing_when_the_container_cannot_be_inspected(mon
     monkeypatch.setattr(provider, "_run", run)
     handle = SandboxHandle("box", "docker", docker_provider._DockerContainer(name="box", image="img"))
     assert await provider.usage(handle) == ()
+
+
+@pytest.mark.sandbox
+async def test_apptainer_measures_its_instance_only_while_the_pid_is_still_that_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
+
+    monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
+    provider = apptainer_provider.ApptainerProvider()
+    listings = []
+    listed = {"pid": 777}
+
+    async def run(argv, *, timeout_s, stdin=None):
+        listings.append(argv)
+        entries = [{"instance": "box", "pid": listed["pid"]}, {"instance": "other", "pid": 1}] if listed["pid"] else []
+        return 0, json.dumps({"instances": entries}), ""
+
+    monkeypatch.setattr(provider, "_run", run)
+    start_times = {777: 5000}
+    monkeypatch.setattr(apptainer_provider, "process_start_time", lambda pid: start_times.get(pid))
+    seen = []
+    monkeypatch.setattr(
+        usage_readers.ProcfsUsageReader,
+        "host_process_usage",
+        lambda self, pid, state, *, own_cgroup_scope: seen.append((pid, own_cgroup_scope))
+        or (_sample("container", 1, 1, 1),),
+    )
+    instance = apptainer_provider._ApptainerInstance(name="box", staging_dir=Path("/s"), mount_point="/m", image="i")
+    handle = SandboxHandle("box", "apptainer", instance)
+
+    assert len(await provider.usage(handle)) == 1
+    assert len(await provider.usage(handle)) == 1
+    assert seen == [(777, "container"), (777, "container")] and len(listings) == 1  # a live instance is listed once
+
+    # The instance exits and another process reuses its PID: that process is never measured as the instance.
+    start_times[777] = 9999
+    listed["pid"] = None
+    assert await provider.usage(handle) == ()
+    assert len(seen) == 2 and len(listings) == 2
 
 
 async def test_stop_puts_the_usage_on_its_span_and_tells_listeners(monkeypatch: pytest.MonkeyPatch) -> None:

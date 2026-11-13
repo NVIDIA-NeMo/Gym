@@ -40,7 +40,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SandboxUsageSample,
 )
+from nemo_gym.sandbox.providers.usage import ProcessTreeState, ProcfsUsageReader, process_start_time
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 
@@ -166,6 +168,9 @@ class _ApptainerInstance:
     mount_point: str  # where the folder shows up inside
     image: str  # what it was built from
     env: dict[str, str] = field(default_factory=dict)
+    init_pid: int | None = None  # host PID of the instance, resolved by the first usage sample
+    init_start_time: int | None = None  # its /proc start time, so a reused PID is never measured as the instance
+    usage_state: ProcessTreeState = field(default_factory=ProcessTreeState)
 
 
 def _resource_flags(resources: SandboxResources) -> list[str]:
@@ -819,6 +824,32 @@ class ApptainerProvider:
 
         if stop_error is not None:
             raise stop_error
+
+    async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+        """The instance's own cgroup when Apptainer created one for its resource limits; otherwise the process
+        tree in its namespaces plus the cgroup it shares with Gym (``shared_step``)."""
+        inst = handle.raw
+        if inst.init_pid is not None and process_start_time(inst.init_pid) != inst.init_start_time:
+            inst.init_pid = None  # the instance's process is gone, or its PID now names another process
+        if inst.init_pid is None:
+            code, out, _err = await self._run([self._binary, "instance", "list", "--json", inst.name], timeout_s=30)
+            try:
+                entries = json.loads(out).get("instances", []) if code == 0 else []
+            except (json.JSONDecodeError, AttributeError):
+                entries = []
+            pids = [entry.get("pid") for entry in entries if entry.get("instance") == inst.name]
+            if len(pids) != 1 or not isinstance(pids[0], int) or pids[0] <= 0:
+                return ()
+            started = process_start_time(pids[0])
+            if started is None:
+                return ()
+            inst.init_pid, inst.init_start_time = pids[0], started
+        reader = ProcfsUsageReader()
+        samples = await asyncio.to_thread(
+            reader.host_process_usage, inst.init_pid, inst.usage_state, own_cgroup_scope="container"
+        )
+        # Read again after the sample, so a PID reused while it was taken never becomes this instance's usage.
+        return samples if process_start_time(inst.init_pid) == inst.init_start_time else ()
 
     async def aclose(self) -> None:
         """No provider-wide resources to close."""
