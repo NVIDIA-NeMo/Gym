@@ -971,6 +971,58 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
         assert not verified and result.failure.terminal and result.result is None
 
 
+async def test_activation_keeps_its_budget_when_the_loop_clock_runs_ahead(tmp_path, monkeypatch):
+    """uvloop's clock runs ahead of time.monotonic() once a macOS host has slept; a reply in budget is graded."""
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda clock=loop.time: clock() + 86_400)
+    environment = server(tmp_path)
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.prompt = "instruction"
+
+    async def stop(self, value, role):
+        value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
+
+    async def verify(self, value, initial, activations):
+        return {
+            "responses_create_params": initial,
+            "response": activations[-1].response,
+            "reward": 1,
+            "judge_score": 1,
+            "task_id": "task",
+            "evaluation_completed": True,
+        }
+
+    async def post(name, path, *, json, cookies, **kwargs):
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            data = {"agent_session_id": json.agent_session_id, "cleanup_confirmed": True}
+        else:
+            await asyncio.sleep(0.05)
+            data = activation().response.model_dump(mode="json")
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(
+        SWETEnvironmentServer, "_next_user_turn", AsyncMock(return_value=UserTurn(activation_id=0, kind="stop"))
+    )
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
+    environment.server_client = SimpleNamespace(post=post)
+    result = await environment.run_request(request())
+    assert result.result is not None, result.failure
+    assert result.result.reward == 1
+    assert [turn.response_source for turn in result.result.ng_activations] == ["agent"]
+
+
 @pytest.mark.parametrize("transient", [True, False])
 async def test_setup_failures_preserve_retry_classification_and_evidence(tmp_path, monkeypatch, transient):
     from aiohttp import ClientConnectionError
