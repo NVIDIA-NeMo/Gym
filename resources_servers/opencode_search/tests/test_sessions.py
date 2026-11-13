@@ -389,8 +389,9 @@ def test_with_the_search_cache_a_lent_sandbox_searches_through_its_proxy(
         _seed(task_data={"ground_truth": "Paris"}),
         # A malformed episode seed: it names a resources session but no episode, task or task_data.
         {"resources_session_id": "session"},
+        _seed() | {"task_data": None},
     ],
-    ids=["no_ground_truth", "no_question", "id_only"],
+    ids=["no_ground_truth", "no_question", "id_only", "null_task_data"],
 )
 def test_an_episode_seed_with_bad_task_data_is_refused_and_starts_nothing(workdir, started, body) -> None:
     server = _server(workdir)
