@@ -65,12 +65,12 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `cli` | The `gym` command line. |
 | `environment` | Authoring environments and benchmarks: manifests, registries, scaffolding, and validation. Also running a benchmark from Python: `plan_benchmark` and `TaskRunner`. |
 | `eval` | Evaluation on top of collected rollouts. |
-| `orchestration` | Starting servers, submitting jobs to clusters, and recovering a submitted run from its saved evidence. |
+| `orchestration` | Submitting jobs to clusters, tracking them, and recovering a submitted run from its saved evidence. |
 | `rollouts` | Collecting rollouts and checking the results. |
 | `data` | Datasets and task data. |
 | `agents` | The shared base for agent servers. |
 | `models` | The shared base for model servers, and converters between model API formats. |
-| `server_runtime` | What runs inside every server, including the resources server and environment server bases. |
+| `server_runtime` | What runs inside every server, including the resources server and environment server bases. The `supervisor` subpackage starts the servers of a run and sets up their venvs; nothing that runs inside a server imports it. |
 | `artifacts` | The files a run writes and exports. |
 | `metrics` | Rollout metrics, such as reward profiles and pass@k. |
 | `verification` | Helpers resources servers share for verification, such as LLM judges. |
@@ -144,6 +144,13 @@ A failure reports what Gym observed and leaves the decision to you:
 | `delivery` | Whether the `/run` request reached the agent: `not_sent` (every connection was refused, so resending cannot start a second episode), `possibly_delivered` or `delivered`. Use it for a retry decision. |
 | `stage`, `terminal` | Where in the episode it happened, when known, and the reporter's statement that the episode must not be attempted again. `terminal=False` is not a retry hint. |
 | `reason`, `http_status`, `exception_type` | Diagnostics. |
+
+`TaskRunner.run_task` also counts the rollout in `gym.rollout.completed_total`: `failed` when the outcome has a failure
+(labeled with its kind), otherwise `scored` when it has a reward and `unscored` when it has none. This is Gym's record of
+what the rollout returned; a caller may apply another rule to the same outcome. A result is a failure when it carries
+`failure_kind`; a routing class alone does not make it one. A scored rollout with a finite reward is
+also counted in `gym.rollout.rewarded_total`, masked rewards included. They are exported when telemetry is on in the
+calling process: call `nemo_gym.telemetry.setup.init_telemetry` first.
 
 `RolloutOutcome.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part
 of the contract: depend on the other fields, and use `raw` for debugging.

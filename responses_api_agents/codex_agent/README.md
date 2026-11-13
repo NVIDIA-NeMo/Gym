@@ -399,7 +399,8 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 
 ## Legacy direct-agent limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
+- Training token-ID capture works as in agent sessions when `model_server` is set. A direct
+  `openai_base_url` endpoint bypasses Gym capture.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.

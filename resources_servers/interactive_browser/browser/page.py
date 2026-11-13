@@ -23,6 +23,7 @@ speak CDP at all (a vendor SDK with its own DOM API, say) implements
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -37,6 +38,11 @@ _INTERACTIVE = "a, button, input:not([type=hidden]), textarea, select, [role=but
 # hides in, small enough that a content-heavy page does not dominate the context
 # the policy spends on deciding what to click.
 _MAX_TEXT_CHARS = 2000
+
+# How long one teardown step (closing the page, context or browser, or stopping
+# Playwright) may take. A dead CDP endpoint would otherwise hang the close, and with
+# it `verify`, a re-seed or server shutdown, before the provider release runs.
+_CLOSE_STEP_TIMEOUT_S = 10.0
 
 
 class PlaywrightPageDriver:
@@ -194,14 +200,14 @@ class PlaywrightConnectedBackend(BrowserBackend):
             for closer in closers:
                 try:
                     if closer is not None:
-                        await closer.close()
+                        await asyncio.wait_for(closer.close(), timeout=_CLOSE_STEP_TIMEOUT_S)
                 except Exception as exc:
                     # Never silent: an unreported close failure is a leaked
                     # browser that looks exactly like a clean teardown.
                     LOGGER.warning("Failed to close %s: %r", type(closer).__name__, exc)
             if self._pw is not None:
                 try:
-                    await self._pw.stop()
+                    await asyncio.wait_for(self._pw.stop(), timeout=_CLOSE_STEP_TIMEOUT_S)
                 except Exception as exc:
                     LOGGER.warning("Failed to stop playwright: %r", exc)
         finally:

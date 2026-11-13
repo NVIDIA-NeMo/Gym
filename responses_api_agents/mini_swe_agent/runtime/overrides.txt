@@ -1,0 +1,3 @@
+# mini-SWE declares datasets for its batch benchmark runners, which agent sessions do not use; without it the runtime
+# leaves out pyarrow and pandas and is about half the size in the task sandbox.
+datasets; sys_platform == 'never'

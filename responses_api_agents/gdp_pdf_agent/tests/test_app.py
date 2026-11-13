@@ -21,6 +21,7 @@ import json
 import random
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -969,6 +970,65 @@ class TestRun:
         assert result.mask_sample is True
         assert failure.failure_kind == AGENT_ROUTE_FAILED
         assert failure.operation == "verify"
+
+
+class TestMaskFailedAttempts:
+    """mask_failed_attempts keeps attempts without a gradable answer out of training, never out of evaluation."""
+
+    async def _run(
+        self, tmp_path: Path, episode: Any, *, verify_raises: bool = False, **config: Any
+    ) -> SimpleAgentVerifyResponse:
+        agent, manifest = _text_only_agent(tmp_path, **config)
+
+        async def post(**kw: Any) -> SimpleNamespace:
+            if kw["url_path"] == "/verify" and verify_raises:
+                raise RuntimeError("judge outage")
+            return SimpleNamespace(
+                cookies={}, data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {}
+            )
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        return await _run_with_episodes(agent, manifest, episode)
+
+    async def test_off_by_default_so_evaluation_counts_the_zero(self, tmp_path: Path) -> None:
+        result = await self._run(tmp_path, _error("maximum context length", status=400))
+        assert result.reward == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason == "GDP.pdf terminal input limit: context"
+        assert "mask_sample" not in (result.model_extra.get("instance_config") or {})
+
+    @pytest.mark.parametrize(
+        ("error", "kind"),
+        [
+            (_error("maximum context length", status=400), "model_context_limit"),
+            (_error("payload too large", status=413), "model_request_error"),
+        ],
+    )
+    async def test_masks_an_attempt_whose_input_never_fit(
+        self, tmp_path: Path, error: ClientResponseError, kind: str
+    ) -> None:
+        result = await self._run(tmp_path, error, mask_failed_attempts=True)
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == kind
+        assert result.model_extra["instance_config"]["mask_sample"] is True
+        assert result.failure_reason.startswith("GDP.pdf terminal input limit: ")
+
+    async def test_a_failed_verification_is_masked_either_way(self, tmp_path: Path) -> None:
+        for mask in (False, True):
+            result = await self._run(
+                tmp_path / str(mask), [(_response(), None, {}, {})], verify_raises=True, mask_failed_attempts=mask
+            )
+            assert result.reward == 0.0
+            assert result.mask_sample is True
+            assert result.failure_kind is not None
+
+    async def test_leaves_a_graded_answer_alone(self, tmp_path: Path) -> None:
+        result = await self._run(tmp_path, [(_response(), None, {}, {})], mask_failed_attempts=True)
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.failure_reason is None
 
 
 class TestStripImageBlocks:

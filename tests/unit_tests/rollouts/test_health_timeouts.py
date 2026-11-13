@@ -103,8 +103,9 @@ class TestEvidence:
         assert result["by_limit"] == {"default_episode_timeout_seconds": 1}
         assert result["by_enforcer"] == {"gym.environment_server": 1}
 
-    def test_a_typed_event_wins_over_a_legacy_signal(self) -> None:
-        row = {"agent_timed_out": True, "timeouts": [event(limit="agent_timeout_seconds")]}
+    @pytest.mark.parametrize("legacy", [{"agent_timed_out": True}, {"opencode_error_type": "timeout"}])
+    def test_a_typed_event_wins_over_a_legacy_signal(self, legacy: dict) -> None:
+        row = {**legacy, "timeouts": [event(limit="agent_timeout_seconds")]}
 
         assert section(row)["by_limit"] == {"agent_timeout_seconds": 1}
 
