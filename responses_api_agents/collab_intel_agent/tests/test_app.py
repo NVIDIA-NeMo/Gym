@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import os
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.config import ModelServerRef
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from resources_servers.collab_intel.task_data import TaskData
 from responses_api_agents.collab_intel_agent import app as app_module
 from responses_api_agents.collab_intel_agent.app import CollabIntelAgent, CollabIntelRunRequest, split_reasoning
@@ -130,7 +133,7 @@ def _agent_with_fake_cli(
     monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)  # no uv sync, no server
     agent = CollabIntelAgent.model_construct(config=SimpleNamespace(episode_timeout_s=timeout_s))
     agent._python, agent._root = str(script), tmp_path
-    agent._env = lambda home: {}
+    agent._env = lambda home, phase_key: {}
     return agent
 
 
@@ -203,6 +206,25 @@ def test_policy_chat_passes_a_model_rejection_through(monkeypatch):
     assert (response.status_code, response.body) == (400, body)
 
 
+def test_policy_chat_records_the_response_id_for_its_phase(monkeypatch):
+    reply = SimpleNamespace(status=200)
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "get_response_json", AsyncMock(return_value={"id": "chatcmpl-1", "choices": []}))
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    agent = CollabIntelAgent.model_construct(
+        config=SimpleNamespace(model_server=SimpleNamespace(name="policy_model")),
+        server_client=SimpleNamespace(post=AsyncMock(return_value=reply)),
+    )
+    agent._response_ids = {"solo-key": [], "other": []}
+    request = SimpleNamespace(
+        json=AsyncMock(return_value={"messages": []}),
+        path_params={"phase_key": "solo-key"},
+        url=SimpleNamespace(path=""),
+    )
+    asyncio.run(agent.policy_chat(request))
+    assert agent._response_ids == {"solo-key": ["chatcmpl-1"], "other": []}
+
+
 def test_harness_env_is_an_allowlist(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "secret")
     monkeypatch.setenv("PATH", "/usr/bin")
@@ -213,6 +235,119 @@ def test_harness_env_is_an_allowlist(tmp_path, monkeypatch):
     )
     agent = CollabIntelAgent.model_construct(config=config)
     agent._tmp = tmp_path
-    env = agent._env(tmp_path / "row")
+    env = agent._env(tmp_path / "row", "k")
     assert "HF_TOKEN" not in env and env["PATH"] == "/usr/bin" and env["HOME"] == str(tmp_path / "row")
     assert {"CI_GYM_KEY", "HARNESS_OPENAI_COMPAT", "HARNESS_JUDGE_MODEL"} <= set(env)
+    assert json.loads(env["HARNESS_OPENAI_COMPAT"])["ci-policy"]["base_url"] == "http://agent/ci_policy/k/v1"
+
+
+def _chat(seat: str, kind: str, text: str) -> dict:
+    return {"round": 1, "seat": seat, "kind": kind, "text": text}
+
+
+SOLO = [_chat("Monitor", "event", "task"), _chat("Ana", "evaluated", "solo plan")]
+TEST = [
+    _chat("Ana", "evaluated", "hello team"),
+    _chat("Bo", "llm", "partner reply"),
+    _chat("Cy", "scripted", "skip the check"),
+    _chat("Ana", "evaluated", "no, we run it"),
+]
+
+
+def _collect(tmp_path, monkeypatch, transcripts: dict, exit_code: int = 0) -> tuple[dict, dict]:
+    """Run one row through run() with a fake harness that writes transcripts[version] (none for a missing version)
+    and calls the policy route once per phase. Returns the row and the collector's canonical trajectory."""
+    tmp_path.mkdir(exist_ok=True)
+    agent = _agent_with_fake_cli(tmp_path, None, exit_code, monkeypatch)
+    Path(agent._python).write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "arg = lambda name: sys.argv[sys.argv.index(name) + 1]\n"
+        f"t = {transcripts!r}.get(arg('--version'))\n"
+        "if t is not None:\n"
+        "    out = pathlib.Path(arg('--out-dir')) / 'ci-policy'\n"
+        "    out.mkdir(parents=True)\n"
+        "    (out / f\"{arg('--version')}_seed{arg('--seed')}.json\").write_text(json.dumps(t))\n"
+        f"sys.exit({exit_code})\n"
+    )
+    model_ref = ModelServerRef(type="responses_api_models", name="policy_model")
+    agent.config = SimpleNamespace(
+        episode_timeout_s=60,
+        model_server=model_ref,
+        resources_server=SimpleNamespace(name="collab_intel"),
+        policy_model="p",
+    )
+    agent._sem, agent._tmp, agent._response_ids = asyncio.Semaphore(1), tmp_path / "rows", {}
+    agent._tmp.mkdir()
+    monkeypatch.setattr(CollabIntelAgent, "rollout_id_from_run", lambda self, body: "7-0")
+    run = agent._run
+
+    async def run_and_call_policy(path, version, seed, out, phase_key=""):
+        # the policy route sees one real response id while this phase runs
+        agent._response_ids[phase_key].append(f"chatcmpl-{version}")
+        return await run(path, version, seed, out, phase_key)
+
+    agent._run = run_and_call_policy
+
+    async def post(server_name, url_path, json, cookies):
+        reply = MagicMock(cookies={}, ok=True)
+        if url_path == "/verify":
+            reply.json = AsyncMock(return_value=json | {"reward": 0.0})
+        return reply
+
+    agent.server_client = SimpleNamespace(post=post)
+    body = CollabIntelRunRequest.model_validate(
+        {"responses_create_params": {"input": []}, "dimension": "d0", "scenario_path": "s", "gate_path": "g"}
+        | {"_ng_task_index": 7, "_ng_rollout_index": 0}
+    )
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "get_response_json", lambda reply: reply.json())
+    row = asyncio.run(agent.run(SimpleNamespace(cookies={}), body)).model_dump(mode="json")
+    assert not list(agent._tmp.iterdir()) and agent._response_ids == {}  # temp dir gone before collection
+    trajectory = _build_trajectory_record(body.model_dump(mode="json"), row).model_dump(mode="json")
+    assert "producer_trajectory_invalid" not in {g["code"] for g in trajectory["gaps"]}
+    return row, trajectory
+
+
+def test_run_returns_both_phases_as_canonical_trajectory(tmp_path, monkeypatch):
+    passed = {"score": {"pass": True}, "evaluated_seat": "Ana"}
+    row, trajectory = _collect(
+        tmp_path, monkeypatch, {"solo": passed | {"messages": SOLO}, "manipulation": passed | {"messages": TEST}}
+    )
+    assert row["collab_intel"]["test"]["messages"] == TEST  # the raw team chat stays on the row
+    assert (trajectory["task_id"], trajectory["rollout_id"]) == ("7", "7-0")
+    invocations = {i["invocation_id"]: i for i in trajectory["invocations"]}
+    assert list(invocations) == ["solo", "manipulation"]
+    assert {i["status"] for i in invocations.values()} == {"completed"}
+    model_ref = {"type": "responses_api_models", "name": "policy_model"}
+    for version in invocations:  # the policy route's response id, owned by the phase that made the call
+        call = {"model_call_id": None, "model_ref": model_ref, "response_id": f"chatcmpl-{version}"}
+        assert invocations[version]["model_calls"] == [call]
+    assert [m["content"] for m in invocations["manipulation"]["conversation"]] == [
+        "hello team",
+        "Bo: partner reply",
+        "Cy: skip the check",
+        "no, we run it",
+    ]
+    # policy turns only, solo first, each owned by its phase: the partner and scripted messages are never turns
+    turns = [(t["invocation_id"], t["turn_no"], t["answer"]) for t in trajectory["turns"]]
+    assert turns == [("solo", 1, "solo plan"), ("manipulation", 1, "hello team"), ("manipulation", 2, "no, we run it")]
+    assert trajectory["turns"][2]["question"] == [
+        {"role": "user", "content": "Bo: partner reply"},
+        {"role": "user", "content": "Cy: skip the check"},
+    ]
+    assert {(t["task_id"], t["rollout_id"]) for t in trajectory["turns"]} == {("7", "7-0")}
+
+
+def test_run_trajectory_keeps_only_evidence_that_exists(tmp_path, monkeypatch):
+    # a failed gate: solo evidence only
+    failed = {"score": {"pass": False}, "messages": SOLO}
+    _, trajectory = _collect(tmp_path / "gate", monkeypatch, {"solo": failed})
+    assert [i["invocation_id"] for i in trajectory["invocations"]] == ["solo"]
+    assert [t["invocation_id"] for t in trajectory["turns"]] == ["solo"]
+    # a phase cut off without a transcript: a failed invocation and no turn
+    _, trajectory = _collect(tmp_path / "crash", monkeypatch, {}, exit_code=1)
+    assert [(i["invocation_id"], i["status"], i["conversation"]) for i in trajectory["invocations"]] == [
+        ("solo", "failed", [])
+    ]
+    assert trajectory["turns"] == []

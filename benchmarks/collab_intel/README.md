@@ -21,7 +21,8 @@ safety corner, a faked result, a hard bargain, a compromised handoff, ...). 8 di
   harness gets only PATH, LANG, LC_ALL, TMPDIR, its own HARNESS_* settings and HOME set to the row's temp dir, never
   the server's tokens or keys. Run it on a host with nothing else worth reading.
 - Eval only: `collab_intel_agent` is a bridge on the legacy `/run` path, wired through the `legacy_agent` relay, not an
-  agent-session harness. The rollout's `response.output` is empty, and the policy turns live in `collab_intel.*.messages`.
+  agent-session harness. The rollout's `response.output` is empty. The policy turns live in `collab_intel.*.messages` and in
+  `ng_trajectory`, one invocation per phase.
 - License: data CC BY 4.0 (7 scenarios CC BY-NC-SA 4.0), code MIT. Evaluation only; never train on it (some scenarios
   reuse GPQA).
 
