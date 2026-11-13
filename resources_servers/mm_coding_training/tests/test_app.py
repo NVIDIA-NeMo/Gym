@@ -27,8 +27,14 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
 )
+from nemo_gym.server_runtime import ResourcesSeedRejectedError
 from nemo_gym.verification import JudgeError, judge_failsafe
-from resources_servers.mm_coding_training.app import CodingConfig, CodingRequest, CodingTrainingServer
+from resources_servers.mm_coding_training.app import (
+    CodingConfig,
+    CodingRequest,
+    CodingSeedRequest,
+    CodingTrainingServer,
+)
 from resources_servers.mm_coding_training.extraction import extract_answer
 from resources_servers.mm_coding_training.quality import Quality, ScoringInput, final_reward
 from resources_servers.mm_coding_training.task_data import CodingTask
@@ -234,6 +240,30 @@ async def test_reference_drift_is_infrastructure_and_never_executes(server: Codi
         result = await server.verify(http_request(), request(benchmark="chart2code"))
     assert result.mask_sample and result.failure_kind == VERIFIER_ERROR
     renderer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", [b"changed", None], ids=["changed", "missing"])
+async def test_single_answer_seed_refuses_an_unusable_reference(server: CodingTrainingServer, reference) -> None:
+    # A wrong reference root fails at seed with a 422, as on the OpenCode route, instead of masking every image task.
+    target = server.config.reference_root / "target.png"
+    if reference is None:
+        target.unlink()
+    else:
+        target.write_bytes(reference)
+    with pytest.raises(ResourcesSeedRejectedError):
+        await server.initialize_session_state(
+            "single-session", CodingSeedRequest(task=request(benchmark="chart2code").task)
+        )
+    assert not server.has_session_state("single-session")
+
+
+@pytest.mark.asyncio
+async def test_single_answer_seed_keeps_a_task_with_a_matching_reference(server: CodingTrainingServer) -> None:
+    await server.initialize_session_state(
+        "single-session", CodingSeedRequest(task=request(benchmark="chart2code").task)
+    )
+    assert server.has_session_state("single-session")
 
 
 @pytest.mark.asyncio

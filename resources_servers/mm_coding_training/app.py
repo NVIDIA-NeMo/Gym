@@ -31,6 +31,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedRejectedError,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
@@ -127,6 +128,12 @@ class CodingTrainingServer(SimpleResourcesServer):
         return session_id in self._tasks
 
     async def initialize_session_state(self, session_id: str, body: CodingSeedRequest) -> None:
+        try:
+            self._reference(body.task)
+        except (OSError, ValueError) as error:
+            raise ResourcesSeedRejectedError(
+                "Coding reference is unavailable or differs from its declared SHA256"
+            ) from error
         self._tasks[session_id] = body.model_copy(deep=True)
 
     async def release_session_state(self, session_id: str) -> None:
