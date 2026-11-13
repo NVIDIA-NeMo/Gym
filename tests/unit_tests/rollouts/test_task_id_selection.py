@@ -141,6 +141,25 @@ def test_an_accepted_resume_keeps_the_saved_record(tmp_path: Path) -> None:
     assert record_path(tmp_path).read_bytes() == saved
 
 
+def test_a_resume_after_a_crash_before_the_record_write_records_the_selection(tmp_path: Path) -> None:
+    config = run_config(tmp_path, task_ids=["a"])
+    start(tmp_path, config)
+    written = record_path(tmp_path).read_bytes()
+    record_path(tmp_path).unlink()
+
+    start(tmp_path, run_config(tmp_path, resume=True, task_ids=["a"]))
+
+    assert record_path(tmp_path).read_bytes() == written
+
+
+def test_a_resume_without_a_selection_writes_no_record(tmp_path: Path) -> None:
+    start(tmp_path, run_config(tmp_path))
+
+    start(tmp_path, run_config(tmp_path, resume=True))
+
+    assert not record_path(tmp_path).exists()
+
+
 def test_inline_ids_hydra_read_as_numbers_or_booleans_are_ids(tmp_path: Path) -> None:
     # Hydra reads an unquoted `7` in `+task_ids=[7]` as an int and `true` as a bool.
     assert run_config(tmp_path, task_ids=[7, True, "x"]).task_ids == ["7", "true", "x"]
