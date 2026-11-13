@@ -3,23 +3,33 @@
 
 """Create the episode database, run queries on it and grade a submission, inside the episode's sandbox.
 
+The database is SQLite or PostgreSQL. A SQLite database is a file that ``setup`` creates from the task's database. A
+PostgreSQL database is ``<db>_template`` in the server of the sandbox's image (``benchmarks/bird_interact`` builds it),
+which ``setup`` starts; the sandbox is the episode's own, so the database is too.
+
 Grading is an independent implementation of BIRD-Interact's default test case for tasks without custom test cases:
-remove comments, ``DISTINCT`` and ``ROUND(...)`` from both queries, run them, round floats to two places, and compare
-the rows in order when ``conditions.order`` is set, or as sets otherwise. An empty result on either side fails.
+remove comments, ``DISTINCT`` and ``ROUND(...)`` from both queries, run them, normalize the values (floats and decimals
+to two places, dates to ``YYYY-MM-DD``, JSON values to sorted JSON), and compare the rows in order when
+``conditions.order`` is set, or as sets otherwise. An empty result on either side fails. No query changes the
+database: SQLite runs each on a scratch copy, PostgreSQL in a transaction that it rolls back.
 
 The Environment Server uploads this file to the episode's sandbox and runs ``python3 grading.py <command> <request>``
-(see ``main``), so it imports only the standard library.
+(see ``main``), so it imports only the standard library, and ``psycopg2`` for PostgreSQL, which the image provides.
 """
 
+import datetime
 import json
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from typing import Any, Protocol
 
 
 _LINE_COMMENT = re.compile(r"--[^\n]*")
@@ -27,6 +37,7 @@ _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _DISTINCT = re.compile(r"\bdistinct\b", re.IGNORECASE)
 _ROUND_CALL = re.compile(r"\bround\s*\(", re.IGNORECASE)
 _FLOAT_PLACES = 2
+_DECIMAL_STEP = Decimal(1).scaleb(-_FLOAT_PLACES)
 # Rows returned to the agent by an exploratory query.
 MAX_PREVIEW_ROWS = 20
 
@@ -53,7 +64,10 @@ class SolutionFailedError(RuntimeError):
 
 
 def split_statements(sql: str) -> list[str]:
-    """Split a script into complete statements; a semicolon inside a string literal does not split."""
+    """Split a script into complete statements; a semicolon inside a string literal does not split.
+
+    PostgreSQL's dollar-quoted bodies (``$$ ... $$``) are not recognized, so a semicolon inside one splits.
+    """
     statements, pending = [], ""
     for piece in sql.split(";"):
         pending += piece + ";"
@@ -123,20 +137,141 @@ def run_on_copy(database: Path, sql: str, *, timeout_seconds: float) -> QueryRes
         return run_query(copy, sql, timeout_seconds=timeout_seconds)
 
 
+def _round_nested(value: object) -> object:
+    if isinstance(value, float):
+        return round(value, _FLOAT_PLACES)
+    if isinstance(value, Decimal):
+        return value.quantize(_DECIMAL_STEP, rounding=ROUND_HALF_UP)
+    if isinstance(value, (list, tuple)):
+        return [_round_nested(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _round_nested(item) for key, item in value.items()}
+    return value
+
+
 def _normalize_value(value: object) -> object:
-    return round(value, _FLOAT_PLACES) if isinstance(value, float) else value
+    """A value as grading compares it. SQLite returns only the first two kinds; PostgreSQL returns them all."""
+    if isinstance(value, (float, Decimal)):
+        return _round_nested(value)
+    # datetime is a date too: the time of day does not count.
+    if isinstance(value, datetime.date):
+        return value.strftime("%Y-%m-%d")
+    # JSON values and arrays compare as JSON with sorted keys, which a set can hold.
+    if isinstance(value, (dict, list)):
+        return json.dumps(_round_nested(value), sort_keys=True, default=str)
+    return value
 
 
 def _normalize_rows(rows: list[tuple]) -> list[tuple]:
     return [tuple(_normalize_value(value) for value in row) for row in rows]
 
 
-def grade(database: Path, predicted_sql: str, solution_sql: str, *, ordered: bool, timeout_seconds: float) -> Grade:
-    """Compare the predicted query's result with the solution's on scratch copies of ``database``."""
-    predicted = run_on_copy(database, normalize_sql(predicted_sql), timeout_seconds=timeout_seconds)
+def _display_value(value: object) -> object:
+    """A value as the agent sees it in a preview: decimals as numbers and dates as ISO strings."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value.isoformat()
+    return value
+
+
+class Database(Protocol):
+    def create(self, request: dict[str, Any]) -> None:
+        """Make the episode database ready, with the task's ``preprocess_sql`` applied."""
+
+    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
+        """Run ``sql`` and return the rows of its last statement that returns rows, leaving the database unchanged."""
+
+
+@dataclass(frozen=True)
+class SQLiteDatabase:
+    """The episode's SQLite file."""
+
+    path: Path
+
+    def create(self, request: dict[str, Any]) -> None:
+        create_database(Path(request["source"]), self.path, request["preprocess_sql"])
+
+    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
+        return run_on_copy(self.path, sql, timeout_seconds=timeout_seconds)
+
+
+@dataclass(frozen=True)
+class PostgresDatabase:
+    """A database in the PostgreSQL server of the sandbox's image.
+
+    The image sets ``PGDATA`` and the libpq variables (``PGHOST``, ``PGUSER``) that connections use.
+    """
+
+    name: str
+
+    def create(self, request: dict[str, Any]) -> None:
+        start_postgres()
+        if request["preprocess_sql"]:
+            applied = self._execute(";\n".join(request["preprocess_sql"]), commit=True, timeout_seconds=None)
+            if not applied.ok:
+                # As for SQLite: the task's own setup failed, and the command fails with it.
+                raise RuntimeError(f"preprocess_sql failed: {applied.error}")
+
+    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
+        return self._execute(sql, commit=False, timeout_seconds=timeout_seconds)
+
+    def _execute(self, sql: str, *, commit: bool, timeout_seconds: float | None) -> QueryResult:
+        import psycopg2
+
+        connection = psycopg2.connect(dbname=self.name)
+        try:
+            with connection.cursor() as cursor:
+                if timeout_seconds is not None:
+                    # Bounds each statement of the transaction.
+                    cursor.execute("SET LOCAL statement_timeout = %s", (max(1, int(timeout_seconds * 1000)),))
+                rows: list[tuple] | None = None
+                for statement in split_statements(sql):
+                    cursor.execute(statement)
+                    if cursor.description is not None:
+                        rows = cursor.fetchall()
+            return QueryResult(rows=rows)
+        except psycopg2.errors.QueryCanceled:
+            return QueryResult(rows=None, error=f"Query timed out after {timeout_seconds} seconds")
+        except psycopg2.Error as error:
+            return QueryResult(rows=None, error=str(error).strip())
+        finally:
+            if commit:
+                connection.commit()
+            else:
+                connection.rollback()
+            connection.close()
+
+
+def start_postgres() -> None:
+    """Start the image's server, listening on its Unix socket only, unless it already runs."""
+    # pg_ctl refuses to run as root, for any command.
+    if subprocess.run(["gosu", "postgres", "pg_ctl", "status"], capture_output=True).returncode == 0:
+        return
+    # The log goes to a file, so the server does not hold this command's output open.
+    subprocess.run(
+        [
+            "gosu",
+            "postgres",
+            "pg_ctl",
+            "start",
+            "--wait",
+            "--log=/tmp/postgresql.log",
+            "--options=-c listen_addresses=",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def grade(
+    database: Database, predicted_sql: str, solution_sql: str, *, ordered: bool, timeout_seconds: float
+) -> Grade:
+    """Compare the predicted query's result with the solution's; neither changes ``database``."""
+    predicted = database.run(normalize_sql(predicted_sql), timeout_seconds=timeout_seconds)
     if not predicted.ok:
         return Grade(passed=False, execution_error=predicted.error)
-    solution = run_on_copy(database, normalize_sql(solution_sql), timeout_seconds=timeout_seconds)
+    solution = database.run(normalize_sql(solution_sql), timeout_seconds=timeout_seconds)
     if not solution.ok:
         raise SolutionFailedError(f"The ground-truth SQL failed: {solution.error}")
     if not predicted.rows or not solution.rows:
@@ -172,17 +307,20 @@ def main(argv: list[str]) -> None:
     finally:
         # A grade request holds the solution SQL, which must not stay in the sandbox.
         request_file.unlink(missing_ok=True)
-    database = Path(request["database"])
+    if request.get("engine", "sqlite") == "postgresql":
+        database: Database = PostgresDatabase(request["database"])
+    else:
+        database = SQLiteDatabase(Path(request["database"]))
     if command == "setup":
-        create_database(Path(request["source"]), database, request["preprocess_sql"])
+        database.create(request)
         result: dict[str, object] = {}
     elif command == "execute":
-        query = run_on_copy(database, request["sql"], timeout_seconds=request["timeout_seconds"])
+        query = database.run(request["sql"], timeout_seconds=request["timeout_seconds"])
         rows = query.rows or []
         result = {
             "error": query.error,
             "row_count": len(rows),
-            "preview": [repr(row) for row in rows[:MAX_PREVIEW_ROWS]],
+            "preview": [repr(tuple(_display_value(value) for value in row)) for row in rows[:MAX_PREVIEW_ROWS]],
         }
     elif command == "grade":
         try:

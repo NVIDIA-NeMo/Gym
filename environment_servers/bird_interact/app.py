@@ -22,7 +22,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import (
@@ -109,21 +109,25 @@ DEFAULT_ACTION_COSTS = {
 }
 # The a-Interact budget before the per-ambiguity and patience parts: three for exploration, three for one submit.
 _BASE_COIN_BUDGET = 6.0
-# The last fenced block marked sql or sqlite.
-_SQL_BLOCK = re.compile(r"```(?:sqlite|sql)[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+# The last fenced block marked sql, sqlite, postgresql or postgres.
+_SQL_BLOCK = re.compile(r"```(?:sqlite|sql|postgresql|postgres)[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_SQLITE_IMAGE = "python:3.12-slim"
+DatabaseEngine = Literal["sqlite", "postgresql"]
+# For each engine, the dialect the instructions name and the fence they ask for.
+_DIALECTS: dict[str, tuple[str, str]] = {"sqlite": ("SQLite", "sqlite"), "postgresql": ("PostgreSQL", "sql")}
 
-C_INTERACT_INSTRUCTIONS = """You are a data analyst who writes SQLite queries for a user. The user's request can be \
+C_INTERACT_INSTRUCTIONS = """You are a data analyst who writes {dialect} queries for a user. The user's request can be \
 ambiguous, and part of the knowledge you need can be missing from what you see.
 
 You may ask the user clarifying questions, one in each reply, at most {question_budget} in total. Each reply must be \
 exactly one of these:
 - one clarifying question in plain text, with no SQL;
-- your final SQL in one ```sqlite fenced code block.
+- your final SQL in one ```{fence} fenced code block.
 
 Ask your questions before you send SQL. After you send SQL, the user tells you whether it is right. If it is not, \
 you get one more attempt, which must be SQL. The user can then ask a follow-up question, which you answer with SQL."""
 
-A_INTERACT_INSTRUCTIONS = """You are a data analyst who writes SQLite queries for a user. The user's request can be \
+A_INTERACT_INSTRUCTIONS = """You are a data analyst who writes {dialect} queries for a user. The user's request can be \
 ambiguous, and part of the knowledge you need can be missing from the knowledge base.
 
 Use the tools to read the schema, column meanings and knowledge base, to run exploratory queries, to ask the user \
@@ -140,9 +144,13 @@ class PhaseReward(BaseModel):
 
 
 class BirdInteractSandboxConfig(BaseModel):
-    """The episode's sandbox. The image needs ``python3``; the database and the runner are uploaded at the start."""
+    """The episode's sandbox. The runner is uploaded at the start.
 
-    image: str = "python:3.12-slim"
+    For SQLite the image needs only ``python3`` (default ``python:3.12-slim``), and the database is uploaded too. For
+    PostgreSQL the image holds the release's databases as ``<db>_template``; ``benchmarks/bird_interact`` builds it.
+    """
+
+    image: str | None = None
     # The provider reclaims a sandbox that a crashed server never stopped.
     ttl_s: PositiveFloat | None = 7200.0
     ready_timeout_s: PositiveFloat | None = None
@@ -166,8 +174,18 @@ class BirdInteractEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
     )
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     mode: InteractionMode
+    database_engine: DatabaseEngine = Field(
+        default="sqlite",
+        description=(
+            "sqlite: a task's database is <db>/<db>.sqlite (or <db>.sql) under database_dir, as in Mini-Interact. "
+            "postgresql: it is <db>_template in the server of the sandbox image, as in Lite and Full."
+        ),
+    )
     database_dir: str = Field(
-        description="Holds <db>/<db>.sqlite (or <db>.sql), <db>_schema.txt, <db>_column_meaning_base.json, <db>_kb.jsonl."
+        description=(
+            "Holds <db>/<db>_schema.txt, <db>_column_meaning_base.json and <db>_kb.jsonl for each database, and for "
+            "sqlite the database itself."
+        )
     )
     user_model: ModelServerRef
     sandbox_config: BirdInteractSandboxConfig = Field(default_factory=BirdInteractSandboxConfig)
@@ -189,6 +207,15 @@ class BirdInteractEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
         ],
         min_length=1,
     )
+
+    @model_validator(mode="after")
+    def postgresql_names_its_image(self) -> Self:
+        if self.database_engine == "postgresql" and self.sandbox_config.image is None:
+            raise ValueError(
+                "database_engine postgresql needs sandbox_config.image: an image that holds the release's "
+                "databases, such as one built from benchmarks/bird_interact/Dockerfile"
+            )
+        return self
 
     @model_validator(mode="after")
     def a_interact_has_one_turn(self) -> Self:
@@ -246,8 +273,10 @@ class _DatabaseFiles:
 @dataclass
 class _EpisodeSandbox:
     sandbox: AsyncSandbox
-    # The directory in the sandbox that holds the runner, the database source and the episode's database.
+    # The directory in the sandbox that holds the runner and, for SQLite, the database source and the episode's database.
     root: str = ""
+    # The episode's database: a SQLite file in root, or a PostgreSQL database in the image's server.
+    database: str = ""
 
     def path(self, name: str) -> str:
         return posixpath.join(self.root, name)
@@ -344,7 +373,7 @@ class AInteractTools:
 
     @episode_tool
     async def execute(self, arguments: SQLArguments) -> ToolObservation:
-        """Run an exploratory SQLite query and see up to 20 rows."""
+        """Run an exploratory SQL query on the database and see up to 20 rows."""
 
         async def act(episode: BirdInteractEpisode) -> str:
             request = {"sql": arguments.sql, "timeout_seconds": self._server.config.sql_timeout_seconds}
@@ -462,7 +491,7 @@ def function_tool(spec: ToolSpec) -> dict[str, Any]:
 
 
 def extract_sql(text: str) -> str | None:
-    """Return the last ```sql or ```sqlite block of a reply, or None for a reply without one."""
+    """Return the last ```sql, ```sqlite, ```postgresql or ```postgres block of a reply, or None without one."""
     blocks = _SQL_BLOCK.findall(text)
     return blocks[-1].strip() if blocks and blocks[-1].strip() else None
 
@@ -576,10 +605,10 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 f"Task {task.instance_id} has no sol_sql. The public BIRD-Interact releases withhold the ground truth; "
                 "merge it into the rows before running."
             )
-        if task.test_cases:
+        if task.test_cases or (task.follow_up is not None and task.follow_up.test_cases):
             raise _refused(f"Task {task.instance_id} has custom test cases, which this server does not run yet.")
         files = self._database_files(task.selected_database)
-        source = self._database_source(task.selected_database)
+        source = self._sandbox_source(task)
         try:
             sandbox = await self._start_sandbox(request, cleanup, task, source)
         except Exception as error:
@@ -597,10 +626,13 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         return episode
 
     def _first_request(self, episode: BirdInteractEpisode) -> NeMoGymResponseCreateParamsNonStreaming:
+        dialect, fence = _DIALECTS[self.config.database_engine]
         task = episode.task
         if self.config.mode == "c_interact":
             question_budget = task.ambiguity_count + self.config.question_patience
-            instructions = C_INTERACT_INSTRUCTIONS.format(question_budget=question_budget)
+            instructions = C_INTERACT_INSTRUCTIONS.format(
+                dialect=dialect, fence=fence, question_budget=question_budget
+            )
             knowledge = "\n".join(json.dumps(entry) for entry in episode.visible_knowledge())
             message = (
                 f"Database: {task.selected_database}\n\nSchema:\n{episode.files.schema_text}\n\n"
@@ -610,7 +642,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             tools = []
         else:
             # The schema, column meanings and knowledge base cost BIRD-COIN, so the request leaves them out.
-            instructions = A_INTERACT_INSTRUCTIONS.format(coin_budget=episode.coin_budget)
+            instructions = A_INTERACT_INSTRUCTIONS.format(dialect=dialect, coin_budget=episode.coin_budget)
             message = f"Database: {task.selected_database}\n\nMy request:\n{task.amb_user_query}"
             # An MCP agent lists the tools from the server, and some harnesses refuse a request that declares tools.
             declared = "direct_http" in self.config.tool_transports
@@ -778,15 +810,16 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             return await self._run_command(episode.sandbox, command, request)
 
     async def _start_sandbox(
-        self, request: BirdInteractRequest, cleanup: CleanupContext, task: BirdInteractTask, source: Path
+        self, request: BirdInteractRequest, cleanup: CleanupContext, task: BirdInteractTask, source: Path | None
     ) -> _EpisodeSandbox:
         """Start a sandbox holding the task's database with ``preprocess_sql`` applied.
 
-        The episode's cleanup stops it, and a failed setup stops it at once (see ``start_episode_sandbox``).
+        ``source`` is the SQLite database to upload; PostgreSQL's database is in the image. The episode's cleanup
+        stops the sandbox, and a failed setup stops it at once (see ``start_episode_sandbox``).
         """
         sandbox_config = self.config.sandbox_config
         spec = SandboxSpec(
-            image=sandbox_config.image,
+            image=sandbox_config.image or _SQLITE_IMAGE,
             ttl_s=sandbox_config.ttl_s,
             ready_timeout_s=sandbox_config.ready_timeout_s,
             metadata=sandbox_config.metadata | {"instance_id": task.instance_id[:63]},
@@ -804,10 +837,14 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 raise SandboxCommandError(f"pwd failed in the sandbox: {result.error_type or result.return_code}")
             handle.root = posixpath.join((result.stdout or "").strip(), "bird_interact")
             await sandbox.upload(_SANDBOX_RUNNER, handle.path(_SANDBOX_RUNNER.name))
-            await sandbox.upload(source, handle.path(source.name))
-            await self._run_command(
-                handle, "setup", {"source": handle.path(source.name), "preprocess_sql": task.preprocess_sql}
-            )
+            setup_request: dict[str, Any] = {"preprocess_sql": task.preprocess_sql}
+            if source is None:
+                handle.database = f"{task.selected_database}_template"
+            else:
+                handle.database = handle.path("episode.sqlite")
+                await sandbox.upload(source, handle.path(source.name))
+                setup_request["source"] = handle.path(source.name)
+            await self._run_command(handle, "setup", setup_request)
 
         await self.start_episode_sandbox(request, cleanup, spec, setup, name="database sandbox")
         assert handle is not None  # setup ran
@@ -820,7 +857,9 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             with tempfile.TemporaryDirectory(prefix="bird-interact-") as scratch:
                 local = Path(scratch) / name
                 # Text goes in a file, not in the command line.
-                local.write_text(json.dumps(request | {"database": handle.path("episode.sqlite")}))
+                local.write_text(
+                    json.dumps(request | {"engine": self.config.database_engine, "database": handle.database})
+                )
                 await handle.sandbox.upload(local, handle.path(name))
             result = await handle.sandbox.exec(
                 shlex.join(["python3", handle.path(_SANDBOX_RUNNER.name), command, handle.path(name)]),
@@ -839,7 +878,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
     async def _replace_sandbox(self, episode: BirdInteractEpisode) -> None:
         try:
             fresh = await self._start_sandbox(
-                episode.request, episode.cleanup, episode.task, self._database_source(episode.task.selected_database)
+                episode.request, episode.cleanup, episode.task, self._sandbox_source(episode.task)
             )
         except Exception as error:
             raise SandboxCommandError(f"Could not start a fresh sandbox: {type(error).__name__}: {error}") from error
@@ -864,6 +903,10 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             except FileNotFoundError as error:
                 raise _refused(f"Missing database file for {name!r}: {error.filename}") from error
         return self._files[name]
+
+    def _sandbox_source(self, task: BirdInteractTask) -> Path | None:
+        """The SQLite database to upload into the episode's sandbox; PostgreSQL's is in the sandbox image."""
+        return self._database_source(task.selected_database) if self.config.database_engine == "sqlite" else None
 
     def _database_source(self, name: str) -> Path:
         """The database file, ``<db>.sqlite``, or else the script ``<db>.sql``."""
