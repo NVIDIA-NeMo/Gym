@@ -109,7 +109,7 @@ def test_bundle_start_checks_runtime_and_external_grader_bytes(tmp_path, monkeyp
 
 @pytest.mark.parametrize("harness", ["opencode", "browser_use"])
 def test_catalog_manifest_and_explicit_run_root(harness, tmp_path, monkeypatch):
-    from nemo_gym.environment.manifest import load_manifest
+    from nemo_gym.environment import load_manifest
 
     root = Path(__file__).resolve().parents[3]
     monkeypatch.delenv("SAAS_BENCH_RUN_ROOT", raising=False)
