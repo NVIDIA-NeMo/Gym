@@ -66,8 +66,8 @@ PLUGINS = (
 )
 SENTINEL = "[nemo-gym-plugin] loaded sentinel version=1 plugins=\n"
 TURN_CAP = "[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400\n"
-# A web search as nemo_gym_web_guard.js reports it. The plugin writes the query as JSON, which keeps a character outside
-# ASCII as it is, so a log that holds this line is longer in bytes than in characters.
+# A web search as nemo_gym_web_guard.js reports it. The plugin writes the query as JSON, which keeps a character
+# outside ASCII as it is, so a log that holds this line is longer in bytes than in characters.
 MULTIBYTE_SEARCH = '[nemo-gym-plugin] [exa-mcp] tool=web_search_exa ms=5 bytes=1 query="café"\n'
 # What an Environment Server sends with an episode's verify: the session's close follows it.
 EPISODE_VERIFY = {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
@@ -1640,8 +1640,8 @@ def test_a_think_block_is_stripped_before_the_judge(workdir) -> None:
 
 
 def test_an_empty_plugin_log_is_refused_as_one_without_the_sentinel(workdir, tmp_path, started, stopped) -> None:
-    """A log that exists but holds nothing reads as "", which lacks the sentinel's line: the run is refused, terminally,
-    as when no log was written."""
+    """A log that exists but holds nothing reads as "", which lacks the sentinel's line: the run is refused,
+    terminally, as when no log was written."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
     log.write_text("")
@@ -1658,8 +1658,8 @@ def test_an_empty_plugin_log_is_refused_as_one_without_the_sentinel(workdir, tmp
 
 # The line nemo_gym_turn_budget.js reports for an overflow of the context window that compaction did not recover from.
 OVERFLOW = "[nemo-gym-plugin] context_overflow session=s\n"
-# The outcomes of a failed run that the default agent outcome policy sends to /verify, and model_context_limit, which the
-# session preset adds; each with the plugin log line of the ending that masks the row, and that ending's kind.
+# The outcomes of a failed run that the default agent outcome policy sends to /verify, and model_context_limit, which
+# the session preset adds; each with the plugin log line of the ending that masks the row, and that ending's kind.
 POLICY_VERIFIED_FAILURES = [
     ({"failure_kind": "agent_limit"}, TURN_CAP, "agent_limit"),
     ({"failure_kind": "agent_invalid_output"}, TURN_CAP, "agent_limit"),
@@ -1748,8 +1748,8 @@ def test_an_incomplete_response_is_masked_only_by_the_plugin_log(workdir, tmp_pa
 
 
 def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workdir) -> None:
-    """A lost session, a judge without a verdict and a judge that never answered each leave a masked row, not counted as
-    graded, that says why."""
+    """A lost session, a judge without a verdict and a judge that never answered each leave a masked row, not counted
+    as graded, that says why."""
     server = _server(workdir)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed()).status_code == 200
@@ -1772,8 +1772,8 @@ def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workd
 
 
 def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> None:
-    """Rollouts in a row whose judge could not be reached trip the breaker, and verify answers 500; a verdict starts the
-    count again."""
+    """Rollouts in a row whose judge could not be reached trip the breaker, and verify answers 500; a verdict starts
+    the count again."""
     server = _server(workdir, judge_max_consecutive_failures=2)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
 
@@ -1796,8 +1796,8 @@ def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> Non
 
 
 def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
-    """With judge_max_consecutive_failures 0, rollouts without a verdict are masked one by one, and verify never answers
-    500."""
+    """With judge_max_consecutive_failures 0, rollouts without a verdict are masked one by one, and verify never
+    answers 500."""
     server = _server(workdir, judge_max_consecutive_failures=0)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     _mock_judge(server, NO_VERDICT)
@@ -1811,8 +1811,8 @@ def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
     assert {_graded(reply) for reply in replies} == {(0.0, True, "judge_unparseable", False)}
 
 
-# single_agent_turn's verify body for an episode: the task_data keys flat at the top level, then the request, the agent's
-# response and the failure report it forwards.
+# single_agent_turn's verify body for an episode: the task_data keys flat at the top level, then the request, the
+# agent's response and the failure report it forwards.
 SESSION_VERIFY_BODY = {
     "question": "Which city?",
     "ground_truth": "Paris",
@@ -1895,8 +1895,8 @@ def _record_finished_stops(monkeypatch: pytest.MonkeyPatch) -> list[AsyncSandbox
 
 
 async def _cancel_once_reached(reached: asyncio.Event, call: Awaitable[Any]) -> None:
-    """Await call, and once reached is set, cancel it as the server cancels a request whose client disconnected: at that
-    await and at every later one that is not shielded."""
+    """Await call, and once reached is set, cancel it as the server cancels a request whose client disconnected: at
+    that await and at every later one that is not shielded."""
     scope = anyio.CancelScope()
 
     async def run() -> None:
@@ -1941,8 +1941,8 @@ def test_a_reused_agent_run_cookie_stops_the_first_sandbox_before_it_starts_anot
 def test_an_agent_run_reseed_whose_stop_fails_is_refused_and_keeps_the_first_sandbox(
     workdir, started, monkeypatch, lending
 ) -> None:
-    """A stop that fails raises and keeps its sandbox, so a later stop can try again: the re-seed answers 500 and starts
-    nothing in its place."""
+    """A stop that fails raises and keeps its sandbox, so a later stop can try again: the re-seed answers 500 and
+    starts nothing in its place."""
     server = _server(workdir if lending else None)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     assert client.post("/seed_session", json=_row()).status_code == 200
@@ -2134,9 +2134,9 @@ async def test_an_episode_seed_cancelled_at_an_await_stops_its_sandbox(workdir, 
 def test_a_sandbox_the_relay_agent_stopped_first_does_not_break_a_reseed_or_the_shutdown(
     workdir, tmp_path, started, stopped
 ) -> None:
-    """The relay agent stops its sandbox itself, also when it refuses a run and never verifies, which leaves this server
-    holding a sandbox that is gone. A re-seed of the cookie stops it again, which the provider takes as stopped, before
-    it starts another; the shutdown stops the second."""
+    """The relay agent stops its sandbox itself, also when it refuses a run and never verifies, which leaves this
+    server holding a sandbox that is gone. A re-seed of the cookie stops it again, which the provider takes as stopped,
+    before it starts another; the shutdown stops the second."""
     server = _server(None)
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=_row()).status_code == 200

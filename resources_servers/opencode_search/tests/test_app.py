@@ -336,8 +336,8 @@ def _search_cache_server(exa_cache_root: str) -> SearchResourcesServer:
 
 
 class TestSearchCacheProxy:
-    """The /mcp proxy that a sandbox's searches go through when exa_cache_root is set. It reads no session, and it fails
-    open: a cache that cannot be read or written costs a call upstream, never the search."""
+    """The /mcp proxy that a sandbox's searches go through when exa_cache_root is set. It reads no session, and it
+    fails open: a cache that cannot be read or written costs a call upstream, never the search."""
 
     def test_without_a_cache_root_there_is_no_proxy(self):
         with TestClient(_search_cache_server("").setup_webserver()) as client:

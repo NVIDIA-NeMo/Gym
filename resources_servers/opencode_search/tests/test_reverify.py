@@ -111,8 +111,8 @@ def _server() -> SearchResourcesServer:
 @pytest.mark.parametrize("saved_as", ["graded", "judge_failed"])
 @pytest.mark.parametrize("materialized", ["dataset_row", "task"])
 def test_a_row_that_ended_on_its_budget_is_graded_again_without_its_mask(materialized, saved_as, reason, kind) -> None:
-    """The body carries the saved answer but none of the receipts, and the plugin log that gave the ending went with the
-    sandbox, so the row comes back graded and unmasked."""
+    """The body carries the saved answer but none of the receipts, and the plugin log that gave the ending went with
+    the sandbox, so the row comes back graded and unmasked."""
     pair = InputRolloutPair(input=MATERIALIZED_INPUTS[materialized], rollout=_saved_row(saved_as, reason, kind))
 
     payload = _build_verify_payload(pair)
