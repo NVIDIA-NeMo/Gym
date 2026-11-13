@@ -52,7 +52,7 @@ def validate_rows(rows: list[dict], *, media_root: Path | None = None) -> None:
             ):
                 raise ValueError("Agent-X canonical policy input cannot include additional prompt context")
             messages = params["input"]
-            if len(messages) != 1 or messages[0]["role"] != "user":
+            if len(messages) != 1 or messages[0].get("type", "message") != "message" or messages[0]["role"] != "user":
                 raise ValueError("Agent-X canonical policy input requires one user message")
             content = messages[0]["content"]
             attachments = [p for p in content if p["type"] == "input_image"]

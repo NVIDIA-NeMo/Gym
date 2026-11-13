@@ -104,10 +104,19 @@ def source_video_release(source_release):
     return root, frames
 
 
-def test_video_source_bundle_roundtrip_preserves_frames_and_sampling(source_video_release, tmp_path):
+@pytest.mark.parametrize("explicit_message_type", [False, True])
+def test_video_source_bundle_roundtrip_preserves_frames_and_sampling(
+    source_video_release, tmp_path, explicit_message_type
+):
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
     root, expected_frames = source_video_release
     output = agentx_prepare.prepare(source_root=str(root))
     original = [json.loads(line) for line in output.read_text().splitlines()]
+    if explicit_message_type:
+        for row in original:
+            row["responses_create_params"]["input"][0]["type"] = "message"
+        output.write_text("".join(json.dumps(row) + "\n" for row in original))
     assert [row["task_id"] for row in original] == ["2", "522", "600"]
     video = original[-1]
     assert video["verifier_metadata"]["video_sampling"] == {"fps": 2.0, "frame_count": 6, "indices": [0, 2, 5]}
@@ -120,7 +129,19 @@ def test_video_source_bundle_roundtrip_preserves_frames_and_sampling(source_vide
     prepared = agentx_prepare.prepare(
         dataset=str(portable / "agentx.jsonl"), sha256=receipt["dataset_sha256"], media_root=str(portable / "media")
     )
-    assert [json.loads(line) for line in prepared.read_text().splitlines()] == original
+    imported = [json.loads(line) for line in prepared.read_text().splitlines()]
+    assert imported == original
+    for row in imported:
+        params = row["responses_create_params"]
+        parsed = NeMoGymResponseCreateParamsNonStreaming.model_validate(params)
+        assert len(parsed.input) == 1
+        message = parsed.input[0]
+        assert message.type == "message"
+        assert message.role == "user"
+        assert message.content[0]["text"] == agentx_source.policy_prompt(row["verifier_metadata"])
+        assert [part["image_url"] for part in message.content[1:]] == [
+            part["image_url"] for part in params["input"][0]["content"][1:]
+        ]
 
 
 @pytest.mark.parametrize("limit", [None, 1])
@@ -225,6 +246,7 @@ def test_embedded_media_must_be_valid_image_bytes(value):
         "append_answer",
         "extra_text",
         "extra_message",
+        "function_call",
         "instructions",
         "prompt",
         "previous_response_id",
@@ -247,6 +269,14 @@ def test_portable_bundle_rejects_modified_policy_prompt_even_with_matching_check
         params["input"][0]["content"].append({"type": "input_text", "text": leaked})
     elif mutation == "extra_message":
         params["input"].append({"role": "user", "content": [{"type": "input_text", "text": leaked}]})
+    elif mutation == "function_call":
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+        arguments = json.dumps({"answer": row["verifier_metadata"]["answer"]})
+        params["input"][0].update(type="function_call", call_id="injected", name="hint", arguments=arguments)
+        parsed = NeMoGymResponseCreateParamsNonStreaming.model_validate(params)
+        assert parsed.input[0].type == "function_call"
+        assert parsed.input[0].arguments == arguments
     elif mutation == "text":
         from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
