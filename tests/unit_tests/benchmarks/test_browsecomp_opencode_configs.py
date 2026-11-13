@@ -216,19 +216,33 @@ def test_the_lent_sandbox_gets_the_relay_agents_opencode_env(
 
 
 def test_opencode_resolves_tool_permissions_as_on_the_relay() -> None:
-    """Same tools map and same rules after "*": webfetch, websearch and task allowed, skill denied. The turn budget
-    plugin still removes the task tool from every request; a task deny would change OpenCode's truncation notice."""
+    """The relay's permission rules, with webfetch and websearch allowed by permission rules rather than a tools map:
+    webfetch, websearch and task allowed, skill denied, and every bash and edit pattern in the relay's order. No task
+    rule, so OpenCode's truncation notice still names the task tool; the turn budget plugin removes the tool from every
+    request."""
     _, config = sessions()
     _, relay = resolve(RELAY)
     ours = settings(config, AGENT)["opencode_config"]
     theirs = settings(relay, RELAY_AGENT)["opencode_config"]
 
-    assert ours["tools"] == theirs["tools"]
-    assert ours["permission"] == theirs["permission"]
+    assert set(ours) == {"permission", "compaction"}
+    web = ("webfetch", "websearch")
+    assert {key: rule for key, rule in ours["permission"].items() if key not in web} == {
+        key: rule for key, rule in theirs["permission"].items() if key not in web
+    }
     assert next(iter(ours["permission"])) == next(iter(theirs["permission"])) == "*"
-    tools = ("webfetch", "websearch", "task", "skill")
-    assert {tool: decision(ours, tool) for tool in tools} == {tool: decision(theirs, tool) for tool in tools}
-    assert [decision(ours, tool) for tool in tools] == ["allow", "allow", "allow", "deny"]
+    # The last matching pattern wins, so each pattern map keeps the relay's order.
+    pattern_maps = [key for key, rule in theirs["permission"].items() if isinstance(rule, dict)]
+    for key in pattern_maps:
+        assert list(ours["permission"][key].items()) == list(theirs["permission"][key].items())
+    # The other rules resolve as on the relay, and so do three tools that no permission rule names.
+    keys = [key for key in theirs["permission"] if key not in pattern_maps]
+    keys += ["task", "external_directory", "doom_loop"]
+    assert {key: decision(ours, key) for key in keys} == {key: decision(theirs, key) for key in keys}
+    # The session's workdir is /workspace, so reading /tmp or a truncated output is an external_directory request,
+    # which only the "*" rule allows.
+    tools = ("webfetch", "websearch", "task", "skill", "external_directory", "doom_loop")
+    assert [decision(ours, tool) for tool in tools] == ["allow", "allow", "allow", "deny", "allow", "allow"]
 
 
 def test_the_agent_runs_opencode_as_the_relay_agent_does() -> None:

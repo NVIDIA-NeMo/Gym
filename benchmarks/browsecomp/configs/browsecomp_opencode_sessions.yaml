@@ -125,15 +125,13 @@ browsecomp_opencode_agent:
       # the sandbox at verify, so keep it only on storage that outlives the sandbox, such as a provider volume.
       export_dir: ${oc.env:BROWSECOMP_OPENCODE_EXPORT_DIR,null}
       opencode_config:
-        # The relay's tools map over opencode_agent's permission rules, which resolves as on the relay: OpenCode puts
-        # the keys of a tools map ahead of the "*": allow rule and applies the last matching rule, so webfetch,
-        # websearch and task are allowed and skill denied. nemo_gym_turn_budget.js still removes the task tool from
-        # every request. No task deny: OpenCode's notice for a truncated tool result names the task tool only while
-        # it is allowed, as it is on the relay.
-        tools:
-          webfetch: true
-          websearch: true
-          task: false
+        # Merged into opencode_agent's permission rules, these replace its webfetch and websearch denies in place,
+        # after "*": allow. OpenCode applies the last matching rule, so webfetch, websearch and task are allowed and
+        # skill denied, as on the relay. No task rule: OpenCode's notice for a truncated tool result names the task
+        # tool only while it is allowed. nemo_gym_turn_budget.js removes the task tool from every request.
+        permission:
+          webfetch: allow
+          websearch: allow
         compaction:
           # Compaction starts after a call that reaches 262144 - 70144 = 192000 tokens, as on the relay; by default
           # OpenCode would start at 242,144.
