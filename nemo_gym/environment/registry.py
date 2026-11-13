@@ -73,6 +73,9 @@ class EnvironmentCatalogEntry:
     # slow discovery; the catalog views read them from the config when needed.
     resources_server: Optional[str] = None
     agent_server: Optional[str] = None
+    # The Harbor target a Harbor-backed workload runs (the manifest's `harbor_target`); `gym eval run` composes its
+    # environment server, `gym env start` does not.
+    harbor_target: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,7 @@ def _manifest_entry(
         "lifecycle": _enum_value(manifest.lifecycle),
         "resources_server": manifest.resources_server,
         "agent_server": manifest.agent_server,
+        "harbor_target": manifest.harbor_target,
     }
     if expected_kind == "environment":
         return EnvironmentEntry(**values)

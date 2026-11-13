@@ -122,9 +122,10 @@ configs, whichever harness runs, including one `--agent-type` swaps in; `--confi
 overrides still win. A variant that includes a Harbor-backed config repeats `harbor_target` in its own file, and a
 Harbor-backed config passed with `--config` instead of `--benchmark` is refused. Another resources or environment
 server instance, in the config or any config it includes, is refused, since it would start beside the taskset's. Such a benchmark runs on its own (not
-with a second `--benchmark`), `gym eval plan` does not plan it, and `gym list benchmarks` does not list it, since it
-declares no dataset of its own; its manifest sets the same `harbor_target` (refer to
-[Environment Manifest](/main/contribute/environments/new-environment#field-reference)).
+with a second `--benchmark`) and `gym eval plan` does not plan it, since it declares no dataset of its own.
+`gym list benchmarks` lists it through its manifest, which sets the same `harbor_target` (refer to
+[Environment Manifest](/main/contribute/environments/new-environment#field-reference)), and inspecting it shows a
+`gym eval run --benchmark` example; listing it prepares or fetches nothing.
 
 ## Configure the server
 

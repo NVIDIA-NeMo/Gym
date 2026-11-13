@@ -139,6 +139,14 @@ class TestHarborBenchmarkConfig:
             "builds": {"enabled": False},
         }
 
+    def test_an_included_harbor_backed_preset_keeps_its_settings(self, tmp_path: Path) -> None:
+        """The documented variant form: it repeats the preset's target and includes the preset, which also defines the
+        agent instance but, setting `harbor_target`, is a benchmark rather than a harness config."""
+        overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
+        preset = _benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay))
+        variant = _benchmark(tmp_path, "tb_variant", {"harbor_target": "terminal_bench_4", "config_paths": [str(preset)]})
+        assert harbor_benchmark(variant).agent.benchmark_settings == {"harbor_environment_server": overlay}
+
     def test_a_target_only_an_include_sets_is_refused(self, tmp_path: Path) -> None:
         """A variant that includes a Harbor-backed preset would otherwise fall through to the composed-server path."""
         base = _benchmark(tmp_path, "tb", _harbor_config())
@@ -418,6 +426,17 @@ def test_an_included_server_setting_wins_in_the_runs_merged_config(tmp_path: Pat
     settings.write_text(yaml.safe_dump({"harbor_environment_server": overlay, "episode_bound": 54000}))
     config = _harbor_config(config_paths=[MINISWE_CONFIG, str(settings)])
     merged, server = _merged_run_config(tmp_path, config, agent_type)
+    assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 54000
+
+
+@pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+def test_a_variant_of_a_harbor_backed_preset_keeps_its_server_settings(tmp_path: Path, agent_type) -> None:
+    """A variant that repeats the target and includes the preset runs at the preset's episode bound, not the
+    server's default, with the preset's harness and with a swapped-in one."""
+    overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": "${episode_bound}"}}}
+    preset = _benchmark(tmp_path, "preset", _harbor_config(episode_bound=54000, harbor_environment_server=overlay))
+    variant = {"harbor_target": "terminal_bench_4", "config_paths": [str(preset)]}
+    merged, server = _merged_run_config(tmp_path, variant, agent_type)
     assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 54000
 
 
