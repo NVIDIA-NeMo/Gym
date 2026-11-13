@@ -1,12 +1,13 @@
 ---
 name: run-and-babysit-eval
 description: >
-  Take a NeMo Gym evaluation from a ready config to a trusted result: submit it, let the resumable
-  Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
-  run with `gym eval resubmit --recover`, check health and the acceptance gates, and decide when to
-  stop a chain or start a fresh run. Use when a working Gym config exists; with no config yet,
-  compose it first with add-model-eval-config. Not for building a benchmark or harness (use
-  add-benchmark or add-harness). Triggered by: "run the eval", "run evaluations on model Y on
+  Take a NeMo Gym evaluation from a request to a trusted result: compose the eval config when none
+  exists (by following add-model-eval-config, in the same task), submit it, let the resumable Slurm
+  chain continue through walltime limits, preemption and node loss, inspect and recover the run with
+  `gym eval resubmit --recover`, check health and the acceptance gates, and decide when to stop a
+  chain or start a fresh run. The entry point for "run evaluations on model Y on benchmark Z", with
+  or without a ready config. Not for building a benchmark or harness (use add-benchmark or
+  add-harness). Triggered by: "run the eval", "run evaluations on model Y on
   benchmark Z with serving params X", "submit this benchmark", "the job timed out", "the chain
   stopped", "resume the run", "recover the run", "is the run done", "inspect the run", "gate the
   score", "restart the evaluation".
@@ -26,6 +27,7 @@ contain those pages, so read them in the Gym repository.
 
 ## How to act
 
+0. **No config yet: compose it** (section 0) in the same task; the user does not call a second skill.
 1. **Submit pinned and resumable** (section 1), a small smoke first.
 2. **Inspect, never guess** (section 3): read `decision.action` and `gate_task.status`.
 3. **Do the one action the table names** (section 4): run the same command without `--inspect`, or add the
@@ -34,6 +36,19 @@ contain those pages, so read them in the Gym repository.
 4. **Never** use plain `gym eval resubmit`, edit a run's files, or regenerate a saved answer.
 5. **Done** only when the inspect says `SUCCESS` (section 6). Report the health, the corrections of
    section 7 and every operator action with its reason.
+
+## 0. No config yet: compose it
+
+A request such as "run evaluations on model Y on benchmark Z with serving params X" often comes without a
+config. Then write it yourself before section 1: read [add-model-eval-config](../add-model-eval-config/SKILL.md)
+and follow its sections 1 to 5 (the model card, the policy service with the serving params the request gives,
+the reasoning toggle, each benchmark's own config from `benchmarks/<name>/`, validation without GPUs). A
+quantized export of a model that also runs unquantized follows its section 9. Ask the user only for what that
+skill says to ask for (the cluster and its login host, the account and partition, the images, the checkpoint
+path, the output directory), never for a second skill to be run. Its smoke (section 6) is the smoke of
+section 1 here; then continue with section 1. A config the user hands you is used as it is: do not re-derive
+its model settings. A deployment handed over as a `services.policy` block is used as it is too
+(add-model-eval-config, section 2).
 
 ## 1. Submit
 
@@ -346,9 +361,13 @@ recover(job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_
 
 A run can be healthy and still score low: that is the model or its deployment. Fix the deployment and run
 again, not the evaluation. For the evaluation itself, only `num_repeats` and the client parallelism
-(`--concurrency`) may change from the command line or a benchmark's `run`; a smoke run also sets `limit`
-(section 1). Never change the benchmark, the judge, or its token budgets and timeouts, which are the
-evaluation's identity. The model section is yours
+(`--concurrency`) may change from the command line or a benchmark's `run`, and `num_repeats` only upward.
+The benchmark's own count is `num_repeats` in its `benchmarks/<name>/manifest.yaml`; `--resolve-only`
+shows only an override. A run with fewer repeats than that, or with `limit`, is a smoke (section 1):
+report its score as a smoke, never as the benchmark's score. A score on part of the tasks needs a named,
+versioned subset and is reported under its name and version; with no such subset, report no benchmark
+score. Never change the benchmark, the judge, or
+its token budgets and timeouts, which are the evaluation's identity. The model section is yours
 ([add-model-eval-config](../add-model-eval-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
 the call sets `--policy-timeout-counts-as-model false` (for a self-hosted evaluation that owns its
@@ -450,6 +469,8 @@ still written by the next segment's guard, with its own remedy.
 - [ ] `trial_counts` and `quality_summary.json` were read: unobserved and unhealthy counts are explained.
 - [ ] Any `resumed across operational drift` settings are listed with the result.
 - [ ] Each correction of section 7 that applies is in the report with its count.
+- [ ] A score reported as the benchmark's comes from all its tasks at no fewer than its `num_repeats`
+  (`manifest.yaml`); a smoke or subset score is labelled as one.
 - [ ] The run is final on its receipts: `rollouts_coverage.json` says complete, the export receipt
   `rollouts_mlflow_export_done` is current and `gate_task.mlflow_delivery.state` is `verified` (or
   `not_required`, with `mlflow_tracking_required: false` set on purpose), and `.gym_chain_incomplete` is
