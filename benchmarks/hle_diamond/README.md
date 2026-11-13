@@ -432,12 +432,10 @@ multipleChoice):
 - Failed runs: a session run that stops at its output, context or time limit is graded on what it
   produced, as in `benchmarks/hle`. A harness crash (a nonzero exit, no result) is retried and then
   reported as a failed rollout, so it leaves the denominator; the relay presets'
-  `execution_failure_reward_zero` scored it 0. Both agents report such a crash as failure kind
-  `unknown`, which the Environment Server's `agent_outcome_policy` retries by default. Setting
-  `agent_outcome_policy.by_failure_kind.unknown: verify` on
-  `hle_diamond_equivalence_llm_judge_environment_server` would grade it instead (a partial map keeps
-  the other defaults), but it would grade every unclassified failure, infrastructure ones included,
-  so the presets leave the policy at its default, as `benchmarks/hle` does. Report the failed-rollout
+  `execution_failure_reward_zero` scored it 0. The crash leaves the agent route as an error (HTTP
+  502 from OpenCode, an exception from Pi), so the Environment Server handles it as a dependency
+  failure before `agent_outcome_policy` runs, and no `by_failure_kind` setting makes it gradable. A
+  failed response that carries an agent outcome does reach the policy. Report the failed-rollout
   count next to every score.
 - The OpenCode session presets start without network access to npm. With any plugin configured
   (the adapter always loads its own), OpenCode 1.17.11 installs `@opencode-ai/plugin` into each
@@ -460,9 +458,10 @@ multipleChoice):
 - A session's sandbox is created at seed, before the agent's own concurrency limit (`concurrency:
   512`) applies. `pi_agent` waits for a slot only when the activation starts, outside the run
   budget, while the sandbox idles and its TTL runs, so a long wait can use up the 1,800 s of TTL
-  headroom and lose the sandbox before the deadline. `opencode_agent` counts the wait against the
-  run budget, but its sandbox idles too. The sandboxed Pi agent took the slot before creating the
-  sandbox. Keep `--concurrency` at or below 512 on these presets so that no session queues.
+  headroom and lose the sandbox before the deadline. `opencode_agent` does the same: a first
+  activation's budget starts once it holds a slot. The sandboxed Pi agent took the slot before
+  creating the sandbox. Keep `--concurrency` at or below 512 on these presets so that no session
+  queues.
 - The search presets' leakage policy binds only the Tavily tools: under the Docker provider (open
   egress) the agent can search and fetch from bash around it, and Tavily pre-filters at most 150 of
   the 220 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
