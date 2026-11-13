@@ -59,6 +59,7 @@ from nemo_gym.trajectory import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_turn_simulation import cline_xml
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
 from responses_api_agents.simple_agent.app import (
@@ -606,3 +607,6 @@ class AgenticTurnSimulationAgent(SimpleAgent):
 
 if __name__ == "__main__":
     AgenticTurnSimulationAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AgenticTurnSimulationAgent.run_webserver()  # noqa: F401

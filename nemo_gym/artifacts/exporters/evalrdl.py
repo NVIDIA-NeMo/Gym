@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -27,28 +26,19 @@ from nemo_gym.config.config_types import RunExportConfig
 
 # Time the upload itself may take, before the wait for a verdict; past it the worker is killed.
 UPLOAD_ALLOWANCE_S = 3600
-# The configuration identity a resume compares, saved beside the run manifest. It is resume bookkeeping, not a result.
-RESUME_IDENTITY_SUFFIX = "manifest.identity.json"
 
 
-def _without_resume_identity(run_dir: Path, workdir: Path) -> Path:
-    """The run directory to upload: as it is, or, when it holds a resume identity anywhere below it, a mirror without
-    any such file.
-
-    The mirror, under `workdir` and named like the run directory, has the run's directories and a link to each of its
-    files, so nothing is copied and the run directory is left as it is.
-    """
-    if next(run_dir.rglob(f"*{RESUME_IDENTITY_SUFFIX}"), None) is None:
-        return run_dir
-    mirror = workdir / "upload" / run_dir.name
-    for directory, subdirectories, names in os.walk(run_dir):
-        relative = Path(directory).relative_to(run_dir)
-        (mirror / relative).mkdir(parents=True, exist_ok=True)
-        for name in names + [name for name in subdirectories if (Path(directory) / name).is_symlink()]:
-            if name.endswith(RESUME_IDENTITY_SUFFIX):
-                continue
-            (mirror / relative / name).symlink_to(Path(directory, name).absolute())
-    return mirror
+def _dotted_keys(meta: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Fold nested mappings of `meta` into dotted keys: `{"model": {"version": "v"}}` is `{"model.version": "v"}`."""
+    flat: dict[str, Any] = {}
+    for key, value in meta.items():
+        path = f"{prefix}.{key}" if prefix else key
+        leaves = _dotted_keys(value, path) if isinstance(value, dict) else {path: value}
+        repeated = sorted(flat.keys() & leaves.keys())
+        if repeated:
+            raise ValueError(f"`meta` sets the annotation {repeated[0]!r} twice.")
+        flat.update(leaves)
+    return flat
 
 
 class EvalRDLExportConfig(RunExportConfig):
@@ -75,13 +65,21 @@ class EvalRDLExportConfig(RunExportConfig):
         default=None, description="EvalRDL service: `prod`, `stg` or a URL. Defaults to the SDK's own choice."
     )
     requirement: str = Field(
-        default="evalrdl", description="pip requirement for the EvalRDL SDK, for example a pinned version."
+        default="evalrdl>=0.0.241",
+        description="pip requirement for the EvalRDL SDK, for example a pinned version. 0.0.241 adds `upload_plan`.",
     )
 
     @field_validator("tags", "meta", mode="before")
     @classmethod
     def plain_containers(cls, value: Any) -> Any:
         return OmegaConf.to_container(value, resolve=True) if isinstance(value, (DictConfig, ListConfig)) else value
+
+    @field_validator("meta")
+    @classmethod
+    def dotted_annotation_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """EvalRDL annotations are flat keys such as `model.version`, which a Hydra override can only write as nested
+        settings (`+meta.model.version=m`); the nested form is folded into the dotted key."""
+        return _dotted_keys(value)
 
 
 class EvalRDLExporter(IsolatedExporter):
@@ -109,8 +107,7 @@ class EvalRDLExporter(IsolatedExporter):
         """Describe the upload for the worker: the directory the rollouts are in, uploaded as it is.
 
         Everything in that directory is part of the run (the rollouts and their sidecars, health reports,
-        model-call captures, benchmark-specific files), so nothing is copied; only the resume identity beside the
-        run manifest is left out, through a mirror of links (see `_without_resume_identity`). The saved
+        model-call captures, benchmark-specific files), so nothing is picked out, staged or copied. The saved
         config and the aggregate metrics are still required first, as Gym's own rule for a complete run.
         """
         unexportable = unexportable_reason(artifacts)
@@ -133,7 +130,7 @@ class EvalRDLExporter(IsolatedExporter):
             )
         config = self.config
         return {
-            "run_dir": str(_without_resume_identity(run_dir, workdir)),
+            "run_dir": str(run_dir),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

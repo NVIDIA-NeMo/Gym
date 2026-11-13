@@ -1,7 +1,6 @@
 langgraph_agent:
   responses_api_agents:
     langgraph_agent:
-      num_workers: 1
       # This directory ships four distinct agents, selected by entrypoint. There is no default, so start
       # from a flavor config rather than setting this by hand:
       #   responses_api_agents/langgraph_agent/configs/orchestrator_agent.yaml

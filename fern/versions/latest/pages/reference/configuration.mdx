@@ -177,6 +177,36 @@ When metrics export is active at client construction, Gym uses `QueueTimedTCPCon
 connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
 without collecting these metrics.
 
+### HTTP Timeouts and Retries Between Servers
+
+Two settings bound how long one call from a Gym server to another waits on an unreachable peer.
+
+```yaml
+global_aiohttp_sock_connect_timeout_seconds: 60
+global_aiohttp_internal_retry_budget_seconds: 600
+```
+
+`global_aiohttp_sock_connect_timeout_seconds` (default `60`) limits one TCP handshake. It does not
+count the wait for a free connection-pool slot, so a request queued behind a busy pool is not cut
+short. Total and read time stay unlimited unless the caller passes its own timeout, because a model
+generation or a `/run` episode can run for hours. A handshake that times out counts as a connection
+that was never made: the request cannot have been delivered, so it is retried like a refused
+connection, within the caller's limits and even where a dropped connection is not resent.
+
+`global_aiohttp_internal_retry_budget_seconds` (default `600`) is the retry budget of a call between
+Gym servers whose caller sets none of `_max_num_tries`, `_max_connection_retries` or a connection
+retry window. Such a call retries quietly through a peer that is restarting, and past the budget it
+raises the last error. Two clocks make up the budget:
+
+- **Connection errors.** The window opens at the first connection error and closes when the server
+  answers, so it bounds an unbroken run of failures. After the first connection error, the window
+  also bounds each attempt's wait for a free pool slot, not only the handshake.
+- **Other errors**, such as a timeout or a DNS failure. The cap is the time since the call started.
+
+A call that sets its own limit uses that limit and not the budget. Set the budget to `0` to retry
+without a time limit, as before. Model connection retries are separate: `connection_retry_timeout_s`
+on a model client stays unset by default.
+
 ### Listen Backlog
 
 `uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them
@@ -469,6 +499,59 @@ Metrics and config are still exported. The old name `upload_rollouts_to_wandb` i
 <Note>
 Exporting is best-effort. Errors that happen during export (e.g., unavailable server) are reported as warnings and the run continues.
 </Note>
+
+---
+
+## Harbor image builds
+
+A task folder whose Dockerfile needs a build (see [Dockerfile modes](/main/data/task-folders/task-folder-format#dockerfile-modes))
+is built once at prepare, inside `gym eval run` and `gym dataset validate`. The top-level `builds:` block configures
+those builds. Set it in `env.yaml`, a `--config` file or with `++builds.<key>=<value>`:
+
+```yaml
+builds:
+  tool: buildah
+  repository: registry.example.com:5005/my-team/harbor-builds
+  platform: linux/amd64
+  enabled: true
+  force: false
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `tool` | detected | `buildah`, `podman` or `docker`. With a repository, the first of the three on `PATH`; without one, only `docker` is accepted. |
+| `repository` | `$NEMO_GYM_BUILD_REPOSITORY` | Registry path that built images are pushed under: `<repository>/hb__<hash>` for a task's image, `hb__<hash>-<service>` for a Compose sidecar and `hb__<hash>-verifier` for a separate verifier built from `tests/`. Unset, images stay in the local Docker daemon, which only the Docker sandbox provider can start. OpenSandbox needs pushed images. |
+| `platform` | `linux/amd64` | Platform asked of the tool, and the one prepare records base and Compose images for, even when nothing is built. Set it to your sandboxes' platform: the server refuses a Compose task whose images were recorded for another. An image that comes out for another platform is refused, and so is an amd64 level above the baseline, such as `linux/amd64/v3`. |
+| `enabled` | `true` | `false` never builds: a task that needs a build runs only on an image an earlier prepare recorded that fits this run. Others are listed in `skipped.json`, and `gym eval run` then stops unless you pass `--skip-unloadable`. |
+| `force` | `false` | Also build the Dockerfile of a task that declares `docker_image`, and run the built image, as Harbor's `--force-build` does. |
+
+The hash is Harbor's hash of the task's `environment/` folder (of `tests/` for a separate verifier), so identical
+folders share one image. The tool pulls base images and pushes built ones with its own login
+(`buildah login`, `podman login` or `docker login`).
+
+- **buildah** runs as the user who runs Gym, with `chroot` isolation and the `vfs` storage driver, under
+  `/raid/scratch/<user>/nemo-gym-buildah` when `/raid/scratch` exists, else in the system temp folder. It reads each
+  build context (`environment/`, or a Compose service's `build.context`) in place inside the dataset folder. Its
+  heredoc support fails on Lustre, so keep a dataset whose Dockerfiles use heredocs on local disk while it builds.
+- **buildah and podman** run with Gym's own `containers.conf`, layered over the host's, and `registries.conf`, which
+  replaces the host's main one, so registry mirrors set there no longer apply unless you export your own
+  `CONTAINERS_REGISTRIES_CONF`. They build Docker-format images.
+  Dockerfile heredocs need a tool built with openshift/imagebuilder 1.2.6 or later (upstream buildah 1.33.0 or later);
+  Ubuntu 24.04's packaged buildah 1.33.7 and podman 4.9.3 do not qualify. Prepare checks the tool before
+  the first heredoc build. If the check fails, tasks whose Dockerfiles use heredocs are left out, with the remedy as
+  their reason in `skipped.json`, and `gym eval run` stops unless you pass `--skip-unloadable`.
+- **docker** builds through `docker compose build`, so it needs the Compose v2 plugin (`docker-compose-plugin`).
+- **Proxies.** A proxy the build tool inherits can answer 403 to the registry, which fails the base-image pull or the
+  push. Add the registry host to `no_proxy` and `NO_PROXY`, including in the tool's own proxy configuration.
+
+## Harbor environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `NEMO_GYM_DATASETS_DIR` | Where pulled task-folder datasets live. Default: `environments/harbor/` in the Gym checkout, or under the working directory for a package install. See [Task Folder Files and Storage](/main/reference/task-folder-storage#pulled-datasets). |
+| `NEMO_GYM_BUILD_REPOSITORY` | Default for `builds.repository`. |
+| `NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING` | Run a harness that a dataset's `[gym] allowed_agents` does not list, like `--allow-unsupported-pairing`. |
+| `CONTAINERS_CONF_OVERRIDE`, `CONTAINERS_REGISTRIES_CONF` | Your own buildah and podman configuration. When set, Gym leaves them alone instead of supplying its own. |
 
 ---
 

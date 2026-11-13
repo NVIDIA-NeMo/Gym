@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentCloseSessionRequest, AgentSeedSessionRequest
@@ -299,10 +300,13 @@ async def test_sessions_and_required_grants_are_validated_before_execution(monke
     await close(instance)
 
 
-def test_legacy_run_route_is_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_run_route_is_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
     instance, _ = agent(monkeypatch)
-    paths = instance.setup_webserver().openapi()["paths"]
-    assert "/run" not in paths
+    app = instance.setup_webserver()
+    response = TestClient(app).post("/run", json={"responses_create_params": {"input": []}})
+    assert response.status_code == 422
+    assert f"{type(instance).__name__} does not implement /run" in response.json()["detail"]
+    paths = app.openapi()["paths"]
     assert "/v1/agent_sessions" in paths
     assert "/v1/agent_sessions/close" in paths
     assert "/v1/agent_sessions/finish" not in paths
