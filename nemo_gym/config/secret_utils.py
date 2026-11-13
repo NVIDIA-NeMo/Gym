@@ -15,7 +15,7 @@
 import re
 from typing import Any, List
 
-from omegaconf import DictConfig, ListConfig, open_dict
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 
 
 MASKED_VALUE = "****"
@@ -88,6 +88,27 @@ def looks_like_secret_key(key: object) -> bool:
     return any(substring in lowered_key for substring in _SECRET_KEY_SUBSTRINGS)
 
 
+def _secret_shaped_only_by_token(key: object) -> bool:
+    lowered_key = str(key).lower()
+    return {substring for substring in _SECRET_KEY_SUBSTRINGS if substring in lowered_key} == {"token"}
+
+
+def _is_token_count_or_flag(key: object, value: Any) -> bool:
+    """Whether a leaf is secret-shaped only through "token" and holds a number, bool or null.
+
+    `max_tokens`, `num_speculative_tokens` and the like are counts or flags, not credentials, and the
+    saved config must show them. A credential is a string, so any string (an interpolation included)
+    stays masked, as does a key that also matches another secret substring (`api_token_key`).
+    """
+    return _secret_shaped_only_by_token(key) and (value is None or isinstance(value, (bool, int, float)))
+
+
+# An override value that Hydra parses as an int, float, bool or null.
+_OVERRIDE_NON_STRING_SCALAR = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|true|false|null", re.IGNORECASE
+)
+
+
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
     """Mask `+key=value` / `++key=value` tokens whose key looks secret-shaped."""
     override_re = re.compile(r"^(\+{1,2})([^=]+)=(.*)$")
@@ -95,9 +116,13 @@ def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
     for token in tokens:
         match = override_re.match(token)
         if match:
-            prefix, key, _value = match.groups()
+            prefix, key, value = match.groups()
+            *parents, leaf = key.split(".")
             # Any secret-shaped segment, not only the leaf: `...harbor.secrets.JUDGE_AUTH` is a secret too.
-            if any(looks_like_secret_key(segment) for segment in key.split(".")):
+            secret_parent = any(looks_like_secret_key(segment) for segment in parents)
+            # Same rule as for a config leaf: a token count or flag stays visible.
+            visible_leaf = _secret_shaped_only_by_token(leaf) and _OVERRIDE_NON_STRING_SCALAR.fullmatch(value)
+            if secret_parent or (looks_like_secret_key(leaf) and not visible_leaf):
                 token = f"{prefix}{key}={MASKED_VALUE}"
         redacted.append(token)
     return redacted
@@ -138,7 +163,9 @@ def recursively_hide_secrets(dict_config: DictConfig) -> None:
                         elif isinstance(inner_v, str) and mask_url_passwords(inner_v) != inner_v:
                             v[index] = mask_url_passwords(inner_v)
             else:
-                if looks_like_secret_key(k):
+                # An interpolation is a string in the source config, whatever it resolves to.
+                interpolation = isinstance(node, DictConfig) and OmegaConf.is_interpolation(node, k)
+                if looks_like_secret_key(k) and (interpolation or not _is_token_count_or_flag(k, v)):
                     node[k] = MASKED_VALUE
                 elif isinstance(v, str) and mask_url_passwords(v) != v:
                     node[k] = mask_url_passwords(v)
@@ -166,7 +193,13 @@ def hide_secrets_in_container(data: Any) -> Any:
                     continue
                 capture_settings = root and key == "token_id_capture" and isinstance(value, dict)
                 credential_options = capture and key not in _CAPTURE_PUBLIC_FIELDS
-                child_secret = secret or credential_options or (looks_like_secret_key(key) and not capture_settings)
+                child_secret = (
+                    secret
+                    or credential_options
+                    or (
+                        looks_like_secret_key(key) and not capture_settings and not _is_token_count_or_flag(key, value)
+                    )
+                )
                 masked[key] = hide(value, child_secret, capture=capture_settings)
             return masked
         if isinstance(node, list):
