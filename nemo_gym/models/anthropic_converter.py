@@ -606,7 +606,9 @@ class AnthropicConverter:
 
         message_shell = {k: v for k, v in anthropic_response.items() if k != "content"}
         message_shell["content"] = []
-        message_shell.setdefault("usage", {})
+        message_shell["stop_reason"] = None
+        if "usage" in anthropic_response:
+            message_shell["usage"] = {**usage, "output_tokens": 0}
         yield self._sse_event("message_start", {"type": "message_start", "message": message_shell})
 
         for index, block in enumerate(content):
@@ -628,7 +630,8 @@ class AnthropicConverter:
                     "stop_reason": anthropic_response.get("stop_reason"),
                     "stop_sequence": anthropic_response.get("stop_sequence"),
                 },
-                "usage": {"output_tokens": usage.get("output_tokens", 0)},
+                # Preserve missing usage instead of reporting an invented zero.
+                **({"usage": {"output_tokens": usage["output_tokens"]}} if "output_tokens" in usage else {}),
             },
         )
         yield self._sse_event("message_stop", {"type": "message_stop"})

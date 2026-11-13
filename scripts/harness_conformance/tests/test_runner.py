@@ -13,8 +13,8 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _config
-from scripts.harness_conformance.provider import SUMMARY_PROMPTS, OpenClawProbe, Probe, is_compaction_request
+from scripts.harness_conformance.episode import HARNESSES, _compaction_settings, _config
+from scripts.harness_conformance.provider import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -109,7 +109,18 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+        getattr(module, HARNESSES[harness]).model_fields["config"].annotation.model_validate(agent)
+
+
+@pytest.mark.parametrize("compaction", [False, True])
+def test_compaction_overrides_preserve_tool_timeout(tmp_path, compaction):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=9)
+    ports = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
+    config = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True, scenario=scenario)
+    agent = config["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]
+    assert agent["harness"] == {"step_limit": 13, "step_timeout_sec": 10}
+    ordinary = _config("miniswe_sandboxed", tmp_path, ports, 12, use_agent_sessions=True)
+    assert ordinary["probe_agent"]["responses_api_agents"]["miniswe_sandboxed_agent"]["harness"]["step_limit"] == 6
 
 
 def test_session_runtime_does_not_require_host_cli(monkeypatch):
@@ -199,7 +210,16 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
     monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
-    monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
+    import_module = episode.importlib.import_module
+    monkeypatch.setattr(
+        episode,
+        "importlib",
+        SimpleNamespace(
+            import_module=lambda name, **kwargs: module
+            if name == "responses_api_agents.codex_agent.app"
+            else import_module(name, **kwargs)
+        ),
+    )
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
@@ -387,71 +407,77 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 
 
 @pytest.mark.parametrize("compaction", [True, False])
-def test_compaction_probe_keeps_summary_separate_from_policy_replies(tmp_path, compaction):
+def test_opencode_compaction_is_scripted_independently_of_request_text(tmp_path, compaction):
     scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
-    probe = Probe(scenario, tmp_path)
-    messages = [{"role": "user", "content": "Run checks"}]
+    settings = _compaction_settings("opencode", scenario)
+    probe = Probe(scenario, tmp_path, harness="opencode", **settings.probe_overrides)
+    messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
-        for index in range(2):
-            response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
-            assert response.status_code == 200
-            message = response.json()["choices"][0]["message"]
+        for expected_usage in (500, 27000):
+            response = client.post("/v1/chat/completions", json=body).json()
+            assert response["usage"]["prompt_tokens"] == expected_usage
+            message = response["choices"][0]["message"]
             call = message["tool_calls"][0]
-            execution = subprocess.run(
-                json.loads(call["function"]["arguments"])["command"],
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=True,
+            output = subprocess.check_output(
+                json.loads(call["function"]["arguments"])["command"], shell=True, text=True
             )
-            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
-            if compaction and index == 0:
-                helper = client.post(
-                    "/ng-rollout/0-0/v1/chat/completions",
-                    json={**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]},
-                ).json()
-                assert helper["choices"][0]["message"]["content"] == probe.compaction_summary
-                assert helper["usage"]["total_tokens"] == 511
-                assert not probe.finished and len(probe.tool_calls) == 1
-                messages.append(helper["choices"][0]["message"])
-        final = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
-    assert final.json()["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": output}])
+        if compaction:
+            # The summary instruction can change freely; the fixture uses request position.
+            response = client.post(
+                "/v1/chat/completions", json={**body, "messages": [{"role": "user", "content": "New wording"}]}
+            ).json()
+            assert response["choices"][0]["message"]["content"] == probe.compaction_summary
+            messages.append({"role": "user", "content": probe.compaction_summary})
+        final = client.post("/v1/chat/completions", json=body).json()
+    assert final["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+    assert len(probe.attempts) == 3 + int(compaction)
+    assert len(probe.compaction_response_ids) == int(compaction)
     assert probe.finished and not probe.violations
-    assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
-    witness = json.loads((tmp_path / "witness.json").read_text())
-    assert len(witness["attempts"]) == 3 + int(compaction)
-    assert len(witness["compaction"]["response_ids"]) == int(compaction)
-    assert sum(a["response"]["usage"]["total_tokens"] for a in witness["attempts"]) == (27738 if compaction else 81027)
 
 
-@pytest.mark.parametrize("prompt", SUMMARY_PROMPTS)
-@pytest.mark.parametrize("tools", [[], [TOOL]])
-def test_summary_recognition_requires_an_explicit_last_user_instruction(prompt, tools):
-    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "tools": tools}
-    assert is_compaction_request(body)
-    body["messages"].append({"role": "tool", "content": prompt})
-    assert not is_compaction_request(body)
-    assert not is_compaction_request({"messages": [{"role": "user", "content": "Run checks"}], "tools": []})
+def test_reply_schedule_controls_response_kind_and_usage(tmp_path):
+    probe = Probe(
+        SCENARIO["context_compaction"],
+        tmp_path,
+        responses=[{"kind": "final", "input_tokens": 123, "output_tokens": 7}],
+    )
+    with TestClient(probe.model_app()) as client:
+        response = client.post("/v1/chat/completions", json={"messages": [], "tools": [TOOL]}).json()
+        assert response["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+        assert response["usage"]["prompt_tokens"] == 123
+        assert response["usage"]["completion_tokens"] == 7
+        assert not probe.tool_calls and not probe.compaction_response_ids
+        assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 409
+
+
+@pytest.mark.parametrize("responses", [[], [{"kind": "unknown", "input_tokens": 1, "output_tokens": 1}]])
+def test_reply_schedule_rejects_missing_or_unknown_entries(tmp_path, responses):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path, responses=responses)
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 409
+    assert probe.violations and not probe.tool_calls
 
 
 def test_summary_does_not_waive_policy_tool_result_requirement(tmp_path):
-    probe = Probe(SCENARIO["context_compaction"], tmp_path)
+    probe = Probe(
+        SCENARIO["context_compaction"],
+        tmp_path,
+        responses=[{"kind": kind, "input_tokens": 500, "output_tokens": 8} for kind in ("tool", "summary", "tool")],
+    )
     body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}], "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
         assert client.post("/v1/chat/completions", json=body).status_code == 200
-        helper = {**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]}
+        helper = {**body, "messages": [{"role": "user", "content": "Summarize"}]}
         assert client.post("/v1/chat/completions", json=helper).status_code == 200
         assert client.post("/v1/chat/completions", json=body).status_code == 409
     assert len(probe.compaction_response_ids) == 1
 
 
-def test_compaction_probe_rejects_unexpected_summary_request(tmp_path):
-    probe = Probe(SCENARIO["context_compaction"], tmp_path)
-    with TestClient(probe.model_app()) as client:
-        response = client.post("/v1/chat/completions", json={"model": "conformance-model", "messages": []})
-    assert response.status_code == 409
-    assert probe.violations and not probe.compaction_response_ids
+def test_compaction_requires_an_explicit_schedule(tmp_path):
+    with pytest.raises(ValueError, match="compaction scenario requires an explicit reply schedule"):
+        Probe(SCENARIO["context_compaction"], tmp_path)
 
 
 def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):

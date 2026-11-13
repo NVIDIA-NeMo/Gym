@@ -14,19 +14,19 @@ import shutil
 import socket
 import subprocess
 import sys
-from contextlib import ExitStack, nullcontext
+from contextlib import AsyncExitStack, ExitStack, nullcontext
 from pathlib import Path
 
 import uvicorn
-import yaml
+from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
-from .provider import OpenClawProbe, Probe
+from .local_sandbox import prepare_sandbox
 from .registry import HARNESSES
-from .scenarios import SCENARIOS
+from .scenarios import SCENARIOS, Scenario
 
 
 class _Server(uvicorn.Server):
@@ -38,6 +38,8 @@ class _Server(uvicorn.Server):
 
 def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
+    if harness == "terminus_2_sandboxed" and (os.geteuid() != 0 or not shutil.which("tmux")):
+        raise RuntimeError("Terminus conformance requires a disposable Linux runner as root with tmux installed")
     if harness == "simple":
         return {"installation": "builtin"}
     if use_agent_sessions and harness != "hermes":
@@ -68,92 +70,223 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     return {"executable": shutil.which(harness), "version": version.stdout.strip()}
 
 
+def _base_settings(harness: str, directory: Path, timeout: float) -> DictConfig:
+    """Describe harness settings, probe settings and setup requirements."""
+    workspace = str(directory / "workspace")
+    opencode = {"permission": {"bash": "allow"}}
+    settings = {
+        "simple": {
+            "harness_overrides": {"max_steps": 6},
+            "session": {"harness_overrides": None, "tool_transports": ["direct_http"], "sandbox_backend": None},
+        },
+        "opencode": {
+            "harness_overrides": {"timeout": timeout, "opencode_config": opencode},
+            "legacy": {
+                "harness_overrides": {
+                    "workspace_root": workspace,
+                    # Auxiliary requests would consume the scripted policy replies.
+                    "opencode_config": {
+                        "agent": {"title": {"disable": True}, "summary": {"disable": True}},
+                    },
+                },
+            },
+        },
+        "pi": {
+            "harness_overrides": {"timeout": timeout},
+            "legacy": {"harness_overrides": {"workspace_root": workspace}},
+        },
+        "copilot": {
+            "harness_overrides": {"timeout": timeout},
+            "legacy": {"harness_overrides": {"workspace_root": workspace}},
+        },
+        "crewai": {"harness_overrides": {"timeout": timeout}},
+        "openclaw": {
+            "probe": ".provider:OpenClawProbe",
+            "harness_overrides": {"timeout": math.ceil(timeout)},
+            "legacy": {"harness_overrides": {"workspace_root": workspace}},
+        },
+        "codex": {
+            "legacy": {
+                "requires_workspace": True,
+                "harness_overrides": {
+                    "cwd": workspace,
+                    "timeout": timeout,
+                    "sandbox_mode": "danger-full-access",
+                    "extra_config": {"features": {"shell_snapshot": False}, "web_search": "disabled"},
+                },
+            },
+        },
+        "nooa": {
+            "probe": ".nooa:NOOAProbe",
+            "required_imports": ["scripts.harness_conformance.nooa"],
+            "inherit_adapter_fields": ["nooa"],
+            "harness_overrides": {
+                "sandbox_runner_timeout_seconds": timeout,
+                "nooa": {
+                    "execution_mode": "sandboxed",
+                    "invocation_adapter": "${harness_conformance.nooa_observer:}:invoke_with_witness",
+                },
+            },
+            "pop_fields": ["model", "concurrency"],
+            "session": {"harness_overrides": None, "sandbox_backend": "conformance_local"},
+        },
+        "claude_code": {
+            "harness_overrides": {
+                "claude_code_version": "2.1.108",
+                "timeout": int(timeout),
+                "max_turns": 6,
+                "allowed_tools": "Bash",
+                "thinking": "disabled",
+            },
+        },
+        "miniswe_sandboxed": {
+            "requires_sandbox": True,
+            "harness_overrides": {
+                "harness": {"step_limit": 6, "step_timeout_sec": 10},
+                "agent_timeout_sec": timeout,
+                "setup_timeout_sec": timeout,
+                "artifacts_dir": str(directory / "native"),
+            },
+        },
+        "terminus_2_sandboxed": {
+            "requires_sandbox": True,
+            "requires_tmux": True,
+            "probe_overrides": {"final_responses": 2},
+            "inherit_adapter_defaults": True,
+            "harness_overrides": {
+                "max_turns": 6,
+                "enable_summarize": False,
+                "llm_request_timeout": int(timeout),
+                "sandbox_timeout": timeout,
+            },
+        },
+        "hermes": {
+            "harness_overrides": {
+                "max_turns": 6,
+                "enabled_toolsets": ["terminal"],
+                "terminal_backend": "local",
+                "terminal_timeout": 10,
+                "compression_enabled": False,
+                "checkpoints_enabled": False,
+                "api_key": "conformance",
+            },
+        },
+    }.get(harness, {})
+    return OmegaConf.merge(
+        {
+            "probe": ".provider:Probe",
+            # Whether the episode runner must prepare a sandbox for the agent to borrow.
+            "requires_sandbox": False,
+            "requires_tmux": False,
+            "session": {
+                # Session sandboxes replace provider settings inherited from adapter YAML.
+                "pop_fields": ["resources_server", "sandbox_config"],
+                "harness_overrides": {"sandbox_provider": "probe_sandbox", "sandbox_config": {"workdir": workspace}},
+                "tool_transports": [],
+                "sandbox_backend": "local",
+            },
+            "legacy": {
+                "harness_overrides": {"resources_server": {"type": "resources_servers", "name": "probe_resources"}},
+            },
+        },
+        settings,
+    )
+
+
+def _compaction_settings(harness: str, scenario: Scenario) -> DictConfig:
+    """Scenario-specific overrides, applied after constructing the base settings."""
+    steps = scenario.tool_steps + 4
+    context = {"context_window": 32768 if scenario.compaction else 65536, "max_output_tokens": 8192}
+    settings = {
+        "simple": {"harness_overrides": {"max_steps": steps}},
+        "opencode": {
+            "harness_overrides": context,
+            "probe_overrides": {
+                "responses": [
+                    {"kind": "tool", "input_tokens": 500, "output_tokens": 8},
+                    {"kind": "tool", "input_tokens": 27000, "output_tokens": 8},
+                    *([{"kind": "summary", "input_tokens": 500, "output_tokens": 11}] if scenario.compaction else []),
+                    *[
+                        {"kind": "tool", "input_tokens": 500, "output_tokens": 8}
+                        for _ in range(scenario.tool_steps - 2)
+                    ],
+                    {"kind": "final", "input_tokens": 500, "output_tokens": 8},
+                ],
+            },
+        },
+        "pi": {"harness_overrides": context},
+        "codex": {"harness_overrides": {"model_context_window": 32768, "model_auto_compact_token_limit": 24000}},
+        "stirrup": {"harness_overrides": {"context_window_tokens": 32768}},
+        "hermes": {
+            "harness_overrides": {"compression_enabled": True, "compression_threshold": 0.1, "max_turns": steps}
+        },
+        "claude_code": {"harness_overrides": {"max_turns": steps}},
+        "miniswe_sandboxed": {"harness_overrides": {"harness": {"step_limit": steps}}},
+        "terminus_2_sandboxed": {
+            "harness_overrides": {
+                "max_turns": steps,
+                "enable_summarize": scenario.compaction,
+                "model_context_limit": 32768,
+            },
+        },
+    }.get(harness, {})
+    return OmegaConf.create(settings)
+
+
 def _config(
-    harness: str, directory: Path, ports: dict[str, int], timeout: float, *, use_agent_sessions: bool = False
+    harness: str,
+    directory: Path,
+    ports: dict[str, int],
+    timeout: float,
+    *,
+    use_agent_sessions: bool = False,
+    scenario: Scenario | None = None,
 ) -> dict:
     def server(port: int) -> dict:
         return {"name": "unused", "host": "127.0.0.1", "port": port, "entrypoint": "app.py", "num_workers": 1}
 
-    agent = {
-        **server(ports["probe_agent"]),
-        "name": "probe_agent",
-        "concurrency": 1,
-        "model": "conformance-model",
-        "model_server": {"type": "responses_api_models", "name": "policy_model"},
-    }
-    if not use_agent_sessions:
-        agent["resources_server"] = {"type": "resources_servers", "name": "probe_resources"}
     defaults_path = (
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
-    defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
-        f"{harness}_agent"
-    ]
-    agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
-    if harness == "nooa":
-        agent.pop("model")
-        agent.pop("concurrency")
-        from .nooa import observer_module_name
-
-        agent.update(
-            nooa={
-                **defaults["nooa"],
-                "execution_mode": "sandboxed",
-                "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
-            }
-        )
-        agent["sandbox_runner_timeout_seconds"] = timeout
-    if use_agent_sessions and harness not in ("simple", "nooa"):
-        # The verifier only reads retained output, so the agent can own this local sandbox.
-        agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
-    if harness == "simple":
-        agent["max_steps"] = 6
-    if harness in ("opencode", "pi", "copilot"):
-        agent["timeout"] = timeout
-        if not use_agent_sessions:
-            agent["workspace_root"] = str(directory / "workspace")
-    if harness == "crewai":
-        agent["timeout"] = timeout
-    if harness == "openclaw":
-        agent["timeout"] = math.ceil(timeout)
-        if not use_agent_sessions:
-            agent["workspace_root"] = str(directory / "workspace")
-    if harness == "opencode":
-        # Auxiliary title/summary requests would consume the scripted policy replies.
-        agent["opencode_config"] = {"permission": {"bash": "allow"}}
-        if not use_agent_sessions:
-            agent["opencode_config"]["agent"] = {"title": {"disable": True}, "summary": {"disable": True}}
-    if harness == "codex" and not use_agent_sessions:
-        workspace = directory / "workspace"
-        workspace.mkdir()
-        agent.update(
-            cwd=str(workspace),
-            timeout=timeout,
-            sandbox_mode="danger-full-access",
-            extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
-        )
-    if harness == "hermes":
-        agent.update(
-            max_turns=6,
-            enabled_toolsets=["terminal"],
-            terminal_backend="local",
-            terminal_timeout=10,
-            compression_enabled=False,
-            checkpoints_enabled=False,
-            api_key="conformance",
-        )
+    defaults = OmegaConf.load(defaults_path)[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
+    settings = _base_settings(harness, directory, timeout)
+    if scenario is not None and scenario.compaction is not None:
+        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    for module_name in settings.get("required_imports", []):
+        importlib.import_module(module_name)
+    mode = settings["session" if use_agent_sessions else "legacy"]
+    agent = OmegaConf.merge(
+        defaults if settings.get("inherit_adapter_defaults") else {},
+        {key: defaults[key] for key in settings.get("inherit_adapter_fields", [])},
+        server(ports["probe_agent"]),
+        {
+            "name": "probe_agent",
+            "concurrency": 1,
+            "model": "conformance-model",
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        },
+        {key: defaults[key] for key in defaults if key.endswith("_version")},
+        settings.get("harness_overrides", {}),
+    )
+    for field in [*settings.get("pop_fields", []), *mode.get("pop_fields", [])]:
+        agent.pop(field, None)
+    agent = OmegaConf.merge(agent, mode.get("harness_overrides") or {})
+    if mode.get("requires_workspace"):
+        (directory / "workspace").mkdir()
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
-    environment = {
-        **server(ports["probe_environment"]),
-        "name": "probe_environment",
-        "agent_server": {"type": "responses_api_agents", "name": "probe_agent"},
-    }
+    environment = OmegaConf.merge(
+        server(ports["probe_environment"]),
+        {"name": "probe_environment", "agent_server": {"type": "responses_api_agents", "name": "probe_agent"}},
+    )
     if use_agent_sessions:
-        environment.update(
-            resources_server={"type": "resources_servers", "name": "probe_resources"},
-            resources_tool_transports=["direct_http"] if harness == "simple" else [],
-            default_episode_timeout_seconds=timeout,
-            cleanup_timeout_seconds=10,
+        environment = OmegaConf.merge(
+            environment,
+            {
+                "resources_server": {"type": "resources_servers", "name": "probe_resources"},
+                "resources_tool_transports": mode["tool_transports"],
+                "default_episode_timeout_seconds": timeout,
+                "cleanup_timeout_seconds": 10,
+            },
         )
     config = {
         "head_server": {"host": "127.0.0.1", "port": ports["policy_model"]},
@@ -170,16 +303,16 @@ def _config(
         config["judge_model"] = {
             "responses_api_models": {"probe": {**server(ports["judge_model"]), "name": "judge_model"}}
         }
-    if use_agent_sessions and harness != "simple":
-        config["probe_sandbox"] = {("conformance_local" if harness == "nooa" else "local"): {"concurrency": 1}}
-    return config
+    if use_agent_sessions and mode["sandbox_backend"]:
+        config["probe_sandbox"] = {mode["sandbox_backend"]: {"concurrency": 1}}
+    return OmegaConf.to_container(OmegaConf.create(config), resolve=True, throw_on_missing=True)
 
 
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
-    config_cls = getattr(module, HARNESSES[harness] + "Config")
+    config_cls = agent_cls.model_fields["config"].annotation
     use_agent_sessions = agent_cls.supports_agent_sessions()
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
@@ -192,13 +325,12 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    if harness == "nooa":
-        from .nooa import BorrowedSandboxProbe
-
-        probe = BorrowedSandboxProbe(scenario, directory)
-    else:
-        probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-        probe = probe_cls(scenario, directory)
+    settings = _base_settings(harness, directory, timeout)
+    if scenario.compaction is not None:
+        settings = OmegaConf.merge(settings, _compaction_settings(harness, scenario))
+    probe_module, probe_name = settings.probe.split(":")
+    probe_cls = getattr(importlib.import_module(probe_module, package=__package__), probe_name)
+    probe = probe_cls(scenario, directory, harness=harness, **settings.get("probe_overrides", {}))
     probe.save()
     tasks = []
     servers = []
@@ -215,21 +347,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             {name: sock.getsockname()[1] for name, sock in sockets.items()},
             timeout,
             use_agent_sessions=use_agent_sessions,
+            scenario=scenario,
         )
-        if scenario.compaction is not None:
-            agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
-            if harness in ("opencode", "pi"):
-                agent_config.update(context_window=32768 if scenario.compaction else 65536, max_output_tokens=8192)
-            elif harness == "codex":
-                agent_config.update(model_context_window=32768, model_auto_compact_token_limit=24000)
-            elif harness == "stirrup":
-                agent_config.update(context_window_tokens=32768)
-            elif harness == "hermes":
-                agent_config.update(
-                    compression_enabled=True, compression_threshold=0.1, max_turns=scenario.tool_steps + 4
-                )
-            elif harness == "simple":
-                agent_config.update(max_steps=scenario.tool_steps + 4)
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:
@@ -284,12 +403,14 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             ),
             server_client=client,
         )
+        sandbox_stack = AsyncExitStack()
         try:
+            sandbox_access = await sandbox_stack.enter_async_context(prepare_sandbox(directory, settings))
             apps = {
                 "policy_model": probe.model_app(
                     assistant_message_header=client.assistant_message_header("policy_model")
                 ),
-                "probe_resources": probe.resources_app(server_client=client),
+                "probe_resources": probe.resources_app(server_client=client, sandbox_access=sandbox_access),
                 "probe_agent": agent.setup_webserver(),
                 "probe_environment": environment.setup_webserver(),
             }
@@ -342,8 +463,11 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             for server in servers:
                 server.should_exit = True
             await asyncio.gather(*tasks, return_exceptions=True)
-            await get_global_aiohttp_client().close()
-            probe.save()
+            try:
+                await sandbox_stack.aclose()
+            finally:
+                await get_global_aiohttp_client().close()
+                probe.save()
 
 
 def main() -> None:

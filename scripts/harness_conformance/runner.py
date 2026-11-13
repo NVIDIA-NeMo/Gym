@@ -248,7 +248,7 @@ def run_suite(
         "suite_sha256": digest_file(output / "suite.json"),
         "harnesses": rows,
         "limits": [
-            "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
+            "local harness runtime and controlled Chat/Responses/Messages model only; no remote sandbox qualification",
             "existing general checks stay P0; compaction scenarios and their new checks are P1",
             "compaction trigger support depends on the selected harness runtime and configuration",
             "context before/after measurements are outside this fixture",

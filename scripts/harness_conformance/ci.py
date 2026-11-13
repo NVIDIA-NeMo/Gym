@@ -138,8 +138,18 @@ def install_runtime(harness: str) -> None:
         return
     if harness == "crewai":
         _build_crewai_sandbox_runtime()
-    if harness in ("hermes", "stirrup", "simple", "openclaw", "copilot", "crewai"):
-        # Simple is built in; Hermes is locked; the remaining harnesses provision the task sandbox.
+    if harness in (
+        "hermes",
+        "stirrup",
+        "simple",
+        "openclaw",
+        "copilot",
+        "crewai",
+        "miniswe_sandboxed",
+        "claude_code",
+        "terminus_2_sandboxed",
+    ):
+        # Runtimes are locked dependencies or installed during agent-session setup.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]

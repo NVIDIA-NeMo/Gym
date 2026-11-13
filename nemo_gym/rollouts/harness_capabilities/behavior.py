@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.models.chat_completions_converter import message_content_to_text
+from nemo_gym.trajectory.model_call_record import build_model_call_record
 
 from .checks import BehavioralCheck
 from .results import Results
@@ -366,7 +367,12 @@ def inspect_behavior(
     )
     return (
         results.dump()
-        + model_checks(record, attempts + judges, fingerprint=fingerprint, available=available)
+        + model_checks(
+            record,
+            attempts + judges + (witness or {}).get("auxiliary_calls", []),
+            fingerprint=fingerprint,
+            available=available,
+        )
         + tool_checks(
             record,
             tools + _objects((witness or {}).get("native_tool_calls")),
@@ -386,25 +392,25 @@ def model_checks(
     expected_metadata, observed_metadata = Counter(), Counter()
     expected_tokens, observed_tokens = Counter(), Counter()
     token_fields = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens")
-    for attempt in attempts:
+    for index, attempt in enumerate(attempts):
         response = attempt["response"] or {}
         exchange = fingerprint(attempt["request"], attempt["status_code"], response)
         expected_exchanges[exchange] += 1
-        chat = "messages" in attempt["request"]
-        choices = response.get("choices") or []
-        finish = choices[0].get("finish_reason") if chat and choices else None
+        expected = build_model_call_record(attempt, call_index=index)
         expected_metadata[
-            (exchange, json.dumps(response.get("id")), json.dumps(response.get("status")), json.dumps(finish))
+            (
+                exchange,
+                json.dumps(expected.response_id),
+                json.dumps(expected.response_status),
+                json.dumps(expected.finish_reason),
+            )
         ] += 1
-        usage = response.get("usage") or {}
         counts = (
-            usage.get("prompt_tokens" if chat else "input_tokens"),
-            usage.get("completion_tokens" if chat else "output_tokens"),
-            (usage.get("completion_tokens_details" if chat else "output_tokens_details") or {}).get(
-                "reasoning_tokens"
-            ),
-            usage.get("total_tokens"),
-            (usage.get("prompt_tokens_details" if chat else "input_tokens_details") or {}).get("cached_tokens"),
+            expected.tokens_in,
+            expected.tokens_out,
+            expected.tokens_reasoning,
+            expected.tokens_total,
+            expected.cached_tokens,
         )
         expected_tokens[(exchange, json.dumps(counts))] += 1
     for call in calls:
