@@ -178,6 +178,34 @@ class TestRewardFile:
     def test_boolean_rewards_match_harbor(self, tmp_path):
         (tmp_path / "reward.json").write_text('{"passed": true, "failed": false}')
         assert parse_reward_file(tmp_path) == ({"passed": 1.0, "failed": 0.0}, None)
+        assert parse_reward_file(tmp_path, non_numeric="ignore") == ({"passed": 1.0, "failed": 0.0}, None)
+
+    def test_text_precedence_reads_reward_txt_first(self, tmp_path):
+        (tmp_path / "reward.json").write_text('{"reward": 0.25}')
+        (tmp_path / "reward.txt").write_text("0.5\n")
+        assert parse_reward_file(tmp_path) == ({"reward": 0.25}, None)
+        assert parse_reward_file(tmp_path, precedence="txt") == ({"reward": 0.5}, None)
+        # Only a missing reward.txt falls back to reward.json, as only a missing JSON falls back by default.
+        (tmp_path / "reward.txt").unlink()
+        assert parse_reward_file(tmp_path, precedence="txt") == ({"reward": 0.25}, None)
+        (tmp_path / "reward.txt").write_text("yes")
+        rewards, problem = parse_reward_file(tmp_path, precedence="txt")
+        assert rewards is None and "reward.txt is not valid" in problem
+
+    def test_ignored_non_numeric_values_leave_the_numeric_keys(self, tmp_path):
+        (tmp_path / "reward.json").write_text('{"reward": 0.6, "rationale": "x", "notes": ["a"], "extra": null}')
+        rewards, problem = parse_reward_file(tmp_path)
+        assert rewards is None and "'rationale' is not a finite number" in problem
+        assert parse_reward_file(tmp_path, non_numeric="ignore") == ({"reward": 0.6}, None)
+        (tmp_path / "reward.json").write_text('{"reward": NaN, "rationale": "x"}')
+        assert "not a finite number" in parse_reward_file(tmp_path, non_numeric="ignore")[1]
+        (tmp_path / "reward.json").write_text('{"rationale": "x"}')
+        rewards, problem = parse_reward_file(tmp_path, non_numeric="ignore")
+        assert rewards is None and problem == "reward.json holds no numeric value"
+        # A judge that failed writes a non-numeric reward: the file stays invalid, its other keys are never the score.
+        (tmp_path / "reward.json").write_text('{"reward": null, "confidence": 0.9}')
+        rewards, problem = parse_reward_file(tmp_path, non_numeric="ignore")
+        assert rewards is None and "'reward' is not a finite number" in problem
 
     @pytest.mark.parametrize(
         ("text", "expected"),

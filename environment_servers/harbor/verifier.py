@@ -22,10 +22,11 @@ import posixpath
 import shlex
 import tarfile
 import tempfile
+import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -50,11 +51,14 @@ from environment_servers.harbor.session import (
 from nemo_gym import __version__
 from nemo_gym.core import BaseEpisodeRequest, NeMoGymResponse, failure_kinds
 from nemo_gym.data.tasks.harbor import (
+    MISSING_REWARD_OUTCOMES,
     HarborArtifact,
     HarborTask,
     HarborTaskStep,
     HarborTurn,
     HarborVerifier,
+    MissingRewardEvidence,
+    MissingRewardVerdict,
     VerifierShim,
     is_ignored,
     write_shim,
@@ -91,17 +95,36 @@ TIMEOUT_WRAPPER_GUARD = "command -v timeout >/dev/null 2>&1 && command -v bash >
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+# A classifier that raises or breaks the protocol is a grader fault of ours: the registered verifier error.
+MISSING_REWARD_CLASSIFIER_FAILED_KIND = failure_kinds.VERIFIER_ERROR
+# Where the host copy of /logs/artifacts lands for a dataset's missing-reward classifier; test.sh cannot write
+# this name in /logs/verifier (SERVER_OWNED_LOG_NAMES).
+VERIFIER_ARTIFACTS_NAME = "verifier-artifacts"
 
 
-def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
-    """Read reward.json when present; only a missing JSON file falls back to reward.txt."""
-    for path in (directory / "reward.json", directory / "reward.txt"):
+def parse_reward_file(
+    directory: Path,
+    *,
+    precedence: Literal["json", "txt"] = "json",
+    non_numeric: Literal["invalid", "ignore"] = "invalid",
+) -> tuple[dict[str, float] | None, str | None]:
+    """Read the reward file ``precedence`` names when present; only a missing file falls back to the other.
+
+    ``"txt"`` is Harbor 0.6.6's order. With ``non_numeric="ignore"``, reward.json values that are not numbers (a
+    judge's rationale beside its ``reward``) are left out instead of invalidating the file; the file itself stays in
+    the verifier logs.
+    """
+    names = ("reward.json", "reward.txt") if precedence == "json" else ("reward.txt", "reward.json")
+    for name in names:
+        path = directory / name
         if path.is_file():
-            return _parse_one_reward_file(path)
+            return _parse_one_reward_file(path, non_numeric=non_numeric)
     return None, "no reward.json or reward.txt was written"
 
 
-def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | None]:
+def _parse_one_reward_file(
+    path: Path, *, non_numeric: Literal["invalid", "ignore"] = "invalid"
+) -> tuple[dict[str, float] | None, str | None]:
     # The verifier wrote these bytes; never let a stray non-UTF-8 byte escape as an exception.
     text = path.read_text(errors="replace").strip()
     if not text:
@@ -112,6 +135,16 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
         return None, f"{path.name} is not valid: {exc}"
     if not isinstance(raw, dict) or not raw:
         return None, f"{path.name} must hold a non-empty JSON object"
+    if non_numeric == "ignore":
+        # A `reward` key names the score: when it is not a number the file is invalid, never the other keys' sum.
+        ignored = sorted(
+            str(key) for key, value in raw.items() if key != "reward" and not isinstance(value, (int, float))
+        )
+        if ignored:
+            LOGGER.info("%s: ignoring non-numeric keys %s", path, ignored)
+        raw = {key: value for key, value in raw.items() if key == "reward" or isinstance(value, (int, float))}
+        if not raw:
+            return None, f"{path.name} holds no numeric value"
     rewards: dict[str, float] = {}
     for key, value in raw.items():
         if not isinstance(value, (int, float)):
@@ -124,6 +157,22 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
             return None, f"{path.name}: {key!r} is not a finite number"
         rewards[str(key)] = value
     return rewards, None
+
+
+def _is_missing_reward_verdict(verdict: object) -> bool:
+    if not (
+        isinstance(verdict, MissingRewardVerdict)
+        and verdict.outcome in MISSING_REWARD_OUTCOMES
+        and isinstance(verdict.kind, str)
+        and isinstance(verdict.reason, str)
+        and bool(verdict.reason)
+    ):
+        return False
+    # A task's 0 is the dataset's own outcome, so it carries the dataset's <server>:<kind>; a shared kind names a
+    # fault of ours and must never score. A masked verdict may use either.
+    if verdict.outcome == "task":
+        return failure_kinds.is_namespaced(verdict.kind) and not failure_kinds.is_registered(verdict.kind)
+    return failure_kinds.is_registered(verdict.kind) or failure_kinds.is_namespaced(verdict.kind)
 
 
 def verifier_command(budget: int) -> str:
@@ -406,6 +455,7 @@ TRAJECTORY_FILE_NAME = "trajectory.json"
 SERVER_OWNED_LOG_NAMES = (
     TRAJECTORY_FILE_NAME,
     "artifacts",
+    VERIFIER_ARTIFACTS_NAME,
     ENTRYPOINT_LOG_NAME,
     ENTRYPOINT_EXIT_NAME,
     VERIFIER_ENTRYPOINT_LOG_NAME,
@@ -592,7 +642,11 @@ class HarborVerificationMixin:
         """
         await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt", EXIT_RECORD_NAME))
         exit_record = parse_exit_record(logs_dir)
-        rewards, problem = parse_reward_file(logs_dir)
+        rewards, problem = parse_reward_file(
+            logs_dir,
+            precedence=task.config.reward_file_precedence,
+            non_numeric=task.config.reward_json_non_numeric,
+        )
         try:
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True, protect=SERVER_OWNED_LOG_NAMES)
         except Exception:
@@ -812,6 +866,9 @@ class HarborVerificationMixin:
                     f"test.sh could not be started: timeout wrapper or bash missing (exit {result.return_code})",
                 )
             timed_out = verifier_timed_out(result, exit_record, budget)
+            classified = await self._classify_missing_reward(
+                verifier, session, logs_dir, result, rewards=rewards, problem=problem, timed_out=timed_out
+            )
         except HTTPException:
             raise
         except HarborOverlayError as exc:
@@ -836,7 +893,15 @@ class HarborVerificationMixin:
                     # the episode cleanup and shutdown retry it after.
                     LOGGER.exception(f"Could not stop the verifier sandbox for {task.task_id}")
         return self._score(
-            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+            task,
+            settings,
+            result,
+            logs_dir,
+            started,
+            timed_out=timed_out,
+            rewards=rewards,
+            problem=problem,
+            classified=classified,
         )
 
     async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox, *, keep: Sequence[str] = ()) -> None:
@@ -1150,13 +1215,24 @@ class HarborVerificationMixin:
                     f"test.sh could not be started: timeout wrapper or bash missing (exit {result.return_code})",
                 )
             timed_out = verifier_timed_out(result, exit_record, budget)
+            classified = await self._classify_missing_reward(
+                sandbox, session, logs_dir, result, rewards=rewards, problem=problem, timed_out=timed_out
+            )
         except HTTPException:
             raise
         except Exception as exc:
             LOGGER.exception(f"Verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
         return self._score(
-            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+            task,
+            settings,
+            result,
+            logs_dir,
+            started,
+            timed_out=timed_out,
+            rewards=rewards,
+            problem=problem,
+            classified=classified,
         )
 
     def _score(
@@ -1170,8 +1246,10 @@ class HarborVerificationMixin:
         timed_out: bool,
         rewards: dict[str, float] | None,
         problem: str | None,
+        classified: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Turn the verifier's exit and the reward it wrote into the reward fields."""
+        """Turn the verifier's exit and the reward it wrote into the reward fields; ``classified`` is the dataset
+        classifier's outcome for a run that wrote no reward file (:meth:`_classify_missing_reward`)."""
         # Absolute, so the row names a folder that exists from wherever the run was launched; the server
         # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
         extras = {
@@ -1199,6 +1277,8 @@ class HarborVerificationMixin:
                 )
                 | extras
             )
+        if rewards is None and classified is not None:
+            return classified | extras
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
@@ -1244,6 +1324,65 @@ class HarborVerificationMixin:
                     self._refuse_unsupported_group(task, task.entrypoint_user, where=where)
             elif turn.config.verifier.user is None:
                 self._refuse_unsupported_group(task, _verifier_user(_shared_verifier_task(task)), where=where)
+
+    async def _classify_missing_reward(
+        self,
+        sandbox: AsyncSandbox,
+        session: HarborSession,
+        logs_dir: Path,
+        result: SandboxExecResult,
+        *,
+        rewards: dict[str, float] | None,
+        problem: str | None,
+        timed_out: bool,
+    ) -> dict[str, Any] | None:
+        """The dataset classifier's outcome for a ``test.sh`` that finished without writing a reward file, else ``None``.
+
+        Only that case reaches the classifier: a timeout or an invalid reward file keeps its measured 0 and needs no
+        extra transfer. The classifier's evidence is required, so a failed transfer of ``/logs/verifier`` or
+        ``/logs/artifacts`` raises and the caller masks the sample. A classifier that raises or answers outside the
+        protocol masks the sample too: a grader bug is never a score. It runs in a worker thread, off the event loop.
+        """
+        if rewards is not None or timed_out or "written" not in (problem or ""):
+            return None
+        if not any(classifier is not None for classifier in self._missing_reward_classifiers.values()):
+            return None
+        classifier = self._missing_reward_classifiers.get(session.taskset)
+        if classifier is None:
+            return None
+        task = session.task
+        await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True, protect=SERVER_OWNED_LOG_NAMES)
+        artifacts = None
+        if await remote_kind(sandbox, ARTIFACTS_DIR) == "dir":
+            artifacts = Path(logs_dir) / VERIFIER_ARTIFACTS_NAME
+            await download_dir(sandbox, ARTIFACTS_DIR, artifacts, skip_unsafe=True)
+        evidence = MissingRewardEvidence(
+            task_id=task.task_id,
+            task_path=task.path,
+            metadata=task.config.metadata,
+            logs_dir=Path(logs_dir).resolve(),
+            artifacts_dir=artifacts.resolve() if artifacts is not None else None,
+            return_code=result.return_code,
+        )
+        try:
+            verdict = await asyncio.to_thread(classifier, evidence)
+            if verdict is not None and not _is_missing_reward_verdict(verdict):
+                raise TypeError(
+                    f"returned {verdict!r}, not None or a MissingRewardVerdict with outcome in "
+                    f"{MISSING_REWARD_OUTCOMES}, a registered or <server>:<kind> kind (a task 0 only the latter) "
+                    "and a non-empty reason"
+                )
+        except Exception as exc:
+            LOGGER.exception(f"{task.task_id}: the dataset's missing-reward classifier failed")
+            tail = "".join(traceback.format_exception(exc)[-3:])
+            return self._masked(MISSING_REWARD_CLASSIFIER_FAILED_KIND, f"{type(exc).__name__}: {exc}\n{tail}")
+        if verdict is None:
+            return None
+        if verdict.outcome == "task":
+            return self._measured(0.0, verdict.kind, verdict.reason)
+        if verdict.outcome == "infrastructure":
+            return self._masked(verdict.kind, verdict.reason)
+        return self._masked(failure_kinds.JUDGE_FAILED, f"{verdict.kind}: {verdict.reason}")
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:

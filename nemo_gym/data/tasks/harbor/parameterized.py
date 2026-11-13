@@ -59,6 +59,7 @@ from nemo_gym.data.tasks.harbor.digest import GITIGNORE, is_ignored
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.hub import validate_task_name
 from nemo_gym.data.tasks.harbor.manifest import MANIFEST_FILE
+from nemo_gym.data.tasks.harbor.missing_reward import MISSING_REWARD_MODULE
 from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE
 from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, RECORD_LOCK_SUFFIX, record_lock
 from nemo_gym.data.tasks.harbor.task import TASK_FILE, is_task_folder
@@ -68,7 +69,7 @@ from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_FILE, TASK_DATA_MODUL
 TASKS_FILE = "tasks.jsonl"
 TEMPLATE_MARKER = ".template"
 # Files of the template folder that describe the dataset, not a task: copied beside the rendered folders.
-DATASET_FILES = (DATASET_FILE, TASK_DATA_MODULE, VERIFIER_FILE)
+DATASET_FILES = (DATASET_FILE, TASK_DATA_MODULE, VERIFIER_FILE, MISSING_REWARD_MODULE)
 # What prepare records at the dataset root, here the rendered folder: kept across renders (with their lock files).
 RECORD_FILES = (MANIFEST_FILE, IMAGE_CONFIGS_FILE, BUILT_IMAGES_FILE)
 # Files of the template folder that are neither a task file nor a dataset file.

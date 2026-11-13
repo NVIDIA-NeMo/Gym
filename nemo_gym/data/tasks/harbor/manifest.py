@@ -48,6 +48,7 @@ from pathlib import Path
 from nemo_gym.data.tasks.harbor import task as harbor_task
 from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.data.tasks.harbor.digest import content_hash
+from nemo_gym.data.tasks.harbor.missing_reward import MISSING_REWARD_MODULE
 from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE
 from nemo_gym.data.tasks.harbor.task import iter_task_folders
 from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_MODULE
@@ -57,8 +58,9 @@ logger = logging.getLogger(__name__)
 
 MANIFEST_FILE = "manifest.toml"
 MANIFEST_SCHEMA_VERSION = 1
-# The Gym files beside dataset.toml that shape every task: the row model and the dataset-level grader.
-DATASET_FILES = (TASK_DATA_MODULE, VERIFIER_FILE)
+# The Gym files beside dataset.toml that shape every task: the row model, the dataset-level grader and the
+# classifier of a verifier run that wrote no reward.
+DATASET_FILES = (TASK_DATA_MODULE, VERIFIER_FILE, MISSING_REWARD_MODULE)
 TASK_FILE = "task.toml"
 # Where the task folders came from. `local` is a folder prepare met on disk with no fetch record.
 SOURCES = ("harbor-registry", "harbor-package-store", "git", "local")

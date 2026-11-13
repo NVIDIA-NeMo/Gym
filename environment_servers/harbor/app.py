@@ -35,7 +35,8 @@ Reward rule: when ``test.sh`` ran, the sample is measured. In ``reward.json`` a 
 key is the score and the other keys are metrics; without one every key is a component of the
 score, which is their sum, and the result names them as ``reward_components`` (keys that sum to
 ``reward``, the contract a trainer asserts). A missing or invalid reward file scores 0 with a
-``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
+``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample, or a dataset's
+``missing_reward.py`` verdict on a run that wrote no reward file. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
 transport or unknown cause is retried ungraded instead of scoring 0. A task that cannot be set up is a handled episode failure:
@@ -97,6 +98,7 @@ from nemo_gym.agents import (
     OutcomeAction,
     agent_outcome_policy,
 )
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
 from nemo_gym.client import get_response_json, raise_boundary_failure, raise_for_status
 from nemo_gym.config import (
     TOKEN_CAPTURE_BLOCK,
@@ -123,6 +125,7 @@ from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DATASET_FILE,
     DIGEST_KEY,
+    MISSING_REWARD_MODULE,
     ORACLE_AGENT,
     STEP_METADATA_KEY,
     TESTS_DOCKERFILE,
@@ -134,9 +137,12 @@ from nemo_gym.data.tasks.harbor import (
     HarborTaskError,
     HarborTaskInput,
     HarborTurn,
+    MissingRewardClassifier,
+    MissingRewardClassifierError,
     TaskDataError,
     TaskDataSchema,
     check_row_matches_folder,
+    load_missing_reward_classifier,
     load_task,
     load_task_data_schema,
     wrap_first_instruction,
@@ -406,6 +412,22 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     compose_overlay: HarborComposeOverlay | None = None
 
 
+def judge_failure_routing(outcome: dict[str, Any]) -> dict[str, Any]:
+    """``outcome`` with Gym's judge-failure routing when a dataset's classifier named a judge failure.
+
+    The collector then writes the row to the failures file, keeps it out of the metrics and runs it again on resume,
+    as it does for a resources server's ``judge_failsafe``. No other Harbor outcome carries this kind.
+    """
+    if outcome.get("mask_sample") and outcome.get("failure_kind") == failure_kinds.JUDGE_FAILED:
+        reason = str(outcome.get("failure_reason") or "")
+        return outcome | {
+            "evaluation_completed": False,
+            NG_FAILURE_CLASS_KEY: failure_kinds.JUDGE_FAILED,
+            "_ng_failure_judge_error": reason,
+        }
+    return outcome
+
+
 def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None) -> str | None:
     """Why a turn misses its step's ``min_reward``, or ``None`` when it passes or sets none.
 
@@ -573,6 +595,17 @@ class HarborEnvironmentServer(
             except TaskDataError as exc:
                 LOGGER.error(f"Taskset {name!r}: its task_data.py does not load; its episodes will be refused: {exc}")
                 self._task_data_schemas[name] = exc
+        # A dataset's missing_reward.py, loaded once like its task_data.py; one that does not load refuses the
+        # taskset's episodes at seed.
+        self._missing_reward_classifiers: dict[str, MissingRewardClassifier | MissingRewardClassifierError | None] = {}
+        for name, taskset in self.config.tasksets.items():
+            try:
+                self._missing_reward_classifiers[name] = load_missing_reward_classifier(Path(taskset.folder))
+            except MissingRewardClassifierError as exc:
+                LOGGER.error(
+                    f"Taskset {name!r}: its missing_reward.py does not load; its episodes will be refused: {exc}"
+                )
+                self._missing_reward_classifiers[name] = exc
         artifacts = self.config.artifacts_dir
         if artifacts is None or not artifacts.is_absolute():
             results_root = Path(get_global_config_dict().get("results_dir", RESULTS_DIR)).resolve()
@@ -646,7 +679,7 @@ class HarborEnvironmentServer(
             # discovered deeper) and the loader reads them from the snapshot's parent, so the snapshot
             # gets copies there: the dataset's own settings (dataset.toml), the recorded image
             # configurations and the built images.
-            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE, VERIFIER_FILE):
+            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE, VERIFIER_FILE, MISSING_REWARD_MODULE):
                 sidecar = root / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
@@ -712,6 +745,9 @@ class HarborEnvironmentServer(
         schema = self._task_data_schemas.get(taskset)
         if isinstance(schema, TaskDataError):
             raise HTTPException(422, f"Taskset {taskset!r}: {schema}")
+        classifier = self._missing_reward_classifiers.get(taskset)
+        if isinstance(classifier, MissingRewardClassifierError):
+            raise HTTPException(422, f"Taskset {taskset!r}: {classifier}")
         try:
             if schema is not None:
                 schema.validate(task_data, task_id=task.task_id)
@@ -945,7 +981,7 @@ class HarborEnvironmentServer(
         result = HarborEpisodeResult(
             responses_create_params=task_input.responses_create_params,
             response=agent_response,
-            **outcome,
+            **judge_failure_routing(outcome),
             ng_agent_observations=agent_observations,
             ng_trajectory=agent_trajectory,
         )
@@ -1611,7 +1647,7 @@ class HarborEnvironmentServer(
             turn_reward_strategy=strategy,
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
             stopped_after_turn=stopped_after,
-            **roll_up_turns(results, strategy, task_id=request.task.task_id),
+            **judge_failure_routing(roll_up_turns(results, strategy, task_id=request.task.task_id)),
         )
         self._trace_score(task.task_id, request.episode_id.capture_key, episode)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)

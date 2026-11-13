@@ -56,6 +56,15 @@ if TYPE_CHECKING:
         HarborTaskInput,
         materialize_task,
     )
+    from nemo_gym.data.tasks.harbor.missing_reward import (
+        MISSING_REWARD_MODULE,
+        MISSING_REWARD_OUTCOMES,
+        MissingRewardClassifier,
+        MissingRewardClassifierError,
+        MissingRewardEvidence,
+        MissingRewardVerdict,
+        load_missing_reward_classifier,
+    )
     from nemo_gym.data.tasks.harbor.models import (
         HarborArtifact,
         HarborEnvironment,
@@ -107,6 +116,12 @@ _PUBLIC_API = {
     "IMAGE_CONFIGS_FILE": "records",
     "ImageConfigError": "registry",
     "MAIN_SERVICE": "records",
+    "MISSING_REWARD_MODULE": "missing_reward",
+    "MISSING_REWARD_OUTCOMES": "missing_reward",
+    "MissingRewardClassifier": "missing_reward",
+    "MissingRewardClassifierError": "missing_reward",
+    "MissingRewardEvidence": "missing_reward",
+    "MissingRewardVerdict": "missing_reward",
     "ORACLE_AGENT": "prepare",
     "OverlayRun": "dockerfile",
     "OverlayWorkdir": "dockerfile",
@@ -130,6 +145,7 @@ _PUBLIC_API = {
     "discover_tasks": "task",
     "is_ignored": "digest",
     "load_compose_document": "image_configs",
+    "load_missing_reward_classifier": "missing_reward",
     "load_task": "task",
     "load_task_data_schema": "task_data",
     "materialize_task": "materialize",

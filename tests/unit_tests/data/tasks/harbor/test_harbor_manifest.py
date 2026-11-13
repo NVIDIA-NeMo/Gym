@@ -271,7 +271,7 @@ class TestManifestFormat:
         after = check_manifest(folder)
         assert after.source == "harbor-registry" and after.pins == before.pins and after.digest != before.digest
         assert after.tasks["a"]["digest"] == before.tasks["a"]["digest"]
-        assert "a dataset-level task_data.py or verifier.py changed" in capsys.readouterr().out
+        assert "a dataset-level task_data.py or verifier.py or missing_reward.py changed" in capsys.readouterr().out
         assert Manifest.read(folder) == after
 
         # A single task folder prepared on its own: its identity covers the files beside it the same way.

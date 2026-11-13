@@ -332,6 +332,39 @@ async def test_non_finite_numeric_reward_is_measured_zero(tmp_path, monkeypatch,
     assert sum("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs) == 1
 
 
+def write_dataset_defaults(tmp_path: Path, defaults: str) -> None:
+    """A dataset.toml with ``[gym.defaults]`` beside the task ``make_server`` writes."""
+    folder = tmp_path / "datasets" / "ds"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "dataset.toml").write_text(f"[gym.defaults]\n{defaults}\n")
+
+
+@pytest.mark.parametrize(
+    ("defaults", "reward", "kind"),
+    [(None, 0.0, "harbor:invalid_reward"), ('reward_json_non_numeric = "ignore"', 0.6, None)],
+    ids=["default", "ignore"],
+)
+async def test_a_judges_rationale_beside_its_reward_counts_only_when_ignored(
+    tmp_path, monkeypatch, defaults, reward, kind
+):
+    if defaults is not None:
+        write_dataset_defaults(tmp_path, defaults)
+    sandbox = FakeSandbox(verifier_files={"reward.json": '{"reward": 0.6, "rationale": "close enough"}'})
+    server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox)
+    result = (await run_episode(server, task)).result
+    assert result.reward == reward and result.mask_sample is False and result.failure_kind == kind
+
+
+@pytest.mark.parametrize(("precedence", "reward"), [(None, 0.25), ("txt", 0.5)], ids=["default", "txt"])
+async def test_reward_file_precedence_picks_the_file_an_episode_scores(tmp_path, monkeypatch, precedence, reward):
+    sandbox = FakeSandbox(verifier_files={"reward.json": '{"reward": 0.25}', "reward.txt": "0.5\n"})
+    if precedence is not None:
+        write_dataset_defaults(tmp_path, f'reward_file_precedence = "{precedence}"')
+    server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox)
+    result = (await run_episode(server, task)).result
+    assert result.reward == reward and result.mask_sample is False and result.failure_kind is None
+
+
 @pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
 async def test_unsafe_diagnostic_link_does_not_mask_valid_reward(tmp_path, monkeypatch, verifier_tree):
     root, logs, _ = verifier_tree

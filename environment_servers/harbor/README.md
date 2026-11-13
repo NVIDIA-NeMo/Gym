@@ -137,6 +137,7 @@ live in `nemo_gym/cli/eval.py`):
 | `harbor_compat.py` | Environment hashing and image naming vendored from Harbor v0.22.0 |
 | `dataset_config.py` | The `[gym]` table of `dataset.toml` |
 | `task_data.py` | A dataset's `task_data.py` model for typed task fields |
+| `missing_reward.py` | A dataset's `missing_reward.py` classifier of a verifier run that wrote no reward |
 | `parameterized.py` | Render a template folder plus `tasks.jsonl` into task folders |
 | `python_verifier.py` | Python verifiers and the `test.sh` shim that runs them |
 | `scaffold.py` | `gym dataset init` |

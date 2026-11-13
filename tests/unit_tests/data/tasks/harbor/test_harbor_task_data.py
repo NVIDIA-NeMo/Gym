@@ -471,6 +471,14 @@ class TestMaterializeRefusesTheDataset:
             DATASET_DIGEST_KEY: prepared.dataset_digest,
         }
 
+    def test_a_missing_reward_module_that_does_not_import_refuses_the_dataset(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "q1")
+        (folder / "missing_reward.py").write_text("raise RuntimeError('broken classifier')\n")
+        with pytest.raises(HarborTaskError, match="missing_reward.py: failed to import: RuntimeError"):
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        assert not (tmp_path / "out" / "ds" / "tasks.jsonl").exists()
+
     def test_a_violating_task_refuses_the_dataset_naming_it(self, tmp_path):
         folder = write_dataset(
             tmp_path / "ds",
