@@ -38,6 +38,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_types import MaterializedTask, is_materialized_task_row
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.environment.manifest import (
+    CATALOG_SUBDIRS,
     DatasetKind,
     EnvironmentKind,
     EnvironmentManifest,
@@ -133,10 +134,7 @@ def _manifest_dataset(dataset: Any) -> ManifestDataset:
 
 
 def _catalog_directory(path: Path) -> Path | None:
-    return next(
-        (parent for parent in path.resolve().parents if parent.name in {"environments", "benchmarks"}),
-        None,
-    )
+    return next((parent for parent in path.resolve().parents if parent.name in CATALOG_SUBDIRS), None)
 
 
 def _component_root(config_path: Path) -> Path | None:
@@ -957,18 +955,16 @@ def _write_manifest_atomically(path: Path, manifest: EnvironmentManifest) -> Non
 
 
 def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManifest) -> None:
+    """Check that a manifest sits in a folder of its own, and that one in ``benchmarks/`` or ``environments/`` declares
+    that folder's kind. A taskset in ``tasksets/`` declares either kind."""
     catalog_directory = _catalog_directory(manifest_path)
     # Catalog discovery refuses a manifest at the root of its tree, so validation refuses it too.
     if catalog_directory is not None and manifest_path.parent == catalog_directory:
         raise EnvironmentValidationError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
-    catalog_kind = catalog_directory.name if catalog_directory is not None else None
-    expected_kind = {
-        "environments": EnvironmentKind.ENVIRONMENT,
-        "benchmarks": EnvironmentKind.BENCHMARK,
-    }.get(catalog_kind)
+    expected_kind = CATALOG_SUBDIRS[catalog_directory.name] if catalog_directory is not None else None
     if expected_kind is not None and manifest.kind != expected_kind:
         raise EnvironmentValidationError(
-            f"Manifest kind '{manifest.kind.value}' does not match its location under '{catalog_kind}/'."
+            f"Manifest kind '{manifest.kind.value}' does not match its location under '{catalog_directory.name}/'."
         )
 
 
@@ -976,34 +972,41 @@ def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest) ->
     """Check that a manifest's name is the one ID of its config within its search root.
 
     A name is an ID and stays the same when folders move, so it need not match a path. No other manifest in the
-    root's benchmarks/ and environments/ trees may declare it, whatever its kind, and no other manifest may point at
-    its config, which would then be listed twice. A name other than the manifest's folder path also may not be the
-    path of another config: it would hide that config from the catalog and from ``--benchmark`` and ``--environment``.
+    root's benchmarks/, environments/ and tasksets/ trees may declare it, whatever its kind, and no other manifest may
+    point at its config, which would then be listed twice. A name other than the manifest's folder path also may not
+    be the path of another config in the folder for its kind: it would hide that config from the catalog and from
+    ``--benchmark`` and ``--environment``. A taskset's name is never its folder path in that sense.
     """
     catalog_directory = _catalog_directory(manifest_path)
     if catalog_directory is None:
         return
     config_path = _manifest_config(manifest_path, manifest)
-    trees = (catalog_directory.parent / BENCHMARKS_SUBDIR, catalog_directory.parent / ENVIRONMENTS_SUBDIR)
+    root = catalog_directory.parent
+    trees = [root / subdir for subdir in CATALOG_SUBDIRS]
     for other_path, other in (declared for tree in trees for declared in declared_manifests(tree)):
         if other_path.resolve() == manifest_path:
             continue
         if other.name == manifest.name:
             raise EnvironmentValidationError(
                 f"Name '{manifest.name}' is also declared by {other_path}. A name is the ID of a manifest and must be "
-                "unique across benchmarks/ and environments/."
+                "unique across benchmarks/, environments/ and tasksets/."
             )
         if config_path is not None and _manifest_config(other_path, other) == config_path:
             raise EnvironmentValidationError(
                 f"The config of '{manifest.name}', {config_path}, is also the config of '{other.name}' in "
                 f"{other_path}. A config has one ID, so declare it in one place."
             )
-    if manifest.name == manifest_path.parent.relative_to(catalog_directory).as_posix():
+    # The folder that holds configs of this manifest's kind without a manifest; tasksets/ holds none.
+    own_directory = root / (BENCHMARKS_SUBDIR if manifest.kind == EnvironmentKind.BENCHMARK else ENVIRONMENTS_SUBDIR)
+    if (
+        catalog_directory == own_directory
+        and manifest.name == manifest_path.parent.relative_to(catalog_directory).as_posix()
+    ):
         return
-    # The paths `asset_config_path` tries for a benchmark or environment name, in its order.
-    path_configs = [catalog_directory / manifest.name / "config.yaml"]
+    # The paths `asset_config_path` tries for a benchmark or environment name, in its order. tasksets/ has none.
+    path_configs = [own_directory / manifest.name / "config.yaml"]
     if "/" in manifest.name:
-        path_configs.append(catalog_directory / f"{manifest.name}.yaml")
+        path_configs.append(own_directory / f"{manifest.name}.yaml")
     for path_config in path_configs:
         if path_config.is_file() and path_config.resolve() != config_path:
             raise EnvironmentValidationError(

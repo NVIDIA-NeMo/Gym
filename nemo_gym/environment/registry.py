@@ -32,6 +32,7 @@ from nemo_gym.environment.benchmarks import (
 )
 from nemo_gym.environment.discovery import iter_server_configs, read_config_metadata
 from nemo_gym.environment.manifest import (
+    TASKSETS_SUBDIR,
     EnvironmentManifest,
     ManifestError,
     load_manifest,
@@ -100,12 +101,12 @@ def _manifest_entry(
     tree_dir: Path,
     manifest_path: Path,
     manifest: EnvironmentManifest,
-    expected_kind: CatalogKind,
+    expected_kind: Optional[CatalogKind],
 ) -> EnvironmentCatalogEntry:
     if manifest_path.parent == tree_dir:
         raise RegistryError(f"Manifest '{manifest_path}' must be inside a named catalog directory.")
     actual_kind = _enum_value(manifest.kind)
-    if actual_kind != expected_kind:
+    if expected_kind is not None and actual_kind != expected_kind:
         raise RegistryError(
             f"Manifest '{manifest_path}' declares kind '{actual_kind}', "
             f"but its catalog path requires '{expected_kind}'."
@@ -135,7 +136,7 @@ def _manifest_entry(
         "agent_server": manifest.agent_server,
         "harbor_target": manifest.harbor_target,
     }
-    if expected_kind == "environment":
+    if actual_kind == "environment":
         return EnvironmentEntry(**values)
     return EnvironmentCatalogEntry(kind="benchmark", **values)
 
@@ -316,15 +317,17 @@ def _manifest_config(manifest_path: Path, manifest: EnvironmentManifest) -> Opti
 
 def _discover_registry_tree(
     tree_dir: Path,
-    kind: CatalogKind,
+    kind: Optional[CatalogKind],
     *,
     claimed: frozenset[tuple[CatalogKind, str]] = frozenset(),
     declared_by: Optional[Dict[str, Path]] = None,
 ) -> Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry]:
     """Discover one catalog tree without importing or resolving runnable components.
 
-    ``declared_by`` maps each manifest name already read in this search root to its file. The catalog passes one
-    mapping for a root's benchmarks/ and environments/ trees, so that a name is unique across both.
+    ``kind`` is the kind every entry of the tree has. It is None for ``tasksets/``, where each manifest declares its
+    own kind and a config without a manifest is not an entry. ``declared_by`` maps each manifest name already read in
+    this search root to its file. The catalog passes one mapping for a root's benchmarks/, environments/ and tasksets/
+    trees, so that a name is unique across all three.
     """
     if not tree_dir.is_dir():
         return {}
@@ -338,11 +341,11 @@ def _discover_registry_tree(
         if manifest.name in declared_by:
             raise RegistryError(
                 f"Manifests '{declared_by[manifest.name]}' and '{manifest_path}' both declare name '{manifest.name}'. "
-                "A name is the ID of a manifest and must be unique across the benchmarks/ and environments/ trees "
-                f"of '{tree_dir.parent}'."
+                "A name is the ID of a manifest and must be unique across the benchmarks/, environments/ and tasksets/ "
+                f"trees of '{tree_dir.parent}'."
             )
         declared_by[manifest.name] = manifest_path
-        key = (kind, manifest.name)
+        key = (kind or _enum_value(manifest.kind), manifest.name)
         if key in claimed:
             # An earlier root shadows this entry, but its config is still this manifest's: listing it again under
             # its folder path would give it a second, unrelated ID.
@@ -357,6 +360,8 @@ def _discover_registry_tree(
         entries[key] = entry
         manifest_configs.add(entry.config_path.resolve())
 
+    if kind is None:
+        return entries
     for name, config_path in _legacy_config_paths(tree_dir, kind):
         key = (kind, name)
         if key in claimed or key in entries or config_path.resolve() in manifest_configs:
@@ -375,27 +380,48 @@ def _discover_environments_in_dir(environments_dir: Path) -> Dict[str, Environme
 
 
 def discover_environments() -> Dict[str, EnvironmentEntry]:
-    """Discover environments with standard component-root precedence."""
+    """Discover environments, from ``environments/`` and ``tasksets/``, with standard component-root precedence."""
     environments: Dict[str, EnvironmentEntry] = {}
     for root in component_search_roots():
-        claimed = frozenset(("environment", name) for name in environments)
-        discovered = _discover_registry_tree(root / ENVIRONMENTS_SUBDIR, "environment", claimed=claimed)
-        environments.update(
-            (name, entry) for (_kind, name), entry in discovered.items() if isinstance(entry, EnvironmentEntry)
-        )
+        for kind, subdir in (("environment", ENVIRONMENTS_SUBDIR), (None, TASKSETS_SUBDIR)):
+            claimed = frozenset(("environment", name) for name in environments)
+            discovered = _discover_registry_tree(root / subdir, kind, claimed=claimed)
+            environments.update(
+                (name, entry) for (_kind, name), entry in discovered.items() if isinstance(entry, EnvironmentEntry)
+            )
     return environments
 
 
 def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
-    """Discover manifest and legacy runnable units across all workload locations."""
+    """Discover manifest and legacy runnable units across all workload locations.
+
+    An entry in an earlier search root shadows one of the same kind and name in a later root. Within one root, no two
+    manifests in ``benchmarks/``, ``environments/`` and ``tasksets/`` declare the same name, whatever their kind, and
+    a taskset cannot take the name of a config without a manifest of the same kind, because the name would select
+    either.
+    """
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     for root in component_search_roots():
+        earlier_roots = frozenset(entries)
         declared_by: Dict[str, Path] = {}
-        for kind, subdir in (("environment", ENVIRONMENTS_SUBDIR), ("benchmark", BENCHMARKS_SUBDIR)):
-            discovered = _discover_registry_tree(
-                root / subdir, kind, claimed=frozenset(entries), declared_by=declared_by
-            )
-            entries.update(discovered)
+        in_root: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
+        for kind, subdir in (
+            ("environment", ENVIRONMENTS_SUBDIR),
+            ("benchmark", BENCHMARKS_SUBDIR),
+            (None, TASKSETS_SUBDIR),
+        ):
+            discovered = _discover_registry_tree(root / subdir, kind, claimed=earlier_roots, declared_by=declared_by)
+            for key, entry in discovered.items():
+                # `_discover_registry_tree` raises for two manifests with one name. This catches a taskset whose name is
+                # the folder path of a config without a manifest, of the same kind, in benchmarks/ or environments/.
+                if key in in_root:
+                    first = in_root[key].manifest_path or in_root[key].config_path
+                    raise RegistryError(
+                        f"'{first}' and '{entry.manifest_path}' are both the {key[0]} '{key[1]}' in search root "
+                        f"'{root}'. A name selects one {key[0]} per search root, so rename or remove one."
+                    )
+                in_root[key] = entry
+        entries.update(in_root)
         entries.update(_discover_resource_workloads(root / RESOURCES_SERVERS_SUBDIR, claimed=frozenset(entries)))
     return tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
 

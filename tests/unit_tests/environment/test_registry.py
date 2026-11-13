@@ -373,7 +373,7 @@ class TestEnvironmentCatalog:
         _write_manifest(tmp_path, "benchmarks", "moved", _manifest("alpha", "benchmark"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
-        with pytest.raises(RegistryError, match="both declare name 'alpha'.*benchmarks/ and environments/"):
+        with pytest.raises(RegistryError, match="both declare name 'alpha'.*benchmarks/, environments/ and tasksets/"):
             discover_environment_catalog()
 
     def test_a_benchmark_and_an_environment_manifest_in_different_roots_are_both_listed(
@@ -559,6 +559,91 @@ def test_one_configs_catalog_name_follows_the_tree_scan(subdir: str, kind: str) 
 
     assert scanned
     assert {config_path: name for config_path, name in named.items() if name is not None} == scanned
+
+
+def _write_taskset(root: Path, folder: str, data: dict) -> Path:
+    """A taskset laid out as `tasksets/<folder>/manifest.yaml` with its config in `configs/`."""
+    data = {**data, "config_path": f"configs/{folder}.yaml"}
+    manifest_path = _write_manifest(root, "tasksets", folder, data, with_config=False)
+    config_path = manifest_path.parent / data["config_path"]
+    config_path.parent.mkdir()
+    config_path.write_text("{}\n", encoding="utf-8")
+    return manifest_path
+
+
+class TestTasksets:
+    def test_a_search_root_lists_its_tasksets_by_name_and_declared_kind(self, tmp_path: Path, monkeypatch) -> None:
+        alpha = _write_taskset(tmp_path, "alpha", _manifest("alpha", "benchmark"))
+        beta = _write_taskset(tmp_path, "beta_folder", _manifest("beta"))
+        # A taskset is listed only through its manifest; a config without one has no kind or name.
+        _make_env(tmp_path / "tasksets", "no_manifest", _ENV_CONFIG.format(name="no_manifest"))
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+
+        entries = {entry.name: entry for entry in discover_environment_catalog()}
+
+        assert (entries["alpha"].kind, entries["alpha"].manifest_path) == ("benchmark", alpha)
+        assert entries["alpha"].config_path == (alpha.parent / "configs/alpha.yaml").resolve()
+        assert (entries["beta"].kind, entries["beta"].manifest_path) == ("environment", beta)
+        assert "no_manifest" not in entries
+        assert resolve_catalog_entry("alpha").kind == "benchmark"
+        environments = discover_environments()
+        assert environments["beta"].manifest_path == beta
+        assert "alpha" not in environments
+
+    @pytest.mark.parametrize(
+        ("tree", "other_kind", "taskset_kind"),
+        [
+            ("benchmarks", "benchmark", "benchmark"),
+            ("benchmarks", "benchmark", "environment"),
+            ("environments", "environment", "benchmark"),
+            ("tasksets", "benchmark", "environment"),
+        ],
+    )
+    def test_a_taskset_cannot_share_a_name_with_any_manifest_in_its_root(
+        self, tmp_path: Path, monkeypatch, tree: str, other_kind: str, taskset_kind: str
+    ) -> None:
+        if tree == "tasksets":
+            _write_taskset(tmp_path, "first", _manifest("shared", other_kind))
+        else:
+            _write_manifest(tmp_path, tree, "shared", _manifest("shared", other_kind))
+        _write_taskset(tmp_path, "moved", _manifest("shared", taskset_kind))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both declare name 'shared'"):
+            discover_environment_catalog()
+
+    def test_a_taskset_cannot_take_the_name_of_a_config_of_its_kind(self, tmp_path: Path, monkeypatch) -> None:
+        config_path = tmp_path / "benchmarks/shared/config.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("dataset:\n  type: benchmark\n", encoding="utf-8")
+        _write_taskset(tmp_path, "moved", _manifest("shared", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both the benchmark 'shared'"):
+            discover_environment_catalog()
+
+    def test_a_taskset_may_take_the_name_of_a_config_of_the_other_kind(self, tmp_path: Path, monkeypatch) -> None:
+        # A config without a manifest keeps its folder path as its name, as in benchmarks/ and environments/.
+        _make_env(tmp_path / "environments", "shared", _ENV_CONFIG.format(name="shared"))
+        taskset = _write_taskset(tmp_path, "moved", _manifest("shared", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = discover_environment_catalog()
+
+        assert resolve_catalog_entry("shared", "benchmark", entries=entries).manifest_path == taskset
+        assert resolve_catalog_entry("shared", "environment", entries=entries).manifest_path is None
+
+    def test_a_taskset_in_an_earlier_root_shadows_a_benchmark_in_a_later_one(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        environments_repo, gym = tmp_path / "environments_repo", tmp_path / "gym"
+        moved = _write_taskset(environments_repo, "shared", _manifest("shared", "benchmark"))
+        _write_manifest(gym, "benchmarks", "shared", _manifest("shared", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [environments_repo, gym])
+
+        entries = [entry for entry in discover_environment_catalog() if entry.name == "shared"]
+
+        assert [entry.manifest_path for entry in entries] == [moved]
 
 
 class TestReadEnvironmentDetails:
