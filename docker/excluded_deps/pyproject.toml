@@ -9,10 +9,10 @@ dependencies = [
     "opencv-python-headless==5.0.0.93",
     "pynvvideocodec==2.0.4",
     "torchcodec==0.16.0",
-    "torchvision==0.28.0",
-    "torchaudio==2.11.1",
+    "torchvision==0.29.0",
+    "torchaudio==2.11.0",
     "pycountry==26.2.16",
-    "torch==2.13.0",
+    "torch==2.14.0",
 ]
 
 [tool.uv]

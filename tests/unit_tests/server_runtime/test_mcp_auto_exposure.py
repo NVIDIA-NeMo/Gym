@@ -459,6 +459,11 @@ def test_non_json_2xx_response_passes_through_as_text():
         assert r["content"][0]["text"] == "plain hello"
 
 
+def _wire(result: BaseModel) -> dict:
+    """The result as an MCP client receives it; MCP 2 renamed the Python attributes but kept the wire names."""
+    return result.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
 def test_tool_output_images_become_image_content_after_the_text():
     result = _to_result(
         {
@@ -474,8 +479,8 @@ def test_tool_output_images_become_image_content_after_the_text():
     )
 
     # OpenCode replaces the content with structured content when it is present, which would drop the images.
-    assert result.structuredContent is None
-    assert [content.model_dump(exclude_none=True) for content in result.content] == [
+    assert "structuredContent" not in _wire(result)
+    assert _wire(result)["content"] == [
         {"type": "text", "text": '{"ok":true}'},
         {"type": "text", "text": "Image 2"},
         {
@@ -499,12 +504,12 @@ def test_tool_output_images_keep_the_structured_content_that_an_output_schema_re
 
     result = _to_result(payload, output_schema={"type": "object"})
 
-    assert result.structuredContent == {"ok": True}
+    assert _wire(result)["structuredContent"] == {"ok": True}
     assert [content.type for content in result.content] == ["text", "image"]
 
 
 def test_a_result_without_images_keeps_its_structured_content():
-    assert _to_result({"ok": True}).structuredContent == {"ok": True}
+    assert _wire(_to_result({"ok": True}))["structuredContent"] == {"ok": True}
 
 
 def test_sequential_calls_keep_sessions_isolated_and_ordered():
