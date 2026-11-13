@@ -298,7 +298,8 @@ def test_the_staged_plugins_print_every_line_verify_requires(
     arm: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """verify refuses a run whose plugin log lacks a required line, so a line no plugin prints would refuse every run.
-    The preset requires only lines that every arm prints; the bash-off arm's lines appear on that arm only."""
+    The preset requires only lines that every arm prints; only the bash-off arm prints its bash=off and patched-grep
+    lines."""
     for name, value in arm.items():
         monkeypatch.setenv(name, value)
     _, config = sessions()
@@ -339,9 +340,11 @@ def test_an_episode_ends_before_its_lent_sandbox_expires() -> None:
 
     # Each admitted episode holds a sandbox; any one worker can run every admitted episode, so none waits for OpenCode.
     assert agent["concurrency"] >= pairing["max_concurrent_episodes"]
-    # Everything before the judge, each step at its bound: the seed (the sandbox start, its workdir and OpenCode's
-    # install), the run, the agent's close, and verify's plugin-log read, export copy (counted since an overlay can
-    # turn it on) and sandbox stop.
+    # Everything before the judge, each step counted at its configured bound: the seed (the sandbox start, its workdir
+    # and OpenCode's install), the run, the agent's close, and verify's plugin-log read, export copy (counted since an
+    # overlay can turn it on) and sandbox stop. The sum is nominal: opencode_agent's supervised run can outlast
+    # `timeout` by up to session_close_timeout_seconds and 30 s for its cleanup, and its finish can take another
+    # session_close_timeout_seconds.
     before_judge = (
         sandbox["ready_timeout_s"]
         + WORKDIR_CREATE_S
