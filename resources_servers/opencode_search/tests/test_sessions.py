@@ -1644,3 +1644,94 @@ def test_an_empty_plugin_log_is_refused_as_one_without_the_sentinel(workdir, tmp
     assert judge.await_count == 0 and stopped == [started[0][0]]
     # The empty log it read is kept, so a retry is refused the same way.
     assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).status_code == 422
+
+
+# The line nemo_gym_turn_budget.js reports for an overflow of the context window that compaction did not recover from.
+OVERFLOW = "[nemo-gym-plugin] context_overflow session=s\n"
+# The outcomes of a failed run that the default agent outcome policy sends to /verify, and model_context_limit, which the
+# session preset adds; each with the plugin log line of the ending that masks the row, and that ending's kind.
+POLICY_VERIFIED_FAILURES = [
+    ({"failure_kind": "agent_limit"}, TURN_CAP, "agent_limit"),
+    ({"failure_kind": "agent_invalid_output"}, TURN_CAP, "agent_limit"),
+    ({"failure_kind": "provider_oom_killed"}, TURN_CAP, "agent_limit"),
+    ({"failure_kind": "model_request_error", "status_code": 400}, TURN_CAP, "agent_limit"),
+    ({"failure_kind": "model_request_error", "status_code": 413}, TURN_CAP, "agent_limit"),
+    ({"failure_kind": "model_request_error", "status_code": 422}, TURN_CAP, "agent_limit"),
+    ({"failure_kind": "model_context_limit"}, OVERFLOW, "model_context_limit"),
+]
+
+
+def _failed_response(answer: str, outcome: dict[str, Any]) -> dict[str, Any]:
+    """A failed run's response as a harness reports it: its outcome in the metadata, and the answer the run reached, or
+    no output at all."""
+    response = _response(answer) | {"status": "failed", "metadata": {"ng_agent_outcome": json.dumps(outcome)}}
+    return response if answer else response | {"output": []}
+
+
+@pytest.mark.parametrize("answer", ["Exact Answer: Paris", ""], ids=["answer", "no_output"])
+@pytest.mark.parametrize(
+    ("outcome", "ending", "kind"),
+    POLICY_VERIFIED_FAILURES,
+    ids=[
+        "agent_limit",
+        "agent_invalid_output",
+        "provider_oom_killed",
+        "model_request_error_400",
+        "model_request_error_413",
+        "model_request_error_422",
+        "model_context_limit",
+    ],
+)
+def test_a_failed_response_the_outcome_policy_verifies_is_graded_with_its_receipts(
+    workdir, tmp_path, outcome, ending, kind, answer
+) -> None:
+    """verify reads no response status: a failed run's last answer is graded, or scores 0 without a judge call when
+    there is none, the plugin log's ending masks the row, and the failure report single_agent_turn forwards comes back.
+    The grade replaces request fields of the same names."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL + ending)
+    judge = _mock_judge(server, CORRECT)
+    failure_report = {"failure_id": None, "events": {}, "omitted": True}
+    body = _verify_body(
+        response=_failed_response(answer, outcome),
+        failure_report=failure_report,
+        # Request fields named like the grade's.
+        reward=0.5,
+        mask_sample=False,
+        failure_kind="session_lost",
+        failure_reason="a reason from the request",
+        evaluation_completed=False,
+    )
+
+    verified = client.post("/verify", json=body, headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0 if answer else 0.0, True, kind, True)
+    assert verified.json()["failure_reason"] != "a reason from the request"
+    assert verified.json()["failure_report"] == failure_report
+    assert judge.await_count == (1 if answer else 0)
+
+
+@pytest.mark.parametrize(
+    ("ending", "graded"),
+    [(OVERFLOW, (1.0, True, "model_context_limit", True)), ("", (1.0, False, None, True))],
+    ids=["overflow", "no_ending"],
+)
+def test_an_incomplete_response_is_masked_only_by_the_plugin_log(workdir, tmp_path, ending, graded) -> None:
+    """opencode_agent ends a run that overflowed the context window as incomplete, as it ends one that timed out, and
+    puts agent_timeout_sec on every response. verify reads neither: the plugin log's ending alone masks the row, never
+    as agent_timeout."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL + ending)
+    _mock_judge(server, CORRECT)
+    response = _response("Exact Answer: Paris") | {
+        "status": "incomplete",
+        "metadata": {"harness_execution": "sandbox", "agent_timeout_sec": "21600"},
+    }
+
+    verified = client.post("/verify", json=_verify_body(response=response), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == graded
