@@ -176,8 +176,8 @@ class ResourcesParticipant(CheckpointParticipant):
         # yields the same result from either the state before it captured what it grades or the state after.
         # A seed is waited for, so the session matches the environment's boundary.
         self.replayable_paths = {"/verify"} if verify_step_type == "replay" else set()
-        # "before_agent_close" when a fork of the session's state cannot continue an episode once its agent closed,
-        # such as a grader that needs the agent's running processes; the seed reply says so.
+        # "before_agent_close" when a fork of the session's state cannot continue an episode once its agent's turn
+        # ended, such as a grader that needs the agent's running processes; the seed reply says so.
         self.restore_policy = "any_step"
         self.accepting = True
         self._open = asyncio.Event()

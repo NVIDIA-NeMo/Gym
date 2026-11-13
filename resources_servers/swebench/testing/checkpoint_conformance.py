@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Conformance checks for servers that checkpoint the sandboxes they own.
+"""Conformance checks for ``CheckpointedSandboxSessionResourcesServer`` subclasses. Import them from tests.
 
-:func:`check_sandbox_session_checkpoints` drives a ``CheckpointedSandboxSessionResourcesServer`` subclass through its
-real routes,
-checkpoint control routes and middleware, in process, against :class:`FakeSnapshotProvider`, a provider with
-durable snapshots that behaves like OpenSandbox's: a snapshot is an independent copy that lives until deleted,
-and ``create_from_snapshot`` forks it under a new id. A server's own tests call it with
-a factory that builds the server on the provider it is given, and one seed request the server accepts.
+:func:`check_sandbox_session_checkpoints` drives a subclass through its real routes, checkpoint control routes and
+middleware, in process, against :class:`FakeSnapshotProvider`, a provider with durable snapshots that behaves like
+OpenSandbox's: a snapshot is an independent copy that lives until deleted, and ``create_from_snapshot`` forks it
+under a new id. A server's own tests call it with a factory that builds the server on the provider it is given, and
+one seed request the server accepts.
 """
 
-import asyncio
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -19,11 +17,14 @@ from typing import Any, Optional
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxSnapshotInfo,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.server_runtime._checkpoint import sandbox as sandbox_checkpoints
+from nemo_gym.server_runtime._checkpoint.sandbox import SandboxCheckpointError
 
 
 TOKEN = "conformance-token"
@@ -112,7 +113,7 @@ class FakeSandboxProvider:
 
 
 class FakeSnapshotProvider(FakeSandboxProvider):
-    """A :class:`FakeSandboxProvider` with durable snapshots, listed by name; ``fail_snapshots`` fails the next ones."""
+    """A :class:`FakeSandboxProvider` with durable snapshots, listed by name; ``fail_snapshots`` fails the next."""
 
     name = "fake-snapshots"
 
@@ -149,9 +150,9 @@ class FakeSnapshotProvider(FakeSandboxProvider):
         self.calls.append(("delete_snapshot", snapshot_id))
         self.snapshots.pop(snapshot_id, None)
 
-    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
         return [
-            {"id": snapshot_id, "name": snapshot["name"]}
+            SandboxSnapshotInfo(snapshot_id=snapshot_id, name=snapshot["name"], sandbox_id=snapshot["sandbox_id"])
             for snapshot_id, snapshot in self.snapshots.items()
             if snapshot["name"].startswith(prefix)
         ]
@@ -218,7 +219,9 @@ async def check_sandbox_session_checkpoints(
             assert seeded.headers.get("x-ng-checkpoint-restore-policy") == "before_agent_close"
         retried = await http.post(seed_path, json=seed_body)
         assert retried.status_code == 200 and retried.json()["sandbox_access"] == access, "an identical retry"
-        other = seed.model_copy(update={"episode_id": seed.episode_id.model_copy(update={"attempt": 7})})
+        # Derived from the seed, so it names another episode whatever attempt the seed has.
+        other_attempt = seed.episode_id.attempt + 1
+        other = seed.model_copy(update={"episode_id": seed.episode_id.model_copy(update={"attempt": other_attempt})})
         conflicting = await http.post(
             f"/ng-rollout/{other.episode_id.capture_key}/seed_session", json=other.model_dump(mode="json")
         )
@@ -289,7 +292,7 @@ async def check_sandbox_session_checkpoints(
         # Release: a crashed process's indexed snapshot and an unindexed one with this server's prefix go too.
         stray = await provider.snapshot(
             await provider.create(SandboxSpec(image="stray")),
-            # Named as this server names a snapshot of a checkpoint it never indexed, as a crash during a commit leaves.
+            # Named as this server names a snapshot of a checkpoint it never indexed, which a crash in a commit leaves.
             name=restored._checkpointer().snapshot_name("dropped", "stray", 1),
         )
         await control(http, "release", "c2", kept=[])
@@ -320,21 +323,45 @@ async def check_sandbox_session_checkpoints(
             "descriptor": {"sandbox_id": "gone"},
             "snapshot_id": snapshot_id,
             "spec": {},
-            "snapshot_at": 0.0,
+            "snapshot_ready_ts": 0.0,
         }
         session_seed = seed.model_copy(update={"resources_session_id": session_id})
         return {"seed": session_seed.model_dump(mode="json"), "workdir": "/testbed", "sandbox": sandbox}
 
     states = {"ok": session_state("ok", good), "missing": session_state("missing", "snap-missing")}
     live_before = set(rollback_provider.live())
+    # A fork retries a snapshot the provider does not have yet; without the waits here, which test nothing.
+    backoff_s = sandbox_checkpoints.FORK_NOT_FOUND_BACKOFF_S
+    sandbox_checkpoints.FORK_NOT_FOUND_BACKOFF_S = 0.0
     try:
         await rollback.restore_session_states(states)
-    except Exception:
-        pass
+    except SandboxCheckpointError as error:
+        assert "snap-missing" in str(error), f"the restore fails on the snapshot that is missing: {error}"
     else:
         raise AssertionError("a restore whose fork fails must raise")
+    finally:
+        sandbox_checkpoints.FORK_NOT_FOUND_BACKOFF_S = backoff_s
+    forked = [sandbox_id for sandbox_id, box in rollback_provider.boxes.items() if box["from_snapshot"] == good]
+    assert forked, "the restore forked the snapshot it has before the other fork failed"
     assert set(rollback_provider.live()) == live_before, "a failed restore stops the forks it made"
     assert "ok" not in rollback._session_id_to_sandbox, "a failed restore installs nothing"
+
+    # -- a close stops a task sandbox that is still running -------------------------------------------------------
+    closing_provider = FakeSnapshotProvider()
+    provider = closing_provider  # client_of checks the server is built on this provider
+    closing = make_server(closing_provider, checkpointing_config(state_dir / "closing"))
+    async with client_of(closing) as http:
+        seeded = await http.post(seed_path, json=seed_body)
+        assert seeded.status_code == 200, f"episode seed failed: {seeded.text}"
+        started = set(closing_provider.live())
+        assert started, "the seed starts the task sandbox"
+        closed = await http.post(
+            f"/ng-rollout/{seed.episode_id.capture_key}/close_session",
+            json={"resources_session_id": session_id, "episode_id": seed.episode_id.model_dump(mode="json")},
+        )
+        assert closed.status_code == 200, f"close failed: {closed.text}"
+        assert not started & set(closing_provider.live()), "a close stops the session's running task sandbox"
+    await closing.shutdown()
 
     # -- shutdown, and a provider that cannot snapshot ------------------------------------------------------------
     plain = FakeSandboxProvider()
@@ -349,4 +376,3 @@ async def check_sandbox_session_checkpoints(
         assert seeded.headers.get("x-ng-checkpoint-restart") == "1", "its seed reply makes the episode a restart"
     await restart_only.shutdown()
     assert plain.live() == [], "shutdown stops every live sandbox"
-    await asyncio.sleep(0)

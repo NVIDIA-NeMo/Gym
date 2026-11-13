@@ -313,6 +313,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     failure.episode_evidence["agent_observations"] = closed_agent[-1].agent_observations
                     failure.episode_evidence["trajectory"] = closed_agent[-1].trajectory
                 raise
+            if handles.resources_restores_before_agent_close:
+                # A fork of the resources session cannot continue once the agent's turn ended: it lacks the
+                # processes the agent left for the grader, and nothing starts them again. Marked before the
+                # close boundary, so no checkpoint exports the episode between the turn's end and the close.
+                await self.checkpoint_restart(request)
             stage = "close_agent"
 
         if stage == "close_agent":
@@ -339,10 +344,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                         stage="cleanup",
                         partial_response=agent_response,
                     ) from error
-                if handles.resources_restores_before_agent_close:
-                    # A fork of the resources session cannot continue past the agent's close,
-                    # so from here on the episode starts over after a crash.
-                    await self.checkpoint_restart(request)
             observations = close.agent_observations
             trajectory = close.trajectory
             stage = "verify"

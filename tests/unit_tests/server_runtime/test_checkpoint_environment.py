@@ -730,6 +730,25 @@ async def test_a_blocking_episode_becomes_a_restart_at_once_while_a_checkpoint_i
     await asyncio.wait_for(steps.mark_restart("r"), 1)
 
     assert steps.restarts() == ["r"] and steps.blocker_count() == 0
+    # The open checkpoint was waiting for this episode, so it must hear that it no longer has to.
+    assert notified == [True]
+
+
+@pytest.mark.parametrize("known", [True, False])
+async def test_marking_an_episode_that_is_already_a_restart_or_unknown_does_not_wait_for_resume(known: bool) -> None:
+    notified: list[bool] = []
+
+    async def notify() -> None:
+        notified.append(True)
+
+    steps = EpisodeSteps(notify)
+    if known:
+        steps.begin("r", restart=True)
+    steps.close()
+    # Nothing would change, so there is nothing to keep from the open checkpoint.
+    await asyncio.wait_for(steps.mark_restart("r"), 1)
+
+    assert steps.restarts() == (["r"] if known else []) and notified == []
 
 
 async def test_a_parked_episode_becomes_a_restart_only_after_resume() -> None:
