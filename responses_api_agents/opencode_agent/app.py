@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping, Sequence
@@ -412,6 +413,17 @@ def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
     return passes >= steps
 
 
+def _kill_process_group(pgid: int) -> None:
+    """SIGKILL a run's whole process group (OpenCode and anything the model left running)."""
+    # Never our own group: killpg(0) or our own pgid would kill this server.
+    if not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpgrp():
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -730,14 +742,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                # Own process group: the model's shell commands (scripts, background jobs) are OpenCode's
+                # descendants and must die with the run instead of piling up on the host.
+                start_new_session=True,
             )
             try:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                _kill_process_group(proc.pid)
                 _, stderr = await proc.communicate()
                 timed_out = True
                 LOG.warning("opencode timed out after %ss", timeout)
+            finally:
+                _kill_process_group(proc.pid)
 
             if proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
