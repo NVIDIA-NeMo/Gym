@@ -109,8 +109,8 @@ attaches it, so the model can open it with its tools.
 
 `verify()` grades only the request, never the sandbox. It stops the sandbox before it calls the judge, and grades a
 verify that has no seed (`allow_missing`), such as a retry after a judge failure. A verify after the episode's close is
-masked as `session_lost`. A lending server runs with one worker (`num_workers: 1`), as `visual_coding_opencode` does:
-several workers are not tested with lent sandboxes. The no-tools setting runs with any number. A run that does not
+masked as `session_lost`. Both settings run with any `num_workers`: each lent sandbox lives in the worker that seeded
+its session, and routing sends the session's requests to that worker. A run that does not
 complete (any response status but `completed`: OpenCode's timeout, an output cap, a context limit, or a failed run that
 the outcome policy still sends to verify) scores 0 without a judge call in the OpenCode setting
 (`score_unfinished_as_zero: true`), as in `visual_coding_opencode`. The no-tools setting keeps upstream's behavior and

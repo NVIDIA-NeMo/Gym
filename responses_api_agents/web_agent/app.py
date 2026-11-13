@@ -36,6 +36,7 @@ from nemo_gym.core import (
 from nemo_gym.core.failure_kinds import SESSION_RELEASE_FAILED, TRANSPORT_TIMEOUT
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.web import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
@@ -1471,3 +1472,5 @@ class WebAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     WebAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = WebAgent.run_webserver()  # noqa: F401

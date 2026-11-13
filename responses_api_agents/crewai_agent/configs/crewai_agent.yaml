@@ -8,7 +8,6 @@ crewai_agent:
   responses_api_agents:
     crewai_agent:
       entrypoint: app.py
-      num_workers: 1
       resources_server: null
       model_server:
         type: responses_api_models
