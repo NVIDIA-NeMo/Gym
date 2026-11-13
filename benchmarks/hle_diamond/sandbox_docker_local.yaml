@@ -2,9 +2,11 @@
 # COMPARISON INFRASTRUCTURE ONLY. NOT A BENCHMARK. EGRESS UNRESTRICTED. LABEL EVERY RESULT.
 # ============================================================================================
 # Composable override that runs the hle_diamond sandboxed presets (opencode, opencode_search,
-# opencode_full, opencode_search_full, pi, pi_search, and opencode_reference behind the
-# acknowledgement below) on the LOCAL Docker sandbox provider instead of OpenSandbox, for smoke
+# opencode_full, opencode_search_full, pi, pi_search, and opencode_reference behind
+# the acknowledgement below) on the LOCAL Docker sandbox provider instead of OpenSandbox, for smoke
 # tests and pilots on a workstation. It declares no dataset, so it is not discovered by `gym list benchmarks`.
+# The text *_legacy_agent presets keep the session presets' agent names on the deprecated relay agents, so
+# this file does not compose with them: run those on OpenSandbox.
 # Pass it, together with judge_openai.yaml (otherwise the policy grades itself), as ONE raw Hydra
 # token: the CLI appends raw tokens after the --benchmark and --model-type configs, so the override
 # merges last and wins. Never pass it with `--config <file>`: --config is translated before
@@ -28,9 +30,10 @@
 #   That block cannot be removed or re-typed by an override (the provider resolver counts keys
 #   regardless of value), so export the placeholder values above before composing, and this file
 #   defines a second block, `sandbox_docker` (the content of
-#   nemo_gym/sandbox/providers/docker/configs/docker.yaml under that name), and repoints the three
-#   hle_diamond sandboxed agents at it. Only the agent the composed preset defines is started;
-#   the other blocks below stay partial, inert entries.
+#   nemo_gym/sandbox/providers/docker/configs/docker.yaml under that name), and repoints the four
+#   hle_diamond sandbox agents at it: the opencode_agent and pi_agent sessions of the text presets,
+#   the reference preset's session agent and the full presets' opencode_sandboxed_agent. Only the agent
+#   the composed preset defines is started; the other blocks below stay partial, inert entries.
 # - The Docker provider ignores sandbox_config.ttl_s when an entrypoint is set (the presets set
 #   `entrypoint: [sleep, infinity]`), so container lifetime relies on the agent's cleanup; check
 #   `docker ps -a --filter label=nemo-gym.sandbox` after every run.
@@ -78,14 +81,24 @@ sandbox_docker:
 
 hle_diamond_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       sandbox_provider: sandbox_docker
       # Restricted policies fail closed on non-OpenSandbox providers; inherit = unrestricted egress.
       network_access: inherit
+      # Replaces the presets' note so the model is told the truth about the network. Written to hold for the
+      # code-only and the search preset alike.
+      system_prompt: |
+        Direct internet access from this machine is NOT restricted (local Docker sandbox). If Tavily search and browsing tools are offered, they are available if useful for the task.
+        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+
+hle_diamond_opencode_full_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_provider: sandbox_docker
+      network_access: inherit
       sandbox_config:
         files:
-          # Replaces the presets' note so the model is told the truth about the network. Written to
-          # hold for the code-only and the search preset alike.
+          # The same note, in the file the sandboxed agent's OpenCode reads as its instructions.
           /tmp/nemo-gym-environment.txt: |
             Direct internet access from this machine is NOT restricted (local Docker sandbox). If Tavily search and browsing tools are offered, they are available if useful for the task.
             Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
@@ -98,19 +111,17 @@ hle_diamond_docker_egress_acknowledgement:
 
 hle_diamond_opencode_reference_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       sandbox_provider: sandbox_docker
       network_access: "${oc.select:hle_diamond_docker_egress_acknowledgement.${oc.env:HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS,unset},'refused - the reference preset enforces egress; export HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted to run it on local Docker and label the result'}"
-      sandbox_config:
-        files:
-          # The reference image's note with the truth about the network; nothing the image lacks.
-          /tmp/nemo-gym-environment.txt: |
-            Direct internet access from this machine is NOT restricted (local Docker sandbox). The web search and page-reading tools offered to you are available if useful for the task.
-            Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
+      # The reference image's note with the truth about the network; nothing the image lacks.
+      system_prompt: |
+        Direct internet access from this machine is NOT restricted (local Docker sandbox). The web search and page-reading tools offered to you are available if useful for the task.
+        Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
 
 hle_diamond_pi_agent:
   responses_api_agents:
-    pi_sandboxed_agent:
+    pi_agent:
       sandbox_provider: sandbox_docker
       network_access: inherit
       system_prompt: |

@@ -86,6 +86,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
@@ -142,6 +143,10 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
         ),
     )
     output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
+    forward_agent_evidence: bool = Field(
+        default=False,
+        description="Forward saved agent trajectories and observations to /verify for execution-dependent grading.",
+    )
     force: bool = Field(
         default=False,
         description=(
@@ -734,7 +739,7 @@ def check_saved_patch_replay(
 _IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
 
 
-def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: bool = False) -> Dict:
     saved_patch_failure = _is_judge_failure(pair.rollout) or (
         pair.rollout.get("failure_kind") == VERIFIER_ERROR and pair.rollout.get("evaluation_completed") is False
     )
@@ -777,6 +782,10 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
+    if forward_agent_evidence:
+        for key in ("ng_trajectory", "ng_agent_observations"):
+            if key in pair.rollout:
+                payload[key] = pair.rollout[key]
     if replay_patch:
         payload["saved_model_patch"] = saved_patch
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
@@ -862,9 +871,10 @@ def _prepare_payloads(
     retry_terminal_timeouts: bool = False,
     *,
     selected_rollouts: Optional[Iterable[Dict]] = None,
+    forward_agent_evidence: bool = False,
 ) -> List[Dict]:
     all_payloads = [
-        _build_verify_payload(pair)
+        _build_verify_payload(pair, forward_agent_evidence=forward_agent_evidence)
         for pair in _yield_inputs_and_rollouts_paired(
             materialized_inputs_jsonl_fpath,
             rollouts_jsonl_fpath,
@@ -953,9 +963,15 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, AGENT_CONTEXT_KEY_NAME)
                 and key not in _IDENTITY_KEYS
             }
+            # Agent context belongs only to the agent, including when a flat row keeps it in task_data.
+            # Filter at the shared HTTP boundary so native and ATIF inputs preserve the same separation.
+            if isinstance(request_row.get("task_data"), dict):
+                request_row["task_data"] = {
+                    key: value for key, value in request_row["task_data"].items() if key != AGENT_CONTEXT_KEY_NAME
+                }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
@@ -1912,6 +1928,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                forward_agent_evidence=config.forward_agent_evidence,
                 **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
@@ -1925,6 +1942,7 @@ class RolloutReverificationHelper(BaseModel):
                     output_fpaths,
                     config.resume_from_cache,
                     rollout_predicate=lambda row: bound_results.get(logical_rollout_id(row)) == row,
+                    forward_agent_evidence=config.forward_agent_evidence,
                 )
 
         if config.settle_into_source:

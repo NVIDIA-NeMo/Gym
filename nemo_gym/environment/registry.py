@@ -73,6 +73,9 @@ class EnvironmentCatalogEntry:
     # slow discovery; the catalog views read them from the config when needed.
     resources_server: Optional[str] = None
     agent_server: Optional[str] = None
+    # The Harbor target a Harbor-backed workload runs (the manifest's `harbor_target`); `gym eval run` composes its
+    # environment server, `gym env start` does not.
+    harbor_target: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,7 @@ def _manifest_entry(
         "lifecycle": _enum_value(manifest.lifecycle),
         "resources_server": manifest.resources_server,
         "agent_server": manifest.agent_server,
+        "harbor_target": manifest.harbor_target,
     }
     if expected_kind == "environment":
         return EnvironmentEntry(**values)
@@ -338,6 +342,33 @@ def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
             entries.update(discovered)
         entries.update(_discover_resource_workloads(root / RESOURCES_SERVERS_SUBDIR, claimed=frozenset(entries)))
     return tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
+
+
+# The outputs of the legacy five-example server contract. A server that has either one stays on that contract.
+LEGACY_SERVER_OUTPUTS = ("example_metrics.json", "example_rollouts.jsonl")
+
+
+def manifest_workloads_for_server(
+    server_name: str, server_dir: Path, catalog: Iterable[EnvironmentCatalogEntry] | None = None
+) -> tuple[EnvironmentCatalogEntry, ...]:
+    """The manifest workloads whose verifier fixtures validate a resources server, or none when it keeps the legacy
+    five-example contract.
+
+    A resources server that only manifest workloads use carries committed verifier fixtures instead of the legacy
+    ``data/example_metrics.json`` and ``data/example_rollouts.jsonl``. It is validated through every manifest workload
+    that names it (each has its own reward contract) when at least one does and the server has neither legacy output.
+    Either output keeps the server on the legacy contract, so a partly migrated server is still checked as before.
+
+    ``catalog`` defaults to the discovered catalog; ``server_dir`` is the server's directory, holding its ``data/``.
+    """
+    workloads = tuple(
+        entry
+        for entry in (discover_environment_catalog() if catalog is None else catalog)
+        if entry.manifest_path is not None and entry.resources_server == server_name
+    )
+    if any((Path(server_dir) / "data" / name).exists() for name in LEGACY_SERVER_OUTPUTS):
+        return ()
+    return workloads
 
 
 def resolve_catalog_entry(

@@ -112,9 +112,23 @@ sessions, so:
 
 - a rollout run through an Agent's `/run` and abandoned without `verify` or a
   re-seed (trainer crash, client disconnect) leaves its browser open until the
-  process exits (local) or the provider reclaims it;
+  server shuts down;
 - with a metered provider, size the account quota **above** the rollout
   concurrency, with headroom for sessions still being torn down.
+
+When the server shuts down, its lifespan closes every browser the process still
+holds, all at once. Each step of a close has a limit: 10 seconds for each of the
+page, context and browser closes and for stopping Playwright, then the provider's
+own release (`lexmount` allows up to 30 seconds for each of its two calls). A
+remote close can therefore take up to about 100 seconds when the provider is
+slow. Gym's launcher gives a server `server_shutdown_timeout_seconds` (default
+`1`) after SIGINT before it kills it, and a process killed mid-close leaves its
+remote browsers for the provider to reclaim. With a remote backend, set it above
+that worst case:
+
+```yaml
+server_shutdown_timeout_seconds: 110
+```
 
 Every acquired provider session is released exactly once — including when the
 CDP connect fails after the session was created, and however often `close()` is

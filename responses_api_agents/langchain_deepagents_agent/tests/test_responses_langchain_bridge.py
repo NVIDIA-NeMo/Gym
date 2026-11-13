@@ -35,10 +35,9 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from responses_api_agents.langchain_deepagents_agent.responses_chat_model import message_text, to_gym_input
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
-    _text,
-    to_gym_input,
     to_langchain,
     to_langchain_ai_message,
     to_responses,
@@ -88,13 +87,13 @@ def _ambient_config(config: RunnableConfig):
         var_child_runnable_config.reset(token)
 
 
-# --- to_langchain / to_responses / _text -----------------------------------------------------------
+# --- to_langchain / to_responses / message_text -----------------------------------------------------------
 
 
 def test_text_handles_str_and_list_and_other():
-    assert _text("hello") == "hello"
-    assert _text([{"type": "input_text", "text": "a"}, {"type": "input_text", "text": "b"}]) == "ab"
-    assert _text(123) == "123"
+    assert message_text("hello") == "hello"
+    assert message_text([{"type": "input_text", "text": "a"}, {"type": "input_text", "text": "b"}]) == "ab"
+    assert message_text(123) == "123"
 
 
 def test_to_langchain_round_trip_against_typed_items():
