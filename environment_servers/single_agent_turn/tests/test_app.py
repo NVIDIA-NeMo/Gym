@@ -261,6 +261,13 @@ async def test_the_agents_tool_servers_are_seeded_granted_and_closed() -> None:
     assert seed_body.resources_session_id != resources_seed_body.resources_session_id
     # The tool server sees the episode's task, as its Resources server does.
     assert seed_body.task_data == {"instance_id": "task"}
+    # Only the Resources server's seed carries the task's responses_create_params, as its /verify gets them. The tool
+    # server's seed leaves the key out, so its wire shape is unchanged.
+    assert "responses_create_params" not in search_calls[0][1]["json"]
+    assert (
+        resources_seed_body.responses_create_params
+        == _request().task.task_input.responses_create_params.model_dump(mode="json", exclude_unset=True)
+    )
     assert search_calls[1][1]["cookies"] == {"session": "cookie-value"}
     [access] = _agent_seed_body(client).tool_accesses
     assert access.name == "tavily"

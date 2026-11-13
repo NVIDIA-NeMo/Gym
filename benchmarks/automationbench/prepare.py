@@ -20,6 +20,22 @@ from pathlib import Path
 
 VF_ENV_ID = "automationbench_env"
 TOOLSET = "api"
+# verifiers_agent's max_tokens for this benchmark. Its own recipe reads the agent config, not the row.
+MAX_OUTPUT_TOKENS = 131072
+
+
+def responses_tools(env) -> list[dict]:
+    """The environment's tools as Responses function tools, with the schemas and strictness verifiers sends."""
+    return [
+        {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+            "strict": tool.strict,
+        }
+        for tool in env.tool_defs
+    ]
 
 
 def prepare(
@@ -49,6 +65,7 @@ def prepare(
 
     env = load_environment(domains=domains, max_turns=max_turns, toolset=TOOLSET)
     dataset = env.dataset
+    tools = responses_tools(env)
     n = len(dataset) if size < 0 else min(size, len(dataset))
 
     out = out or Path(__file__).parent / "data" / f"automationbench-{n}.jsonl"
@@ -65,11 +82,8 @@ def prepare(
                 "task_idx": i,
                 "task_id": f"{info['task_name']}/{row['example_id']}",
                 "vf_env_id": VF_ENV_ID,
-                "responses_create_params": {"input": prompt},
-                "agent_ref": {
-                    "type": "responses_api_agents",
-                    "name": "verifiers_agent",
-                },
+                # simple_agent sends these; verifiers_agent takes its tools and budget from its environment and config.
+                "responses_create_params": {"input": prompt, "tools": tools, "max_output_tokens": MAX_OUTPUT_TOKENS},
                 "question": prompt[-1]["content"] if prompt else "",
                 "answer": row.get("answer", ""),
                 "example_id": row["example_id"],

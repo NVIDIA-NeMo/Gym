@@ -110,6 +110,14 @@ def test_deeply_nested():
     assert _flatten_run_args({"a": {"b": {"c": 1}}}) == ["+a.b.c=1"]
 
 
+def test_none_value_is_written_as_hydra_null():
+    (token,) = _flatten_run_args({"a": {"b": None}})
+    assert token == "+a.b=null"
+    override = OverridesParser.create().parse_overrides([token])[0]
+    assert override.key_or_group == "a.b"
+    assert override.value() is None
+
+
 # ---------------------------------------------------------------------------
 # _render_pool_directives
 # ---------------------------------------------------------------------------
