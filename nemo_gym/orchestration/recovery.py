@@ -5640,6 +5640,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
         "output_budget_refits": output_budget_refits(collected),
+        "repetition_stops": repetition_stops(collected),
         "agent_adaptations": agent_adaptations(decision, collected),
     }
 
@@ -5663,6 +5664,27 @@ def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
         )
         count += refits
         rows += refits > 0
+    return {"count": count, "rows": rows}
+
+
+def repetition_stops(collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many of the policy's model calls in the saved results the provider stopped for repetition, and in how many
+    result rows: a ``repetition`` finish reason or a ``repetition_detected`` stop reason (vLLM's repetition detection),
+    as the evidence collector flags each call.
+
+    The model's own ending, never a failure: the answer it produced is scored as it is and nothing is retried, so the
+    count only makes loops visible. A judge's or another model's call is not counted.
+    """
+    count = rows = 0
+    for row in (collected.results or []) if collected is not None else []:
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        stops = sum(
+            isinstance(call, dict) and call.get("repetition_stop") is True and _policy_call(row, call)
+            for call in calls or []
+        )
+        count += stops
+        rows += stops > 0
     return {"count": count, "rows": rows}
 
 
@@ -5732,6 +5754,11 @@ def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | No
         text += f"; {name.replace('_', ' ')}: {found['rate']:.2%} ({named or 'none'} of {facts['expected']})"
     if facts["omitted"]:
         text += f"; {facts['omitted']} accepted stage omission(s) are not counted"
+    stops = facts.get("repetition_stops")
+    if stops and stops["count"]:
+        text += (
+            f"; repetition stops: {stops['count']} policy calls in {stops['rows']} trials (model, scored as answered)"
+        )
     coverage = facts.get("metric_coverage")
     if coverage is not None:
         text += f"; {coverage.get('name') or 'metric'} over {coverage['trials']} of {coverage['expected']} trials"
