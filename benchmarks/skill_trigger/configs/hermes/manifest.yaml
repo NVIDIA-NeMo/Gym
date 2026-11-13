@@ -31,6 +31,6 @@ datasets:
   prepare_script: benchmarks/skill_trigger/package.py
   num_repeats: 1
 model_server: null
-canonical_split: positive-trigger
+canonical_split: full
 prompt_source: agent
 lifecycle: active

@@ -33,5 +33,9 @@ datasets:
   prepare_script: benchmarks/opencode_multimodal_benchmarks/agentx_prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: non_generative
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/Tajamul21/Agent-X
+  ref: 0440efc38bef0b9fa176c3ad09f5352a1e838211
+  reconciled: '2026-11-18'

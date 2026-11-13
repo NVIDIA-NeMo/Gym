@@ -33,6 +33,10 @@ datasets:
   prompt_config: benchmarks/birdbench/prompts/default_sqlite.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: dev
 standard_prompt_config: benchmarks/birdbench/prompts/default_sqlite.yaml
+adopted_from:
+  source: https://github.com/RUCKBReasoning/OmniSQL
+  ref: a66d732010c89fac4353488d1c59e0b06f92b742
+  reconciled: '2026-11-11'
 lifecycle: active

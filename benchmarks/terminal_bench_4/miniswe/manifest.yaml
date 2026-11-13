@@ -28,6 +28,6 @@ resources_server: null
 agent_server: mini_swe_agent
 datasets: []
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: agent
 lifecycle: active

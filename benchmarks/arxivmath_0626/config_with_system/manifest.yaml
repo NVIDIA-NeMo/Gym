@@ -33,6 +33,10 @@ datasets:
   prompt_config: benchmarks/arxivmath_0626/prompts/with_system.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/arxivmath_0626/prompts/with_system.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/MathArena/arxivmath-0626
+  ref: dca0d771ab20c1b8e8c50d0921bf693f7bfe663d
+  reconciled: '2026-09-16'
 lifecycle: active

@@ -31,6 +31,6 @@ datasets:
   prompt_config: benchmarks/hle/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/hle/prompts/default.yaml
 lifecycle: active

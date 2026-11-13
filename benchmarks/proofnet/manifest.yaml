@@ -31,6 +31,10 @@ datasets:
   prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
   num_repeats: 32
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
+adopted_from:
+  source: https://github.com/deepseek-ai/DeepSeek-Prover-V1.5
+  ref: 2c4ba9119eef74d0d611f494261b2c5bae98c69a
+  reconciled: '2026-04-23'
 lifecycle: active

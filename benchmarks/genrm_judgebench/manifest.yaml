@@ -29,6 +29,10 @@ datasets:
     prepare_script: benchmarks/genrm_judgebench/prepare.py
     prompt_config: null
     num_repeats: 1
-canonical_split: benchmark
+canonical_split: gpt
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/ScalerLab/JudgeBench
+  ref: 57dd5e0b9817d07f05ec8f45a91b2ce1e310e308
+  reconciled: '2026-10-15'
 lifecycle: active

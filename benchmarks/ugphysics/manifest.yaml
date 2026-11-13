@@ -32,6 +32,6 @@ datasets:
   prompt_config: benchmarks/ugphysics/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: en
 standard_prompt_config: benchmarks/ugphysics/prompts/default.yaml
 lifecycle: active

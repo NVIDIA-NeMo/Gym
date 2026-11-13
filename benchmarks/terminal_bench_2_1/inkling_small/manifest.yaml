@@ -34,6 +34,10 @@ datasets:
   prepare_script: benchmarks/terminal_bench_2_1/prepare_inkling_small.py
   num_repeats: 8
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/harbor-framework/terminal-bench-2-1
+  ref: 7131e4375048a0e408a8fb404b5f499d726b695b
+  reconciled: '2026-10-20'
 lifecycle: active

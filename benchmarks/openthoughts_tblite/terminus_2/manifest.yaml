@@ -32,6 +32,10 @@ datasets:
   prepare_script: benchmarks/openthoughts_tblite/prepare.py
   num_repeats: 3
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/open-thoughts/OpenThoughts-TBLite
+  ref: f075e463472c7790b85793b392dff1fff20cc0e3
+  reconciled: '2026-10-24'
 lifecycle: active

@@ -32,6 +32,10 @@ datasets:
   prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
   num_repeats: 5
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/Genentech/assaybench
+  ref: bc37bf8f4842b43abcd6e9f781423d478b9aee4b
+  reconciled: '2026-09-17'
 lifecycle: active

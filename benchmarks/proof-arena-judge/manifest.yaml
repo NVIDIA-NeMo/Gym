@@ -32,6 +32,10 @@ datasets:
   prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/MathArena/imo_2025_outputs
+  ref: d995fc906b58
+  reconciled: '2026-04-28'
 lifecycle: active

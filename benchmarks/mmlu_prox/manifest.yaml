@@ -32,6 +32,10 @@ datasets:
   num_repeats: 1
 model_server: policy_model
 grading_mode: lenient_answer_colon_md
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/prompts/generic/default.yaml
+adopted_from:
+  source: https://github.com/EleutherAI/lm-evaluation-harness
+  ref: f4d4b3de3ee6741a7151a9fe74945ee515262f4c
+  reconciled: '2026-07-31'
 lifecycle: active

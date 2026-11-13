@@ -35,3 +35,7 @@ datasets:
 model_server: policy_model
 canonical_split: zerobench
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/jonathan-roberts1/zerobench
+  ref: 8fcdfd9138c802cac52b774b36946e70f738f500
+  reconciled: '2026-11-13'

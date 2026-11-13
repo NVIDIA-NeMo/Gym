@@ -33,6 +33,6 @@ datasets:
   prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
   num_repeats: 3
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 standard_prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
 lifecycle: active

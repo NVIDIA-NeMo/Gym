@@ -31,6 +31,10 @@ datasets:
     jsonl_fpath: benchmarks/visualwebarena/data/visualwebarena.jsonl
     prepare_script: benchmarks/visualwebarena/prepare.py
     num_repeats: 1
-canonical_split: test
+canonical_split: full
 prompt_source: agent
+adopted_from:
+  source: https://github.com/jayl940712/webarena_benchmarks
+  ref: 6a2977939b157b0ab9de7799bb089c721f1ac115
+  reconciled: '2026-11-19'
 lifecycle: active

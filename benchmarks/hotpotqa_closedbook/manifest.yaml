@@ -32,6 +32,6 @@ datasets:
   prompt_config: benchmarks/hotpotqa_closedbook/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: validation
 standard_prompt_config: benchmarks/hotpotqa_closedbook/prompts/default.yaml
 lifecycle: active

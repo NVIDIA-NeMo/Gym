@@ -29,6 +29,10 @@ datasets:
     prepare_script: benchmarks/genrm_rmbench/prepare.py
     prompt_config: null
     num_repeats: 1
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/THU-KEG/RM-Bench
+  ref: 73c52d7b27b361621361ec959ac6c0eb9bb7a689
+  reconciled: '2026-10-15'
 lifecycle: active

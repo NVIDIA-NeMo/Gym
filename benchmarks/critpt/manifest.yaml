@@ -32,6 +32,10 @@ datasets:
   prompt_config: benchmarks/critpt/prompts/turn1.yaml
   num_repeats: 5
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/critpt/prompts/turn1.yaml
+adopted_from:
+  source: https://huggingface.co/datasets/CritPt-Benchmark/CritPt
+  ref: 37ecba7e9d00eda858d7be1adba19a38ba50e7a6
+  reconciled: '2026-11-10'
 lifecycle: active

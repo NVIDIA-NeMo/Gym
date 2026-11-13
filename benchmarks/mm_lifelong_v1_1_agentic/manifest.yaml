@@ -33,6 +33,10 @@ datasets:
   prepare_script: benchmarks/mm_lifelong_v1_1_agentic/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: month_val+week_test+day_test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/MM-Lifelong/MM-Lifelong
+  ref: efa197479b25fbcf4f7881f9218d703c57dfc9bb
+  reconciled: '2026-11-21'
 lifecycle: active

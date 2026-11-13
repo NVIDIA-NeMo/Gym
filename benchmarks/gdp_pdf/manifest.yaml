@@ -32,6 +32,6 @@ datasets:
   prepare_script: benchmarks/gdp_pdf/prepare.py
   num_repeats: 5
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test
 prompt_source: prepared
 lifecycle: active

@@ -39,4 +39,8 @@ datasets:
 model_server: policy_model
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/NVIDIA-NeMo/Skills
+  ref: bcf059af55c20a89f797724598f9908d126153e6
+  reconciled: '2026-11-04'
 lifecycle: active

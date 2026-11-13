@@ -34,4 +34,8 @@ datasets:
   num_repeats: 1
 canonical_split: train
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/jablonkagroup/ChemBench
+  ref: 6e1d25748952393f44e35b8e85bbe567246a6430
+  reconciled: '2026-10-12'
 lifecycle: active

@@ -31,7 +31,11 @@ datasets:
     prompt_config: benchmarks/prompts/generic/math.yaml
     num_repeats: 4
 standard_prompt_config: benchmarks/prompts/generic/math.yaml
-canonical_split: benchmark
+canonical_split: train
 session_model: episode
 state: none
+adopted_from:
+  source: https://huggingface.co/datasets/ai4bharat/indic-aime-2026
+  ref: 6cbc9d963bdd9f77e18f28de396f2f9b09bb180a
+  reconciled: '2026-10-07'
 lifecycle: active

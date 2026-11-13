@@ -31,6 +31,6 @@ datasets:
   prompt_config: benchmarks/librispeech_pc/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: test-clean
 standard_prompt_config: benchmarks/librispeech_pc/prompts/default.yaml
 lifecycle: active

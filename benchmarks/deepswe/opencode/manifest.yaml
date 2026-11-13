@@ -33,6 +33,10 @@ datasets:
   prepare_script: benchmarks/deepswe/prepare.py
   num_repeats: 10
 model_server: policy_model
-canonical_split: test
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://github.com/datacurve-ai/deep-swe
+  ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
+  reconciled: '2026-08-21'
 lifecycle: active

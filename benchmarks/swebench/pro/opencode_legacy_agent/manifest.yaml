@@ -35,4 +35,8 @@ datasets:
 model_server: policy_model
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro
+  ref: 7ab5114912baf22bb098818e604c02fe7ad2c11f  # pragma: allowlist secret
+  reconciled: '2026-08-31'
 lifecycle: deprecated

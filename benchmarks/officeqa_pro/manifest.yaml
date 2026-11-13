@@ -21,7 +21,7 @@ config_path: config.yaml
 resources_server: officeqa
 agent_server: opencode_agent
 model_server: policy_model
-canonical_split: officeqa_pro
+canonical_split: full
 prompt_source: prepared
 datasets:
 - name: officeqa_pro
@@ -31,4 +31,8 @@ datasets:
   num_repeats: 5
 session_model: episode
 state: per_session
+adopted_from:
+  source: https://huggingface.co/datasets/databricks/officeqa
+  ref: 763a8366abf2a3605c381d53586d844dc60fa756
+  reconciled: '2026-11-09'
 lifecycle: active

@@ -34,4 +34,8 @@ datasets:
   num_repeats: 1
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/futurehouse/ether0-benchmark
+  ref: c7d5e59960087f360bc32a5006bb994324b38c35
+  reconciled: '2026-11-17'
 lifecycle: active

@@ -29,6 +29,10 @@ datasets:
     prepare_script: benchmarks/genrm_rewardbench2/prepare.py
     prompt_config: null
     num_repeats: 1
-canonical_split: benchmark
+canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/allenai/reward-bench-2
+  ref: 7ff08853b0d5686e79b13fda8677024f566a104a
+  reconciled: '2026-10-30'
 lifecycle: active

@@ -57,7 +57,7 @@ def test_manifest_and_committed_requests() -> None:
     entry = _manifest_entry(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")
     config_path = Path(asset_config_path("benchmark", entry.name))
     assert config_path == benchmark / "config.yaml"
-    assert manifest.canonical_split == "benchmark"
+    assert manifest.canonical_split == "full"
     assert manifest.datasets[0].num_repeats == 1
     assert Path(manifest.datasets[0].prepare_script).resolve() == benchmark / "prepare.py"
     assert all(dataset.jsonl_fpath.endswith("indic_frontiermath_raw.jsonl") for dataset in manifest.datasets)

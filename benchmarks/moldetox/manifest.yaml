@@ -34,4 +34,8 @@ datasets:
 model_server: policy_model
 canonical_split: test
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/MolDeTox/MolDeTox
+  ref: 059e1926fa62a07c3f01afadadf72cce154cfb7f
+  reconciled: '2026-09-22'
 lifecycle: active

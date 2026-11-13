@@ -30,6 +30,10 @@ datasets:
   jsonl_fpath: benchmarks/agentvista/data/agentvista_benchmark.jsonl
   prepare_script: benchmarks/agentvista/prepare.py
   num_repeats: 1
-canonical_split: benchmark
+canonical_split: train
 prompt_source: agent
+adopted_from:
+  source: https://github.com/hkust-nlp/AgentVista
+  ref: a3385d51d0c3dd0c8501350a08d52065e3e94ab4  # pragma: allowlist secret
+  reconciled: '2026-11-16'
 lifecycle: active
