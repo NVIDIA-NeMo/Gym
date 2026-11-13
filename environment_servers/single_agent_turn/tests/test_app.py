@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import json
 import re
 import runpy
 import time
@@ -54,12 +55,14 @@ from nemo_gym.core import (
 )
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
+    AgentContext,
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     SimpleServer,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
+    SingleAgentTurnTaskInput,
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
@@ -147,6 +150,31 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert client.calls[4][2]["cookies"] == {"session": "updated-cookie"}
     assert client.calls[5][2]["cookies"] == {"session": "updated-cookie"}
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
+
+
+async def test_the_tasks_agent_context_reaches_the_agent_seed_and_not_the_resources_server() -> None:
+    environment_server, client = _environment_server()
+    request = _request()
+    request.task.task_input = SingleAgentTurnTaskInput.model_validate(
+        {
+            "responses_create_params": {"input": "task"},
+            "instance_id": "task",
+            "agent_context": {"agent": {"values": {"tag": "figqa2"}, "artifacts": {"media": {"path": "figs/1"}}}},
+        }
+    )
+
+    await environment_server.run_request(request)
+
+    create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
+    assert create_body.agent_context == AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}})
+    resources_bodies = [call["json"] for _, path, call in client.calls if path in ("/seed_session", "/verify")]
+    assert len(resources_bodies) == 2
+    assert all("agent_context" not in json.dumps(body) for body in resources_bodies)
+
+    # A task without context seeds the agent with the same body as before.
+    environment_server, client = _environment_server()
+    await environment_server.run_request(_request())
+    assert "agent_context" not in client.calls[1][2]["json"]
 
 
 async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:

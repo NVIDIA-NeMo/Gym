@@ -65,8 +65,10 @@ from nemo_gym.artifacts.exporters.metrics import (
 )
 from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
-from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
+from nemo_gym.config.config_types import ConfigError, MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.utils.path_utils import task_selection_path_for
+from nemo_gym.utils.task_ids import read_task_selection_record, task_ids_digest, task_selection
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,10 @@ class MLflowExporter(BaseExporter):
     # Can't write .jsonl: `log_table` accepts only .json/.parquet, and writes one table document.
     ROLLOUTS_ARTIFACT_FILE: ClassVar[str] = "rollouts.json"
     RESUME_COUNT_TAG: ClassVar[str] = "gym_resume_count"
+    # A run that selected its tasks by id (task_ids, task_ids_fpath): its score is a subset's, never the benchmark's.
+    TASK_SELECTION_TAG: ClassVar[str] = "gym_task_selection"
+    TASK_SELECTION_SOURCE_TAG: ClassVar[str] = "gym_task_selection_source"
+    TASK_IDS_SHA256_TAG: ClassVar[str] = "gym_task_ids_sha256"
 
     def __init__(self, global_config_dict: DictConfig) -> None:
         super().__init__(global_config_dict)
@@ -242,8 +248,40 @@ class MLflowExporter(BaseExporter):
 
         for batch in batched(params, MAX_PARAMS_TAGS_PER_BATCH):
             self._retain_operation(client.log_batch(run_id, params=batch, **self._batch_mode()))
+        subset_tags = [RunTag(key, value) for key, value in self._task_selection_tags(container).items()]
+        if subset_tags:
+            self._retain_operation(client.log_batch(run_id, tags=subset_tags, **self._batch_mode()))
 
         self._delivered_config_digest = self._payload_digest(container)
+
+    def _task_selection_tags(self, container: Any) -> dict[str, str]:
+        """The tags that mark a subset run: ``gym_task_selection=subset``, the list's source and the ids' sha256.
+
+        A post-run export reads the record the run saved beside its rollouts; a live run reads its setting (the inline
+        ids, or the id file it is about to run). A digest that cannot be read is ``unknown``: still a subset.
+        """
+        if not isinstance(container, dict):
+            return {}
+        task_ids, fpath = container.get("task_ids"), container.get("task_ids_fpath")
+        if task_ids is None and not fpath:
+            return {}
+        source, digest = (fpath or "task_ids"), None
+        if self._exported_artifacts is not None:
+            record = read_task_selection_record(task_selection_path_for(self._exported_artifacts.rollouts_jsonl_fpath))
+            if record is not None:
+                source, digest = record.get("source") or source, record.get("task_ids_sha256")
+        else:
+            try:
+                selection = task_selection(task_ids, fpath)
+            except (ConfigError, OSError, ValueError, TypeError):
+                selection = None
+            if selection is not None:
+                digest = task_ids_digest(selection.task_ids)
+        return {
+            self.TASK_SELECTION_TAG: "subset",
+            self.TASK_SELECTION_SOURCE_TAG: str(source)[:MAX_PARAM_VAL_LENGTH],
+            self.TASK_IDS_SHA256_TAG: digest if isinstance(digest, str) else "unknown",
+        }
 
     @staticmethod
     def _payload_digest(payload: Any) -> bytes:
