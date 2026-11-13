@@ -1038,13 +1038,18 @@ class RolloutRecords:
             for identity in self.expected
             if self.disposition(identity) == "success"
         )
-        # Masked with ``fail`` by its producer: final (recovery stops on it), never measured, so the run is not complete
-        # until the row's data is fixed or dropped. The kinds tell the benchmark owner what to fix.
+        # Masked with ``fail`` by its producer: final (recovery stops on it), never measured, so the run is not
+        # complete until the row's data is fixed or dropped. The kinds tell the benchmark owner what to fix. Never a
+        # row already counted as retryable or exhausted above: each unsettled rollout is subtracted from ``settled``
+        # once.
         masked_failed = Counter(
             self.payloads[(identity, self.latest[identity])].masked_failed_kind
             for identity in self.expected
             if self.disposition(identity) == "success"
             and self.payloads[(identity, self.latest[identity])].masked_failed_kind
+            and not (
+                self.payloads[(identity, self.latest[identity])].masked_infrastructure and self._retryable(identity)
+            )
         )
         settled = counts["success"] - masked_retryable - masked_exhausted - masked_failed.total() + final_zeros
         # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
@@ -1090,6 +1095,7 @@ class RolloutRecords:
             "max_rollout_attempts": max_attempts,
             "attempt_extension": self.attempt_extension,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
+            "settled": settled,
             "completion_fraction": settled / expected if expected else 1.0,
             "complete": settled == expected,
             "reconciled": missing == 0,

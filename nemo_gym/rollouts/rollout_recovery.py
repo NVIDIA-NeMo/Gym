@@ -137,6 +137,29 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     return row.get("evaluation_completed") is True
 
 
+def unsettled_masked_note(coverage: Mapping[str, Any]) -> str:
+    """What keeps masked results from counting as settled, for an incomplete-run message; empty when none does.
+
+    Names the kinds a producer masked with ``fail`` (final: fix or drop those rows, a larger attempt cap does not
+    reopen them) and the infrastructure-masked results that spent their attempt budget (reopened by
+    ``--extend-attempts``).
+    """
+    notes = []
+    if coverage.get("masked_failed"):
+        by_kind = sorted(coverage.get("masked_failed_kinds", {}).items())
+        kinds = ", ".join(f"{kind} ({count})" for kind, count in by_kind)
+        notes.append(
+            f"{coverage['masked_failed']} masked result(s) were failed by their producer and are not retried "
+            f"(masked_failed_kinds: {kinds}): fix or drop those rows."
+        )
+    if coverage.get("masked_exhausted"):
+        notes.append(
+            f"{coverage['masked_exhausted']} infrastructure-masked result(s) spent their attempt budget "
+            "(masked_exhausted): continue with gym eval resubmit --recover --extend-attempts N."
+        )
+    return " ".join(notes)
+
+
 def _row_failure_kind(row: Mapping[str, Any]) -> Any:
     """The selected failure event's kind when the row selects one (None when that event is missing), else the row's."""
     events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
@@ -428,9 +451,9 @@ def _masked_evaluation_side_kind(
 
     The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
-    ``failure_kind`` is registered (or namespaced, with the ``retry`` action its owner recorded and no model attribution), evaluation-side through
-    the shared classifier, not one whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a
-    ``transport_*`` verify call.
+    ``failure_kind`` is registered, or namespaced with the ``retry`` action its owner recorded and no model
+    attribution. The kind is evaluation-side through the shared classifier (or carries a recorded ``retry``), not one
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
@@ -475,9 +498,11 @@ def masked_infrastructure_kind(
 
     A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
-    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action (honored
-    whatever the attribution), the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
-    model-class kind, no kind, an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
+    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action,
+    the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed
+    attempt and a later attempt supersedes it. A recorded ``retry`` is honored for a registered kind whatever its
+    attribution, but for a namespaced kind only when it is not attributed to the model. A model-class kind, no kind,
+    an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
     whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the
     masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its
     verifier could grade of it.
@@ -504,9 +529,11 @@ def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
 
     Same facts as recovery's saved-answer test: a collector projection's own flag, else the retained generation of the
     response (``has_saved_generation``, which leaves out a no-generation placeholder) or of a native partial response.
-    An agent-stage fault whose owner recorded ``retry`` keeps no answer: its response is the failed attempt's partial
-    transcript, whatever its status.
+    A recorded grade (``has_recorded_grade``) always keeps it. An agent-stage fault whose owner recorded ``retry`` and
+    has no grade keeps no answer: its response is the failed attempt's partial transcript, whatever its status.
     """
+    if has_recorded_grade(row):
+        return True  # A graded result stays the result, whatever the collector's flag or the stage's retry says.
     flag = row.get("_ng_collected_saved_answer")
     if isinstance(flag, bool):
         return flag

@@ -146,7 +146,7 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `masked` | Completed results with a numeric reward whose producer set `mask_sample`. A failure record whose producer set `mask_sample` is counted in `failed_masked`, never here. These remain saved and reusable on resume, except a result masked by an evaluation-side failure kind (see `masked_retryable`). |
 | `masked_retryable` | Completed results whose producer reported an evaluation-side failure kind (for example a lost session or a failed provider) and that resume runs again within the attempt cap. They count as one failed attempt and are not settled. |
 | `masked_exhausted` | Completed results masked by an evaluation-side failure kind that used every attempt of their cap. They are final, never measured and not settled, so the run is not `complete` until a recovery with `--extend-attempts` measures them. |
-| `masked_failed` / `masked_failed_kinds` | Completed results masked by a producer that recorded the `fail` action (for example a defect in the task data), and the count per failure kind. They are final, never measured and not settled, so the run is not `complete` until the data is fixed or the task is dropped. |
+| `masked_failed` / `masked_failed_kinds` | Completed results masked by a producer that recorded the `fail` action (for example a defect in the task data), and the count per failure kind. Never also counted in `masked_retryable` or `masked_exhausted`. They are final, a larger attempt cap does not reopen them, never measured and not settled, so the run is not `complete` until the data is fixed or the task is dropped. |
 | `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `failed_final` / `failed_not_final` | Selected failures with no retry available (terminal or budget exhausted), versus selected failures still eligible for retry. |
@@ -163,6 +163,7 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `progress_outcomes_recorded` | Saved successes, omissions, terminal failures or counted failures; distinguishes productive continuation from infrastructure-only retries. |
 | `stopped_not_retried` | Failed rollouts that are neither final nor at their attempt cap and that resume still does not run again (a kept answer or a judge failure left to recovery, or an unclassified execution). |
 | `attempt_extension` | The recorded extension of the per-rollout attempt cap; 0 when none. |
+| `settled` | Rollouts counted as settled: completed results, less `masked_retryable`, `masked_exhausted` and `masked_failed` (each unsettled rollout once), plus final zeros. The CLI and the collector read completion from this field. |
 | `completion_fraction` | Settled rollouts (completed results, less `masked_retryable`, `masked_exhausted` and `masked_failed`, plus final zeros) divided by `expected`; 1.0 for an empty inventory. |
 
 The existing `successful` field remains the completed-result total. The measurement split is additive:

@@ -545,3 +545,47 @@ def test_a_masked_result_without_an_action_keeps_its_coverage(tmp_path):
     coverage = RolloutStore.read(output, import_legacy=False).coverage()
     assert (coverage["complete"], coverage["masked"], coverage["masked_failed"]) == (True, 1, 0)
     assert coverage["masked_failed_kinds"] == {}
+
+
+def test_a_masked_agent_stage_retry_with_a_recorded_grade_keeps_its_graded_answer(tmp_path):
+    # A graded result is never overwritten by a new sample, with or without the collector's saved-answer flag.
+    for flag in ({}, {"_ng_collected_saved_answer": False}):
+        job = tmp_path / ("flag" if flag else "plain")
+        output, _ = _run(job, [[_retry_at("agent") | {"evaluation_completed": True} | flag]])
+        store = RolloutStore.read(output, import_legacy=False)
+        assert store.pending() == []
+        coverage = store.coverage()
+        assert (coverage["masked_retryable"], coverage["retryable"], coverage["complete"]) == (0, 0, True)
+        assert store.attempt_count({"_ng_task_index": 1, "_ng_rollout_index": 0}) == 0
+
+
+def test_a_row_both_infrastructure_masked_and_failed_by_its_producer_is_unsettled_once(tmp_path, monkeypatch):
+    # The two buckets are exclusive: a row that qualified for both would otherwise be subtracted twice.
+    import nemo_gym.rollouts.rollout_records as records
+
+    row = _masked("session_lost") | {"failure_outcome_action": "fail"}
+    monkeypatch.setattr(
+        records,
+        "masked_infrastructure_kind",
+        lambda row, classification=None: "session_lost" if row.get("mask_sample") else None,
+    )
+    output, _ = _run(tmp_path, [[row] * 3])
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert (coverage["masked_exhausted"], coverage["masked_failed"]) == (1, 0)
+    assert (coverage["settled"], coverage["completion_fraction"]) == (1, 0.5)
+    assert coverage["settled"] == coverage["successful"] - coverage["masked_exhausted"] - coverage["masked_failed"]
+
+
+def test_the_incomplete_run_message_names_the_masked_failed_kinds_and_the_retryable_exhausted_ones():
+    from nemo_gym.rollouts.rollout_recovery import unsettled_masked_note
+
+    note = unsettled_masked_note(
+        {
+            "masked_failed": 2,
+            "masked_failed_kinds": {"demo_env:invalid_reference": 2},
+            "masked_exhausted": 1,
+        }
+    )
+    assert "masked_failed_kinds: demo_env:invalid_reference (2)" in note and "fix or drop" in note
+    assert "--extend-attempts" in note
+    assert unsettled_masked_note({"masked_failed": 0, "masked_exhausted": 0}) == ""
