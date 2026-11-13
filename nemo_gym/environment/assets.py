@@ -119,6 +119,22 @@ def _catalog_config(tree: Path, value: str, kind: str) -> Path | None:
     return _path_config(names, value, kind)
 
 
+def _taskset_config(tasksets: Path, value: str, kind: str) -> Path | None:
+    """The config of the task set in one root's ``tasksets/`` whose manifest declares the name ``value`` and ``kind``.
+
+    ``tasksets/`` holds both kinds and has no configs without a manifest, so only a manifest of the flag's kind
+    selects a name there, never a folder path.
+    """
+    from nemo_gym.environment.registry import _manifest_config, declared_manifests
+
+    for manifest_path, manifest in declared_manifests(tasksets):
+        if manifest.name == value and manifest.kind == kind:
+            config_path = _manifest_config(manifest_path, manifest)
+            if config_path is not None:
+                return config_path
+    return None
+
+
 def asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
@@ -139,12 +155,16 @@ def asset_config_path(flag: str, value: str) -> str:
     matches: list[Path] = []
 
     if flag in _CATALOG_FLAGS:
-        # The catalog's rule: the highest-priority root whose catalog lists the name wins.
+        from nemo_gym.environment.manifest import TASKSETS_SUBDIR
+
+        # The catalog's rule: the highest-priority root whose catalog lists the name wins. In each root, the kind's own
+        # folder comes before tasksets/; validation keeps a name from being in both.
         trees = [root / parent for root in roots]
-        for tree in trees:
-            config_path = _catalog_config(tree, value, flag)
-            if config_path is not None and config_path not in matches:
-                matches.append(config_path)
+        for root, tree in zip(roots, trees):
+            taskset_config = _taskset_config(root / TASKSETS_SUBDIR, value, flag)
+            for config_path in (_catalog_config(tree, value, flag), taskset_config):
+                if config_path is not None and config_path not in matches:
+                    matches.append(config_path)
         if not matches:
             # Any other config at the name's path, such as an environment flavor file, a nested benchmark config or a
             # config that a manifest declares under another name, selects only when no root lists the name.
@@ -171,10 +191,15 @@ def asset_config_path(flag: str, value: str) -> str:
 
     # No match: build a "did you mean?" hint and the roots searched
     if flag in _CATALOG_FLAGS:
-        from nemo_gym.environment.registry import _legacy_config_paths
+        from nemo_gym.environment.registry import _legacy_config_paths, declared_manifests
 
-        # Suggest declared IDs as well as the folder/flavor aliases that remain selectable.
+        # Suggest declared IDs, including task sets of this kind, as well as the folder/flavor aliases that remain
+        # selectable.
         config_names: set[str] = set()
+        for root in roots:
+            config_names.update(
+                manifest.name for _, manifest in declared_manifests(root / TASKSETS_SUBDIR) if manifest.kind == flag
+            )
         for tree in trees:
             if not tree.is_dir():
                 continue
@@ -193,7 +218,8 @@ def asset_config_path(flag: str, value: str) -> str:
         # at the config names under it; otherwise fall back to a fuzzy match across every token.
         under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
         hint = f" Did you mean `{min(under_dir, key=len)}`?" if under_dir else did_you_mean(value, config_names)
-        available = ", ".join(sorted(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
+        searched = [tree for root in roots for tree in (root / parent, root / TASKSETS_SUBDIR) if tree.is_dir()]
+        available = ", ".join(sorted(f"`{tree.resolve()}`" for tree in searched))
     else:
         # Suggest the closest real name across all roots: a config flavor when the server exists, else a server
         # name, reporting the full paths that were searched in each case.
