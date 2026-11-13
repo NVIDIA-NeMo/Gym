@@ -98,8 +98,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
     reject_partial_typed_seed,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.utils.network_policy import reachable_host
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, reachable_host
 from nemo_gym.verification import JudgeError, call_judge
 
 # The grader the apptainer comparators were scored with. NOT the longer
