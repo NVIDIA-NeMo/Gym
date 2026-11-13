@@ -731,13 +731,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "grant that also offers one is left out."
         ),
     )
-    # An OpenAI-compatible base URL (including /v1) that Pi calls directly, as a generated
-    # `openai-completions` provider, instead of a Gym model_server. It must be reachable from the
-    # sandbox. Such calls do not pass through Gym, so Gym does not capture them.
-    model_base_url: Optional[str] = None
-    # The key Pi sends to model_base_url ("EMPTY" when unset). Written only to the session's private
-    # models.json, never to logs.
-    model_api_key: Optional[str] = None
     # Pi's thinkingLevelMap for the generated model, e.g. {"max": "max"} so that `thinking: max`
     # sends reasoning_effort "max" (with provider_compat supportsReasoningEffort: true).
     thinking_level_map: dict[str, Optional[str]] = Field(default_factory=dict)
@@ -766,9 +759,9 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     raise_oom_score_adj: bool = False
     # Sandbox sessions: return a failed run (nonzero or signalled exit, a terminal error, no terminal
     # assistant result) as a gradable `failed` response, as Harbor grades after any agent exit, when
-    # the supervisor confirmed cleanup, the runner started Pi and any granted Gym MCP tools loaded, the
-    # terminal error is not a transient model-endpoint failure, and the sandbox still runs and answers a
-    # command. A model error Pi reported itself keeps its classified cause for the outcome policy
+    # the supervisor confirmed cleanup, the runner started Pi, any granted Gym MCP tools loaded, Pi
+    # ended at least one assistant turn, the terminal error is not a transient model-endpoint failure,
+    # and the sandbox still runs and answers a command. A model error Pi reported itself keeps its classified cause for the outcome policy
     # instead. Anything else stays an execution error.
     verify_after_agent_error: bool = False
 
@@ -884,8 +877,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
         if refused:
             raise HTTPException(422, "Pi cannot use these required MCP grants: " + "; ".join(refused))
-        if (self.config.model_server is None) == (self.config.model_base_url is None):
-            raise HTTPException(422, "Pi requires either a sandbox-reachable Gym model_server or a model_base_url")
+        if self.config.model_server is None:
+            raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
             raise HTTPException(422, "Pi requires an exact pi_version, for example 0.80.2")
         if self.config.command != "pi" or self.config.extra_args or self.config.env:
@@ -898,12 +891,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     spec,
                     network_access=self.config.network_access,
                     provider=provider,
-                    # A direct endpoint is the host the sandbox calls in place of the Gym model server.
-                    model_base_url=(
-                        self.config.model_base_url
-                        if self.config.model_server is None
-                        else self.resolve_model_base_url(self.config.model_server.name, trace_context=False)
-                    ),
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                     # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`.
                     tool_urls=[
                         str(access.connection.url)
@@ -1164,20 +1152,26 @@ class PiAgent(SimpleResponsesAPIAgent):
         }
 
     async def _gradable_agent_error(
-        self, state: PiSandboxSession, error: str, *, cleanup: Any, mcp_failed: bool
+        self, state: PiSandboxSession, error: str, *, cleanup: Any, mcp_failed: bool, answered: bool
     ) -> Optional[str]:
         """Describe a failed Pi run that Resources can still grade, or return None.
 
         The supervisor's confirmed cleanup means Pi ended and nothing it started still runs. A setup
-        failure (the runner did not start Pi, or Gym's MCP tools did not load), a transient
-        model-endpoint failure, or a sandbox that no longer runs or answers keeps the run an execution
-        error, so the episode is retried rather than graded.
+        failure (the runner did not start Pi, Gym's MCP tools did not load, or Pi ended before its first
+        assistant turn, ``answered``, short of its time limit), a transient model-endpoint failure, or a
+        sandbox that no longer runs or answers keeps the run an execution error, so the episode is retried
+        rather than graded.
         """
         if cleanup is None or cleanup["error"]:
             return None
         return_code = cleanup["return_code"]
         detail = f"exit {return_code}: {error}"
-        if mcp_failed or return_code == HARNESS_RUNNER_FAILED or return_code in HARNESS_COMMAND_NOT_STARTED:
+        if (
+            mcp_failed
+            or (not answered and not cleanup["timed_out"])
+            or return_code == HARNESS_RUNNER_FAILED
+            or return_code in HARNESS_COMMAND_NOT_STARTED
+        ):
             LOG.warning("Pi failed in setup; not grading it: %s", detail)
             return None
         if _MODEL_ENDPOINT_ERROR.search(error):
@@ -1402,7 +1396,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         graded_error = None
         # A failure Pi reported from the model endpoint is classified below, not graded here.
         if error and not reported_error and self.config.verify_after_agent_error:
-            graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, mcp_failed=mcp_failed)
+            graded_error = await self._gradable_agent_error(
+                state, error, cleanup=cleanup, mcp_failed=mcp_failed, answered=bool(stop_reasons)
+            )
             if graded_error is not None:
                 error = None
         if graded_error is not None:
@@ -1507,11 +1503,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
     def _effective_model(self) -> str:
-        return f"nemo/{self.config.model}" if self._generates_provider() else self.config.model
-
-    def _generates_provider(self) -> bool:
-        """Whether the agent writes Pi's `nemo` provider (a Gym model server or a direct endpoint)."""
-        return self.config.model_server is not None or self.config.model_base_url is not None
+        return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
 
     def _build_settings_config(self) -> dict[str, Any]:
         # Gym buffers completions before replaying SSE. Pi's default five-minute
@@ -1526,7 +1518,7 @@ class PiAgent(SimpleResponsesAPIAgent):
 
     def _build_models_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
         config = copy.deepcopy(self.config.models_config)
-        if not self._generates_provider():
+        if self.config.model_server is None:
             return config
         providers = config.setdefault("providers", {})
         model: dict[str, Any] = {
@@ -1538,16 +1530,14 @@ class PiAgent(SimpleResponsesAPIAgent):
         }
         if self.config.thinking_level_map:
             model["thinkingLevelMap"] = dict(self.config.thinking_level_map)
-        # A Gym model server wins; otherwise Pi calls model_base_url directly with model_api_key.
-        direct = self.config.model_server is None
         providers["nemo"] = {
-            "baseUrl": self.config.model_base_url.rstrip("/") if direct else self._resolve_model_base_url(rollout_id),
+            "baseUrl": self._resolve_model_base_url(rollout_id),
             "api": "openai-completions",
-            "apiKey": (self.config.model_api_key if direct else None) or "EMPTY",  # pragma: allowlist secret
+            "apiKey": "EMPTY",  # pragma: allowlist secret
             "compat": {**_DEFAULT_PROVIDER_COMPAT, **self.config.provider_compat},
             "models": [model],
         }
-        if rollout_id is not None and not direct:
+        if rollout_id is not None:
             # Response IDs do not exist for HTTP errors; correlate every retry
             # with the same invocation used by _build_pi_observations.
             providers["nemo"]["headers"] = {"x-session-id": rollout_id}

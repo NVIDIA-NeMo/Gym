@@ -96,8 +96,7 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 
 ## Runtime and model requirements
 
-Use an exact `pi_version` (default **0.80.2**), and either a Gym `model_server` or a
-`model_base_url` that Pi calls directly.
+Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
@@ -208,8 +207,7 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
    This installs the harness runtime, not task dependencies or the test environment.
 4. Environment Server calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
-   the rollout-prefixed Gym model-server URL (or to `model_base_url`). The sandbox must be able to
-   reach that URL.
+   the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
 6. Agent close confirms harness termination, returns observations,
    removes session files, and disconnects. Missing termination evidence keeps close retryable;
    a final negative receipt fails the activation but releases the borrowed connection.
@@ -282,18 +280,15 @@ detail, not a separate endpoint or a setup step users must run.
 - `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
   grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
-- `model_base_url`, `model_api_key`: an OpenAI-compatible base URL (with `/v1`) that Pi calls directly
-  from the sandbox, instead of a Gym `model_server` (set exactly one), and its key (default `EMPTY`).
-  Gym does not capture these calls. In a sandbox Pi creates, `network_access: model_only` opens this endpoint's host.
 - `thinking_level_map`: the generated model's Pi `thinkingLevelMap`, e.g. `{max: max}` so that
-  `thinking: max` sends `reasoning_effort: "max"` (with `provider_compat.supportsReasoningEffort: true`)
+  `thinking: max` sends `reasoning_effort: "max"` (with `provider_compat.supportsReasoningEffort: true`).
+  `thinking: max` needs `pi_version` 0.80.6 or later (the default pin is 0.80.2)
 - `provider_compat`: Pi compat flags merged over the generated provider's
   (`supportsDeveloperRole` and `supportsReasoningEffort` off)
 - `settings`: extra `settings.json` entries merged over Gym's, e.g. `{retry: {maxRetries: 10}}`
 
-Sandbox-session settings for running Pi the way a harness started in the task container runs (the
-[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#pi-in-the-task-sandbox)
-uses all of them):
+Sandbox-session settings for running Pi the way a harness started in the task container runs, for
+benchmarks that grade such a harness:
 
 - `sandbox_env`: further environment for Pi and its tools, e.g. `{PI_OFFLINE: "1"}`
 - `sandbox_runtime_guards`: Gym's bash cap and system-prompt note (default true); false runs Pi's own tools
@@ -311,7 +306,7 @@ uses all of them):
   assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is in
   `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
   harness runner started Pi (not its own exit 125, 126 or 127), any granted Gym MCP tools loaded (not exit
-  78), the terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as
+  78), Pi ended at least one assistant turn or ran until its time limit, the terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as
   Pi's retry classifier names them) and the sandbox still runs and answers a command. A model error Pi
   reported itself is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment
   Server's outcome policy. Anything else stays an execution error and the episode is retried.

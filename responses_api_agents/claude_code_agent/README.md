@@ -358,9 +358,7 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 ### Task-container settings
 
 These settings are off by default. They run Claude Code the way a harness started in the task
-container runs it, for benchmarks that grade such a harness (the
-[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#claude-code-in-the-task-sandbox)
-uses all of them).
+container runs it, for benchmarks that grade such a harness.
 
 - `instruction_on_stdin` (sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
   claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an

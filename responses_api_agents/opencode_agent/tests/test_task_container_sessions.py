@@ -8,8 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Request
@@ -19,12 +18,10 @@ from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.sandbox import SandboxStatus
 from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
 from responses_api_agents.opencode_agent.app import _is_model_endpoint_failure, _sandbox_prepare_command, argv_prompt
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.tests.test_sandbox_runner import stage
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
     capture_observations,
     close_body,
-    owned_seed_with_several_grants,
     read_params,
     seed,
     setup,
@@ -35,14 +32,9 @@ ROLLOUT = "/ng-rollout/opencode-smoke-a2/v1/responses"
 PACKAGE = Path(__file__).parents[1]
 
 
-def configure_direct(agent, **overrides):
-    """A direct OpenAI-compatible endpoint instead of a Gym model server."""
-    settings = {
-        "model_server": None,
-        "model_base_url": "http://gateway.example:16100/v1/",
-        "model_api_key": "gateway-key",  # pragma: allowlist secret
-        "model": "deepseek-flash",
-    } | overrides
+def configure_task_container(agent, **overrides):
+    """The model ID OpenCode's session provider names (its model-family prompts), beside the Gym model server."""
+    settings = {"sandbox_model_id": "deepseek-flash"} | overrides
     for name, value in settings.items():
         setattr(agent.config, name, value)
 
@@ -61,93 +53,19 @@ def run_session(agent, sandbox, body=None, request=None):
     return response, payload, closed.json()
 
 
-@pytest.mark.parametrize("sampling", [{}, {"temperature": 0.2, "top_p": 0.9}])
-@pytest.mark.parametrize("image_input", [False, True])
-def test_direct_endpoint_session_calls_the_configured_endpoint(setup, sampling, image_input):
+def test_seed_requires_a_model_server(setup):
     agent, sandbox = setup
-    configure_direct(agent, image_input=image_input)
-    # Gym capture is on, but calls to a direct endpoint never pass through Gym: no correlation plugin.
-    agent.server_client.global_config_dict["observability_enabled"] = True
-    response, payload, _ = run_session(agent, sandbox, request={"input": "Fix the code", **sampling})
-    assert response.status_code == 200, response.text
-    assert response.json()["model"] == "deepseek-flash"
-    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-    assert (config["model"], config["small_model"]) == ("nemo_gym/deepseek-flash", "nemo_gym/deepseek-flash")
-    provider = config["provider"]["nemo_gym"]
-    assert provider["options"] == {
-        "baseURL": "http://gateway.example:16100/v1",
-        "apiKey": "gateway-key",  # pragma: allowlist secret
-        "timeout": False,
-    }
-    assert list(provider["models"]) == ["deepseek-flash"]
-    model = provider["models"]["deepseek-flash"]
-    if sampling:
-        assert model["temperature"] is True
-        assert config["agent"]["build"]["temperature"] == 0.2
-        assert config["agent"]["build"]["top_p"] == 0.9
-    assert ("image" in model.get("modalities", {}).get("input", [])) is image_input
-    assert not any(OBSERVABILITY_PATCH.name in plugin for plugin in config["plugin"])
-    assert not any(path.endswith(OBSERVABILITY_PATCH.name) for path in sandbox.files)
-    agent.server_client.post.assert_not_called()
-
-
-def test_direct_endpoint_key_defaults_to_a_placeholder(setup):
-    agent, sandbox = setup
-    configure_direct(agent, model_api_key=None)
-    response, payload, _ = run_session(agent, sandbox)
-    assert response.status_code == 200, response.text
-    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-    assert config["provider"]["nemo_gym"]["options"]["apiKey"] == "EMPTY"  # pragma: allowlist secret
-
-
-@pytest.mark.parametrize("routes", ["neither", "both"])
-def test_seed_requires_exactly_one_model_route(setup, routes):
-    agent, sandbox = setup
-    if routes == "neither":
-        agent.config.model_server = None
-    else:
-        agent.config.model_base_url = "http://gateway.example/v1"
+    agent.config.model_server = None
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
     assert response.status_code == 422
-    assert "model_server or model_base_url" in response.text
+    assert "requires model_server" in response.text
     sandbox.exec.assert_not_awaited()
-
-
-@pytest.mark.parametrize(("network_access", "allowed"), [("inherit", None), ("model_only", ["gateway.example"])])
-def test_direct_endpoint_owned_sandbox_egress_allows_the_endpoint(setup, network_access, allowed):
-    agent, sandbox = setup
-    configure_direct(agent, network_access=network_access)
-    agent.config.sandbox_provider = "agent-provider"
-    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
-    sandbox.expected_workdir = "/workspace"
-    sandbox.start = AsyncMock()
-    module = "responses_api_agents.opencode_agent.app"
-    with (
-        patch(f"{module}.AsyncSandbox", return_value=sandbox),
-        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
-        TestClient(agent.setup_webserver()) as client,
-    ):
-        created = client.post("/v1/agent_sessions", json=owned_seed_with_several_grants(required=False))
-        assert created.status_code == 200, created.text
-    # With no Gym model server, the sandbox calls the direct endpoint, so that is the host model_only opens.
-    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
-    if allowed is None:
-        assert policy is None
-    else:
-        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
-
-
-def test_direct_endpoint_accepts_its_own_model_name_in_requests(setup):
-    agent, sandbox = setup
-    configure_direct(agent)
-    response, _, _ = run_session(agent, sandbox, request={"input": "Fix the code", "model": "deepseek-flash"})
-    assert response.status_code == 200, response.text
 
 
 def test_request_settings_reach_the_session_provider(setup):
     agent, sandbox = setup
-    configure_direct(
+    configure_task_container(
         agent,
         reasoning_effort="max",
         interleaved_reasoning_field="reasoning",
@@ -160,6 +78,7 @@ def test_request_settings_reach_the_session_provider(setup):
     # No size: OpenCode compacts only on an overflow error; effort goes on every request.
     assert config["provider"]["nemo_gym"]["models"]["deepseek-flash"] == {
         "interleaved": {"field": "reasoning"},
+        "reasoning": agent.config.thinking,
         "options": {"reasoningEffort": "max"},
     }
     plugin = f"{sandbox.directory}/{REMAINING_CONTEXT_PLUGIN}"
@@ -371,6 +290,10 @@ def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, tmp_path, case,
         # A required Gym MCP tool did not connect, or nothing confirmed it before the model ran.
         ("mcp_failed", "Required Gym MCP tools could not be initialized: task_tools: failed (connection refused)"),
         ("mcp_unconfirmed", "Required Gym MCP tools were not confirmed before the model call: task_tools"),
+        # Never confirmed, and OpenCode then exited nonzero after a model step: still a setup failure.
+        ("mcp_unconfirmed_exit_1", "OpenCode exited with code 1"),
+        # OpenCode exited nonzero before any model step ran (for example on an invalid model setting).
+        ("no_model_step", "OpenCode exited with code 1"),
     ],
 )
 def test_setup_failure_is_not_graded(setup, case, detail):
@@ -392,6 +315,12 @@ def test_setup_failure_is_not_graded(setup, case, detail):
             return await wait_exit()
 
         sandbox.wait_exit = record_status_then_exit
+        if case == "mcp_unconfirmed_exit_1":
+            sandbox.result["return_code"] = 1
+    elif case == "no_model_step":
+        export = json.loads(sandbox.events)
+        sandbox.events = json.dumps({"messages": export["messages"][:1]})
+        sandbox.result["return_code"] = 1
     else:
         # OpenCode never ran: no session to export.
         sandbox.events = json.dumps({"messages": []})

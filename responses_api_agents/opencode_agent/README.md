@@ -236,14 +236,8 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 ## Task-container settings
 
 These sandbox-session settings are off by default. They run OpenCode the way a harness started in
-the task container runs it, for benchmarks that grade such a harness (the
-[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#opencode-in-the-task-sandbox)
-uses all of them). Local calls ignore them.
+the task container runs it, for benchmarks that grade such a harness. Local calls ignore them.
 
-- `model_base_url`, `model_api_key`: an OpenAI-compatible chat-completions base URL (with `/v1`) that
-  OpenCode calls directly from the sandbox as `model`, instead of a Gym `model_server` (set exactly one),
-  and its key (default `EMPTY`). Gym does not capture these calls, so the model-call correlation plugin
-  is not loaded. In a sandbox OpenCode creates, `network_access: model_only` opens this endpoint's host.
 - `reasoning_effort`: sent as chat `reasoning_effort` on every request (the model's `reasoningEffort`
   option), e.g. `max`.
 - `interleaved_reasoning_field`: the assistant-message field that replays each turn's reasoning
@@ -263,7 +257,7 @@ uses all of them). Local calls ignore them.
   terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is
   in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
   harness runner started OpenCode (not its own exit 125, 126 or 127), the required Gym MCP tools connected
-  and were confirmed, the run's output was captured, its last error is not a transient model-endpoint
+  and were confirmed, a model step ran or OpenCode ran until its time limit, the run's output was captured, its last error is not a transient model-endpoint
   failure (a retryable API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers
   a command. A model error OpenCode reported itself (an API error or context overflow on a completed turn)
   is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's
