@@ -1,0 +1,37 @@
+CREATE TABLE authors (
+    author_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    country TEXT
+);
+First 3 rows:
+author_id  name  country
+1  Ana Ribeiro  Brazil
+2  Kenji Mori  Japan
+3  Lena Fischer  Germany
+
+CREATE TABLE books (
+    book_id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    author_id INTEGER NOT NULL REFERENCES authors(author_id),
+    genre TEXT NOT NULL,
+    list_price REAL NOT NULL,
+    published_year INTEGER NOT NULL
+);
+First 3 rows:
+book_id  title  author_id  genre  list_price  published_year
+1  River of Glass  1  Fiction  20.0  2019
+2  The Quiet Harbor  1  Fiction  18.0  2022
+3  Counting Stars  1  Science  30.0  2023
+
+CREATE TABLE sales (
+    sale_id INTEGER PRIMARY KEY,
+    book_id INTEGER NOT NULL REFERENCES books(book_id),
+    sale_date TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    unit_price REAL NOT NULL
+);
+First 3 rows:
+sale_id  book_id  sale_date  quantity  unit_price
+1  1  2024-01-03  6  18.0
+2  1  2024-02-11  5  20.0
+3  2  2024-01-15  4  18.0
