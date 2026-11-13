@@ -1822,6 +1822,7 @@ class TestDeclaringInstanceValidation:
             **example,
             "name": "unused",
             "type": "train",
+            "license": "MIT",
             "jsonl_fpath": "${oc.env:AGENTVISTA_UNUSED_TRAIN_JSONL}",
         }
         selected = self._validate(
@@ -1831,7 +1832,6 @@ class TestDeclaringInstanceValidation:
                     "responses_api_agents": {
                         "impl": {
                             "entrypoint": "a.py",
-                            "resources_server": {"type": "resources_servers", "name": "fixture_rs"},
                             "datasets": [{**example, "jsonl_fpath": "${example_path}"}, train],
                         }
                     }
