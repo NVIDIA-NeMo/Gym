@@ -32,6 +32,24 @@ A model in a Gym evaluation has two parts:
 
 ## 1. Read the model card first
 
+First list the benchmarks the config will run: several settings depend on them. Each setting has one
+owner:
+
+| Setting | Comes from | Goes to |
+| --- | --- | --- |
+| **From the model card** | | |
+| Sampling (`temperature`, `top_p`, `top_k`, `min_p`, ...) | The card, else the checkpoint's `generation_config.json` | The server default for what a benchmark leaves unset: `--generation-config auto`, or `--override-generation-config` in `extra_args` where the card and the file disagree. Never the client's `sampling_overrides`; the benchmark's own values win (section 3). |
+| Chat template | The checkpoint's own; another only when the card names it | `--chat-template <path>` in `extra_args`, only in that case (section 2). |
+| Reasoning on or off, and the switch's name | The card, and the template (`chat_template.jinja`) | `chat_template_kwargs` on the client, unless the benchmark sets it (section 3). |
+| Output budget | Never the card: the benchmark's | Nothing to set; record the card's value (section 3). |
+| **From the model and the planned benchmarks** | | |
+| Reasoning parser | The model family; needed when it reasons | `--reasoning-parser` in `extra_args`, `uses_reasoning_parser` on the client (sections 2, 3). |
+| Tool-call parser | The template's tool-call format; needed when any planned benchmark uses tools (its agent sends `tools`) | `--enable-auto-tool-choice --tool-call-parser <p>` in `extra_args`. Without it, do not run a tool-using benchmark: every rollout fails. The smoke checks the tool calls (section 6). |
+| Context length | The model's limit (card or `config.json`) and the planned benchmarks' longest prompt plus output budget | `--max-model-len` in `extra_args`: at least what the benchmarks need, at most the model's limit. |
+| Multimodal limits | The planned benchmarks' most images (or other media) per request | vLLM's `--limit-mm-per-prompt` in `extra_args` (check its syntax in the image's vLLM). A text-only model does not run a vision benchmark. |
+| **From whoever deploys the model** | | |
+| Parallelism (tensor, pipeline, expert), `number_of_instances`, `--max-num-seqs`, `--gpu-memory-utilization`, nodes and GPUs per node | Their `services.policy` block or the serving params of the request | Use them as given; ask when none are given. This skill does not choose them, and they do not change the outputs (section 8). |
+
 Collect before writing anything: the context length, the recommended sampling settings, whether
 the model reasons (and which vLLM reasoning parser its family uses), its tool-call format (and the
 vLLM tool-call parser), whether its chat template has a reasoning switch and what it is called, and
