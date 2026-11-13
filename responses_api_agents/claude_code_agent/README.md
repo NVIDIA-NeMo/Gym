@@ -103,14 +103,14 @@ claude_code_agent:
         name: my_verifier
       concurrency: 32
       model: claude-sonnet-4-6
-      anthropic_api_key: ${anthropic_api_key}
+      anthropic_api_key: ${oc.select:anthropic_api_key,""}
       anthropic_base_url: null
       max_turns: 30
       timeout: 300
       system_prompt: null
       allowed_tools: null
       disallowed_tools: null
-      claude_code_version: null
+      claude_code_version: "2.1.108"
       thinking: null
       max_thinking_tokens: null
       fold_thinking: null
@@ -121,14 +121,14 @@ claude_code_agent:
 
 - `concurrency`: max simultaneous `run()` calls
 - `model`: model name. Full names like `Qwen/Qwen3-4B-Instruct-2507` are kept as-is for local endpoints; the provider prefix is stripped only when `anthropic_base_url` is not set
-- `anthropic_api_key`: Anthropic API key, or any non-empty string for local endpoints
+- `anthropic_api_key`: Anthropic API key, needed only when the CLI calls the Anthropic API directly (no `model_server` or `anthropic_base_url`). Read from the top-level `anthropic_api_key` when set, otherwise empty
 - `anthropic_base_url`: if set, used as `ANTHROPIC_BASE_URL`. Leave null for the real Anthropic API
 - `max_turns`: passed to `--max-turns`. Set to `null` to omit the flag entirely (unlimited turns)
 - `timeout`: per-request wall-clock seconds. On timeout the CLI is killed and the transcript streamed so far is returned
 - `system_prompt`: appended to Claude Code's built-in system prompt via `--append-system-prompt`. The data's system message (if any) is also appended after this.
 - `allowed_tools`: passed to `--allowedTools` (e.g. `"Bash,Read"`)
 - `disallowed_tools`: passed to `--disallowedTools`
-- `claude_code_version`: npm version to pin on auto-install (null means latest)
+- `claude_code_version`: npm version to pin on auto-install. The shipped config pins the tested version, 2.1.108; sandbox sessions require an exact version, while `null` installs the latest for local runs
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
 - `fold_thinking`: whether thinking is folded into the assistant message text as `<think>...</think>`. `null` (default) folds it unless training-token capture is on. `false` returns the capture-style transcript without capture: thinking as separate `reasoning` items, so the final message holds only the answer (useful when a judge grades the final message). `true` is rejected under capture
