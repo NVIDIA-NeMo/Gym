@@ -1,0 +1,48 @@
+verina_resources_server:
+  resources_servers:
+    verina:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Verified code generation in Lean 4. Write a function that meets a formal specification and prove it.
+      value: Trains writing correct code together with a machine-checked proof of its correctness.
+      # Installed on first start (elan, Lean v4.18.0, Mathlib's prebuilt cache; about 7 GB).
+      lean_workspace: ${oc.env:VERINA_LEAN_WORKSPACE,resources_servers/verina/.lean_workspace}
+      timeout_s: 120.0
+      tests_only_reward: 0.5
+      import_mathlib: true
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/verina/data/train.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/verina/data/validation.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/verina/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+
+verina_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: verina_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+verina_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: verina_simple_agent
