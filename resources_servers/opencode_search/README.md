@@ -56,9 +56,13 @@ log. A row that ended on its budget comes back from such a verify graded and unm
 
 ## Sessions
 
-The server implements the session state hooks, so the base class serves `/seed_session` and
-`/close_session`. A session holds one sandbox, started from `sandbox_image` and `sandbox_config`.
-Grading reads nothing from it but the plugin log of an episode session, when `plugin_log_path` is set.
+On the episode path, an Environment Server seeds this server, which starts the episode's sandbox and
+lends it to the agent's session; the agent works in the sandbox; `/verify` reads the plugin log, stops
+the sandbox and grades the answer; and `/close_session` fences the session. The server implements the
+session state hooks, so the base class serves `/seed_session` and `/close_session`. A session holds one
+sandbox, started from `sandbox_image` and `sandbox_config`. Grading reads nothing from it but the plugin
+log of an episode session, when `plugin_log_path` is set. Sessions are not exported to checkpoints
+(`restart_only`): after a crash an episode starts over from its input.
 
 * **Episode seed (Environment Server).** `/seed_session` takes a `ResourcesSeedSessionRequest` and keys
   the session by its `resources_session_id`. With `sandbox_workdir` set, the seed starts the sandbox
@@ -92,17 +96,19 @@ Grading reads nothing from it but the plugin log of an episode session, when `pl
   provider reclaims it after `sandbox_config.ttl_s`. Keep `ttl_s` above the episode deadline plus the
   cleanup after it (the agent's close, then this server's, each within `cleanup_timeout_seconds`):
   verify stops the sandbox before it calls the judge, so grading needs no margin.
-* **Agent-run seed, kept for compatibility.** An agent's own `/run` seeds with the dataset row and its
-  session cookie and gets `{"sandbox_handle": ...}` back, the sandbox it attaches to. That sandbox is
-  started exactly as before episode sessions existed (the image's working directory, no task
-  label), and `/verify` stops it, since this path sends no close.
 
 Supported harnesses, each in the `allowed_agents` of the config that pairs it:
 
 * `opencode_agent`, on the episode seed. `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml`
   runs it through `single_agent_turn_legacy` and stages the OpenCode plugins that the relay agent uploads.
   That config admits no other harness, on purpose: the model's tools are OpenCode's own, shaped by those
-  plugins, and this server serves no tools, so another harness would run a different benchmark.
+  plugins, and this server serves no tools, so another harness would run a different benchmark. The
+  pairing is for evaluation only, as `opencode_agent`'s session path is; training keeps the relay
+  pairing. Run it with `++route_failures_to_sidecar=true`: a failed episode is a failure row either way,
+  and the flag keeps a `/run` that fails outright from ending the run. The BrowseComp README lists how
+  both pairings account for failures
+  ([Failure accounting](../../benchmarks/browsecomp/README.md#failure-accounting)) and the session
+  pairing's [time limits](../../benchmarks/browsecomp/README.md#time-limits).
 * `opencode_sandboxed_agent`, on the agent-run seed, as `configs/opencode_search.yaml` declares. It serves
   no agent sessions, so its configs (`benchmarks/browsecomp/configs/browsecomp_opencode.yaml` and
   `configs/opencode_search_example.yaml`) declare a `legacy_agent` relay in front of it.
@@ -110,6 +116,35 @@ Supported harnesses, each in the `allowed_agents` of the config that pairs it:
 The episode seed lends its sandbox to any session harness that accepts `sandbox_access`; the harness brings
 its tools. With lending on, the server refuses `num_workers` above 1: lent sandboxes live in one worker's
 memory, and several workers are not tested with them.
+
+**Agent-run seed, kept for compatibility.** An agent's own `/run` seeds with the dataset row and its
+session cookie and gets `{"sandbox_handle": ...}` back, the sandbox it attaches to. That sandbox is
+started exactly as before episode sessions existed (the image's working directory, no task label), and
+`/verify` stops it, since this path sends no close; `opencode_sandboxed_agent` also stops it when its run
+ends. Without a verify, as when a run fails before grading, the server keeps it until it shuts down, or
+the provider reclaims it after `ttl_s`. On this path:
+
+* the first cookie seed in a server process logs that cookie seeds are deprecated;
+* a seed whose cookie still holds a sandbox stops that sandbox first; if the stop fails, the seed answers
+  500 and the earlier sandbox stays registered;
+* the sandbox is registered before it starts, so a seed that fails or is cancelled while it starts
+  stops it;
+* every stop (at verify, on a repeated seed, at shutdown) is shielded from request cancellation and
+  bounded at 120 s (`STOP_TIMEOUT_S`, as for lent sandboxes);
+* a stop that fails at verify leaves the grade in place: it is logged and recorded on the verify
+  response as a `session_release_failed` failure, and the sandbox stays registered until a later stop or
+  shutdown.
+
+The grading semantics above (masked verdict-less rows, the breaker's count, `evaluation_completed`) and
+verify-once with 409 apply on this path too.
+
+A session gets no tools from this server: the BrowseComp session preset sets
+`resources_tool_transports: []`, and OpenCode's web tools reach the web from the sandbox. The web-search
+cache proxy (`POST /mcp`, registered only when the cache is configured in `configs/opencode_search.yaml`)
+is not part of a session either: it reads no session cookie and keeps no session state, and it serves
+every session's searches while the cache is on. So it keeps answering after a session closes, on
+purpose: there is no per-session tool to refuse. It owns the `/mcp` route, so this server cannot also set
+`expose_tools_over_mcp`.
 
 ### What differs from the relay
 
@@ -129,10 +164,6 @@ model sees differently. On this server's side:
   sandbox keeps the image's.
 * **Close.** An episode session ends with `/close_session`, which fences the ID and releases the sandbox if
   verify did not stop it, and a verify after it is masked as `session_lost`. The relay sends no close.
-
-The web-search cache proxy (`POST /mcp`, registered only when the cache is configured in
-`configs/opencode_search.yaml`) is not part of a session: it reads no session cookie and keeps no
-session state. It owns the `/mcp` route, so this server cannot also set `expose_tools_over_mcp`.
 
 ## Config
 
