@@ -292,7 +292,6 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
         "intended_use": [
             IntendedUse.EVALUATION if composition.kind == EnvironmentKind.BENCHMARK else IntendedUse.TRAINING
         ],
-        "training_allowed": "unknown",
         "requirements": {"gpu": "unknown", "network": "unknown"},
         "reward": composition.reward,
         "determinism": Determinism.UNKNOWN,

@@ -82,7 +82,6 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     assert manifest.maintainers == ["TODO"]
     benchmark = kind == EnvironmentKind.BENCHMARK
     assert manifest.intended_use == [IntendedUse.EVALUATION if benchmark else IntendedUse.TRAINING]
-    assert manifest.training_allowed == "unknown"
     assert manifest.requirements is not None
     assert (manifest.requirements.gpu, manifest.requirements.network) == ("unknown", "unknown")
     assert manifest.primary_metric == ("TODO" if benchmark else None)
