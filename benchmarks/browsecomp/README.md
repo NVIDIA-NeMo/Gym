@@ -156,16 +156,20 @@ gym eval run --no-serve <the same --config and ++ arguments> \
 - With the search cache on (`NEMO_GYM_EXA_CACHE_ROOT`), the sandbox searches through the Resources Server's `/mcp`
   proxy: add `++absolute_ip_server_types=[responses_api_models,resources_servers]`. On loopback the server refuses to
   start.
-- `NEMO_GYM_DISABLE_BASH=1` removes bash in both presets. With it, also require the plugins' report of the tool
-  surface, in an overlay that restates the whole list:
+- The preset requires only plugin lines that every arm prints. `NEMO_GYM_DISABLE_BASH=1` removes bash in both presets;
+  set `NEMO_GYM_FIX_GREP_DESCRIPTION=1` with it, as the relay preset advises, so that grep's description no longer
+  sends the model to bash and the task tool. For that arm, also require the lines its plugins print, in an overlay that
+  restates the whole list (the first and third lines extend the preset's two):
 
   ```yaml
   search_browsecomp_resources_server:
     resources_servers:
       opencode_search:
         required_plugin_markers:
-        - "[nemo-gym-plugin] web_guard version=2 contamination=on"
         - "[nemo-gym-plugin] tool_surface task=off bash=off"
+        - "[nemo-gym-plugin] tool_surface grep_description=patched removed=2/2"
+        - "[nemo-gym-plugin] web_guard version=2 contamination=on exclude_domains=47 search_transport=mcp"
+        - "[nemo-gym-plugin] bash_guard=on"
   ```
 
 ### Compare the two presets

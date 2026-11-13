@@ -67,9 +67,10 @@ search_browsecomp_resources_server:
         OPENCODE_WEBSEARCH_TYPE: ${oc.env:OPENCODE_WEBSEARCH_TYPE,""}
         NEMO_GYM_PLUGIN_LOG: /tmp/nemo-gym-plugin-receipts.log
       plugin_log_path: /tmp/nemo-gym-plugin-receipts.log
-      # Lines verify requires besides the sentinel's: the search guard loaded with the guard on, and the turn budget
-      # removed the task tool. A run whose log lacks one is refused with 422, not graded. A run with bash off also
-      # requires "[nemo-gym-plugin] tool_surface task=off bash=off" (an override replaces the whole list).
+      # Lines verify requires besides the sentinel's, which the plugins print on every arm: the search guard loaded
+      # with the guard on, and the turn budget removed the task tool. A run whose log lacks one is refused with 422,
+      # not graded. An arm's other lines go in the overlay that sets its environment, which restates the whole list;
+      # the bash-off arm's are in benchmarks/browsecomp/README.md.
       required_plugin_markers:
       - "[nemo-gym-plugin] web_guard version=2 contamination=on"
       - "[nemo-gym-plugin] tool_surface task=off"
