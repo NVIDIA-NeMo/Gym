@@ -87,6 +87,7 @@ async def test_scaffolded_verifier_journey_reaches_published_catalog_entry(
             "description": "A complete local fixture environment.",
             "licensing": "Apache-2.0",
             "authors": ["contributor"],
+            "maintainers": ["contributor"],
         }
     )
     manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
@@ -107,6 +108,8 @@ async def test_scaffolded_verifier_journey_reaches_published_catalog_entry(
         {"description": "TODO: describe this environment"},
         {"authors": ["TODO"]},
         {"licensing": "unknown"},
+        {"maintainers": ["alice-nv", "TODO"]},
+        {"primary_metric": "TODO"},
     ],
 )
 def test_publication_rejects_scaffold_placeholders(tmp_path: Path, updates: dict[str, object]) -> None:

@@ -48,6 +48,10 @@ def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]
         placeholders.append("description")
     if any(_is_placeholder(author) for author in manifest.authors):
         placeholders.append("authors")
+    if any(_is_placeholder(maintainer) for maintainer in manifest.maintainers or ()):
+        placeholders.append("maintainers")
+    if _is_placeholder(manifest.primary_metric):
+        placeholders.append("primary_metric")
     if manifest.licensing == "unknown":
         placeholders.append("licensing")
     if manifest.kind == EnvironmentKind.BENCHMARK:
