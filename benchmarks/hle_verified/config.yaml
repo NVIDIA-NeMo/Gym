@@ -6,6 +6,8 @@ hle_verified_equivalence_llm_judge_resources_server:
   _inherit_from: equivalence_llm_judge
   resources_servers:
     equivalence_llm_judge:
+      report_slice_fields: [category, raw_subject, modality]
+      report_slice_cross_fields: [[modality, category], [modality, raw_subject]]
       judge_model_server:
         type: responses_api_models
         name: policy_model
