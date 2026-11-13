@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from aiohttp import web
 from fastapi import HTTPException
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
@@ -22,7 +24,7 @@ from resources_servers.mcp_atlas.app import (
     MCPAtlasVerifyRequest,
     tool_output_text,
 )
-from resources_servers.mcp_atlas.sandbox import HTTP_HELPER_PATH, SandboxError
+from resources_servers.mcp_atlas.sandbox import HTTP_HELPER_PATH, AtlasSandbox, SandboxError
 from resources_servers.mcp_atlas.tests.fake_agent_environment import FakeAgentEnvironment
 from resources_servers.mcp_atlas.tests.test_sandbox import ExecSandbox, FakeSandbox, pool
 from resources_servers.mcp_atlas.tests.test_verifier import message, response
@@ -565,13 +567,58 @@ async def test_returned_program_deadline_is_scored_at_the_tool_response_boundary
         await env.stop()
 
 
-async def test_bridge_timeout_remains_an_infrastructure_failure_even_for_a_code_tool(environment, monkeypatch) -> None:
+async def test_default_bridge_budget_allows_a_delayed_program_timeout_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omegaconf import OmegaConf
+
+    import resources_servers.mcp_atlas.app as app_module
+    from resources_servers.mcp_atlas.sandbox import call_sandbox_tool
+
+    class DelayedEnvironment(FakeAgentEnvironment):
+        async def _call_tool(self, request: web.Request) -> web.Response:
+            # Scale the real HTTP deadline below, so this exceeds the former 60 s budget without
+            # spending minutes in a unit test. Only the external tool environment is synthetic.
+            await asyncio.sleep(0.12)
+            return await super()._call_tool(request)
+
+    code_tool = "mcp-code-executor_execute_code"
+    text = "Failed to call tool: Timed out running the program"
+    env = DelayedEnvironment([code_tool], {code_tool: (500, {"detail": text})})
+    url = await env.start()
+    budgets: list[float] = []
+
+    async def scaled_transport(
+        box: AtlasSandbox, name: str, arguments: dict[str, object], *, timeout_s: float
+    ) -> tuple[int, object]:
+        budgets.append(timeout_s)
+        return await call_sandbox_tool(box, name, arguments, timeout_s=timeout_s / 1000)
+
+    monkeypatch.setattr(app_module, "call_sandbox_tool", scaled_transport)
+    try:
+        server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"))
+        await seed(server, metadata={**META, "enabled_tools": [code_tool], "servers": ["mcp-code-executor"]})
+        output = await server.call_tool(http_request(), code_tool, {"code": "while True: pass"})
+        result = await server.verify(http_request(), verify_body("wrong answer"))
+        assert text in output and len(env.calls) == 1
+        assert result.reward == 0 and result.mask_sample is False and result.service_errors == []
+        assert budgets and all(budget > 1800 for budget in budgets)
+        official = OmegaConf.load(Path(__file__).resolve().parents[1] / "configs/mcp_atlas.yaml")
+        assert budgets == [official.mcp_atlas.resources_servers.mcp_atlas.tool_call_timeout_s]
+    finally:
+        await env.stop()
+
+
+@pytest.mark.parametrize("mask_service_errors", [False, True])
+async def test_bridge_timeout_remains_an_infrastructure_failure_even_for_a_code_tool(
+    environment: tuple[FakeAgentEnvironment, str], monkeypatch: pytest.MonkeyPatch, mask_service_errors: bool
+) -> None:
     import resources_servers.mcp_atlas.app as app_module
 
     _, url = environment
     code_tool = "mcp-code-executor_execute_code"
     monkeypatch.setattr(app_module, "call_sandbox_tool", AsyncMock(side_effect=asyncio.TimeoutError))
-    server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"))
+    server = make_server(url, judge_client("not_fulfilled", "not_fulfilled"), mask_service_errors=mask_service_errors)
     await seed(server, metadata={**META, "enabled_tools": [code_tool], "servers": ["mcp-code-executor"]})
     await server.call_tool(http_request(), code_tool, {"code": "print(1)"})
     result = await server.verify(http_request(), verify_body("answer"))

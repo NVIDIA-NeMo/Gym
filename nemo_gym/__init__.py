@@ -51,8 +51,6 @@ RESULTS_DIR = WORKING_DIR / "results"
 # CLI's `--search-dir` is folded into this var (see nemo_gym.cli.main), so flag and env var are one channel.
 # Read at call time so it reflects the current environment (incl. spawned server subprocesses).
 NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME = "NEMO_GYM_EXTRA_ROOTS"
-# Internal handoff, not a user setting: JSON absolute read roots captured before a controller launches a component.
-NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_INPUT_ROOTS"
 
 
 def _extra_roots() -> List[Path]:

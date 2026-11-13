@@ -15,7 +15,7 @@ mcp_atlas:
       sandbox_options: ${oc.select:mcp_atlas_sandbox_options,{}}
       sandbox_max_concurrency: 32
       sandbox_startup_timeout_s: 600
-      tool_call_timeout_s: 60
+      tool_call_timeout_s: 1860
       max_tool_calls: 100
       pass_threshold: 0.75
       mask_service_errors: true

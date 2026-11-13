@@ -32,6 +32,7 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.resolved_config import write_resolved_config
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.cli.eval import _finalize_live_exporters
+from nemo_gym.config.config_types import INPUT_READ_ROOTS_KEY_NAME
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -42,6 +43,7 @@ class Client:
     def __init__(self):
         self.artifacts = {}
         self.metrics = {}
+        self.params = {}
         self.tags = {}
         self.status = "RUNNING"
         self.futures = []
@@ -58,6 +60,7 @@ class Client:
         self.artifacts[path] = value
 
     def log_batch(self, run_id, params=(), metrics=(), tags=(), **kwargs):
+        self.params.update({p.key: p.value for p in params})
         self.metrics.update({m.key: m.value for m in metrics})
         self.tags.update({t.key: t.value for t in tags})
         future = Future()
@@ -78,7 +81,7 @@ class Client:
     def get_run(self, run_id):
         return SimpleNamespace(
             info=SimpleNamespace(run_id=run_id, status=self.status),
-            data=SimpleNamespace(metrics=self.metrics, tags=self.tags),
+            data=SimpleNamespace(metrics=self.metrics, tags=self.tags, params=self.params),
         )
 
     def set_terminated(self, run_id, status):
@@ -89,7 +92,9 @@ class Client:
 
 
 @pytest.fixture
-def live(tmp_path, monkeypatch):
+def live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> tuple[RunArtifacts, module.MLflowExporter, Client]:
     output = tmp_path / "artifacts" / "rollouts.jsonl"
     output.parent.mkdir()
     source = tmp_path / "inputs.jsonl"
@@ -135,6 +140,8 @@ def live(tmp_path, monkeypatch):
             "mlflow_run_name": "run",
         }
     )
+    if getattr(request, "param", False):
+        config[INPUT_READ_ROOTS_KEY_NAME] = ["/controller"]
     write_resolved_config(config, output)
     aggregate = [{"agent_ref": {"name": "agent"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}]
     artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(aggregate))
@@ -151,12 +158,22 @@ def live(tmp_path, monkeypatch):
     return artifacts, exporter, client
 
 
-def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
+@pytest.mark.parametrize(
+    "live,controller_roots",
+    [(False, []), (True, ["/controller"])],
+    indirect=["live"],
+    ids=["authored-config", "runtime-read-roots"],
+)
+def test_final_live_delivery_uses_same_run_and_existing_consumer(live, controller_roots: list[str]) -> None:
     artifacts, exporter, client = live
+    assert list(exporter.global_config_dict.get(INPUT_READ_ROOTS_KEY_NAME, [])) == controller_roots
     before = _artifact_version(artifacts)
     scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
     assert not artifacts.export_done_fpath("mlflow").exists()
+    saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
+    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved_config
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert client.run_tags == {}
     receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
     assert receipt == {
         "version": 1,
@@ -165,6 +182,13 @@ def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
         "uploaded_rollouts": True,
         "rollout_projection_version": 1,
     }
+    exported_config = client.artifacts[exporter.CONFIG_ARTIFACT_FILE]
+    assert exported_config == saved_config
+    assert INPUT_READ_ROOTS_KEY_NAME not in saved_config
+    assert INPUT_READ_ROOTS_KEY_NAME not in exported_config
+    assert client.params["mlflow_run_name"] == "run"
+    assert not any(key.startswith(INPUT_READ_ROOTS_KEY_NAME) for key in client.params)
+    assert list(exporter.global_config_dict.get(INPUT_READ_ROOTS_KEY_NAME, [])) == controller_roots
     assert client.status == "FINISHED"
     after = _artifact_version(artifacts)
     assert {k: v for k, v in after.items() if k != "aggregate_metrics_json_fpath"} == {

@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
-import json
 import os
 import select
 import shlex
@@ -29,12 +28,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.server_runtime.supervisor.server_venv
 import nemo_gym.utils.venv_setup
-from nemo_gym import (
-    NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME,
-    PARENT_DIR,
-    _resolve_under_cwd_or_install,
-    component_search_roots,
-)
+from nemo_gym import PARENT_DIR
 from nemo_gym.config.global_config import UV_VENV_DIR_KEY_NAME
 from nemo_gym.server_runtime.supervisor.server_venv import (
     _LOCAL_NEMO_GYM_REQUIREMENT_RE,
@@ -373,9 +367,6 @@ class TestCLISetupCommandRunCommand:
             env={
                 "PYTHONPATH": "/my path",
                 "UV_CACHE_DIR": "default uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",
@@ -402,9 +393,6 @@ class TestCLISetupCommandRunCommand:
             env={
                 "PYTHONPATH": "/my path:existing pythonpath",
                 "UV_CACHE_DIR": "default uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",
@@ -467,9 +455,6 @@ class TestCLISetupCommandRunCommand:
             shell=True,
             env={
                 "NEMO_GYM_EXTRA_ROOTS": "/root",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
                 "NEMO_GYM_CONFIG_DICT": "api_key: synthetic-test-secret",
                 "PYTHONPATH": "/root/resources_servers/my_server:/root",
                 "UV_CACHE_DIR": "default uv cache dir",
@@ -497,78 +482,6 @@ class TestCLISetupCommandRunCommand:
 
         assert Popen_mock.call_args.kwargs["env"]["NEMO_GYM_EXTRA_ROOTS"] == "/root:/plugin-a:/plugin-b"
 
-    def test_project_worker_keeps_controller_read_roots_before_changing_import_precedence(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path
-    ) -> None:
-        popen, _ = self._setup(monkeypatch)
-        controller = tmp_path / "controller"
-        controller.mkdir()
-        plugin = tmp_path / "plugin"
-        component = tmp_path / "component"
-        monkeypatch.chdir(controller)
-        monkeypatch.delenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, raising=False)
-        extra_roots = f"relative-plugin{os.pathsep}{plugin}"
-        monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", extra_roots)
-        monkeypatch.setattr(
-            nemo_gym.server_runtime.supervisor.server_venv, "environ", {"NEMO_GYM_EXTRA_ROOTS": extra_roots}
-        )
-        run_command("my command", component / "resources_servers" / "sample", project_root=component)
-        environment = popen.call_args.kwargs["env"]
-        assert json.loads(environment[NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME]) == [
-            str(controller / "relative-plugin"),
-            str(plugin),
-            str(controller),
-            str(PARENT_DIR.absolute()),
-        ]
-        assert environment["NEMO_GYM_EXTRA_ROOTS"] == f"{component}{os.pathsep}{extra_roots}"
-        assert environment["PYTHONPATH"] == f"{component}/resources_servers/sample:{component}"
-        assert NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME not in os.environ
-
-    def test_nested_worker_preserves_original_controller_read_roots(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path
-    ) -> None:
-        popen, _ = self._setup(monkeypatch)
-        worker = tmp_path / "worker"
-        worker.mkdir()
-        snapshot = json.dumps([str(tmp_path / "controller"), str(tmp_path / "original-plugin")])
-        monkeypatch.chdir(worker)
-        monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(worker))
-        monkeypatch.setattr(
-            nemo_gym.server_runtime.supervisor.server_venv,
-            "environ",
-            {NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: snapshot, "NEMO_GYM_EXTRA_ROOTS": str(worker)},
-        )
-        run_command("my command", worker / "nested", project_root=worker)
-        assert popen.call_args.kwargs["env"][NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME] == snapshot
-
-    def test_wheel_worker_preserves_controller_origin_despite_relative_input_shadows(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path
-    ) -> None:
-        popen, _ = self._setup(monkeypatch)
-        controller = tmp_path / "controller"
-        installed = tmp_path / "wheel" / "site-packages"
-        worker = installed / "resources_servers" / "mcp_atlas"
-        controller.mkdir()
-        worker.mkdir(parents=True)
-        for origin in (controller, installed, worker):
-            (origin / "tasks.jsonl").write_text("{}\n")
-        monkeypatch.chdir(controller)
-        monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS", raising=False)
-        monkeypatch.delenv(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym, "PARENT_DIR", installed)
-        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
-        controller_input = _resolve_under_cwd_or_install("tasks.jsonl")
-        assert controller_input == controller / "tasks.jsonl"
-        run_command("my command", worker)
-        environment = popen.call_args.kwargs["env"]
-        input_roots = json.loads(environment[NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME])
-        assert input_roots == [str(controller), str(installed)]
-        assert environment["PYTHONPATH"] == str(worker)
-        assert "NEMO_GYM_EXTRA_ROOTS" not in environment
-        monkeypatch.chdir(worker)
-        assert _resolve_under_cwd_or_install("tasks.jsonl") == worker / "tasks.jsonl"
-        assert Path(input_roots[0]) / "tasks.jsonl" == controller_input
-
     def test_custom_uv_cache_dir(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
 
@@ -586,9 +499,6 @@ class TestCLISetupCommandRunCommand:
             env={
                 "PYTHONPATH": "/my path",
                 "UV_CACHE_DIR": "my uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",
@@ -672,9 +582,6 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             env={
                 "PYTHONPATH": "/root/resources_servers/my_server",
                 "UV_CACHE_DIR": "default uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",
@@ -702,9 +609,6 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             env={
                 "PYTHONPATH": "/root/resources_servers/my_server",
                 "UV_CACHE_DIR": "default uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",
@@ -1098,9 +1002,6 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             env={
                 "PYTHONPATH": "/root/resources_servers/my_server",
                 "UV_CACHE_DIR": "default uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",
@@ -1129,9 +1030,6 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             env={
                 "PYTHONPATH": "/root/resources_servers/my_server",
                 "UV_CACHE_DIR": "default uv cache dir",
-                NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME: json.dumps(
-                    [str(root.absolute()) for root in component_search_roots()]
-                ),
             },
             stdout="stdout",
             stderr="stderr",

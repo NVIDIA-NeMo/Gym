@@ -18,11 +18,13 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
 - **Limits.** 256 model turns (`max_steps`) and 100 tool calls; calls past the 100th return an error that asks
   for the final answer. The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/run_eval.py#L344-L345)
   uses a default 1800 s per-task request deadline and records a timeout as an `ERROR` response. This
-  resources server sets no per-task wall-clock deadline; its 60 s tool timeout and sandbox TTL do not
-  enforce that deadline.
+  resources server sets no per-task wall-clock deadline. Its bridge timeout defaults to 1860 s, giving a
+  response the upstream task budget plus 60 s of transport headroom; this is not a tool execution limit.
+  The bridge timeout and sandbox TTL do not enforce the upstream task deadline.
 - **Concurrency.** Tool calls within one rollout are serialized under its session lock. Verification and
-  close wait for an active call, up to `tool_call_timeout_s` (60 s by default), before stopping its sandbox.
-  Different rollouts can run concurrently.
+  close wait for the active call before stopping its sandbox. `tool_call_timeout_s` is a fresh per-call
+  bridge/provider budget (1860 s by default); cancellation cleanup can add delay, and the sandbox's
+  remaining TTL can expire earlier. Different rollouts can run concurrently.
 - **Answer.** The final answer is the last assistant message with non-empty text.
 - **Judge.** Each ground-truth claim is judged on its own against the final answer only, with upstream's
   `score_claims.py` prompt, structured output and temperature 0. The default judge is
@@ -84,6 +86,14 @@ also scored, even when their text says `Client failed to connect` or `session wa
 and files can produce arbitrary text. An actual bridge or provider transport timeout is instead
 `mcp_atlas:sandbox_unreachable`, an infrastructure failure. A legacy saved `tool_timeout` marker does not
 establish that a model program timed out; it retains its historical service-failure masking policy.
+Calling a local program tool before a transport failure does not establish that the program caused the
+failure: provider loss, sandbox TTL expiry and a terminated bridge can report the same error. Attribution
+of model-caused environment destruction requires runtime evidence beyond that ordering; it remains an
+acceptance check before scoring, rather than turning unknown infrastructure failures into model zeroes.
+The attribution gap also applies when a command terminates an enabled server outside that local-tool
+list: returned errors with a recognized leading connection/session diagnostic remain `service_error`,
+masked when `mask_service_errors` is set. Returned errors from the listed local tools are still scored;
+for example, a returned connection error from `memory` or `filesystem` is a model observation.
 `service_errors` in a scored verify response lists its recorded failures. `gym eval reverify` recomputes
 the score and mask from saved `service_errors` and `tool_calls`, preserving that legacy attribution.
 

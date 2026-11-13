@@ -132,13 +132,16 @@ Raw `--env`/`--env-file` extra arguments are also rejected on both paths. Set wo
 `sandbox_env` so task credential scoping applies; the provider's internal environment file generated from
 `SandboxSpec.env` is retained. These guards do not establish deployment isolation.
 
-Tool calls within one rollout run serially under its session lock. Verification and close wait for an
-active call, up to `tool_call_timeout_s` (60 s by default). Different rollouts can run concurrently.
+Tool calls within one rollout run serially under its session lock. Verification and close wait for the
+active call. `tool_call_timeout_s` is a fresh per-call bridge/provider budget (1860 s by default);
+cancellation cleanup can add delay, and the sandbox's remaining TTL can expire earlier. Different
+rollouts can run concurrently.
 The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/run_eval.py#L344-L345)
 uses a default 1800 s per-task request deadline and records timeout as an `ERROR` response. This resources
-server sets no per-task wall-clock deadline; the tool timeout and sandbox TTL do not reproduce the
-upstream deadline. A real tool's program deadline may differ from the bridge deadline and still needs
-runtime qualification.
+server sets no per-task wall-clock deadline. The bridge default gives a response that task budget plus
+60 s of transport headroom; it is not a limit enforced on every tool's program. The bridge timeout and
+sandbox TTL do not reproduce the upstream task deadline. Real program deadlines and model-caused
+environment destruction still need runtime qualification before scores are accepted.
 
 ## Inspect results and failures
 
@@ -153,6 +156,14 @@ separately from model failures. An execution-deadline error actually returned by
 model-written code is scored. Returned errors from local program, command, file and state tools also
 remain model observations even when their text says `Client failed to connect` or `session was closed`.
 An actual bridge/provider transport timeout is an infrastructure failure.
+The order of a program tool call followed by transport loss does not establish that the program caused
+the loss: provider failure, sandbox TTL expiry and a terminated bridge can report the same error.
+Keep such unknown infrastructure failures separate from model zeroes until runtime evidence supplies
+reliable attribution.
+For servers outside the [local-tool list](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#who-failed),
+a returned error with a recognized leading connection/session diagnostic remains `service_error`, masked when
+`mask_service_errors` is set. Returned errors from those local tools are still scored; a returned
+connection error from `memory` or `filesystem`, for example, remains a model observation.
 Legacy saved `tool_timeout` markers do not establish a model-program timeout; re-verification preserves
 their historical service-failure masking policy rather than relabeling them as model outcomes.
 Recognized authentication errors from credentialed, enabled services on trusted startup or tool-error

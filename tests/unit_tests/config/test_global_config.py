@@ -29,6 +29,7 @@ import nemo_gym.config.global_config
 import nemo_gym.server_runtime.base_server
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config.config_types import (
+    INPUT_READ_ROOTS_KEY_NAME,
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
@@ -87,6 +88,7 @@ class TestGlobalConfig:
     @property
     def _default_global_config_dict_values(self) -> dict:
         return {
+            INPUT_READ_ROOTS_KEY_NAME: [str(root.absolute()) for root in nemo_gym.component_search_roots()],
             "use_absolute_ip": False,
             "head_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
@@ -3889,3 +3891,77 @@ def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch:
         GlobalConfigDictParser().parse_global_config_dict_from_cli()
 
     assert hydra_main_module.get_args_parser is original
+
+
+class TestInputReadRoots:
+    @staticmethod
+    def _parse(dataset: dict, **overrides) -> DictConfig:
+        config = {
+            "allow_openai_version_skew": True,
+            "resource": {
+                "resources_servers": {"example": {"entrypoint": "app.py", "domain": "other", "datasets": [dataset]}}
+            },
+        }
+        config.update(overrides)
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.create(config),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_controller_roots_survive_actual_worker_config_reload(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        controller = tmp_path / "controller"
+        worker = tmp_path / "installed" / "resources_servers" / "example"
+        controller.mkdir()
+        worker.mkdir(parents=True)
+        installed = worker.parents[1]
+        monkeypatch.chdir(controller)
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "relative-plugin")
+        monkeypatch.setattr(nemo_gym, "PARENT_DIR", installed)
+        dataset = {"name": "tasks", "type": "benchmark", "jsonl_fpath": "data/tasks.jsonl"}
+        loaded = self._parse(dataset, **{INPUT_READ_ROOTS_KEY_NAME: ["stale-relative-hint"]})
+        expected = [str(controller / "relative-plugin"), str(controller), str(installed)]
+        assert loaded[INPUT_READ_ROOTS_KEY_NAME] == expected
+        assert OmegaConf.to_container(get_first_server_config_dict(loaded, "resource").datasets) == [dataset]
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, OmegaConf.to_yaml(loaded))
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.chdir(worker)
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(worker))
+        reloaded = get_global_config_dict()
+        assert reloaded[INPUT_READ_ROOTS_KEY_NAME] == expected
+        assert OmegaConf.to_container(get_first_server_config_dict(reloaded, "resource").datasets) == [dataset]
+
+    def test_unset_dataset_environment_path_stays_lazy(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delenv("VISION2CODE_EVAL_TASKS", raising=False)
+        dataset = {
+            "name": "tasks",
+            "type": "benchmark",
+            "jsonl_fpath": "${oc.env:VISION2CODE_EVAL_TASKS}",
+        }
+        loaded = self._parse(dataset)
+        assert OmegaConf.to_container(get_first_server_config_dict(loaded, "resource").datasets) == [dataset]
+        assert "${oc.env:VISION2CODE_EVAL_TASKS}" in OmegaConf.to_yaml(loaded)
+        assert all(Path(root).is_absolute() for root in loaded[INPUT_READ_ROOTS_KEY_NAME])
+
+    def test_dataset_can_reference_artifact_root_filled_later_in_parse(self) -> None:
+        dataset = {"name": "tasks", "type": "benchmark", "jsonl_fpath": "${results_dir}/tasks.jsonl"}
+        loaded = self._parse(dataset)
+        declaration = get_first_server_config_dict(loaded, "resource").datasets[0]
+        assert declaration.jsonl_fpath == str(RESULTS_DIR.expanduser().resolve() / "tasks.jsonl")
+        assert OmegaConf.to_container(get_first_server_config_dict(loaded, "resource").datasets) == [dataset]
+
+    def test_final_inherited_dataset_declaration_stays_unchanged(self, tmp_path: Path) -> None:
+        replacement = {"name": "replacement", "type": "benchmark", "jsonl_fpath": str(tmp_path / "tasks.jsonl")}
+        loaded = self._parse(
+            {"name": "inherited", "type": "benchmark", "jsonl_fpath": "old.jsonl"},
+            replacement={
+                "_inherit_from": "resource",
+                "resources_servers": {"example": {"datasets": [replacement]}},
+            },
+        )
+        assert OmegaConf.to_container(get_first_server_config_dict(loaded, "replacement").datasets) == [replacement]

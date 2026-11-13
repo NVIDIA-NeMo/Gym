@@ -156,7 +156,9 @@ class MCPAtlasResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_startup_timeout_s: PositiveFloat = 600
     sandbox_ttl_s: PositiveFloat = 3600
     sandbox_scratch_root: Optional[str] = None
-    tool_call_timeout_s: PositiveFloat = 60
+    # Give a tool response the upstream driver's 1800 s task budget plus transport headroom.
+    # This is a bridge deadline, not a claim about every installed tool's execution limit.
+    tool_call_timeout_s: PositiveFloat = 1860
     max_tool_calls: PositiveInt = 100
     judge_model_server: ModelServerRef
     judge_max_tokens: Optional[PositiveInt] = None

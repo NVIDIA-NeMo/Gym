@@ -30,13 +30,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from nemo_gym import NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME
+from nemo_gym.config import INPUT_READ_ROOTS_KEY_NAME
 from nemo_gym.core import is_materialized_task_row
 from nemo_gym.data import normalize_task_fields
 
@@ -207,31 +206,24 @@ def _row_servers(row: object) -> list[str]:
     return enabled_servers(fields.get("servers"))
 
 
-def _dataset_path(jsonl_fpath: str, root: Path) -> Path:
+def _dataset_path(jsonl_fpath: str | Path, *, read_roots: object, root: Path) -> Path:
     path = Path(jsonl_fpath)
     if path.is_absolute():
         return path
-    snapshot = os.environ.get(NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME)
-    roots = [root.absolute()]
-    if snapshot is not None:
-        try:
-            serialized_roots = json.loads(snapshot)
-        except ValueError as exc:
-            raise CredentialConfigurationError(
-                f"invalid internal controller input-root snapshot; unset {NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME} "
-                "in the launching environment and relaunch"
-            ) from exc
-        if (
-            not isinstance(serialized_roots, list)
-            or not serialized_roots
-            or not all(isinstance(value, str) and Path(value).is_absolute() for value in serialized_roots)
-        ):
-            raise CredentialConfigurationError(
-                "internal controller input-root snapshot must contain absolute resource-host-visible roots; "
-                f"unset {NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME} in the launching environment and relaunch"
-            )
-        roots = [Path(value) for value in serialized_roots]
-    return next((candidate / path for candidate in roots if (candidate / path).exists()), roots[0] / path)
+    if read_roots is None:
+        return root.absolute() / path  # Direct library callers supply their known input origin.
+    if (
+        not isinstance(read_roots, Sequence)
+        or isinstance(read_roots, (str, bytes))
+        or not read_roots
+        or not all(isinstance(value, (str, Path)) and Path(value).is_absolute() for value in read_roots)
+    ):
+        raise CredentialConfigurationError(
+            "internal controller read roots must be nonempty absolute resource-host-visible paths; "
+            "reload the config in the controller before launching the resources server"
+        )
+    paths = [Path(value) / path for value in read_roots]
+    return next((candidate for candidate in paths if candidate.exists()), paths[0])
 
 
 def configured_dataset_servers(
@@ -239,7 +231,7 @@ def configured_dataset_servers(
 ) -> DatasetServerRequirements:
     """Read server requirements only from datasets wired to this resources server.
 
-    Relative reads follow the controller's captured roots; direct callers provide their known origin in
+    Relative reads follow the controller's captured read roots; direct callers provide their known origin in
     ``root``. A declared prepare script permits a missing input to be materialized later; every actual seed
     is checked again before provider allocation, including deferred inputs.
     """
@@ -247,9 +239,11 @@ def configured_dataset_servers(
     deferred: set[Path] = set()
     for declaration in _dataset_declarations(global_config, resources_server):
         for dataset in declaration.get("datasets") or ():
-            if not isinstance(dataset, Mapping) or not isinstance(dataset.get("jsonl_fpath"), str):
+            if not isinstance(dataset, Mapping) or not isinstance(dataset.get("jsonl_fpath"), (str, Path)):
                 raise CredentialConfigurationError("MCP-Atlas datasets require an explicit jsonl_fpath")
-            path = _dataset_path(dataset["jsonl_fpath"], root)
+            path = _dataset_path(
+                dataset["jsonl_fpath"], read_roots=global_config.get(INPUT_READ_ROOTS_KEY_NAME), root=root
+            )
             if not path.exists():
                 if dataset.get("prepare_script"):
                     deferred.add(path)

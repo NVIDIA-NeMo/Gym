@@ -19,6 +19,7 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym.config.config_types import INPUT_READ_ROOTS_KEY_NAME
 from nemo_gym.config.secret_utils import hide_secrets_in_container
 from nemo_gym.utils.path_utils import resolved_config_path_for
 
@@ -37,6 +38,8 @@ def write_resolved_config(global_config_dict: Mapping[str, Any], output_fpath: P
         if isinstance(global_config_dict, DictConfig)
         else dict(global_config_dict)
     )
+    # This controller-to-worker handoff describes runtime file lookup, not authored configuration.
+    container.pop(INPUT_READ_ROOTS_KEY_NAME, None)
     masked = hide_secrets_in_container(container)
     text = OmegaConf.to_yaml(OmegaConf.create(masked))
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")

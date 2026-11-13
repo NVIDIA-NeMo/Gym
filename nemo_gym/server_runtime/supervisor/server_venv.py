@@ -14,7 +14,6 @@
 # limitations under the License.
 import importlib.metadata
 import importlib.util
-import json
 import os
 import platform
 import re
@@ -30,12 +29,7 @@ from omegaconf import DictConfig, ListConfig
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from nemo_gym import (
-    NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
-    NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME,
-    PARENT_DIR,
-    component_search_roots,
-)
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.config.global_config import (
     COMPONENT_EXTRAS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
@@ -456,11 +450,6 @@ def run_command(
         working_dir_path,
         server_name=server_name,
         environment=custom_env,
-    )
-    # Preserve controller read precedence for every launch, independently of import roots and worker cwd.
-    custom_env.setdefault(
-        NEMO_GYM_INPUT_ROOTS_ENV_VAR_NAME,
-        json.dumps([str(root.absolute()) for root in component_search_roots()]),
     )
     # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
     # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
