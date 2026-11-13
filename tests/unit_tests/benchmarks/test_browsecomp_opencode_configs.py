@@ -426,6 +426,7 @@ def test_the_rows_are_the_relay_presets_questions_without_its_system_prompt_and_
 def test_the_relay_preset_keeps_its_explicit_legacy_agent_relay() -> None:
     _, relay = resolve(RELAY)
 
+    assert OmegaConf.missing_keys(relay) == set()
     assert environment_servers(relay) == {RELAY_ENVIRONMENT: ["legacy_agent"]}
     assert settings(relay, RELAY_ENVIRONMENT)["agent_server"]["name"] == RELAY_AGENT
     assert list(relay[RELAY_AGENT].responses_api_agents) == ["opencode_sandboxed_agent"]
