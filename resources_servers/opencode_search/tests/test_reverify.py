@@ -24,6 +24,12 @@ ROW = {
     "ground_truth": "Paris",
 }
 IDENTITY = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+SENTINEL = "[nemo-gym-plugin] loaded sentinel version=1 plugins=\n"
+# The line nemo_gym_turn_budget.js reports for each budget ending, which the plugin log of a run that ended so holds.
+ENDING_LINES = {
+    "max_iteration": "[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400\n",
+    "context_window": "[nemo-gym-plugin] context_overflow session=s\n",
+}
 # The materialized input a saved row is paired with: the dataset row itself, as both BrowseComp presets collect it, or
 # the task it becomes for an Environment Server that routes by taskset.
 MATERIALIZED_INPUTS = {
@@ -59,7 +65,7 @@ def _saved_row(saved_as: str, reason: str, kind: str) -> dict[str, Any]:
     receipts = {
         "opencode_terminal_reason": reason,
         "opencode_plugins_loaded": True,
-        "opencode_plugin_log": "[nemo-gym-plugin] loaded sentinel version=1 plugins=\n",
+        "opencode_plugin_log": SENTINEL + ENDING_LINES[reason],
     }
     row = ROW | IDENTITY | receipts | {"response": _response("Exact Answer: Paris"), "mask_sample": True}
     if saved_as == "graded":
