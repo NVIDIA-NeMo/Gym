@@ -92,9 +92,12 @@ async def test_a_judged_conversation_completes_its_grading_and_binds_the_reward(
     assert result.reward == pytest.approx(0.5 + 5 / 15 / 2)
     (operation,) = invocation.grading_operations
     assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
-    # Two opponents, each read in both orders. The trait judge is informational and is not a dependency.
-    assert sorted(dependency.response_id for dependency in operation.dependencies) == sorted(transport.pairwise_ids())
-    assert len(operation.dependencies) == 4
+    # Two opponents, each read in both orders, and the trait judge. Gym's trial gate requires every judge call of
+    # the verify to be a dependency of its grading, the informational trait judge included.
+    assert sorted(dependency.response_id for dependency in operation.dependencies) == sorted(
+        response_id for _, response_id in transport.replies
+    )
+    assert len(operation.dependencies) == 5
     assert [server for server, _ in transport.replies].count("traits") == 1
     assert operation.result_binding_sha256 == grading_result_binding(result)
 
@@ -138,6 +141,20 @@ async def test_a_reply_rejected_before_a_successful_retry_still_completes_the_gr
     # The rejected reply stays a dependency of the grade, beside the four accepted ones.
     assert len(operation.dependencies) == 5
     assert operation.result_binding_sha256 == grading_result_binding(result)
+
+
+async def test_a_trait_reply_without_scores_leaves_the_grading_complete(tmp_path: Path) -> None:
+    transport = JudgeTransport(winner="policy", trait_text="no scores here")
+    server = judged_server(
+        tmp_path,
+        transport,
+        trait_judge_model_server={"type": "responses_api_models", "name": "traits"},
+    )
+    result, invocation = await verify_observed(server, make_request())
+
+    assert result.trait_scores is None and result.trait_judge_error
+    (operation,) = invocation.grading_operations
+    assert operation.outcome == "completed" and len(operation.dependencies) == 5
 
 
 async def test_a_failed_judge_transport_is_a_failed_grading(tmp_path: Path) -> None:

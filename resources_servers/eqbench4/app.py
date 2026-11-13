@@ -205,37 +205,33 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
                 failure_reason=body.conversation_error or "the policy gave no visible reply",
             )
 
-        # The trait judge is informational: it starts outside the grading record, so neither its reply nor its
-        # failure changes how the pairwise grade is recorded.
-        traits = (
-            asyncio.ensure_future(self._judge_traits(body))
-            if self.config.trait_judge_model_server is not None
-            else None
-        )
-
         async def grade() -> EQBench4VerifyResponse:
+            # Every judge call of the verify belongs to its one grading operation, as Gym's trial gate requires, the
+            # informational trait judge included: its reply is part of the graded result, though never of the reward.
+            traits = (
+                asyncio.ensure_future(self._judge_traits(body))
+                if self.config.trait_judge_model_server is not None
+                else None
+            )
             tasks = [asyncio.ensure_future(self._compare(body, opponent)) for opponent in body.opponents]
             try:
                 comparisons = await asyncio.gather(*tasks)
+                trait_fields = await traits if traits is not None else {}
             except BaseException:
-                for task in tasks:
+                pending = tasks + ([traits] if traits is not None else [])
+                for task in pending:
                     task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*pending, return_exceptions=True)
                 raise
             return EQBench4VerifyResponse(
                 **fields,
                 reward=sum(comparison.fraction for comparison in comparisons) / len(comparisons),
                 policy_turns=policy_turns,
                 comparisons=comparisons,
-                **(await traits if traits is not None else {}),
+                **trait_fields,
             )
 
-        try:
-            return await observe_llm_judge_grading(grade)
-        finally:
-            if traits is not None and not traits.done():
-                traits.cancel()
-                await asyncio.gather(traits, return_exceptions=True)
+        return await observe_llm_judge_grading(grade)
 
     async def _compare(self, body: EQBench4VerifyRequest, opponent: Opponent) -> OpponentComparison:
         judges = self.config.judge_model_servers
@@ -370,6 +366,12 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
             return {"trait_judge_error": str(error)[:2000]}
         text = response_text(reply)
         scores = parse_trait_scores(text)
+        # The reply is a dependency of the grading: parsed, or rejected by the parser. The reward never rests on it,
+        # so a rejected trait reply leaves the pairwise grade complete.
+        if scores is not None:
+            record_parsed_judge_verdict()
+        else:
+            record_rejected_judge_reply()
         return {
             "trait_scores": scores,
             "trait_judge_text": text,
