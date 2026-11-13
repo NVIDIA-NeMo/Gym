@@ -1855,6 +1855,11 @@ class TestApp:
     @mark.parametrize(
         ("settings", "error"),
         [
+            # The dialect covers only the chat completions call.
+            ({"use_completions_api": True}, "dynamo_frontend is not supported with"),
+            ({"is_responses_native": True}, "dynamo_frontend is not supported with"),
+            # The frontend rejects the top-level required_prefix_token_ids field.
+            ({"supply_prefix_token_ids": True}, "dynamo_frontend is not supported with"),
             # The frontend rejects the return_token_ids field this flag sends.
             ({"request_prompt_and_generation_token_ids": True}, "return_token_ids"),
             # The frontend rejects the conversation_params field this flag sends.
@@ -1902,6 +1907,15 @@ class TestApp:
     def test_dynamo_worker_backend_pairing(self, monkeypatch: MonkeyPatch, backend, dynamo_frontend, error) -> None:
         with raises(ValueError, match=error) if error else nullcontext():
             self._setup_server(monkeypatch, external_staging_backend=backend, dynamo_frontend=dynamo_frontend)
+
+    def test_dynamo_frontend_sends_an_empty_annotation_for_a_plain_call(self, monkeypatch: MonkeyPatch) -> None:
+        # NeMo RL's chat engine refuses a chat call without the annotation, so a call with no capture and no
+        # echoed turn still carries one.
+        server = self._setup_server(monkeypatch, dynamo_frontend=True)
+        outbound = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert outbound["nvext"] == {"annotations": ["nemo_rl:gym:{}"]}
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
