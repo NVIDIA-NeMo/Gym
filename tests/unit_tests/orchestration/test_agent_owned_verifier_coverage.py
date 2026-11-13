@@ -89,7 +89,7 @@ def test_a_self_grading_agents_trial_without_a_verifier_is_observed_through_its_
     assert counts["unobserved"] == 0
 
 
-# The verdict an earlier self-grading agent run had before agents could own their verifier, read from that code.
+# An earlier self-grading run without a saved verifier remains unobserved, with its missing binding explained.
 UNOBSERVED_REASON = (
     "no completed grading operation or grading record was recorded by the verifier (a resources server the run "
     "provenance does not name)"
@@ -97,12 +97,16 @@ UNOBSERVED_REASON = (
 
 
 @pytest.mark.parametrize(("case", "trials"), [("repeats", 2), ("healthy", 1), ("wrong", 1)])
-def test_an_earlier_run_of_a_self_grading_agent_keeps_exactly_its_verdict(case, trials):
-    """No verifier invocation was saved, as before this change: verdict, reason and counts are what they were."""
+def test_an_earlier_run_of_a_self_grading_agent_keeps_its_unverified_verdict(case, trials):
+    """No verifier invocation was saved: preserve the unknown verdict and counts, with the missing binding named."""
     passed, reason, counts, covered = _gate(_agent_owned(case, record=None))
     assert (passed, covered) == (None, False)
+    unobserved_reason = (
+        f"{UNOBSERVED_REASON} with a matching saved-answer and score binding "
+        f"for {trials} of {trials} unobserved trials"
+    )
     assert reason == (
-        f"trial: UNOBSERVED {trials} of {trials} expected trials: {UNOBSERVED_REASON}, so the run is unverified, not "
+        f"trial: UNOBSERVED {trials} of {trials} expected trials: {unobserved_reason}, so the run is unverified, not "
         f"healthy; observed healthy 0, unhealthy 0; known so far: evaluation-side faults: 0 of {trials} (0.00%) is "
         f"below 2%; model faults: 0 of {trials} (0.00%); unverified: this withholds a pass and is no health failure"
     )
@@ -111,7 +115,7 @@ def test_an_earlier_run_of_a_self_grading_agent_keeps_exactly_its_verdict(case, 
         "unhealthy": 0,
         "unobserved": trials,
         "verifier_recorded": 0,
-        "unobserved_reason": UNOBSERVED_REASON,
+        "unobserved_reason": unobserved_reason,
     }
 
 

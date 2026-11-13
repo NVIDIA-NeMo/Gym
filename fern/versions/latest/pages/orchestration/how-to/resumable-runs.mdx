@@ -136,10 +136,13 @@ The optional unhealthy fraction is a **per-rollout** criterion for the existing 
 ### Unobserved trials
 
 Acceptance reports its trials in three counts, in `gate_task.trial_counts`: `observed_healthy`, `unhealthy` (the
-known failures the trial gate counts) and `unobserved`. A scored trial is unobserved when its verifier recorded no
-grading operation for it, for example a benchmark whose resources server does not record its grading. Nothing
-observed how such a trial was graded, so it is unverified: it counts neither as healthy nor as a failure, and the
-trial gate stays unknown. `unobserved_reason` names the resources servers, and the trial reason reads
+known failures the trial gate counts) and `unobserved`. Required grading evidence must bind the saved answer and
+score and be attributable to its verification owner through the run's saved routing provenance. A trial can remain
+unobserved because grading was not recorded or bound, or because missing, older or malformed provenance prevents
+ownership from resolving even when grading was recorded. It counts neither as healthy nor as a failure, and the
+trial gate stays unknown. `unobserved_reason` distinguishes these causes and names configured resources servers
+when known. An older health summary may need regeneration with compatible provenance; malformed bindings need
+investigation. Preserve the original run, its pins and its grading evidence. The trial reason reads
 `trial: UNOBSERVED <n> of <N> expected trials: ..., so the run is unverified, not healthy`. A run in which every
 trial is unobserved is never healthy; its gate status is `UNVERIFIED`, with that reason, even at full score and coverage.
 

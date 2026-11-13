@@ -17,6 +17,7 @@ from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.orchestration.recovery import (
     _bound_artifact,
     decide_from_collected,
+    failure_facts,
     grading_artifact,
     select_managed_evidence,
     trial_counts,
@@ -84,9 +85,7 @@ def test_a_bound_public_artifact_keeps_its_count_when_another_trial_is_unobserve
     )
 
 
-@pytest.mark.parametrize(
-    "change", ["malformed", "row_conflict", "missing_resources", "missing_agent", "missing_environment"]
-)
+@pytest.mark.parametrize("change", ["malformed", "row_conflict", "missing_resources", "missing_environment"])
 def test_a_public_artifact_with_unresolved_ownership_is_not_counted_as_observed(change):
     collected = _artifact_case()
     row = collected.results[0]
@@ -100,8 +99,6 @@ def test_a_public_artifact_with_unresolved_ownership_is_not_counted_as_observed(
         row["agent_ref"] = {"name": "other_agent"}
     elif change == "missing_resources":
         del environment["resources_server"]
-    elif change == "missing_agent":
-        del environment["agent_server"]
     else:
         del servers[row["_ng_environment_server"]]
     passed, reason, report, counts = _gate(collected)
@@ -489,7 +486,6 @@ async def test_collected_taskset_judge_score_joins_its_owned_call_without_an_age
         "missing_environment",
         "missing_environment_resources",
         "unknown_environment_resources",
-        "ambiguous_agent",
         "row_conflict",
     ],
 )
@@ -509,8 +505,6 @@ def test_taskset_grading_without_a_bound_owner_or_result_stays_unverified(change
         del environment["resources_server"]
     elif change == "unknown_environment_resources":
         environment["resources_server"] = None
-    elif change == "ambiguous_agent":
-        environment["agent_server"] = None
     else:
         servers["other_agent"] = dict(servers["simple"])
         row["agent_ref"] = {"name": "other_agent"}
@@ -521,7 +515,7 @@ def test_taskset_grading_without_a_bound_owner_or_result_stays_unverified(change
 
 @pytest.mark.parametrize(
     "change",
-    ["binding", "missing_resources", "unknown_resources", "missing_agent", "ambiguous_agent", "row_conflict"],
+    ["binding", "missing_resources", "unknown_resources", "row_conflict"],
 )
 def test_taskset_judge_without_a_bound_owner_or_result_is_not_counted_as_observed(change):
     collected = _session_case(judged=True)
@@ -536,10 +530,6 @@ def test_taskset_judge_without_a_bound_owner_or_result_is_not_counted_as_observe
         del environment["resources_server"]
     elif change == "unknown_resources":
         environment["resources_server"] = None
-    elif change == "missing_agent":
-        del environment["agent_server"]
-    elif change == "ambiguous_agent":
-        environment["agent_server"] = None
     else:
         servers["other_agent"] = dict(servers["simple"])
         row["agent_ref"] = {"name": "other_agent"}
@@ -565,12 +555,161 @@ def test_taskset_verifier_is_owned_by_the_environment_resources_binding():
     assert counts["verifier_recorded"] == 1 and counts["unobserved"] == 0
 
 
-async def test_shared_record_does_not_hide_a_collected_incomplete_empty_answer(tmp_path, monkeypatch):
-    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=0.0, empty=True)
+@pytest.mark.parametrize("reward", [0.0, 1.0])
+async def test_shared_grading_counts_only_zero_reward_incomplete_empty_answers_as_response_failures(
+    tmp_path, monkeypatch, reward
+):
+    saved, collected = await _collect_session(tmp_path, monkeypatch, reward=reward, empty=True)
     assert saved["response"]["status"] == "incomplete"
-    assert saved["ng_trajectory"]["verifier_invocations"][0]["grading_record"]["score"] == 0.0
+    assert saved["ng_trajectory"]["verifier_invocations"][0]["grading_record"]["score"] == reward
     passed, reason, report, counts = _gate(collected)
     assert passed is True and report["exact"] is True, reason
-    assert report["model"]["kinds"] == {"empty_answer": 1}
+    assert report["model"]["kinds"] == ({"empty_answer": 1} if reward == 0 else {})
     assert report["evaluation"]["count"] == 0
-    assert counts == {"observed_healthy": 0, "unhealthy": 1, "unobserved": 0, "verifier_recorded": 0}
+    assert counts == {
+        "observed_healthy": int(reward == 1),
+        "unhealthy": int(reward == 0),
+        "unobserved": 0,
+        "verifier_recorded": int(reward == 1),
+    }
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    response_failures = failure_facts(decision, collected)["response_failures"]
+    assert response_failures["count"] == int(reward == 0)
+    assert response_failures["by_cause"]["empty"]["count"] == int(reward == 0)
+
+
+@pytest.mark.parametrize("grading", ["record", "operation", "artifact"])
+@pytest.mark.parametrize("primary", ["absent", "ambiguous"])
+def test_an_environment_resources_binding_observes_grading_without_one_primary_agent(grading, primary):
+    collected = _artifact_case() if grading == "artifact" else _session_case(judged=grading == "operation")
+    row = collected.results[0]
+    servers = collected.quality["provenance"]["servers"]
+    environment = servers[row["_ng_environment_server"]]
+    if primary == "absent":
+        environment.pop("agent_server")
+    else:
+        environment["agent_server"] = None
+    assert "agent_ref" not in row
+    passed, reason, report, counts = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert counts == {
+        "observed_healthy": 1,
+        "unhealthy": 0,
+        "unobserved": 0,
+        "verifier_recorded": int(grading == "record"),
+    }
+
+
+@pytest.mark.parametrize("verifier", ["environment_resources", "mcqa"])
+def test_an_explicit_agent_reference_uses_the_environment_verifier_even_when_the_agent_binds_another(verifier):
+    collected = _session_case()
+    row = collected.results[0]
+    row["agent_ref"] = {"name": "simple"}
+    servers = collected.quality["provenance"]["servers"]
+    assert servers["simple"]["resources_server"] == "mcqa"
+    servers["environment_resources"] = {"kind": "resources_servers", "implementation": "test"}
+    servers[row["_ng_environment_server"]]["resources_server"] = "environment_resources"
+    row["ng_trial_observations"]["verifier_invocations"][0]["grading_record"]["verifier"] = verifier
+    passed, reason, report, counts = _gate(collected)
+    if verifier == "environment_resources":
+        assert passed is True and report["exact"] is True, reason
+        assert counts == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 1}
+    else:
+        assert passed is None and report["status"] == "UNVERIFIED", reason
+        assert counts["observed_healthy"] == counts["verifier_recorded"] == counts["unhealthy"] == 0
+        assert counts["unobserved"] == 1
+
+
+@pytest.mark.parametrize("grading", ["record", "operation", "artifact"])
+@pytest.mark.parametrize(
+    "change", ["unknown_resources", "wrong_resources_kind", "wrong_agent_kind", "result_type", "agent_ref"]
+)
+def test_invalid_owner_bindings_cannot_turn_saved_grading_into_an_observed_trial(grading, change):
+    collected = _artifact_case() if grading == "artifact" else _session_case(judged=grading == "operation")
+    row = collected.results[0]
+    servers = collected.quality["provenance"]["servers"]
+    environment = servers[row["_ng_environment_server"]]
+    if change in {"unknown_resources", "wrong_resources_kind"}:
+        environment["resources_server"] = "unregistered_resources"
+        if change == "wrong_resources_kind":
+            servers["unregistered_resources"] = {"kind": "responses_api_models", "implementation": "test"}
+        if grading == "record":
+            row["ng_trial_observations"]["verifier_invocations"][0]["grading_record"]["verifier"] = (
+                "unregistered_resources"
+            )
+    elif change == "wrong_agent_kind":
+        row["agent_ref"] = {"name": "simple"}
+        servers["simple"]["kind"] = "resources_servers"
+    elif change == "result_type":
+        row["_ng_result_type"] = "another_environment"
+    else:
+        row["agent_ref"] = "simple"
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == counts["unhealthy"] == counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 1
+
+
+@pytest.mark.parametrize("grading", ["record", "operation", "artifact"])
+@pytest.mark.parametrize("gap", ["malformed_bindings", "missing_servers"])
+def test_saved_grading_with_an_unresolved_owner_reports_the_provenance_gap(grading, gap):
+    collected = _artifact_case() if grading == "artifact" else _session_case(judged=grading == "operation")
+    row = collected.results[0]
+    provenance = collected.quality["provenance"]
+    servers = provenance["servers"]
+    environment = servers[row["_ng_environment_server"]]
+    if gap == "malformed_bindings":
+        environment["bindings_malformed"] = True
+    else:
+        provenance.pop("servers")
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == counts["unhealthy"] == counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 1
+    assert "verification owner unresolved" in counts["unobserved_reason"]
+    assert "no completed grading operation or grading record" not in counts["unobserved_reason"]
+    if gap == "malformed_bindings":
+        environment.pop("bindings_malformed")
+    else:
+        provenance["servers"] = servers
+    passed, reason, report, counts = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert counts["observed_healthy"] == 1 and counts["unobserved"] == 0
+
+
+def test_missing_grading_names_the_environment_verifier_without_an_agent_resources_binding():
+    collected = _session_case()
+    row = collected.results[0]
+    servers = collected.quality["provenance"]["servers"]
+    servers["simple"]["resources_server"] = None
+    servers["environment_resources"] = {"kind": "resources_servers", "implementation": "test"}
+    servers[row["_ng_environment_server"]]["resources_server"] = "environment_resources"
+    row["ng_trial_observations"]["verifier_invocations"][0].pop("grading_record")
+    _ungraded(row)
+    assert grading_artifact(row) is None
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == counts["unhealthy"] == counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 1
+    assert "environment_resources" in counts["unobserved_reason"]
+    assert "no completed grading operation or grading record" in counts["unobserved_reason"]
+    assert all(word in counts["unobserved_reason"] for word in ["saved", "answer", "score"])
+    assert "bound" in counts["unobserved_reason"] or "binding" in counts["unobserved_reason"]
+    assert "verification owner unresolved" not in counts["unobserved_reason"]
+
+
+def test_unobserved_trials_report_unresolved_ownership_and_missing_grading_separately():
+    collected = _session_case(case="repeats")
+    unresolved, ungraded = collected.results
+    servers = collected.quality["provenance"]["servers"]
+    servers["unresolved_environment"] = servers[unresolved["_ng_environment_server"]] | {"bindings_malformed": True}
+    unresolved["_ng_environment_server"] = "unresolved_environment"
+    ungraded["ng_trial_observations"]["verifier_invocations"][0].pop("grading_record")
+    _ungraded(ungraded)
+    passed, reason, report, counts = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED", reason
+    assert counts["observed_healthy"] == counts["unhealthy"] == counts["verifier_recorded"] == 0
+    assert counts["unobserved"] == 2
+    assert "verification owner unresolved" in counts["unobserved_reason"]
+    assert "no completed grading operation or grading record" in counts["unobserved_reason"]
+    assert counts["unobserved_reason"].count("1 of 2") == 2
