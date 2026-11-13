@@ -146,7 +146,7 @@ browsecomp_opencode_agent:
       # Off unless set. Each session's OpenCode export is written here, outside the workdir, where the resources server
       # reads it (episode_export_dir). The sandbox stops at verify: a run that keeps the exports sets the resources
       # server's episode_export_copy_dir, which copies them to this host first. Name a directory of its own, such as
-      # /tmp/nemo-gym-exports: the copy takes every regular file directly in it.
+      # /tmp/nemo-gym-exports: the copy takes the regular files directly in it.
       export_dir: ${oc.env:BROWSECOMP_OPENCODE_EXPORT_DIR,null}
       opencode_config:
         # Merged into opencode_agent's permission rules, these replace its webfetch and websearch denies in place,
@@ -192,14 +192,14 @@ browsecomp_opencode_environment_server:
       max_concurrent_episodes: 64
       queue_timeout_seconds: 86400
       # Covers the seed (sandbox start, workdir and OpenCode install), the 21600 s run, the agent's close, the
-      # plugin-log read, the export copy (300 s at most, when an overlay turns it on) and the sandbox stop, and with
-      # the cleanup of the agent's and the resources server's sessions ends before the lent sandbox's ttl_s. After a
-      # run that used its whole budget, counting each other step once at its configured timeout, as the config test
-      # does, it leaves the judge about 20 minutes, or 16 with the export copy on. Quicker steps leave it more;
-      # OpenCode's setup (several commands, each bounded by sandbox_install_timeout_seconds), stopping OpenCode once
-      # its budget runs out and the agent's close can take longer and leave it less. A judge that needs longer, as its
-      # retries allow, times the episode out, a non-terminal failure that a resumed run retries. A job time limit
-      # shorter than the run budget ends such runs first.
+      # plugin-log read, the export copy (300 s at most for its listing and downloads, when an overlay turns it on) and
+      # the sandbox stop, and with the cleanup of the agent's and the resources server's sessions ends before the lent
+      # sandbox's ttl_s. After a run that used its whole budget, counting each other step once at its configured
+      # timeout, as the config test does, it leaves the judge about 20 minutes, or 16 with the export copy on. Quicker
+      # steps leave it more; OpenCode's setup (several commands, each bounded by sandbox_install_timeout_seconds),
+      # stopping OpenCode once its budget runs out and the agent's close can take longer and leave it less. A judge
+      # that needs longer, as its retries allow, times the episode out, a non-terminal failure that a resumed run
+      # retries. A job time limit shorter than the run budget ends such runs first.
       default_episode_timeout_seconds: 25200
       # Bounds the agent's close, and each cleanup step after the episode: the agent's close if it is still open, then
       # the resources server's, which stops the sandbox. benchmarks/browsecomp/README.md lists each time limit and what

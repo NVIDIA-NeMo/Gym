@@ -63,9 +63,9 @@ RUN_VARIABLES = (
 # log at verify.
 WORKDIR_CREATE_S = 60
 PLUGIN_LOG_READ_S = 60
-# opencode_search's bound on the whole export copy at verify (_EXPORT_COPY_TIMEOUT_S), which a run's overlay can turn
-# on. This suite imports no server, so resources_servers/opencode_search/tests/test_browsecomp_presets.py checks that
-# the two agree.
+# opencode_search's bound on the listing and downloads of the export copy at verify (_EXPORT_COPY_TIMEOUT_S), which a
+# run's overlay can turn on. This suite imports no server, so
+# resources_servers/opencode_search/tests/test_browsecomp_presets.py checks that the two agree.
 EXPORT_COPY_S = 300
 NODE = shutil.which("node")
 
