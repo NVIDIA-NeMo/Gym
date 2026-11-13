@@ -28,11 +28,9 @@ from environment_servers.harbor.app import (
 from environment_servers.harbor.session import HarborSession
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.data.tasks.harbor.task import HarborTask, HarborTurn
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.transfer import upload_dir
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.utils.gym_commit import installed_gym_commit
+from nemo_gym.data.tasks.harbor import HarborTask, HarborTurn
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, upload_dir
+from nemo_gym.utils import installed_gym_commit, is_nemo_gym_fastapi_entrypoint
 
 
 RewardMode = Literal["full_task", "criteria_pass_rate"]

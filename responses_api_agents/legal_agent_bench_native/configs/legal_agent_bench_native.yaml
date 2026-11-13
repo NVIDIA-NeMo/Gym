@@ -6,6 +6,7 @@ legal_agent_bench_native_agent:
     legal_agent_bench_native:
       num_workers: 1
       entrypoint: app.py
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model

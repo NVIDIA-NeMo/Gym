@@ -34,7 +34,6 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config, upload_text
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.legal_agent_bench.lab_harbor.tools import get_all_tool_definitions
@@ -77,10 +76,6 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
     """Run LAB tools; the Harbor Environment Server owns the sandbox and handles grading."""
 
     config: LegalAgentBenchNativeAgentConfig
-
-    async def run(self, body: BaseRunRequest) -> BaseVerifyResponse:
-        """Require an agent session seeded by the Environment Server."""
-        raise HTTPException(409, "Use the LAB session Environment Server for native execution")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> LabNativeSession:
         if body.continuation is not None:

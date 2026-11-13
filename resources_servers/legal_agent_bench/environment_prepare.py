@@ -13,10 +13,10 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.data.tasks.harbor.image_build import build_images
-from nemo_gym.data.tasks.harbor.materialize import materialize_task, taskset_mapping
-from nemo_gym.data.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
 from resources_servers.legal_agent_bench.prepare import (
     CACHE_MARKER,
     LAB_SOURCE_REVISION,

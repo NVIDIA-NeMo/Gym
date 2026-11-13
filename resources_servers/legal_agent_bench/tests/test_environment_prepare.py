@@ -11,8 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.data.tasks.harbor.digest import DIGEST_KEY
-from nemo_gym.data.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor import DIGEST_KEY, load_task
 from resources_servers.legal_agent_bench.environment_prepare import prepare_environment
 from resources_servers.legal_agent_bench.prepare import LAB_SOURCE_REVISION
 
