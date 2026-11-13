@@ -28,6 +28,8 @@ from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.observability import add_stopped_sandbox_listener
 from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     GradingOperationObservation,
@@ -36,6 +38,7 @@ from nemo_gym.trajectory.trajectory_record import (
     VerifierGradingRecord,
     VerifierInvocation,
     grading_result_binding,
+    resource_usage_fields,
 )
 from nemo_gym.verification.judge import JudgeGrading, _judge_grading
 
@@ -46,6 +49,11 @@ T = TypeVar("T")
 
 
 _active_verifier: ContextVar[VerifierInvocation | None] = ContextVar("active_verifier_grading", default=None)
+
+
+def verification_active() -> bool:
+    """Whether the current request is inside an observed verification."""
+    return _active_verifier.get() is not None
 
 
 def observe_verifier_sandbox(observation: SandboxObservation | Mapping[str, object]) -> None:
@@ -63,7 +71,63 @@ def observe_verifier_sandbox(observation: SandboxObservation | Mapping[str, obje
         return
     if invocation.sandbox_observations is None:
         invocation.sandbox_observations = []
-    invocation.sandbox_observations.append(observed)
+    recorded = invocation.sandbox_observations
+    index = _observation_index(recorded, observed.sandbox_id)
+    if index is None:
+        recorded.append(observed)
+        return
+    # One record per sandbox: these facts replace the earlier ones, keeping usage measured at its stop.
+    previous = recorded[index]
+    if observed.resource_usage is None and previous.resource_usage is not None:
+        observed = observed.model_copy(update={name: getattr(previous, name) for name in USAGE_FIELDS})
+    recorded[index] = observed
+
+
+USAGE_FIELDS = ("resource_usage", "cpu_time_s", "peak_memory_mib", "resource_usage_source")
+
+
+def _observation_index(observations: list[SandboxObservation], sandbox_id: str | None) -> int | None:
+    if sandbox_id is None:
+        return None
+    return next((index for index, item in enumerate(observations) if item.sandbox_id == sandbox_id), None)
+
+
+def bind_stopped_sandbox(sandbox: AsyncSandbox) -> None:
+    """Record a sandbox stopped during a verification, with its measured usage, in that verification.
+
+    Every resources server gets this without code of its own: ``AsyncSandbox.stop()`` calls it for a measured
+    sandbox it created. The role is ``agent`` for a sandbox lent through ``serialize()`` (the agent ran in it)
+    and ``verifier`` otherwise. A record the server makes for the same sandbox with ``observe_verifier_sandbox``
+    replaces this one and keeps its usage, so each sandbox is recorded once.
+    """
+    invocation = _active_verifier.get()
+    if invocation is None or sandbox.sandbox_id is None:
+        return
+    usage = resource_usage_fields(sandbox.resource_usage)
+    if not usage:
+        return
+    if invocation.sandbox_observations is None:
+        invocation.sandbox_observations = []
+    recorded = invocation.sandbox_observations
+    index = _observation_index(recorded, sandbox.sandbox_id)
+    if index is not None:
+        if recorded[index].resource_usage is None:
+            recorded[index] = recorded[index].model_copy(update=usage)
+        return
+    recorded.append(
+        SandboxObservation(
+            role="agent" if sandbox.lent else "verifier",
+            provider=sandbox.provider_name,
+            sandbox_id=sandbox.sandbox_id,
+            observed_client_interval_s=sandbox.observed_client_interval_s,
+            teardown_confirmed=sandbox.teardown_confirmed,
+            cleanup_errors=list(sandbox.cleanup_errors),
+            **usage,
+        )
+    )
+
+
+add_stopped_sandbox_listener(bind_stopped_sandbox)
 
 
 def observe_programmatic_grading(calculate: Callable[[], T]) -> T:
