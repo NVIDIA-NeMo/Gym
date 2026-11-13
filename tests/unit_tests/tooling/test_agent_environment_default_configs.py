@@ -34,7 +34,7 @@ from tests.helpers.agent_environment_migration import (
 migration = load_migration()
 
 
-@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent", "cline_agent"])
+@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent", "crewai_agent", "cline_agent"])
 def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: Path, agent_type: str) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / f"responses_api_agents/{agent_type}/configs/{agent_type}.yaml"
