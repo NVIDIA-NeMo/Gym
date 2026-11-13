@@ -146,11 +146,13 @@ The session preset's limits, from admission to cleanup:
 | Sandbox lifetime | `sandbox_config.ttl_s: 27000` | The sandbox provider | The provider reclaims the sandbox |
 
 The episode deadline covers the seed, the run, the agent's close, and `/verify`'s plugin-log read (60 s at most) and
-sandbox stop (120 s at most). After a run that used its whole budget it leaves the judge roughly 20 minutes: a judge
-that needs longer, which its attempts allow, times the episode out. A job time limit shorter than the run budget ends
-such runs first. `ttl_s` stays above the deadline plus two cleanup steps, since `/verify` stops the sandbox before it
-calls the judge and, after a deadline, the cleanup stops it. The relay preset has no episode deadline: its agent's
-`sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
+sandbox stop (120 s at most). After a run that used its whole budget it leaves the judge at most about 20 minutes: a
+judge that needs longer, which its attempts allow, times the episode out. With the export copy on
+(`episode_export_copy_dir`, see [Compare the two presets](#compare-the-two-presets)), `/verify` also copies the
+exports before it stops the sandbox, for up to 300 s, which leaves the judge at most about 16 minutes. A job time limit
+shorter than the run budget ends such runs first. `ttl_s` stays above the deadline plus two cleanup steps, since
+`/verify` stops the sandbox before it calls the judge and, after a deadline, the cleanup stops it. The relay preset has
+no episode deadline: its agent's `sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
 
 ### Row fields
 
@@ -161,7 +163,7 @@ observations and the plugin log instead:
 | --- | --- |
 | `opencode_failed`, `opencode_exit_code`, `opencode_error_type` | No such fields: `response.status` says how the run ended, and a run the outcome policy does not grade is a failure row. The agent's invocation and sandbox observation in `ng_agent_observations` give the run's status, error type and exit code |
 | `opencode_export_found`, `opencode_finished` | None: a run that leaves no assistant result fails before `/verify` |
-| `opencode_results_fpath` (OpenCode's export, saved on the host), `opencode_run_stdout`, `opencode_run_stderr` | `opencode_plugin_log`, the plugins' lines; OpenCode's export only with `BROWSECOMP_OPENCODE_EXPORT_DIR` (see [Compare the two presets](#compare-the-two-presets)) |
+| `opencode_results_fpath` (OpenCode's export, saved on the host), `opencode_run_stdout`, `opencode_run_stderr` | `opencode_plugin_log`, the plugins' lines. OpenCode's exports reach the host only with the Resources Server's `episode_export_copy_dir` set: `opencode_export_copy` then names the host directory that holds them (see [Compare the two presets](#compare-the-two-presets)) |
 | `opencode_plugins_loaded`, `opencode_terminal_reason` | The same fields, read from the plugin log |
 | `opencode_attachment_count` | None: the rows hold no images |
 | `ng_trajectory` and `ng_agent_observations`, only when the agent correlates rollouts, for example with `++observability_enabled=true` | Both, from the agent's close |
@@ -261,9 +263,23 @@ gym eval run --no-serve <the same --config and ++ arguments> \
   for a total, add the two on both, since the relay's `total_tokens` is OpenCode's stored total. Leave out the cached
   and reasoning details (see Token usage above).
 - Each session row's `opencode_plugin_log` shows the tool surface the run had, the search guard's settings and how
-  the run ended. `BROWSECOMP_OPENCODE_EXPORT_DIR` also keeps each session's OpenCode export, for example to check where
-  compaction started; the Resources Server stops the sandbox at `/verify`, so point it at storage that outlives the
-  sandbox, such as a provider volume, outside `/workspace`.
+  the run ended. To keep each session's OpenCode export as well, for example to check where compaction started, set
+  `BROWSECOMP_OPENCODE_EXPORT_DIR` to a fresh sandbox directory outside `/workspace` and `/tmp/nemo-gym-opencode*`,
+  such as `/tmp/nemo-gym-exports`, not `/tmp` itself, which also holds the staged plugins and the plugin log. The agent
+  writes the exports there and the Resources Server reads them from there. Then give the run a host directory of its
+  own in an overlay:
+
+  ```yaml
+  search_browsecomp_resources_server:
+    resources_servers:
+      opencode_search:
+        episode_export_copy_dir: /absolute/host/directory/for/this/run
+  ```
+
+  `/verify` copies the files before it stops the sandbox, to
+  `<episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/`, and records the outcome in the row's
+  `opencode_export_copy`. A copy that fails, runs past 300 seconds or exceeds `episode_export_max_bytes` (256 MiB) is
+  recorded there and never changes the grade.
 - `++observability_enabled=true` with a `++model_call_capture_dir` records each model call in the rollouts, as the
   harness conformance checker needs. It also adds a plugin to OpenCode, so use it in a run of its own.
 
