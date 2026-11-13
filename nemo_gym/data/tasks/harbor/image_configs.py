@@ -703,7 +703,9 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
         if select is not None and not select(child.name):
             continue
         try:
-            config = HarborTaskConfig.model_validate(tomllib.loads((child / TASK_FILE).read_text()))
+            data = tomllib.loads((child / TASK_FILE).read_text())
+            HarborTaskConfig.strip_dataset_only_keys(data)
+            config = HarborTaskConfig.model_validate(data)
             config = apply_dataset_config(config, child.name, dataset)
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
             continue

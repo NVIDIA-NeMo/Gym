@@ -414,14 +414,8 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         data = tomllib.loads((path / TASK_FILE).read_text())
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
-        # `[verifier].exit_nonzero` changes the score and Harbor ignores it, so it comes from dataset.toml alone: in
-        # the task's own file it stays an unknown key, and the folder scores the same under Gym and under Harbor.
-        verifier_table = data.get("verifier")
-        if isinstance(verifier_table, dict) and "exit_nonzero" in verifier_table:
-            logger.warning(
-                "%s: ignoring unknown key `verifier.exit_nonzero` (set it in dataset.toml)", path / TASK_FILE
-            )
-            data["verifier"] = {key: value for key, value in verifier_table.items() if key != "exit_nonzero"}
+        for key in HarborTaskConfig.strip_dataset_only_keys(data):
+            logger.warning("%s: ignoring unknown key `%s` (set it in dataset.toml)", path / TASK_FILE, key)
         legacy_mode = data.get("multi_step_reward_mode")
         if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
             # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own

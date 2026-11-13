@@ -371,6 +371,21 @@ class HarborTaskConfig(HarborSettings):
     # like the budgets the task names (`step_verifier_timeout_sec`).
     _timeout_multiplier: float = PrivateAttr(default=1.0)
 
+    @classmethod
+    def strip_dataset_only_keys(cls, data: Any) -> list[str]:
+        """Drop from raw ``task.toml`` data the keys only ``dataset.toml`` sets, and return their dotted paths.
+
+        ``[verifier].exit_nonzero`` changes the score and Harbor ignores it, so in a task's own file it stays an
+        unknown key: the task folder scores the same under Gym and under Harbor. Every reader of a raw ``task.toml``
+        drops it before validating, so a value the field would refuse never makes one reader skip a task another
+        one loads. Not for dataset settings, which do set the key.
+        """
+        verifier = data.get("verifier") if isinstance(data, dict) else None
+        if not isinstance(verifier, dict) or "exit_nonzero" not in verifier:
+            return []
+        data["verifier"] = {key: value for key, value in verifier.items() if key != "exit_nonzero"}
+        return ["verifier.exit_nonzero"]
+
     @model_validator(mode="before")
     @classmethod
     def read_deprecated_fields(cls, data: Any) -> Any:

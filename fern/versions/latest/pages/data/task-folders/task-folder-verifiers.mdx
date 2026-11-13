@@ -32,7 +32,8 @@ is masked, as `verifier_error` when `bash` or `timeout` is missing and as `provi
 ## Reward files
 
 `test.sh` writes its result to `/logs/verifier/reward.txt` or `/logs/verifier/reward.json`. The exit code of
-`test.sh` does not affect the score.
+`test.sh` is ignored by default. A dataset can instead mask nonzero exits that were not stopped by the timeout; see
+`verifier_exit_nonzero` in [Dataset settings](/main/data/task-folders/task-folder-format#dataset-settings).
 
 - `reward.txt` holds one number, which is the reward.
 - `reward.json` holds a non-empty JSON object of numbers; booleans count as numbers. A `reward` key is the score,
@@ -48,7 +49,10 @@ Two tasks of one dataset may write different keys. Gym pads no missing key and r
 | An empty or malformed file, a value that is not a finite number, or components with no finite sum | 0 | `harbor:invalid_reward` |
 | `test.sh` runs past `timeout_sec` (times the dataset's `timeout_multiplier`) without writing a reward | 0 | `harbor:verifier_timeout` |
 
-These rows count in the score, and a reward written before a timeout still stands. Other failures, such as a lost
+By default these rows count in the score, and a reward written before a timeout still stands. Under the dataset's
+`verifier_exit_nonzero = "mask"`, a `test.sh` that exits non-zero without being stopped by its timeout is masked as
+`harbor:verifier_exit_nonzero` instead, whatever reward file it wrote, which stays in `verifier_rewards`; a zero exit
+and a timeout keep the outcomes above. Other failures, such as a lost
 sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in `rollouts.jsonl` but is
 left out of the score.
 
@@ -85,7 +89,8 @@ available one to `**kwargs`), so the example above gets `workspace` and `task_da
 metrics. Without `reward`, the dict must hold exactly one key, which is the score. Unlike in `reward.json`, several
 keys are not summed. An `async def verify` is awaited. A `verify` that raises, requires an argument the runner does
 not supply, or returns anything else writes no reward, which scores 0 with `harbor:missing_reward` and the error in
-`test-stdout.txt`.
+`test-stdout.txt`. The shim then exits non-zero, so under `verifier_exit_nonzero = "mask"` the sample is masked as
+`harbor:verifier_exit_nonzero` instead.
 
 The helpers use the standard library only:
 
@@ -95,7 +100,9 @@ The helpers use the standard library only:
 
 No verifier code runs on the host. At verification the server uploads a shim over `/tests`: a `test.sh`, a runner,
 a copy of `nemo_gym.verifiers`, the task's fields and the agent's response. Its `test.sh` runs `python3`, else
-`python`, and needs 3.8 or newer; without one, the sample scores 0 with `harbor:missing_reward` and is not masked.
+`python`, and needs 3.8 or newer; without one, the sample scores 0 with `harbor:missing_reward` and is not masked,
+unless the dataset sets `verifier_exit_nonzero = "mask"`: the shim then exits 127 and the sample is masked as
+`harbor:verifier_exit_nonzero`.
 The shim runs like any `test.sh`, under the same timeout, user and mode.
 
 In separate mode, a verifier that reads `workspace` needs the working directory in `artifacts`.

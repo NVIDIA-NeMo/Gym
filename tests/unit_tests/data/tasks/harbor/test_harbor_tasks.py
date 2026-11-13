@@ -3200,6 +3200,25 @@ class TestDatasetConfig:
         assert task.config.verifier.exit_nonzero is None
         assert "verifier.exit_nonzero" in caplog.text
 
+    @pytest.mark.parametrize("line", ["", 'exit_nonzero = "mask"', 'exit_nonzero = "fail"'])
+    def test_prepare_readers_ignore_a_task_toml_exit_nonzero_as_the_loader_does(self, tmp_path, line):
+        """Build planning and the base-image scan read task.toml directly. Unless they drop `[verifier].exit_nonzero`
+        as the loader does, a value the field refuses makes both skip the task: a task that needs a build gets no
+        build, an overlay task no recorded base image, and the loader then fails on the missing record."""
+        from nemo_gym.data.tasks.harbor.build_plan import plan_builds
+        from nemo_gym.data.tasks.harbor.image_configs import dockerfile_base_images
+
+        toml = HELLO_TOML.replace("[verifier]", f"[verifier]\n{line}", 1)
+        build = write_task(tmp_path / "build" / "a", dockerfile="FROM ubuntu:24.04\nCOPY . /app\n", toml=toml)
+        overlay = write_task(tmp_path / "overlay" / "b", dockerfile=TB21_DEBIAN_DOCKERFILE, toml=toml)
+
+        assert [(entry.service, entry.tasks) for entry in plan_builds(build.parent)] == [("main", ("a",))]
+        assert dockerfile_base_images(overlay.parent) == {"debian:bookworm-slim": ["b"]}
+        write_image_config(overlay.parent, "debian:bookworm-slim", Env=[f"PATH={IMAGE_PATH}"])
+        task = load_task(overlay)
+        assert task.image == "debian:bookworm-slim" and len(task.overlay) == 2
+        assert task.config.verifier.exit_nonzero is None
+
     def test_an_invalid_exit_nonzero_value_is_refused(self, tmp_path):
         folder = tmp_path / "ds"
         write_task(folder / "hello")
