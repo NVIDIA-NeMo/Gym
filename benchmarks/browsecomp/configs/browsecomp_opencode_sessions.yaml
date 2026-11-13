@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # BrowseComp on the opencode_search resources server with opencode_agent sessions, run by single_agent_turn_legacy.
 # For each question the resources server starts one sandbox, stages the OpenCode plugins and their settings in it, and
 # lends it to the agent's session. After the session closes, verify reads how the run ended from the plugins' log,
