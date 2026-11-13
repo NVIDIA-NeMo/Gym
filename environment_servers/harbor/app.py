@@ -66,6 +66,7 @@ from environment_servers.harbor.entrypoint import (
     HarborEntrypointMixin,
     _cancel_entrypoint,
 )
+from environment_servers.harbor.model_outcomes import model_outcome_events
 from environment_servers.harbor.overlay import HarborOverlayError, HarborOverlayMixin
 from environment_servers.harbor.sandboxes import (
     COMPOSE_IMAGES_FILE,
@@ -948,6 +949,13 @@ class HarborEnvironmentServer(
             **outcome,
             ng_agent_observations=agent_observations,
             ng_trajectory=agent_trajectory,
+            **model_outcome_events(
+                agent_response,
+                agent_observations,
+                event_id=episode_key,
+                harness=self.config.agent_server.name,
+                agent_timeout_sec=session.task.config.agent.timeout_sec,
+            ),
         )
         self._trace_score(session.task.task_id, episode_key, result)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=result)
@@ -1612,6 +1620,14 @@ class HarborEnvironmentServer(
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
             stopped_after_turn=stopped_after,
             **roll_up_turns(results, strategy, task_id=request.task.task_id),
+            # The episode ends on the last step whose agent ran: its ending is the rollout's.
+            **model_outcome_events(
+                ran.response,
+                handle.observations if handle is not None else ran.agent_observations,
+                event_id=request.episode_id.capture_key,
+                harness=self.config.agent_server.name,
+                agent_timeout_sec=task.config.step_agent_timeout_sec(task.turns[results.index(ran)].config),
+            ),
         )
         self._trace_score(task.task_id, request.episode_id.capture_key, episode)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)

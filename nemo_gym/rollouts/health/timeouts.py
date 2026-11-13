@@ -59,6 +59,10 @@ class TimeoutEvent(BaseModel):
     """One confirmed firing of one time limit, in the ``timeouts`` list of the rollout's row.
 
     An event listed twice keeps its ``event_id``, so one firing counts once.
+
+    ``model_outcome`` marks a limit that is part of the task, such as the agent's own time budget: the producer scores
+    the rollout like any other answer, so ``rollout_ended_on_failed_model_call`` does not flag the cancelled call the
+    limit cut.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -70,6 +74,7 @@ class TimeoutEvent(BaseModel):
     configured_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     elapsed_s: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     fired_at: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    model_outcome: bool = False
 
 
 class LegacySignal(NamedTuple):

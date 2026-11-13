@@ -731,6 +731,67 @@ async def test_a_classified_failure_of_a_continued_turn_ends_the_episode_with_th
     assert server.server_client.activation_headers() == ["1", "2"]
 
 
+BUDGETED_STEPS = """
+[[steps]]
+name = "a"
+[steps.agent]
+timeout_sec = 60.0
+
+[[steps]]
+name = "b"
+[steps.agent]
+timeout_sec = 90.0
+"""
+BUDGET_CUT = {"status": "incomplete", "metadata": {"stop_reason": "wall_time"}}
+
+
+def cut_turns(server, cuts: list[bool]) -> None:
+    """Make the n-th activation's agent stop at its time budget when ``cuts[n]``, else complete."""
+    pending = list(cuts)
+
+    def next_turn():
+        server.server_client.turn_response = (
+            agent_response().model_dump(mode="json") | BUDGET_CUT if pending.pop(0) else None
+        )
+
+    server.server_client.turn_hooks.append(next_turn)
+
+
+async def test_a_last_step_cut_at_its_budget_is_a_model_outcome_timeout_of_that_step(tmp_path, monkeypatch):
+    """The episode ends on its last step's agent run: a cut there is the rollout's typed ending, with that step's
+    own budget, so rollout health does not flag the cancelled call."""
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, BUDGETED_STEPS, {"a": "A", "b": "B"})
+    rewards_per_turn(server, sandbox, ["1", "0"])
+    cut_turns(server, [False, True])
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    row = response.result.model_dump(mode="json")
+    assert row["timeouts"] == [
+        {
+            "event_id": f"{response.episode_id.capture_key}:agent-budget",
+            "limit": "agent.timeout_sec",
+            "enforcer": server.config.agent_server.name,
+            "evidence": "internal",
+            "model_outcome": True,
+            "configured_s": 90.0,
+        }
+    ]
+
+
+async def test_an_earlier_step_cut_at_its_budget_leaves_a_completed_episode_without_an_event(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, BUDGETED_STEPS, {"a": "A", "b": "B"})
+    rewards_per_turn(server, sandbox, ["1", "1"])
+    cut_turns(server, [True, False])
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    row = response.result.model_dump(mode="json")
+    assert len(row["turns"]) == 2 and "timeouts" not in row
+
+
 async def test_mean_averages_the_turns_that_produced_a_result(tmp_path, monkeypatch):
     steps = '[[steps]]\nname = "a"\n[[steps]]\nname = "b"\n'
     server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"a": "A", "b": "B"})

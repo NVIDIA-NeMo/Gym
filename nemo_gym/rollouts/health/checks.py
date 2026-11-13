@@ -9,6 +9,9 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from pydantic import ValidationError
+
+from nemo_gym.rollouts.health.timeouts import _timeout_events
 from nemo_gym.rollouts.health.types import (
     ROLLOUT_INDEX_KEY,
     TASK_INDEX_KEY,
@@ -17,6 +20,7 @@ from nemo_gym.rollouts.health.types import (
     CheckSpec,
     CheckSubject,
     Finding,
+    ModelLimitRejection,
     _AgentStep,
     _CallBindings,
 )
@@ -770,13 +774,17 @@ def _trajectory_capture_mismatch(
     return findings
 
 
+def _model_key(call: dict[str, Any]) -> Any:
+    """The model a call went to, as `_model_chains` keys it."""
+    ref = call.get("model_ref")
+    return (ref.get("type"), ref.get("name")) if isinstance(ref, dict) else None
+
+
 def _model_chains(calls: Sequence[dict[str, Any]]) -> dict[Any, list[dict[str, Any]]]:
     """Group calls by the model they went to."""
     chains: dict[Any, list[dict[str, Any]]] = defaultdict(list)
     for call in calls:
-        ref = call.get("model_ref")
-        key = (ref.get("type"), ref.get("name")) if isinstance(ref, dict) else None
-        chains[key].append(call)
+        chains[_model_key(call)].append(call)
     return chains
 
 
@@ -839,12 +847,93 @@ def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
     return len(failed) == len(chain)
 
 
-def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
-    """Whether any model's own last call failed."""
-    return any(_chain_ended_on_failure(chain) for chain in _model_chains(calls).values())
+def _last_call(chain: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))[-1]
 
 
-def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _typed_model_outcome_endings(record: dict[str, Any]) -> tuple[bool, bool]:
+    """Whether the row carries a typed model-outcome timeout (`TimeoutEvent.model_outcome`) and a typed
+    `ModelLimitRejection`. A row without them keeps every failed ending flagged."""
+    events, _ = _timeout_events(record)
+    rejections = record.get("model_limit_rejections")
+    return any(event.model_outcome for event in events), isinstance(rejections, list) and any(
+        _is_model_limit_rejection(rejection) for rejection in rejections
+    )
+
+
+def _is_model_limit_rejection(value: Any) -> bool:
+    try:
+        ModelLimitRejection.model_validate(value)
+    except ValidationError:
+        return False
+    return True
+
+
+def _is_typed_model_outcome(chain: Sequence[dict[str, Any]], endings: tuple[bool, bool]) -> bool:
+    """A chain's failed last call the row's typed events account for: a call cancelled when a model-outcome limit
+    fired, or a 400 the deployment's serving limit returned once the model has answered earlier in the same
+    conversation. Before any answer the request never fit the deployment, as `_chain_ended_on_failure` says of a
+    context overflow. A 5xx, or any other error status, stays a failure."""
+    timed_out, limit_rejected = endings
+    last = _last_call(chain)
+    status = last.get("status_code")
+    cancelled = not (isinstance(status, int) and status >= 400) and "cancelled" in {
+        last.get("error_category"),
+        last.get("response_status"),
+    }
+    refused = status == 400 or (status is None and last.get("upstream_status_code") == 400)
+    answered = any(_is_successful(call) and _same_conversation(call, last) for call in chain)
+    return (timed_out and cancelled) or (limit_rejected and refused and answered)
+
+
+def _agent_models(owned: _CallBindings, calls: Sequence[dict[str, Any]], record: dict[str, Any]) -> frozenset[Any]:
+    """The models the agent's own turns and invocations called (`_bind_policy_call_views`' owned view), and the
+    policy model server the row names (`ng_policy_model_server`). A Harbor row's trajectory binds no call to a turn
+    (`model_call_ownership_unavailable`), so the named policy server is what marks its agent's calls.
+
+    The row's typed events speak for the agent's own calls only: a judge or user simulator chain that ended on a
+    failed call stays a failure whatever the agent's run ended on.
+    """
+    policy = record.get("ng_policy_model_server")
+    # A call without a model_ref names no model, so it is never the named policy server's.
+    named = {key for key in map(_model_key, calls) if policy and key is not None and key[1] == policy}
+    return frozenset({_model_key(call) for call in owned.matched_calls} | named)
+
+
+def _failed_endings(
+    calls: Sequence[dict[str, Any]], record: dict[str, Any], agent_models: frozenset[Any]
+) -> list[bool]:
+    """For each model chain that ended on a failed call, whether the row's typed events account for that call."""
+    endings = _typed_model_outcome_endings(record)
+    return [
+        key in agent_models and _is_typed_model_outcome(chain, endings)
+        for key, chain in _model_chains(calls).items()
+        if _chain_ended_on_failure(chain)
+    ]
+
+
+def _ended_on_failed_call(
+    calls: Sequence[dict[str, Any]], record: dict[str, Any], agent_models: frozenset[Any]
+) -> bool:
+    """Whether any model's own last call failed, other than one the row's typed events account for."""
+    return not all(_failed_endings(calls, record, agent_models))
+
+
+def _ended_on_model_outcome(
+    calls: Sequence[dict[str, Any]], record: dict[str, Any], agent_models: frozenset[Any]
+) -> bool:
+    """Whether the rollout ended on failed calls that the row's typed events all account for.
+
+    A rollout with another model's untyped failed ending counts under ``ended_on_error`` only, so the two counts
+    partition the rollouts that ended on a failed call.
+    """
+    endings = _failed_endings(calls, record, agent_models)
+    return bool(endings) and all(endings)
+
+
+def _rollout_ended_on_failed_model_call(
+    record: dict[str, Any], trajectory: dict[str, Any], subject: dict[str, int | str]
+) -> list[Finding]:
     """Flag a model whose own last call in the rollout failed.
 
     The bound-call checks cannot see this: binding resolves a reference by
@@ -859,14 +948,20 @@ def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dic
     what makes its reward indistinguishable from a genuine zero. A last call
     the upstream rejected as a context-length overflow is not flagged once the
     model has answered earlier in the same conversation: that zero is the
-    model's own result.
+    model's own result. A producer opts its agent's own endings out with typed
+    events on the row (`_is_typed_model_outcome`, `_agent_models`); a row
+    without them is judged as before.
     """
     findings = []
-    for key, chain in _model_chains(_normalized_trajectory_calls(trajectory)).items():
+    endings = _typed_model_outcome_endings(record)
+    calls = _normalized_trajectory_calls(trajectory)
+    agent_models = _agent_models(_bind_policy_call_views(trajectory, calls)[1], calls, record)
+    for key, chain in _model_chains(calls).items():
         if not _chain_ended_on_failure(chain):
             continue
-        ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
-        last = ordered[-1]
+        last = _last_call(chain)
+        if key in agent_models and _is_typed_model_outcome(chain, endings):
+            continue
         findings.append(
             Finding(
                 check="rollout_ended_on_failed_model_call",
@@ -1016,7 +1111,7 @@ _ROLLOUT_CHECKS: dict[
         record, trajectory, subject
     ),
     "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
-        _rollout_ended_on_failed_model_call(trajectory, subject)
+        _rollout_ended_on_failed_model_call(record, trajectory, subject)
     ),
     "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(
         trajectory, bindings, subject
