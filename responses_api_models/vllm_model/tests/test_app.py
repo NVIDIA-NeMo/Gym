@@ -31,7 +31,7 @@ from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import DictConfig, OmegaConf
-from pytest import MonkeyPatch, mark, raises
+from pytest import MonkeyPatch, fail, mark, raises
 from yarl import URL
 
 import nemo_gym.server_runtime.base_server
@@ -1918,6 +1918,82 @@ class TestApp:
         assert result.choices[0].message.content == "served"
         assert dead.create_chat_completion.await_count == 2
         assert live.create_chat_completion.await_count == 1
+
+    async def test_the_llm_span_breakdown_costs_nothing_while_its_span_group_is_off(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.llm_span_breakdown_hook = "/unused/hook.py:hook"
+        client = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://live/v1")
+        client.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
+        server._clients = [client]
+        touched = []
+        monkeypatch.setattr("responses_api_models.vllm_model.app.model_call_spans_enabled", lambda: False)
+        monkeypatch.setattr(
+            "responses_api_models.vllm_model.app.record_model_call_spans", lambda *a, **k: touched.append("record")
+        )
+        monkeypatch.setattr(server, "_replica_index", lambda *a, **k: touched.append("replica"))
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        result = await server.chat_completions(self._request_for_session("session-a"), body)
+
+        assert result.choices[0].message.content == "served"
+        assert touched == []
+
+    async def test_the_model_servers_own_spans_are_recorded_without_a_hook(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        assert server.config.llm_span_breakdown_hook is None
+        client = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://live/v1")
+        client.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
+        server._clients = [client]
+        recorded = []
+        monkeypatch.setattr("responses_api_models.vllm_model.app.model_call_spans_enabled", lambda: True)
+        monkeypatch.setattr(
+            "responses_api_models.vllm_model.app.record_model_call_spans",
+            lambda engine_response, **kwargs: recorded.append(kwargs),
+        )
+        monkeypatch.setattr(server, "_replica_index", lambda *a, **k: fail("no hook, no replica lookup"))
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        await server.chat_completions(self._request_for_session("session-a"), body)
+
+        (kwargs,) = recorded
+        assert kwargs["hook"] is None and kwargs["replica_idx"] is None
+        assert kwargs["session_id"] == "session-a" and kwargs["rollout_id"] is None
+        assert kwargs["started_us"] <= kwargs["sent_us"] <= kwargs["received_us"] <= kwargs["finished_us"]
+
+    async def test_the_llm_span_breakdown_is_recorded_with_the_configured_hook(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.llm_span_breakdown_hook = "/run/hook.py:hook"
+        client = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://live/v1")
+        client.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI), client]
+        recorded = []
+        monkeypatch.setattr("responses_api_models.vllm_model.app.model_call_spans_enabled", lambda: True)
+        monkeypatch.setattr(
+            "responses_api_models.vllm_model.app.record_model_call_spans",
+            lambda engine_response, **kwargs: recorded.append((engine_response, kwargs)),
+        )
+        monkeypatch.setattr(server, "_resolve_client", lambda request: client)
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        with rollout_context("3-1"):
+            await server.chat_completions(self._request_for_session("session-a"), body)
+
+        assert len(recorded) == 1
+        engine_response, kwargs = recorded[0]
+        assert engine_response["choices"][0]["message"]["content"] == "served"
+        assert kwargs["replica_idx"] == 1
+        assert kwargs["hook"] == "/run/hook.py:hook"
+        assert kwargs["rollout_id"] == "3-1" and kwargs["session_id"] == "session-a"
+        assert kwargs["started_us"] <= kwargs["sent_us"] <= kwargs["received_us"] <= kwargs["finished_us"]
+        assert kwargs["tokenize_start_us"] is None and kwargs["tokenize_end_us"] is None
 
     async def test_an_engine_refusal_does_not_count_against_its_endpoint(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, route_around_failing_endpoints=True, endpoint_failure_threshold=1)

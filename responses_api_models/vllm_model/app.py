@@ -87,6 +87,7 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
     token_capture_config,
 )
+from nemo_gym.telemetry.model_call import model_call_spans_enabled, record_model_call_spans
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -558,6 +559,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         default=None,
         description="Set to 1 when the caller owns retries, disabling both transport and HTTP-status retries.",
     )
+    # Optional ``/path/to/file.py:callable``. With the ``model_call`` span group on, it turns each engine response
+    # into attributes and spans for the engine's side of the call; see ``nemo_gym.telemetry.model_call``.
+    # Unset, there is no ``gym.model.llm_execute`` span.
+    llm_span_breakdown_hook: Optional[str] = None
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -1763,6 +1768,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
+        spans_on = model_call_spans_enabled()
+        started_us = time_ns() // 1_000 if spans_on else 0
         body_dict = await self._prepare_chat_request(request, body)
 
         note_generation_request(body_dict)
@@ -1819,6 +1826,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             # A training framework's generation server holds every call to its training sampling, except the calls
             # of agents it does not train, which keep their own.
             transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
+        sent_us = time_ns() // 1_000 if spans_on else 0
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(
@@ -1839,6 +1847,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 chat_completion_dict = await self._call_endpoint(
                     client, client.create_chat_completion(**transport_options, **body_dict)
                 )
+            received_us = time_ns() // 1_000 if spans_on else 0
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
@@ -1971,6 +1980,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self._external_capture_handler is not None:
             self._external_capture_handler.prepare_response(chat_completion_dict)
 
+        tokenize_start_us = tokenize_end_us = None
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
 
@@ -2004,7 +2014,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                             "vLLM response generation token IDs disagree with choice logprob token IDs."
                         )
                 else:
+                    tokenize_start_us = time_ns() // 1_000 if spans_on else None
                     tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
+                    tokenize_end_us = time_ns() // 1_000 if spans_on else None
                     prompt_token_ids = self._require_token_id_list(
                         tokenize_response.get("tokens"),
                         "tokenize.tokens",
@@ -2035,6 +2047,20 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict.pop("token_ids", None)
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
+        if spans_on:
+            record_model_call_spans(
+                chat_completion_dict,
+                started_us=started_us,
+                sent_us=sent_us,
+                received_us=received_us,
+                finished_us=time_ns() // 1_000,
+                replica_idx=self._replica_index(client) if self.config.llm_span_breakdown_hook else None,
+                tokenize_start_us=tokenize_start_us,
+                tokenize_end_us=tokenize_end_us,
+                hook=self.config.llm_span_breakdown_hook,
+                rollout_id=current_rollout_id(),
+                session_id=request.session.get(SESSION_ID_KEY),
+            )
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
     async def _finalize_served_response(self, response: Any) -> None:
@@ -2195,6 +2221,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         Audio metadata and non-text content blocks are rejected in both
         modes — /v1/completions is text-only.
         """
+        spans_on = model_call_spans_enabled()
+        started_us = time_ns() // 1_000 if spans_on else 0
         body_dict = body.model_dump(exclude_unset=True)
         # This path never runs _preprocess_chat_completion_create_params, and
         # _render_messages_via_chat_template hands tools to apply_chat_template,
@@ -2234,6 +2262,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._resolve_client(request)
 
         execution = start_model_execution(request, upstream_attempted=True)
+        sent_us = time_ns() // 1_000 if spans_on else 0
         try:
             try:
                 completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
@@ -2248,6 +2277,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 ):
                     raise
                 completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
+            received_us = time_ns() // 1_000 if spans_on else 0
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode(errors="replace")
@@ -2276,14 +2306,31 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise
 
         execution["response_source"] = "upstream"
+        tokenize_start_us = tokenize_end_us = None
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:
+                tokenize_start_us = time_ns() // 1_000 if spans_on else None
                 tokenize_response = await client.create_tokenize(
                     **self._completion_tokenize_body(prompt, completion_body)
                 )
+                tokenize_end_us = time_ns() // 1_000 if spans_on else None
                 choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
 
+        if spans_on:
+            record_model_call_spans(
+                completion_dict,
+                started_us=started_us,
+                sent_us=sent_us,
+                received_us=received_us,
+                finished_us=time_ns() // 1_000,
+                replica_idx=self._replica_index(client) if self.config.llm_span_breakdown_hook else None,
+                tokenize_start_us=tokenize_start_us,
+                tokenize_end_us=tokenize_end_us,
+                hook=self.config.llm_span_breakdown_hook,
+                rollout_id=current_rollout_id(),
+                session_id=request.session.get(SESSION_ID_KEY),
+            )
         return self._completion_dict_to_chat_completion(completion_dict)
 
     def _completion_tokenize_body(self, prompt: str, completion_body: Dict[str, Any]) -> Dict[str, Any]:
@@ -2681,6 +2728,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         note_generation_backend(getattr(client, "base_url", None))
 
         return client
+
+    def _replica_index(self, client: NeMoGymAsyncOpenAI) -> Optional[int]:
+        """Zero-based index of *client* among the generation replicas, or None if it was rebound away."""
+        try:
+            return self._clients.index(client)
+        except ValueError:
+            return None
 
     def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
         # Uvicorn workers do not share the session cache. A stable assignment keeps
