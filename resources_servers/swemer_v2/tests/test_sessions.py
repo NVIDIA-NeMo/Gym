@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise swemer_v2's episode adapter and failure accounting."""
 
+from pathlib import Path
+from runpy import run_path
+
 import pytest
 
-from tests.helpers.swe_resource_sessions import (
-    check_swe_resource_episode,
-    check_swe_session_config,
-    check_swe_verifier_interruption,
-)
+
+# gym env test runs from the server directory, whose local tests package shadows the root tests package.
+_helpers = run_path(str(Path(__file__).resolve().parents[3] / "tests/helpers/swe_resource_sessions.py"))
+check_swe_resource_episode = _helpers["check_swe_resource_episode"]
+check_swe_session_config = _helpers["check_swe_session_config"]
+check_swe_verifier_interruption = _helpers["check_swe_verifier_interruption"]
 
 
 @pytest.mark.parametrize(
