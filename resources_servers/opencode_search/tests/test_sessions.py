@@ -1735,3 +1735,27 @@ def test_an_incomplete_response_is_masked_only_by_the_plugin_log(workdir, tmp_pa
 
     assert verified.status_code == 200, verified.text
     assert _graded(verified) == graded
+
+
+def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workdir) -> None:
+    """A lost session, a judge without a verdict and a judge that never answered each leave a masked row, not counted as
+    graded, that says why."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    assert client.post("/close_session", json=_close()).status_code == 200
+    replies = [client.post("/verify", json=_verify_body())]
+    _mock_judge(server, NO_VERDICT)
+    client.cookies.clear()
+    replies.append(client.post("/verify", json=_verify_body()))
+    server.server_client.post = AsyncMock(side_effect=JudgeError("connection refused"))
+    client.cookies.clear()
+    replies.append(client.post("/verify", json=_verify_body()))
+
+    assert [_graded(reply) for reply in replies] == [
+        (0.0, True, "session_lost", False),
+        (0.0, True, "judge_unparseable", False),
+        (0.0, True, "judge_failed", False),
+    ]
+    reasons = [reply.json()["failure_reason"] for reply in replies]
+    assert all(isinstance(reason, str) and reason.strip() for reason in reasons), reasons
