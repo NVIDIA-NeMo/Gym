@@ -87,11 +87,12 @@ dependencies = [
     # Pinned to a single version, not a range.
     # Gym subclasses the SDK's pydantic models and mirrors its Responses item union by hand.
     # Each version needs its own audit, so a range would claim support for versions nobody tested.
-    # 2.45.0 makes InputTokensDetails.cache_write_tokens required, which NeMoGymResponseInputTokensDetails cannot satisfy.
+    # 2.45.0 makes InputTokensDetails.cache_write_tokens required.
+    # NeMoGymResponseInputTokensDetails overrides it as Optional, so a provider that does not report cache writes stays unknown instead of becoming zero.
     # Moving this pin means re-running tests/unit_tests/core/test_responses_api_types.py, which names each item type Gym cannot represent.
-    # Updated Tue Aug 11, 2026 with openai==2.44.0
-    # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.44.0/LICENSE
-    "openai==2.44.0",
+    # Updated 2026-11-02 with openai==2.45.0 for MAX reasoning effort.
+    # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.45.0/LICENSE
+    "openai==2.45.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
     # /v1/messages <-> Responses mapping in nemo_gym/models/anthropic_converter.py. Types only — we never
@@ -883,10 +884,12 @@ layers = [
     "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils",
     # environment/
     "nemo_gym.environment",
+    # Shared web benchmark browser, session and task contracts.
+    "nemo_gym.web",
     # eval/
     "nemo_gym.eval",
     # orchestration/
-    "nemo_gym.cli._locked_env : nemo_gym.cli._prepare_worker : nemo_gym.orchestration",
+    "nemo_gym.orchestration",
     # rollouts/
     "nemo_gym.rollouts",
     # data/
@@ -895,6 +898,9 @@ layers = [
     "nemo_gym.agents",
     # models/
     "nemo_gym.models",
+    # server_runtime/supervisor/: starts the servers of a run, so it sits above the rest of server_runtime;
+    # nothing that runs inside a server may import it
+    "nemo_gym.server_runtime.supervisor",
     # server_runtime/
     "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.sandbox_lending : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.uvicorn_reuse_port : nemo_gym.server_runtime.verifier_observability",
     # artifacts/
@@ -925,7 +931,6 @@ ignore_imports = [
     "nemo_gym.client.server_client -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.artifacts.exporters",
-    "nemo_gym.config.global_config -> nemo_gym.orchestration.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",

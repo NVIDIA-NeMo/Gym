@@ -100,7 +100,6 @@ from nemo_gym.trajectory import (
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
-    ToolCallObservation,
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -322,23 +321,6 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
-def _capture_joins_opencode_step_limit() -> bool:
-    """Whether Gym's token capture joins the calls that OpenCode's step-limit note follows.
-
-    The capture fix for OpenCode's step-limit note (Gym #5833) adds ``nemo_gym.models.token_capture.harness_notes``
-    with an OpenCode entry in ``HARNESS_NOTES``. Without it, the note turns the next call into a poisoned capture, so
-    a seed with token capture refuses ``agent.build.steps``. The check imports the module, so it does not depend on
-    whether the module is a file or a package.
-
-    TODO: remove this check once #5833 is on main, and allow ``agent.build.steps`` with token capture always.
-    """
-    try:
-        from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
-    except ImportError:
-        return False
-    return any(note.harness == "opencode" for note in HARNESS_NOTES)
-
-
 def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
     """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
 
@@ -353,8 +335,8 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
-      Other agent fields would replace the adapter's prompt, model or sampling. With token capture on, the seed
-      refuses it unless Gym's capture fix for the step-limit note is installed (Gym #5833).
+      Other agent fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
+      message (``nemo_gym.models.token_capture.harness_notes``) and keeps the calls after it chained.
     """
     unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
     if unsupported:
@@ -482,7 +464,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     report_agent_sandbox_oom: bool = False
-    # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
+    # Connection and per-call timeout of a sandbox session's MCP tool grants. Unset, OpenCode connects within 30 s
+    # and each call gets the MCP SDK's 60 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Sandbox sessions only. Absolute sandbox paths of OpenCode plugin files that the sandbox owner staged,
@@ -508,6 +491,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
     # of a compaction is counted as a step too.
     return_session_trajectory: bool = True
+    # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
+    # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
+    # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
+    # or tools.
+    session_project_config: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -761,17 +749,25 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if timed_out
                 else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
-            observations = AgentObservationBundle(source="opencode")
+            observations = AgentObservationBundle(schema_version="2.0", source="opencode")
             if collect_observations:
                 try:
                     observations = _parse_opencode_session(
-                        db_path, invocation_id, trajectory, model_ref=self.config.model_server
+                        db_path,
+                        invocation_id,
+                        trajectory,
+                        model_ref=self.config.model_server,
+                        # This fresh local database is written by one OpenCode launch.
+                        clock_domain=f"opencode-wall:{uuid4().hex}",
+                        agent_instance=f"opencode-agent:{uuid4().hex}",
+                        observation_schema_version="2.0",
                     )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     if trajectory is not None:
                         trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                     observations = AgentObservationBundle(
+                        schema_version="2.0",
                         source="opencode",
                         records=[AgentInvocation(invocation_id=invocation_id)],
                         gaps=[
@@ -1064,15 +1060,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
         config_error = _session_opencode_config_error(self.config.opencode_config)
-        if (
-            config_error is None
-            and self._token_id_capture_enabled()
-            and "steps" in self.config.opencode_config.get("agent", {}).get("build", {})
-            and not _capture_joins_opencode_step_limit()
-        ):
-            # OpenCode sends its last-step prompt as an assistant message. Without Gym #5833, capture cannot join
-            # that call to the earlier calls of the rollout. TODO: remove this check once #5833 is on main.
-            config_error = "agent.build.steps cannot be used with token capture without Gym #5833's capture fix"
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
@@ -1417,7 +1404,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assert isinstance(state, OpenCodeSandboxSession)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
-            source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+            schema_version="2.0", source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
         # A capture that close finished after the activation returned reports its export failure here.
         observations.gaps.extend(state.take_export_gaps())
@@ -1450,8 +1437,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
-            # NeMo RL sets max_output_tokens on every row. It changes nothing when OpenCode's own limit for each
-            # model call (config.max_output_tokens) already stays within it. A tighter limit is refused below.
+            # Gym agents read a request's max_output_tokens as the limit for each model call (simple_agent copies it
+            # into every call), and NeMo RL sets it on every row as its generation limit. OpenCode's own limit for
+            # each call (config.max_output_tokens) already stays within a value at least that large. A tighter one is
+            # refused below. Nothing limits the sum over a session's calls, as in simple_agent.
             if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
                 continue
             if value != field.get_default(call_default_factory=True):
@@ -1639,7 +1628,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stop_reason="timeout",
                 duration_ms=(monotonic() - started) * 1000,
             )
-            state.activation_observations = AgentObservationBundle(source="opencode", records=[invocation])
+            state.activation_observations = AgentObservationBundle(
+                schema_version="2.0", source="opencode", records=[invocation]
+            )
             state.activation_trajectory = TrajectoryRecord(
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
@@ -1659,7 +1650,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if failure is not None:
                 observations = state.activation_observations
                 if observations is None:
-                    observations = AgentObservationBundle(source="opencode")
+                    observations = AgentObservationBundle(schema_version="2.0", source="opencode")
                     state.activation_observations = observations
                 if not any(
                     isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
@@ -1843,6 +1834,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
+        if self.config.session_project_config:
+            del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
         error = None
         export = {}
         failure = None
@@ -1876,6 +1869,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if state.is_continuation and state.harness_session_id is not None:
                 invocation_id += f":{state.harness_session_id}"
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="opencode",
                 records=(
                     [
@@ -1985,13 +1979,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "server_error"
         cancelled = isinstance(failure, asyncio.CancelledError)
         timed_out = result is not None and result["timed_out"]
-        if cancelled or timed_out:
-            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
-            termination = "timeout" if timed_out else "cancelled"
-            for record in observations.records:
-                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
-                    record.status = termination
-                    record.error_type = f"invocation_{termination}"
+        # The enclosing process deadline does not establish a tool's own terminal outcome.
+        # Persisted starts without native completion remain incomplete through normalization.
         if result is not None:
             sandbox_outcome = (
                 "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"

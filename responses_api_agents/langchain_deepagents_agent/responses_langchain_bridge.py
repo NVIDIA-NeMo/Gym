@@ -17,8 +17,10 @@
 Model calls cannot go through `langchain_openai.ChatOpenAI`: it runs on the `openai` SDK, which runs on
 `httpx`, and CLAUDE.md requires all async HTTP inside a Gym server process to go through Gym's own
 aiohttp-backed `server_client` instead (httpx/httpcore's connection pooling degrades badly at high
-concurrency). `GymResponsesChatModel` below reimplements the minimum LangChain model-calling surface
-deepagents needs (`bind_tools()` + `_agenerate()`) on top of `server_client.post()`.
+concurrency). `GymResponsesChatModel` below sends the requests of `ResponsesChatModel`
+(responses_chat_model.py), which implements the minimum LangChain model-calling surface deepagents needs
+(`bind_tools()` + `_agenerate()`), through `server_client.post()`. The sandbox runner sends the same requests from
+the task sandbox instead.
 
 `GymResponsesChatModel` is a singleton bound to the owning agent (constructed once, in the owning
 `DeepAgentsAgent.__init__`), and gets its per-request `model_url_path`/cookies from the ambient
@@ -43,30 +45,20 @@ import time
 import uuid
 from typing import Any
 
-from langchain_core.language_models.chat_models import BaseChatModel
+from aiohttp import ClientResponseError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.tool import tool_call
-from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import ensure_config
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
-
-
-def _text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return str(content)
-
-
-def _output_text(content_items: list) -> str:
-    """Extract text from a NeMoGymResponseOutputMessage.content list — real Pydantic objects, not dicts
-    (unlike the input-side content lists _text() handles), so it needs its own extraction, not _text()."""
-    return "".join(part.text for part in content_items if isinstance(part, NeMoGymResponseOutputText))
+from nemo_gym.core import NeMoGymResponse, accumulate_response_usage
+from responses_api_agents.langchain_deepagents_agent.responses_chat_model import (
+    ResponsesChatModel,
+    ai_message_from_response,
+    message_text,
+    to_gym_input,
+)
 
 
 def to_langchain(input_items: list) -> list:
@@ -87,7 +79,7 @@ def to_langchain(input_items: list) -> list:
     for item in input_items:
         item_type = getattr(item, "type", None)
         if item_type == "message":
-            messages.append(roles.get(item.role, HumanMessage)(content=_text(item.content)))
+            messages.append(roles.get(item.role, HumanMessage)(content=message_text(item.content)))
         elif item_type == "function_call":
             try:
                 args = json.loads(item.arguments)
@@ -98,7 +90,7 @@ def to_langchain(input_items: list) -> list:
                 args = {}
             messages.append(AIMessage(content="", tool_calls=[tool_call(name=item.name, args=args, id=item.call_id)]))
         elif item_type == "function_call_output":
-            messages.append(ToolMessage(content=_text(item.output), tool_call_id=item.call_id))
+            messages.append(ToolMessage(content=message_text(item.output), tool_call_id=item.call_id))
     return messages
 
 
@@ -132,89 +124,12 @@ def to_responses(new_messages: list, model_name: str) -> dict:
     }
 
 
-def to_gym_input(messages: list) -> list[dict]:
-    """LangChain messages -> Gym Responses API input items, for one internal deepagents model call."""
-    items: list[dict] = []
-    for message in messages:
-        if isinstance(message, ToolMessage):
-            items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": message.tool_call_id,
-                    "output": _text(message.content),
-                }
-            )
-        elif isinstance(message, AIMessage):
-            # Round-trips reasoning items stashed by to_langchain_ai_message() so they aren't silently
-            # dropped on the next internal turn. This resends reasoning content on every subsequent
-            # internal model call (the full growing input list is resent each turn), which grows token
-            # usage — comment out this line to stop round-tripping and only pay for reasoning once, on
-            # the turn it was produced.
-            items.extend(message.additional_kwargs.get("reasoning_items", []))
-            if message.content:
-                items.append({"type": "message", "role": "assistant", "content": _text(message.content)})
-            for call in message.tool_calls:
-                items.append(
-                    {
-                        "type": "function_call",
-                        "call_id": call["id"],
-                        "name": call["name"],
-                        "arguments": json.dumps(call["args"]),
-                    }
-                )
-        elif isinstance(message, SystemMessage):
-            items.append({"type": "message", "role": "system", "content": _text(message.content)})
-        else:
-            items.append({"type": "message", "role": "user", "content": _text(message.content)})
-    return items
-
-
 def to_langchain_ai_message(gym_response: NeMoGymResponse) -> AIMessage:
     """Gym Responses API output -> a single LangChain AIMessage, for one internal deepagents model call."""
-    text_parts: list[str] = []
-    tool_calls: list[dict] = []
-    # Stashed separately from text_parts (not shown as visible assistant text) so to_gym_input() can
-    # round-trip each one back as its own `reasoning` item on the next internal turn instead of silently
-    # dropping it. Kept as the original item dict (full fidelity: id, summary, encrypted_content, ...) so
-    # to_gym_input() can pass it straight through unchanged.
-    reasoning_items: list[dict] = []
-    for item in gym_response.output:
-        item_type = getattr(item, "type", None)
-        if item_type == "message":
-            text_parts.append(_output_text(item.content))
-        elif item_type == "function_call":
-            try:
-                args = json.loads(item.arguments)
-            except (json.JSONDecodeError, TypeError):
-                # Malformed args from the model server. Pass through as {} rather than crashing the
-                # request — deepagents' underlying ToolNode (handle_tool_errors=True by default) will
-                # fail the tool invocation against the real schema and feed the model an error
-                # ToolMessage, same graceful-degradation outcome as simple_agent's explicit guard.
-                args = {}
-            tool_calls.append(tool_call(name=item.name, args=args, id=item.call_id))
-        elif item_type == "reasoning":
-            reasoning_items.append(item.model_dump(mode="json"))
-        else:
-            # Anything else (mcp_call, web_search_call, code_interpreter_call, computer_call, ...) has no
-            # client-side execution path in deepagents and, for hosted/server-executed items, represents a
-            # tool result the model already produced — dropping it silently would leave the agent's next
-            # turn with no memory of something that already happened. Fail loudly instead of guessing a
-            # textual fallback for a type with no observed repro yet.
-            raise NotImplementedError(
-                f"to_langchain_ai_message() does not support Gym Responses output item type {item_type!r} "
-                f"(response id={gym_response.id!r}). Only 'message', 'function_call', and 'reasoning' are "
-                "handled today."
-            )
-    return AIMessage(
-        content="".join(text_parts),
-        tool_calls=tool_calls,
-        id=gym_response.id,
-        response_metadata={"id": gym_response.id},
-        additional_kwargs={"reasoning_items": reasoning_items} if reasoning_items else {},
-    )
+    return ai_message_from_response(gym_response.model_dump(mode="json"))
 
 
-class GymResponsesChatModel(BaseChatModel):
+class GymResponsesChatModel(ResponsesChatModel):
     """LangChain-compatible chat model backed by Gym's own aiohttp-based server_client — see module
     docstring for why ChatOpenAI/langchain_openai can't be used here. A singleton per DeepAgentsAgent
     instance; per-request model_url_path/cookies come from the ambient `RunnableConfig`, not constructor
@@ -222,25 +137,7 @@ class GymResponsesChatModel(BaseChatModel):
 
     agent: Any = Field(default=None, exclude=True)  # the owning DeepAgentsAgent instance
 
-    @property
-    def _llm_type(self) -> str:
-        return "gym-responses-api"
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-        raise NotImplementedError("GymResponsesChatModel is async-only; use ainvoke/astream_events.")
-
-    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
-        # Gym's FunctionToolParam (nemo_gym/client/openai_client.py, a passthrough of the real OpenAI Responses
-        # API type) requires "strict" as a present-but-nullable field — omitting it entirely fails
-        # request validation ("Field required"), confirmed by actually running this against a live
-        # model server. convert_to_openai_tool()'s "function" dict doesn't include it by default.
-        formatted = [{"type": "function", "strict": False, **convert_to_openai_tool(t)["function"]} for t in tools]
-        bind_kwargs: dict[str, Any] = {"tools": formatted}
-        if tool_choice is not None:
-            bind_kwargs["tool_choice"] = tool_choice
-        return self.bind(**bind_kwargs, **kwargs)
-
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+    async def create_response(self, request_body: dict[str, Any]) -> dict[str, Any]:
         # `BaseChatModel.ainvoke()` doesn't forward `configurable` into `_agenerate()`'s kwargs (it only
         # extracts callbacks/tags/metadata/run_name/run_id before calling `agenerate_prompt`), so we pull
         # the ambient config ourselves. `ensure_config()` with no argument reads whatever `RunnableConfig`
@@ -261,26 +158,35 @@ class GymResponsesChatModel(BaseChatModel):
         # Optional (unlike the three above): most callers never set body.reasoning, so this is absent from
         # older/simpler configurable dicts (e.g. hand-built test fixtures) rather than required wiring.
         model_reasoning = configurable.get("model_reasoning")
-
-        request_body: dict[str, Any] = {"input": to_gym_input(messages)}
-        if "tools" in kwargs:
-            request_body["tools"] = kwargs["tools"]
-        if "tool_choice" in kwargs:
-            request_body["tool_choice"] = kwargs["tool_choice"]
         if model_reasoning is not None:
             request_body["reasoning"] = model_reasoning
+        # The activation request's sampling controls, such as temperature and top_p, apply to every model call.
+        for name, value in (configurable.get("model_request_defaults") or {}).items():
+            request_body.setdefault(name, value)
         resp = await self.agent.server_client.post(
             server_name=self.agent.config.model_server.name,
             url_path=model_url_path,
             json=request_body,
             cookies=model_cookies["cookies"],
         )
-        await raise_for_status(resp)
+        try:
+            await raise_for_status(resp)
+        except ClientResponseError as error:
+            # Marks the error as a model call's, so a session can type it apart from a tool's HTTP error.
+            model_failure = configurable.get("model_failure")
+            if model_failure is not None:
+                model_failure["error"] = error
+            raise
         # `model_cookies` is the same holder dict object referenced from `configurable` (not a copy), so
         # this mutation is visible to the next `_agenerate()` call for this rollout — matches
         # `simple_agent`'s pattern of chaining model-server cookies from each response into the next call.
         # It's a deliberate, narrow exception to treating `configurable` as otherwise immutable.
         model_cookies["cookies"] = resp.cookies
         gym_response = NeMoGymResponse.model_validate(await get_response_json(resp))
-        model_usage["usage"] = accumulate_response_usage(model_usage["usage"], gym_response.usage)
-        return ChatResult(generations=[ChatGeneration(message=to_langchain_ai_message(gym_response))])
+        # Missing usage in any call makes the whole rollout unknown, including later successful calls.
+        if gym_response.usage is None:
+            model_usage["unknown"] = True
+        model_usage["usage"] = (
+            None if model_usage.get("unknown") else accumulate_response_usage(model_usage["usage"], gym_response.usage)
+        )
+        return gym_response.model_dump(mode="json")

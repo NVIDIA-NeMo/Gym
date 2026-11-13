@@ -251,7 +251,7 @@ class TestPrepareDependencies:
         assert os.environ["VIRTUAL_ENV"] == str(tmp_path / "parent venv")
 
     def test_absolute_script_loads_and_executes_without_a_prepare_project(self, tmp_path):
-        from nemo_gym.cli._prepare_worker import load_preparer
+        from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
         output = tmp_path / "data.jsonl"
         script = tmp_path / "prepare.py"
@@ -282,7 +282,7 @@ class TestPrepareDependencies:
             "    import agents.function_schema\n"
             f"    p = Path({str(output)!r}); p.write_text('ok'); return p\n"
         )
-        worker = Path(importlib.util.find_spec("nemo_gym.cli._prepare_worker").origin)
+        worker = Path(importlib.util.find_spec("nemo_gym.server_runtime.supervisor._prepare_worker").origin)
         (tmp_path / "args.json").write_text("{}")
         subprocess.run(
             [

@@ -8,7 +8,6 @@ import json
 import shlex
 import sqlite3
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from time import monotonic
@@ -41,10 +40,8 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.models import token_capture
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
@@ -972,14 +969,21 @@ async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, 
         "cancelled",
         241,
     )
-    tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
-    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    tools = {
+        record.native_tool_call_id or record.tool_call_id: record for record in records if record.kind == "tool_call"
+    }
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("incomplete", None)
     assert tools["tool-1"].status != "cancelled"
     invocation = next(record for record in records if record.kind == "agent_invocation")
-    assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(
+    assert {
+        "type": "function_call_output",
+        "call_id": tools["running-shell"].tool_call_id,
+        "output": "started",
+    }.items() <= next(
         item.model_dump()
         for item in invocation.conversation
-        if getattr(item, "call_id", None) == "running-shell" and item.type == "function_call_output"
+        if getattr(item, "call_id", None) == tools["running-shell"].tool_call_id
+        and item.type == "function_call_output"
     ).items()
 
 
@@ -1192,7 +1196,10 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        # An Environment Server activates a captured rollout on the tagged path; without the tag it would not capture.
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/training-token-capture/v1/responses", json={"input": "task"}
+        )
         assert result.status_code == 200, result.text
         config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
     # OpenCode can reach only the Gym provider, for its main and small model alike.
@@ -1205,32 +1212,9 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
 
 
-def test_with_token_capture_a_seed_refuses_build_steps(setup, monkeypatch):
+def test_with_token_capture_a_seed_accepts_build_steps(setup):
     agent, sandbox = setup
-    # Without Gym #5833's capture fix installed.
-    monkeypatch.setattr(opencode_app, "_capture_joins_opencode_step_limit", lambda: False)
-    agent.server_client.global_config_dict = OmegaConf.create(
-        {
-            "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
-            "token_id_capture": {"enabled": True, "all_agents": True},
-        }
-    )
-    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
-    with TestClient(agent.setup_webserver()) as client:
-        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert refused.status_code == 422
-        # OpenCode's last-step prompt is an assistant message, which capture cannot join to the earlier calls.
-        assert "agent.build.steps cannot be used with token capture" in refused.json()["detail"]
-        sandbox.exec.assert_not_awaited()
-        # compaction.auto keeps capture whole, so it stays allowed.
-        agent.config.opencode_config = {"compaction": {"auto": False}}
-        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-
-
-def test_with_token_capture_a_seed_accepts_build_steps_when_the_capture_fix_is_installed(setup, monkeypatch):
-    agent, sandbox = setup
-    # Gym #5833 installs the capture fix for OpenCode's step-limit note. TODO: drop this test with the check.
-    monkeypatch.setattr(opencode_app, "_capture_joins_opencode_step_limit", lambda: True)
+    # Capture recognizes OpenCode's step-limit note (harness_notes), so the step limit and capture go together.
     agent.server_client.global_config_dict = OmegaConf.create(
         {
             "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
@@ -1240,36 +1224,6 @@ def test_with_token_capture_a_seed_accepts_build_steps_when_the_capture_fix_is_i
     agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-
-
-_HARNESS_NOTES_MODULE = "nemo_gym.models.token_capture.harness_notes"
-
-
-def test_capture_fix_detection_is_off_without_the_harness_notes_module(monkeypatch):
-    monkeypatch.setitem(sys.modules, _HARNESS_NOTES_MODULE, None)  # import raises ImportError
-    assert not opencode_app._capture_joins_opencode_step_limit()
-
-
-@pytest.mark.parametrize("layout", ["module", "package"])
-@pytest.mark.parametrize(("harnesses", "expected"), [(["opencode"], True), (["pi"], False), ([], False)])
-def test_capture_fix_detection_finds_an_opencode_note_in_either_layout(
-    monkeypatch, tmp_path, layout, harnesses, expected
-):
-    # #5833 first added harness_notes.py and then moved it into a harness_notes/ package; both must be found.
-    source = "from types import SimpleNamespace\n" + (
-        f"HARNESS_NOTES = tuple(SimpleNamespace(harness=name) for name in {harnesses!r})\n"
-    )
-    if layout == "module":
-        (tmp_path / "harness_notes.py").write_text(source)
-    else:
-        (tmp_path / "harness_notes").mkdir()
-        (tmp_path / "harness_notes" / "__init__.py").write_text(source)
-    monkeypatch.setattr(token_capture, "__path__", [str(tmp_path), *token_capture.__path__])
-    monkeypatch.delitem(sys.modules, _HARNESS_NOTES_MODULE, raising=False)
-    try:
-        assert opencode_app._capture_joins_opencode_step_limit() is expected
-    finally:
-        sys.modules.pop(_HARNESS_NOTES_MODULE, None)
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
@@ -1515,7 +1469,7 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
             "input_tokens": 11 + cache,
             "output_tokens": 2 + reasoning,
             "total_tokens": 13 + cache + reasoning,
-            "input_tokens_details": {"cached_tokens": cache or None},
+            "input_tokens_details": {"cached_tokens": cache or None, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": reasoning or None},
         }
         assert [item["type"] for item in response["output"]] == [
@@ -1572,6 +1526,23 @@ def test_invalid_output_budget_rejected_before_connecting(setup, output_budget):
     assert "max_output_tokens" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
     sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("project_config", [False, True])
+def test_task_repository_project_config_follows_the_session_setting(setup, project_config):
+    agent, sandbox = setup
+    agent.config.session_project_config = project_config
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        payload = sandbox.params()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    # OpenCode reads the repository's AGENTS.md/CLAUDE.md and opencode.json only without this flag.
+    assert payload["env"].get("OPENCODE_DISABLE_PROJECT_CONFIG") == (None if project_config else "true")
+    # The rest of the isolation stays, and Gym's inline config is still passed.
+    assert payload["env"]["OPENCODE_DISABLE_AUTOUPDATE"] == "true"
+    assert "OPENCODE_CONFIG_CONTENT" in payload["env"]
 
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "length"])
@@ -2378,6 +2349,9 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
         assert response.agent_observations is not None
         invocations = [record for record in response.agent_observations.records if record.kind == "agent_invocation"]
         assert any(record.conversation for record in invocations)
+        assert all(record.agent_instance == state.agent_instance for record in invocations)
+        tools = [record for record in response.agent_observations.records if record.kind == "tool_call"]
+        assert tools and all(record.agent_instance == state.agent_instance for record in tools)
         assert state.session.closed
         assert await agent.close_agent_session(request, close) == response
         (sandbox.stop if owned else sandbox.disconnect).assert_awaited_once()

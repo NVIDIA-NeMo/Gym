@@ -107,8 +107,8 @@ agentic_mme_opencode_agent:
         # but still offers the tools. The agentic_mme server scores an answer at or after the limit 0 by default
         # (score_step_limit_answer: false), like the Agentic-MME agent's 0 for an episode that runs out of rounds;
         # a policy trained with that answer scored learned to use every step. agent.build.steps: 17 matches the
-        # Agentic-MME agent's 15 tool rounds plus one answer call. Under token capture the session refuses a step
-        # limit until the capture fix for OpenCode's step-limit note lands.
+        # Agentic-MME agent's 15 tool rounds plus one answer call. Token capture keeps the calls after OpenCode's
+        # step-limit note chained to the rollout's earlier calls.
       datasets:
         - name: agentic_mme_opencode
           type: benchmark

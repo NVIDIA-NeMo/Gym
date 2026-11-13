@@ -224,6 +224,7 @@ class AgenticMMEConfig(BaseResourcesServerConfig):
     judge_model_server: Optional[ModelServerRef] = None
     judge_temperature: float = 0.0
     judge_max_tokens: int = 1024
+    # Per worker: with num_workers > 1, each worker allows this many judge calls at once.
     judge_max_concurrency: int = Field(default=32, ge=1)
     judge_max_text_chars: int = Field(default=8000, ge=1)
     # Whether an answer given at or after a harness's own step limit counts. The harness marks such a response

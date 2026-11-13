@@ -37,6 +37,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
 from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
@@ -73,6 +74,7 @@ class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     # session a failed call fails the response with its cause, and the Environment Server grades or retries.
     max_rounds: int | None = Field(default=15, ge=1, le=100)
     max_tool_calls: int | None = Field(default=15, ge=0, le=100)
+    # Per worker: with num_workers > 1, each worker runs this many rollouts at once.
     max_concurrent_rollouts: int = Field(default=8, ge=1)
     max_image_pixels: int = Field(default=16_000_000, ge=1)
     max_total_image_pixels: int = Field(default=64_000_000, ge=1)
@@ -467,3 +469,6 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     AgenticMMEAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AgenticMMEAgent.run_webserver()  # noqa: F401

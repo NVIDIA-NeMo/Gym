@@ -93,6 +93,31 @@ def changed_harnesses(base: str, *, root: Path = ROOT) -> list[str]:
     return select_harnesses([path for path in paths.split("\0") if path])
 
 
+def _build_crewai_sandbox_runtime() -> None:
+    """Build CrewAI's sandbox runtime before the probes run.
+
+    The runtime, CrewAI and its dependencies for the sandbox's platform, takes longer to build than one probe episode
+    lasts, so the probes' first seed would time out building it. Installing it once into a throwaway local sandbox
+    leaves it in Gym's cache and under the local provider's ``/tmp``, where every probe seed finds it.
+    """
+    import asyncio
+    import tempfile
+
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+    from responses_api_agents.crewai_agent.sandbox import RUNTIME
+
+    async def build() -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            sandbox = AsyncSandbox(create_provider({"local": {}}))
+            await sandbox.start(SandboxSpec(workdir=workdir))
+            try:
+                await RUNTIME.install(sandbox, timeout_s=600)
+            finally:
+                await sandbox.stop()
+
+    asyncio.run(build())
+
+
 def install_runtime(harness: str) -> None:
     """Install the adapter's pinned runtime into this CI job's isolated environment."""
     import yaml
@@ -107,8 +132,10 @@ def install_runtime(harness: str) -> None:
     if harness == "nooa":
         subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
         return
-    if harness in ("hermes", "stirrup", "simple", "openclaw"):
-        # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
+    if harness == "crewai":
+        _build_crewai_sandbox_runtime()
+    if harness in ("hermes", "stirrup", "simple", "openclaw", "copilot", "crewai"):
+        # Simple is built in; Hermes is locked; the remaining harnesses provision the task sandbox.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
@@ -148,9 +175,10 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     else:
         status = "passed"
         message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
+    tested_sha = os.environ.get("TESTED_SHA") or os.environ.get("GITHUB_SHA", "local")
     output.mkdir(parents=True, exist_ok=True)
     (output / "ci-result.json").write_text(
-        json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
+        json.dumps({"harness": harness, "sha": tested_sha, "status": status}) + "\n"
     )
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
     count, first = failure_details(harness, output)
@@ -158,7 +186,7 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     if status != "passed":
         detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
         print(f"::warning title={warning_title}::{detail}".replace("%", "%25"))
-    markdown += f"Source: `{os.environ.get('GITHUB_SHA', 'local')}`\n\n"
+    markdown += f"Source: `{tested_sha}`\n\n"
     report_path = output / "conformance_report.md"
     if report_path.exists():
         markdown += report_path.read_text() + "\n"

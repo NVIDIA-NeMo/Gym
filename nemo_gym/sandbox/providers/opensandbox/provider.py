@@ -84,7 +84,7 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.utils.exception_inspection import error_to_http_status
+from nemo_gym.utils.exception_inspection import error_to_http_status, explicit_causes
 
 
 LOGGER = logging.getLogger(__name__)
@@ -339,6 +339,43 @@ def _is_request_timeout(exception: BaseException) -> bool:
             return True
         current = current.__cause__
     return False
+
+
+def _request_was_not_sent(exception: BaseException) -> bool:
+    """Whether the transport failed before the request left the client, so sending it again cannot run it twice.
+
+    The innermost transport error in the cause chain decides, as in the SWE-bench Pro patch capture. The SDK wraps
+    its client's error, and Gym's aiohttp transport re-raises every aiohttp connection error as
+    ``httpx.ConnectError``, a reset after the request was written included; the aiohttp error underneath says
+    whether the connection ever opened. httpx raises ``ConnectError`` and ``ConnectTimeout`` only while it opens a
+    connection, and ``PoolTimeout`` while it waits for one.
+    """
+    import socket
+
+    import httpx
+
+    unsent: tuple[type[BaseException], ...] = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+        ConnectionRefusedError,
+        socket.gaierror,
+    )
+    sent: tuple[type[BaseException], ...] = (httpx.TransportError,)
+    try:
+        import aiohttp
+
+        unsent += (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError)
+        sent += (aiohttp.ClientError,)
+    except ModuleNotFoundError:
+        pass
+    not_sent = False
+    for link in explicit_causes(exception):
+        if isinstance(link, unsent):
+            not_sent = True
+        elif isinstance(link, sent):
+            not_sent = False
+    return not_sent
 
 
 def _is_retryable_create_error(
@@ -1622,10 +1659,12 @@ class OpenSandboxProvider:
         timeout_s: float | None,
         retries: int,
     ) -> Any:
-        """Submit once: neither a 502 nor a timeout proves non-delivery.
+        """Submit once unless the request never left the client.
 
-        Command retry settings cannot override this safety constraint. The provider
-        has no idempotency key or authoritative non-delivery receipt.
+        Neither a 502 nor a timeout proves non-delivery, and command retry settings cannot
+        override that: the provider has no idempotency key or authoritative non-delivery
+        receipt. A connection that never opened is that receipt, so such a failure, and only
+        such a failure, is sent again within ``operations.retries``.
         """
         renewal = self._renewals.get(sandbox_id)
         if renewal is not None and renewal.done() and not renewal.cancelled():
@@ -1638,14 +1677,15 @@ class OpenSandboxProvider:
                     failure_kind=PROVIDER_UNAVAILABLE,
                     reason="Sandbox lifetime renewal failed before command submission",
                 ) from error
-        try:
-            return await self._await_sdk_call(
-                operation_factory(), operation=operation, sandbox_id=sandbox_id, timeout_s=timeout_s
-            )
-        except Exception as error:
-            if isinstance(error, NgFailureEvent):
-                raise
-            raise opensandbox_failure(operation=operation, sandbox_id=sandbox_id, cause=error) from error
+        return await self._await_sdk_operation(
+            operation_factory,
+            operation=operation,
+            sandbox_id=sandbox_id,
+            timeout_s=timeout_s,
+            retries=self._operations.retries,
+            is_retryable=_request_was_not_sent,
+            replay_safe=True,
+        )
 
     async def _run_setup_commands(self, handle: SandboxHandle) -> None:
         for command in self._setup.commands:
@@ -2449,8 +2489,13 @@ class OpenSandboxProvider:
                     if _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
                         # The lifecycle API exposes a workload reason without a container identity.
                         # Keep OOMKilled as evidence, but do not attribute a possible sidecar OOM.
+                        # Keep the control plane's own report as bounded evidence: it is what tells a reader
+                        # whether the workload hit its limit or was evicted. It never changes the failure kind.
+                        report = getattr(status, "message", None)
+                        detail = f", message={report[:256]!r}" if isinstance(report, str) and report else ""
                         terminal_notice = _SandboxDeathNotice(
-                            f"Sandbox is unavailable; lifecycle status: state={state!r}, reason={str(reason)[:256]!r}",
+                            f"Sandbox is unavailable; lifecycle status: state={state!r}, "
+                            f"reason={str(reason)[:256]!r}{detail}",
                             failure_kind=PROVIDER_UNAVAILABLE,
                             provider_status_reason=reason if isinstance(reason, str) else None,
                         )
@@ -2542,10 +2587,21 @@ class OpenSandboxProvider:
         The logs endpoint returns one combined stream, so unlike the foreground
         path ``stdout`` carries both streams and ``stderr`` is set only when the
         sandbox itself reports an error.
+
+        Gym enforces ``total_timeout_s`` itself: once its own deadline passes
+        while the command is still running, it interrupts the command and
+        returns the timeout result, as the session path does. execd reports its
+        own timeout kill only as a signal death, so its timer is moved past
+        Gym's deadline and serves as a backstop.
         """
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
         background_opts = dict(opts_kwargs)
         background_opts["background"] = True
+        command_timeout_s = float(total_timeout_s) if total_timeout_s else None
+        if command_timeout_s is not None:
+            background_opts["timeout"] = timedelta(
+                seconds=command_timeout_s + self._operations.command_timeout_headroom_s / 2
+            )
 
         loop = asyncio.get_running_loop()
 
@@ -2569,6 +2625,8 @@ class OpenSandboxProvider:
                 failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
                 reason="OpenSandbox background command did not return an execution id",
             )
+        command_deadline = loop.time() + command_timeout_s if command_timeout_s is not None else None
+        timed_out = False
 
         # The server enforces the command timeout; leave the client headroom.
         deadline = (
@@ -2686,7 +2744,17 @@ class OpenSandboxProvider:
                 if status.running is False:
                     break
                 seen_running = True
+                if command_deadline is not None and not timed_out and loop.time() >= command_deadline:
+                    timed_out = await self._interrupt_at_deadline(
+                        handle, execution_id, timeout_s=command_timeout_s, request_timeout_s=status_timeout_s
+                    )
+                    # One attempt: if the interrupt fails, execd's backstop timer still stops the command.
+                    command_deadline = None
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]
+            # Wake at Gym's command deadline, but once it has passed (e.g. while status reads fail) it must not
+            # zero the polling and backoff delay.
+            if command_deadline is not None and command_deadline > loop.time():
+                limits.append(command_deadline)
             # Retry caps must not shorten the configured polling cadence, even when the cap is zero.
             delay = max(
                 poll_interval,
@@ -2748,6 +2816,9 @@ class OpenSandboxProvider:
         stderr = status_error or None
         if output_deleted:
             stderr = f"{stderr}\n{DELETED_OUTPUT_NOTE}" if stderr else DELETED_OUTPUT_NOTE
+        if timed_out:
+            note = f"Command timed out after {command_timeout_s:g}s; Gym interrupted it"
+            return SandboxExecResult(stdout, f"{stderr}\n{note}" if stderr else note, 124, error_type="timeout")
         error_type = None
         if status.exit_code is not None:
             if status.exit_code == 0 and status_error is not None:
@@ -2769,6 +2840,38 @@ class OpenSandboxProvider:
             )
 
         return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+
+    async def _interrupt_at_deadline(
+        self, handle: SandboxHandle, execution_id: str, *, timeout_s: float, request_timeout_s: float
+    ) -> bool:
+        """Interrupt a background command still running at Gym's deadline; whether the interrupt was accepted."""
+        observe_failure(
+            opensandbox_failure(
+                operation="command status",
+                sandbox_id=handle.sandbox_id,
+                execution_id=execution_id,
+                failure_kind=PROVIDER_COMMAND_TIMEOUT,
+                reason=f"Gym command deadline expired after {timeout_s:g}s",
+            )
+        )
+        try:
+            await self._await_sdk_call(
+                handle.raw.commands.interrupt(execution_id),
+                operation="command interrupt",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=request_timeout_s,
+            )
+        except Exception as error:
+            # The command may have finished on its own just before the interrupt; its status says how it ended.
+            observe_failure(
+                error
+                if isinstance(error, NgFailureEvent)
+                else opensandbox_failure(
+                    operation="command interrupt", sandbox_id=handle.sandbox_id, execution_id=execution_id, cause=error
+                )
+            )
+            return False
+        return True
 
     async def exec(
         self,

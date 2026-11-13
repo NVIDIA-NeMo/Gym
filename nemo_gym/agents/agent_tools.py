@@ -77,13 +77,12 @@ async def seed_mcp_servers(
 
 def verification_failure_fields(response: NeMoGymResponse | None = None) -> dict[str, Any]:
     """Forward bounded diagnostic events, including a restored response's report, without selecting a failure."""
-    from nemo_gym.core.failure_records import FailureReport
     from nemo_gym.core.failure_transport import RequestFailureLog
 
     log = RequestFailureLog.current() or RequestFailureLog()
     saved = getattr(response, "failure_report", None) if response is not None else None
     if saved is not None:
-        log.add(FailureReport.model_validate(saved))
+        log.add_saved(saved)
     report = log.report
     # Explicit None clears any unrelated report copied from the run-request body.
     return {"failure_report": report.model_dump(mode="json") if report.events or report.omitted else None}

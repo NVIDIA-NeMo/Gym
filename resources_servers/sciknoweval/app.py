@@ -19,6 +19,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.sciknoweval.grading import grade_task, parse_judgement
 from resources_servers.sciknoweval.task_data import TaskData
@@ -153,3 +154,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     SciKnowEvalResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SciKnowEvalResourcesServer.run_webserver()  # noqa: F401

@@ -1,10 +1,14 @@
+# APEX Shortlist with Pi agent sessions under single_agent_turn_legacy. Each session creates its own sandbox
+# from the offline science image (see responses_api_agents/pi_agent/configs/profiles/offline_science.yaml).
+# pi_legacy_agent.yaml keeps pi_sandboxed_agent on the deprecated legacy_agent relay; the two harnesses
+# are configured differently, so do not compare their scores as the same measurement.
 config_paths:
 - benchmarks/apex_shortlist/config.yaml
-- responses_api_agents/pi_sandboxed_agent/configs/benchmark.yaml
+- responses_api_agents/pi_agent/configs/profiles/offline_science.yaml
 apex_shortlist_pi_agent:
-  _inherit_from: pi_benchmark_agent
+  _inherit_from: pi_agent
   responses_api_agents:
-    pi_sandboxed_agent:
+    pi_agent:
       resources_server:
         type: resources_servers
         name: apex_shortlist_math_with_judge_resources_server
@@ -18,14 +22,16 @@ apex_shortlist_pi_agent:
 math_with_judge_simple_agent: null
 apex_shortlist_math_with_judge_simple_agent: null
 
-# Keep the benchmark's routing name, replacing its inherited server with this harness's /run relay.
+# Keep the benchmark's routing name and its single_agent_turn_legacy server, with this harness as the agent.
 math_with_judge_environment_server: null
 apex_shortlist_math_with_judge_environment_server:
   _delete_key: _inherit_from
   environment_servers:
-    _delete_key: single_agent_turn_legacy
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: apex_shortlist_math_with_judge_resources_server
       agent_server:
         type: responses_api_agents
         name: apex_shortlist_pi_agent

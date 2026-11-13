@@ -121,10 +121,12 @@ def _config(
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness == "simple":
         agent["max_steps"] = 6
-    if harness in ("opencode", "pi"):
+    if harness in ("opencode", "pi", "copilot"):
         agent["timeout"] = timeout
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
+    if harness == "crewai":
+        agent["timeout"] = timeout
     if harness == "openclaw":
         agent["timeout"] = math.ceil(timeout)
         if not use_agent_sessions:
