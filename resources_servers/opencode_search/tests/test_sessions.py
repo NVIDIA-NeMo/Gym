@@ -661,8 +661,8 @@ def test_a_judge_that_never_answers_sends_the_row_to_the_failures_sidecar(workdi
 
 
 def test_judge_replies_without_a_verdict_trip_the_dead_judge_breaker(workdir) -> None:
-    """Such a row is masked, so it leaves the quality metrics as quietly as an unreachable judge's: the run stops after
-    judge_max_consecutive_failures of them in a row, and a verdict starts the count again."""
+    """Such a row is masked, so it leaves the quality metrics as quietly as an unreachable judge's: verify answers 500
+    once judge_max_consecutive_failures of them come in a row, and a verdict starts the count again."""
     server = _server(workdir, judge_max_consecutive_failures=2)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
 
