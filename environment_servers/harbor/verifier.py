@@ -91,6 +91,10 @@ TIMEOUT_WRAPPER_GUARD = "command -v timeout >/dev/null 2>&1 && command -v bash >
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+# A verifier that could not grade (its judge service or an asset download was unavailable) writes this
+# file instead of a reward; the episode is then masked, not scored 0.
+INCONCLUSIVE_NAME = "inconclusive.json"
+INCONCLUSIVE_KIND = "harbor:verifier_inconclusive"
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -99,6 +103,26 @@ def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | N
         if path.is_file():
             return _parse_one_reward_file(path)
     return None, "no reward.json or reward.txt was written"
+
+
+def parse_inconclusive_file(directory: Path) -> str | None:
+    """The reason a verifier gave for not grading, when it wrote ``inconclusive.json`` and no reward.
+
+    The file is a JSON object with a ``reason`` string; any other content is reported as the reason
+    itself, so a verifier that wrote the file is never scored 0 for a malformed note.
+    """
+    path = directory / INCONCLUSIVE_NAME
+    if not path.is_file():
+        return None
+    text = path.read_text(errors="replace").strip()
+    try:
+        note = json.loads(text)
+    except ValueError:
+        note = None
+    reason = note.get("reason") if isinstance(note, dict) else None
+    if not isinstance(reason, str) or not reason.strip():
+        reason = text or "verifier wrote an empty inconclusive.json"
+    return f"verifier inconclusive: {reason.strip()[:500]}"
 
 
 def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -590,7 +614,12 @@ class HarborVerificationMixin:
         sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
         wrapper never reached its end), the rewards and the reward problem.
         """
-        await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt", EXIT_RECORD_NAME))
+        await download_dir(
+            sandbox,
+            VERIFIER_LOGS_DIR,
+            logs_dir,
+            names=("reward.json", "reward.txt", INCONCLUSIVE_NAME, EXIT_RECORD_NAME),
+        )
         exit_record = parse_exit_record(logs_dir)
         rewards, problem = parse_reward_file(logs_dir)
         try:
@@ -1200,6 +1229,10 @@ class HarborVerificationMixin:
                 | extras
             )
         if rewards is None:
+            inconclusive = parse_inconclusive_file(logs_dir)
+            if inconclusive is not None:
+                # The verifier said it could not grade: the sample is masked like a lost sandbox, not scored 0.
+                return self._masked(INCONCLUSIVE_KIND, f"{inconclusive}; tail: {_stdout_tail(logs_dir)}") | extras
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
         reward = select_reward(rewards)

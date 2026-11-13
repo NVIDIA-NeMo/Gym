@@ -52,6 +52,11 @@ These rows count in the score, and a reward written before a timeout still stand
 sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in `rollouts.jsonl` but is
 left out of the score.
 
+A verifier that cannot grade, because a judge service or an asset download it depends on is unavailable, writes
+`/logs/verifier/inconclusive.json` (a JSON object with a `reason` string) and no reward. Such a rollout is masked
+with `harbor:verifier_inconclusive` instead of scoring 0. A reward written beside the note wins; the note is read
+only when no reward file exists.
+
 ## Python verifiers
 
 A single-step task may grade with `tests/verifier.py` instead of `tests/test.sh`. When `tests/test.sh` exists it
