@@ -1,71 +1,41 @@
-# Resources server for Swemer's Agentic-v1 SWE task packages.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
-# Unlike the other SWE resources servers, rows are NOT prepared from a public dataset: this is an
-# internal dataset, sourced from local delivery folders (ext-nvidia-agentic) plus the same image
-# manifest swemer_v2 uses (swemer_v2_images.tsv, filtered to repo == "v1"). See the README.
-#
-# Grading goes through responses_api_agents.swe_agents.swe_bench_ext (the swe-bench-ext harness's
-# own output-flag injection and result parsing) rather than a hand-rolled parser, since v1 spans
-# ~22 test_framework values -- see verification.SUPPORTED_FRAMEWORKS.
+# Default OpenCode episode pairing. The legacy config supplies the shared resources settings.
+config_paths:
+- resources_servers/swemer_v1/configs/swemer_v1_legacy_agent.yaml
+- responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+- environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+environment_server_routes:
+  swemer_v1: swemer_v1_opencode_single_agent_turn
 swemer_v1_resources_server:
   resources_servers:
     swemer_v1:
-      allowed_agents: [opencode_sandboxed_agent]
-      entrypoint: app.py
-      domain: coding
+      allowed_agents:
+      - opencode_agent
+      datasets:
+      - name: example
+        type: example
+        taskset: swemer_v1
+        jsonl_fpath: resources_servers/swemer_v1/data/example.jsonl
+        num_repeats: 1
       verified: false
-
-      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
-      verification_log_dir: null
-      evaluation_timeout: 1800
-      is_verifying_golden_patch: false
-      apply_anti_cheating: true
-
-      sandbox_provider: sandbox
-      sandbox_config:
-        ttl_s: 18000
-        ready_timeout_s: 1200
-        # Spans Go/Rust/Java/C++ builds alongside npm-installed JS/TS suites -- install/compile
-        # bound like SWE-rebench's non-Python rows, same sizing as that server.
-        resources:
-          cpu: 8
-          memory_mib: 30720
-          disk_gib: 30
-        provider_options:
-          resource_requests:
-            cpu: 1
-            memory_mib: 4096
-            disk_gib: 30
-        metadata:
-          benchmark: swemer-v1
-
-# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose
-# golden patch does not resolve is a broken row, and scoring an agent against it measures noise.
-# Run it with resources_servers/swemer_v1/apply_golden_patch.py.
-swemer_v1_golden_patch_resources_server:
-  resources_servers:
-    swemer_v1:
-      entrypoint: app.py
-      domain: coding
-      verified: false
-
-      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
-      verification_log_dir: null
-      evaluation_timeout: 1800
-      is_verifying_golden_patch: true
-
-      sandbox_provider: sandbox
-      sandbox_config:
-        ttl_s: 18000
-        ready_timeout_s: 1200
-        resources:
-          cpu: 8
-          memory_mib: 30720
-          disk_gib: 30
-        provider_options:
-          resource_requests:
-            cpu: 1
-            memory_mib: 4096
-            disk_gib: 30
-        metadata:
-          benchmark: swemer-v1-golden-patch
+swemer_v1_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      resources_server: null
+swemer_v1_opencode_single_agent_turn:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swemer_v1_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swemer_v1_opencode_agent
+      resources_tool_transports: []
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 604800
+      default_episode_timeout_seconds: 18000

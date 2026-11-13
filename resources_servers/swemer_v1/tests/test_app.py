@@ -546,7 +546,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v1.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v1_legacy_agent.yaml").read_text()
+        )
         assert config["swemer_v1_resources_server"]["resources_servers"]["swemer_v1"]["apply_anti_cheating"] is True
 
 
@@ -573,7 +575,9 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v1.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v1_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swemer_v1"].get("num_workers")
             if workers and workers > 1:
