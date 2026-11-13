@@ -26,8 +26,9 @@ Shape of the environment, and how it differs from resources_servers/swebench:
 
 Two kinds of seed reach it. An Environment Server's episode seed opens a session keyed by its
 resources_session_id and lends the sandbox to a session harness as sandbox_access (only with
-sandbox_workdir set). An agent's own /run seeds with the dataset row and its session cookie and
-gets the sandbox back as sandbox_handle: that is how the unmodified
+sandbox_workdir set); with plugin_log_path set, that episode's verify reads how the run ended
+from the plugin log in the sandbox. An agent's own /run seeds with the dataset row and its
+session cookie and gets the sandbox back as sandbox_handle: that is how the unmodified
 responses_api_agents/opencode_sandboxed_agent runs the benchmark, through a legacy_agent relay.
 Either way the agent is told only the question, works inside the sandbox, and the reward comes
 from the judge rather than from a test harness.
@@ -41,16 +42,17 @@ import re
 import shlex
 import sys
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from time import time
-from typing import Annotated, Any, ClassVar, Dict, Optional, Tuple
+from typing import Annotated, Any, ClassVar, Dict, List, Optional, Tuple
 
 import aiohttp
 import anyio
-from fastapi import FastAPI, Request, Response
-from pydantic import BeforeValidator, ConfigDict, PrivateAttr, field_validator
+from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import (
     AggregateMetrics,
@@ -95,6 +97,7 @@ from nemo_gym.server_runtime import (
     reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils.network_policy import reachable_host
 from nemo_gym.verification import JudgeError, call_judge
 
 # The grader the apptainer comparators were scored with. NOT the longer
@@ -128,6 +131,14 @@ _JUDGE_TEMPLATE_ECHO = "The final exact answer extracted from the [response]"
 # that hangs must not hold a verify or the shutdown forever, and the shutdown stops this many at a time.
 _STOP_TIMEOUT_S = 120.0
 _SHUTDOWN_STOP_CONCURRENCY = 64
+
+# Every line the OpenCode plugins report starts with this marker.
+_PLUGIN_MARKER = "[nemo-gym-plugin] "
+# The line nemo_gym_sentinel.js prints once the plugin layer has loaded. Matched beyond "loaded": the receipts plugin's
+# own load line starts the same way, and it proves only that the plugin log works.
+_PLUGIN_SENTINEL = "[nemo-gym-plugin] loaded sentinel"
+# The variable the receipts plugin (opencode_bundle/nemo_gym_receipts.js) takes the plugin log's path from.
+_PLUGIN_LOG_ENV = "NEMO_GYM_PLUGIN_LOG"
 
 
 def _last_assistant_text(response: NeMoGymResponse) -> str:
@@ -171,6 +182,35 @@ def parse_judge_verdict(text: str) -> Tuple[bool, str, bool]:
     return is_correct, extracted, True
 
 
+def terminal_reason_from_plugin_log(plugin_log: str) -> str:
+    """How a run ended, from the lines nemo_gym_turn_budget.js reported: "context_window", "max_iteration" or "".
+
+    The reading opencode_sandboxed_agent applies to its run output before it forwards the ending on the relay path.
+    OpenCode reports an overflow that compaction recovered from exactly like one that ended the session, so the plugin
+    follows a recovered overflow with a recovery line, and only an overflow left unmatched ended the run. That outranks
+    max_iteration: the run was cut off by a limit of the setup rather than by spending its turn budget.
+    """
+    unrecovered_overflows = 0
+    max_iteration = False
+    for line in plugin_log.splitlines():
+        if _PLUGIN_MARKER not in line:
+            continue
+        if "context_overflow_recovered" in line:
+            unrecovered_overflows = max(0, unrecovered_overflows - 1)
+        elif "context_overflow " in line or line.rstrip().endswith("context_overflow"):
+            unrecovered_overflows += 1
+        elif "terminal=" in line:
+            max_iteration = max_iteration or line.split("terminal=", 1)[1].startswith("max_iteration")
+    if unrecovered_overflows:
+        return "context_window"
+    return "max_iteration" if max_iteration else ""
+
+
+def _is_sandbox_path(path: str) -> bool:
+    """Whether path is an absolute path inside the sandbox that stays where it names."""
+    return PurePosixPath(path).is_absolute() and ".." not in PurePosixPath(path).parts and "\x00" not in path
+
+
 class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # ---- Exa response cache -------------------------------------------------------------------
     # Shared by every shard and every sandbox: the store is a directory on Lustre, so it outlives
@@ -209,6 +249,23 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # lending off, so an episode seed is refused (422). An agent's own /run gets the image's working directory.
     sandbox_workdir: Optional[str] = None
 
+    # What an episode seed gives the harness in the lent sandbox, besides the workdir. Each file maps an absolute sandbox
+    # path to its source, relative to the Gym root, and is read once at startup. Its directory must already exist in
+    # the image, since a provider need not create it: stage under /tmp.
+    episode_sandbox_files: Dict[str, str] = Field(default_factory=dict)
+    # Environment of the lent sandbox, over sandbox_config.env. An empty value sets nothing, so a config can name a
+    # setting it leaves off. Secrets come from an overlay, never from a config file. With exa_cache_root set,
+    # NEMO_GYM_EXA_BASE_URL defaults to this server's /mcp proxy, and this server must then have a sandbox-reachable
+    # host; set the variable here to choose another address.
+    episode_sandbox_env: Dict[str, str] = Field(default_factory=dict)
+    # Where the receipts plugin (opencode_bundle/nemo_gym_receipts.js) copies the OpenCode plugins' lines in the lent
+    # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, masks a run
+    # that ended on its budget as the relay does, and refuses one whose plugins did not load. None reads nothing and
+    # refuses nothing, for a harness that brings no such plugins.
+    plugin_log_path: Optional[str] = None
+    # Lines the plugin log must also hold for a run to be graded, such as the tool surface the run must have had.
+    required_plugin_markers: List[str] = Field(default_factory=list)
+
     @field_validator("sandbox_workdir")
     @classmethod
     def _harness_workdir(cls, workdir: Optional[str]) -> Optional[str]:
@@ -218,6 +275,35 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
             if not path.is_absolute() or ".." in path.parts or path in (PurePosixPath("/"), PurePosixPath("/tmp")):
                 raise ValueError(f"sandbox_workdir must be an absolute directory other than / and /tmp: {workdir!r}")
         return workdir
+
+    @field_validator("episode_sandbox_files")
+    @classmethod
+    def _episode_files_in_sandbox(cls, files: Dict[str, str]) -> Dict[str, str]:
+        outside = [path for path in files if not _is_sandbox_path(path)]
+        if outside:
+            raise ValueError(f"episode_sandbox_files must map absolute sandbox paths: {outside!r}")
+        return files
+
+    @field_validator("plugin_log_path")
+    @classmethod
+    def _plugin_log_in_sandbox(cls, path: Optional[str]) -> Optional[str]:
+        if path is not None and not _is_sandbox_path(path):
+            raise ValueError(f"plugin_log_path must be an absolute sandbox path: {path!r}")
+        return path
+
+    @model_validator(mode="after")
+    def _plugin_log_settings_agree(self) -> "SearchResourcesServerConfig":
+        # The plugin writes where NEMO_GYM_PLUGIN_LOG points and verify reads plugin_log_path: were they to differ,
+        # every episode would read a log that no plugin wrote and be refused.
+        named = self.episode_sandbox_env.get(_PLUGIN_LOG_ENV)
+        if named and named != self.plugin_log_path:
+            raise ValueError(
+                f"episode_sandbox_env.{_PLUGIN_LOG_ENV} ({named!r}) must equal plugin_log_path "
+                f"({self.plugin_log_path!r}); plugin_log_path alone sets it"
+            )
+        if self.required_plugin_markers and self.plugin_log_path is None:
+            raise ValueError("required_plugin_markers are read from the plugin log: set plugin_log_path")
+        return self
 
     # Grading. The judge is the only grader; there is no exact-match fallback, because a
     # BrowseComp answer is free text and string equality scores correct answers as wrong.
@@ -315,14 +401,16 @@ class SearchVerifyResponse(BaseVerifyResponse):
 
 @dataclass(frozen=True)
 class _VerifyEvidence:
-    """What a session's verify keeps for its retries: a digest of the body it graded and, once grading reached a
-    result, the grading fields it answered with.
+    """What a session's verify keeps for its retries: a digest of the body it graded, the plugin log it read from the
+    sandbox before stopping it and, once grading reached a result, the grading fields it answered with.
 
     A retry must send the same body, so the grading fields and that body rebuild the first reply; a retry with
     another body gets 409 rather than a grade of a different answer.
     """
 
     body_digest: str
+    # None when no plugin log was read (see _read_plugin_log).
+    plugin_log: Optional[str] = None
     grade: Optional[Dict[str, Any]] = None
 
 
@@ -362,6 +450,8 @@ class SearchResourcesServer(SimpleResourcesServer):
     _agent_run_sandboxes: Dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
     _sandbox_access: Dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
     _lent_sandboxes: Optional[LentSandboxes] = PrivateAttr(default=None)
+    # episode_sandbox_files with their contents, by sandbox path.
+    _episode_files: Dict[str, bytes] = PrivateAttr(default_factory=dict)
     # Rollouts in a row whose judge never produced a verdict. Reset by any success.
     _judge_consecutive_failures: int = PrivateAttr(default=0)
     _exa_cache: Any = PrivateAttr(default=None)
@@ -369,6 +459,9 @@ class SearchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         if self.config.sandbox_workdir is not None:
+            self._episode_files = {
+                path: (PARENT_DIR / source).read_bytes() for path, source in self.config.episode_sandbox_files.items()
+            }
             self._lent_sandboxes = LentSandboxes(
                 self.config.sandbox_provider,
                 self._lent_sandbox_config(),
@@ -377,14 +470,40 @@ class SearchResourcesServer(SimpleResourcesServer):
             )
 
     def _lent_sandbox_config(self) -> SandboxConfig:
-        """sandbox_config as LentSandboxes takes it, so a lent sandbox matches an agent run's but for its workdir."""
+        """sandbox_config as LentSandboxes takes it, so a lent sandbox matches an agent run's but for its workdir and
+        the episode settings."""
         settings = dict(self.config.sandbox_config)
         derive_cpu_env = settings.pop("derive_cpu_env", True)
         config = SandboxConfig.model_validate(settings)
         cpu_env = cpu_cap_env(SandboxResources.from_mapping(config.resources).cpu) if derive_cpu_env else {}
         return config.model_copy(
-            update={"env": cpu_env | config.env, "metadata": config.metadata | {"nemo_gym_agent": self.config.name}}
+            update={
+                "env": cpu_env | config.env | self._episode_env(),
+                "metadata": config.metadata | {"nemo_gym_agent": self.config.name},
+            }
         )
+
+    def _episode_env(self) -> Dict[str, str]:
+        """episode_sandbox_env without its empty values, plus what the plugins need from this server's settings."""
+        env = {name: value for name, value in self.config.episode_sandbox_env.items() if value != ""}
+        if self.config.plugin_log_path is not None:
+            env.setdefault(_PLUGIN_LOG_ENV, self.config.plugin_log_path)
+        if self.config.exa_cache_root and not env.get("NEMO_GYM_EXA_BASE_URL"):
+            env["NEMO_GYM_EXA_BASE_URL"] = self._exa_proxy_url()
+        return env
+
+    def _exa_proxy_url(self) -> str:
+        """This server's /mcp proxy at the address other servers reach it at, as opencode_sandboxed_agent derives it.
+
+        A sandbox runs on another host, where a loopback address would reach nothing and every search would fail, so
+        a loopback or unspecified host is refused at startup.
+        """
+        url = f"http://{self.config.host}:{self.config.port}"
+        try:
+            reachable_host(url)
+        except ValueError as error:
+            raise ValueError(f"A lent sandbox cannot reach the search cache proxy at {url}: {error}") from error
+        return f"{url}/mcp"
 
     def multiple_workers_unsupported_reason(self) -> Optional[str]:
         # As in chartography and visual_coding_opencode: several workers are not tested with lent sandboxes.
@@ -407,7 +526,7 @@ class SearchResourcesServer(SimpleResourcesServer):
                 "This server lends a sandbox to an episode seed only with sandbox_workdir set"
             )
         # On failure lend() stops the sandbox it started; after it returns, the base releases a failed seed.
-        access = await self._lent_sandboxes.lend(session_id, identity[1])
+        access = await self._lent_sandboxes.lend(session_id, identity[1], files=self._episode_files)
         await self._create_workdir(self._lent_sandboxes.get(session_id))
         self._sandbox_access[session_id] = access
 
@@ -778,6 +897,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         gym eval reverify, or an agent run whose cookie was lost. An identical retry replays the
         verdict, or is graded again when the previous attempt reached none; a retry with another
         body gets 409. A verify after the session's close is masked as lost.
+
+        With plugin_log_path set, an episode session's verify first reads the plugin log from its sandbox, and the
+        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts).
         """
         session_id = request.session[SESSION_ID_KEY]
         digest = _body_digest(body)
@@ -786,14 +908,19 @@ class SearchResourcesServer(SimpleResourcesServer):
                 lost = lost_session_verification("the session was closed, or its seed never finished")
                 return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost))
             evidence = verification.retained
-            if isinstance(evidence, _VerifyEvidence):
-                if evidence.body_digest != digest:
-                    raise ResourcesSessionConflictError("This session was already verified with another body")
-                if evidence.grade is not None:
-                    return SearchVerifyResponse(**(body.model_dump() | evidence.grade))
-            verification.retain(_VerifyEvidence(digest))
+            if not isinstance(evidence, _VerifyEvidence):
+                # Read while the sandbox still runs: it is stopped before the judge. A read that fails retains nothing,
+                # so a retry of this verify is masked as lost rather than graded without the log.
+                evidence = _VerifyEvidence(digest, plugin_log=await self._read_plugin_log(session_id))
+                verification.retain(evidence)
+            elif evidence.body_digest != digest:
+                raise ResourcesSessionConflictError("This session was already verified with another body")
+            if evidence.plugin_log is not None:
+                self._take_plugin_receipts(body, evidence.plugin_log)
+            if evidence.grade is not None:
+                return SearchVerifyResponse(**(body.model_dump() | evidence.grade))
             if self.has_session_state(session_id):
-                # Grading never reads the sandbox, so stop it before waiting on the judge. If the stop
+                # Grading reads nothing more from the sandbox, so stop it before waiting on the judge. If the stop
                 # fails, verifying() tries again on exit and records the failure without replacing the grade.
                 try:
                     await self.release_session_state(session_id)
@@ -803,12 +930,60 @@ class SearchResourcesServer(SimpleResourcesServer):
                     )
             grade = await self._grade(body)
             if grade["evaluation_completed"]:
-                verification.retain(_VerifyEvidence(digest, grade))
+                verification.retain(replace(evidence, grade=grade))
             return SearchVerifyResponse(**(body.model_dump() | grade))
+
+    async def _read_plugin_log(self, session_id: str) -> Optional[str]:
+        """The plugin log in an episode session's sandbox, "" when no plugin wrote one; None when there is none to read.
+
+        There is none without plugin_log_path, so a harness that brings no such plugins is graded as before, and none
+        for an agent's own /run, whose agent sends the ending in the verify body.
+
+        A read that fails raises, and the server answers 500, which an Environment Server treats as retryable: the
+        episode fails ungraded and runs again on resume, as a relay run whose output could not be captured does. A row
+        masked instead would stay in the results with a reward that measured nothing, and lower a score that counts
+        masked rows.
+        """
+        sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
+        if self.config.plugin_log_path is None or sandbox is None:
+            return None
+        path = shlex.quote(self.config.plugin_log_path)
+        # From /, which exists whatever the harness did to its workdir.
+        result = await sandbox.exec(f"test ! -e {path} || cat -- {path}", cwd="/", timeout_s=60)
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(
+                f"Cannot read the plugin log {self.config.plugin_log_path} in the lent sandbox "
+                f"(exit {result.return_code}, error {result.error_type}): {(result.stderr or '').strip()[-500:]}"
+            )
+        return result.stdout or ""
+
+    def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: str) -> None:
+        """Put the ending and plugin receipts from an episode's plugin log on its verify body, where the relay agent puts
+        them, so every reply built from the body carries them, judge_failsafe's included.
+
+        A log without the sentinel or a required marker means the run did not have the plugins it was configured with,
+        and its answer is not graded. The refusal is terminal (422): the log was read, and it would read the same again.
+        """
+        missing = [
+            marker for marker in (_PLUGIN_SENTINEL, *self.config.required_plugin_markers) if marker not in plugin_log
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"The harness's OpenCode plugins did not load as configured: the plugin log lacks {missing}. "
+                    f"Refusing to grade a run that ran without them. log_chars={len(plugin_log)} "
+                    f"head={plugin_log[:800]!r}"
+                ),
+            )
+        body.opencode_terminal_reason = terminal_reason_from_plugin_log(plugin_log)
+        body.opencode_plugins_loaded = True
+        body.opencode_plugin_log = plugin_log
 
     async def _grade(self, body: SearchVerifyRequest) -> Dict[str, Any]:
         """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics."""
-        # Forwarded by the agent from the turn-budget plugin's stderr line; "" on a normal ending.
+        # The turn-budget plugin's ending, which the relay agent forwards and an episode's plugin log gives; "" on a
+        # normal ending.
         terminal_reason = getattr(body, "opencode_terminal_reason", "")
         masked = terminal_reason in MASKED_TERMINAL_REASONS
         failure_kind, failure_reason = MASKED_TERMINAL_FAILURES.get(terminal_reason, (None, None))

@@ -5,7 +5,10 @@ provider in a temporary directory, with the judge answered at the server's HTTP 
 
 import asyncio
 import json
+import os
 import shlex
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,12 +32,25 @@ from resources_servers.opencode_search.app import (
     SearchResourcesServer,
     SearchResourcesServerConfig,
     SearchSeedSessionRequest,
+    terminal_reason_from_plugin_log,
 )
 
 
 CORRECT = "extracted_final_answer: Paris\nreasoning: same city\ncorrect: yes"
 WRONG = "extracted_final_answer: Lyon\nreasoning: another city\ncorrect: no"
 NO_VERDICT = "I cannot decide whether the response is right."
+
+REPOSITORY = Path(__file__).parents[3]
+# The receipts plugin and the four plugins opencode_sandboxed_agent ships, by path in the repository, in load order.
+PLUGINS = (
+    "resources_servers/opencode_search/opencode_bundle/nemo_gym_receipts.js",
+    "responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_sentinel.js",
+    "responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_tool_surface.js",
+    "responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_turn_budget.js",
+    "responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_web_guard.js",
+)
+SENTINEL = "[nemo-gym-plugin] loaded sentinel version=1 plugins=\n"
+NODE = shutil.which("node")
 
 
 @pytest.fixture
@@ -94,20 +110,23 @@ def _sandbox_config(**fields: Any) -> dict[str, Any]:
 
 
 def _server(
-    sandbox_workdir: Optional[Path | str], sandbox_config: Optional[dict[str, Any]] = None
+    sandbox_workdir: Optional[Path | str], sandbox_config: Optional[dict[str, Any]] = None, **settings: Any
 ) -> SearchResourcesServer:
     config = SearchResourcesServerConfig(
-        name="opencode_search",
-        host="0.0.0.0",
-        port=8080,
-        entrypoint="app.py",
-        sandbox_provider="sandbox",
-        sandbox_config=_sandbox_config() if sandbox_config is None else sandbox_config,
-        sandbox_image="python:3.12",
-        sandbox_workdir=None if sandbox_workdir is None else str(sandbox_workdir),
-        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
-        judge_max_attempts=2,
-        judge_retry_delay_seconds=0.0,
+        **{
+            "name": "opencode_search",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "sandbox_provider": "sandbox",
+            "sandbox_config": _sandbox_config() if sandbox_config is None else sandbox_config,
+            "sandbox_image": "python:3.12",
+            "sandbox_workdir": None if sandbox_workdir is None else str(sandbox_workdir),
+            "judge_model_server": ModelServerRef(type="responses_api_models", name="judge"),
+            "judge_max_attempts": 2,
+            "judge_retry_delay_seconds": 0.0,
+        }
+        | settings
     )
     return SearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -182,6 +201,32 @@ def _graded(verified: Any) -> tuple[Any, ...]:
     return body["reward"], body["mask_sample"], body["failure_kind"], body["evaluation_completed"]
 
 
+def _staged(stage: Path) -> dict[str, str]:
+    """PLUGINS as episode_sandbox_files, named as opencode_sandboxed_agent names its staged plugins, under stage."""
+    return {str(stage / f"nemo-gym-plugin-{Path(source).name}"): source for source in PLUGINS}
+
+
+def _plugin_log_server(workdir: Path, log: Path, **settings: Any) -> tuple[SearchResourcesServer, TestClient]:
+    """A server that reads the plugin log at log, and a client whose episode session it seeded."""
+    server = _server(workdir, plugin_log_path=str(log), **settings)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    return server, client
+
+
+def _record_execs(monkeypatch: pytest.MonkeyPatch, stopped: list[AsyncSandbox]) -> list[tuple[str, int]]:
+    """Record every command run in a sandbox from now on, with the number of sandboxes stopped by then."""
+    execs: list[tuple[str, int]] = []
+    real_exec = AsyncSandbox.exec
+
+    async def exec(self: AsyncSandbox, command: str, **kwargs: Any) -> SandboxExecResult:
+        execs.append((command, len(stopped)))
+        return await real_exec(self, command, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "exec", exec)
+    return execs
+
+
 # ---------------------------------------------------------------------------
 # Episode seed: a sandbox lent to a session harness
 # ---------------------------------------------------------------------------
@@ -239,6 +284,60 @@ def test_a_lent_sandbox_is_the_agent_run_sandbox_in_the_workdir(workdir, started
     (_, agent_run), (_, lent) = started
     assert lent == replace(agent_run, workdir=str(workdir), metadata=agent_run.metadata | {"task_id": "t-1"})
     assert lent.env == (cpu_cap_env(2) if derive_cpu_env else {}) | {"EXTRA": "1"}
+
+
+def test_an_episode_seed_stages_the_episode_files_and_env_in_its_sandbox(workdir, tmp_path, started) -> None:
+    files = _staged(tmp_path / "stage")
+    log = tmp_path / "stage" / "plugins.log"
+    server = _server(
+        workdir,
+        episode_sandbox_files=files,
+        episode_sandbox_env={"EXTRA": "episode", "NEMO_GYM_MAX_TURNS": "400", "NEMO_GYM_DISABLE_BASH": ""},
+        plugin_log_path=str(log),
+    )
+    client = TestClient(server.setup_webserver())
+
+    assert client.post("/seed_session", json=_row()).status_code == 200
+    client.cookies.clear()
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+
+    (_, agent_run), (_, lent) = started
+    contents = {path: (REPOSITORY / source).read_bytes() for path, source in files.items()}
+    assert lent.files == contents
+    # Each file is where the harness is told to load it from, byte for byte.
+    assert {path: Path(path).read_bytes() for path in files} == contents
+    # Over sandbox_config.env. An empty value sets nothing, and the plugin log's path comes from plugin_log_path.
+    assert lent.env == cpu_cap_env(2) | {
+        "EXTRA": "episode",
+        "NEMO_GYM_MAX_TURNS": "400",
+        "NEMO_GYM_PLUGIN_LOG": str(log),
+    }
+    # An agent's own /run gets the sandbox it got before.
+    assert agent_run.files == {} and agent_run.env == cpu_cap_env(2) | {"EXTRA": "1"}
+
+
+@pytest.mark.parametrize(
+    ("settings", "url"),
+    [
+        ({"host": "192.0.2.10"}, "http://192.0.2.10:8080/mcp"),
+        # A URL the config names wins, and leaves this server's own address unchecked.
+        (
+            {"host": "127.0.0.1", "episode_sandbox_env": {"NEMO_GYM_EXA_BASE_URL": "http://198.51.100.7:9000/mcp"}},
+            "http://198.51.100.7:9000/mcp",
+        ),
+    ],
+    ids=["this_server", "configured"],
+)
+def test_with_the_search_cache_a_lent_sandbox_searches_through_its_proxy(
+    workdir, tmp_path, started, settings, url
+) -> None:
+    server = _server(workdir, exa_cache_root=str(tmp_path / "search-cache"), **settings)
+    client = TestClient(server.setup_webserver())
+
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+
+    ((_, lent),) = started
+    assert lent.env["NEMO_GYM_EXA_BASE_URL"] == url
 
 
 @pytest.mark.parametrize(
@@ -474,6 +573,250 @@ def test_a_verify_without_a_seed_is_graded(workdir) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Plugin receipts: the episode's ending, and the plugins it ran with
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lines", "reason"),
+    [
+        ([], ""),
+        (["[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400"], "max_iteration"),
+        (["[nemo-gym-plugin] terminal=max_iteration_abort session=s calls=406"], "max_iteration"),
+        (["[nemo-gym-plugin] context_overflow session=s"], "context_window"),
+        (
+            ["[nemo-gym-plugin] context_overflow session=s", "[nemo-gym-plugin] context_overflow_recovered session=s"],
+            "",
+        ),
+        # An overflow left unmatched outranks the turn budget.
+        (
+            [
+                "[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400",
+                "[nemo-gym-plugin] context_overflow session=s",
+            ],
+            "context_window",
+        ),
+        # A recovery matches one earlier overflow, never a later one.
+        (
+            [
+                "[nemo-gym-plugin] context_overflow_recovered session=s",
+                "[nemo-gym-plugin] context_overflow session=s",
+            ],
+            "context_window",
+        ),
+        # Only the plugins' lines count.
+        (["terminal=max_iteration", "context_overflow"], ""),
+    ],
+    ids=[
+        "no_lines",
+        "max_iteration",
+        "max_iteration_abort",
+        "overflow",
+        "recovered_overflow",
+        "overflow_outranks_budget",
+        "recovery_before_overflow",
+        "unmarked_lines",
+    ],
+)
+def test_the_ending_is_read_from_the_turn_budget_plugins_lines(lines, reason) -> None:
+    assert terminal_reason_from_plugin_log("".join(f"{line}\n" for line in lines)) == reason
+
+
+@pytest.mark.parametrize(
+    ("lines", "reason", "kind"),
+    [
+        ("[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400\n", "max_iteration", "agent_limit"),
+        ("[nemo-gym-plugin] context_overflow session=s\n", "context_window", "model_context_limit"),
+        (
+            "[nemo-gym-plugin] context_overflow session=s\n[nemo-gym-plugin] context_overflow_recovered session=s\n",
+            "",
+            None,
+        ),
+    ],
+    ids=["max_iteration", "context_window", "recovered"],
+)
+def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stops(
+    workdir, tmp_path, started, stopped, monkeypatch, lines, reason, kind
+) -> None:
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL + lines)
+    execs = _record_execs(monkeypatch, stopped)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200, verified.text
+    # As on the relay path: a budget ending keeps its judged reward, and the mask and kind name the ending.
+    assert _graded(verified) == (1.0, bool(kind), kind, True)
+    receipts = {key: verified.json()[key] for key in ("opencode_terminal_reason", "opencode_plugins_loaded")}
+    assert receipts == {"opencode_terminal_reason": reason, "opencode_plugins_loaded": True}
+    assert verified.json()["opencode_plugin_log"] == SENTINEL + lines
+    # One read, while the sandbox still ran; then the sandbox stopped.
+    assert [stops for _, stops in execs] == [0] and stopped == [started[0][0]]
+    # An identical retry replays the reply, receipts included, without reading again.
+    assert client.post("/verify", json=_verify_body()).json() == verified.json() and len(execs) == 1
+
+
+@pytest.mark.parametrize(
+    ("log_text", "markers", "missing"),
+    [
+        (None, [], ["[nemo-gym-plugin] loaded sentinel"]),
+        # The receipts plugin's own load line does not stand in for the sentinel.
+        ("[nemo-gym-plugin] loaded receipts version=1\n", [], ["[nemo-gym-plugin] loaded sentinel"]),
+        (
+            SENTINEL + "[nemo-gym-plugin] tool_surface task=off bash=on\n",
+            ["tool_surface task=off bash=off", "loaded sentinel"],
+            ["tool_surface task=off bash=off"],
+        ),
+    ],
+    ids=["no_log", "receipts_only", "required_marker"],
+)
+def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
+    workdir, tmp_path, started, stopped, log_text, markers, missing
+) -> None:
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log, required_plugin_markers=markers)
+    if log_text is not None:
+        log.write_text(log_text)
+    judge = _mock_judge(server, CORRECT)
+
+    refused = client.post("/verify", json=_verify_body())
+
+    # 422, which an Environment Server does not retry: the log was read, and it says the run lacked its plugins.
+    assert refused.status_code == 422, refused.text
+    assert f"lacks {missing!r}" in refused.json()["detail"]
+    assert judge.await_count == 0 and stopped == [started[0][0]]
+    # The log it read is kept, so a retry is refused the same way.
+    assert client.post("/verify", json=_verify_body()).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
+        SandboxExecResult(stdout="", stderr="cat: permission denied", return_code=1),
+        RuntimeError("the provider is unavailable"),
+    ],
+    ids=["error_type", "exit_code", "raised"],
+)
+def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
+    workdir, tmp_path, started, stopped, monkeypatch, failure
+) -> None:
+    """A read that fails gives no verdict: the 500 is retryable, so the episode runs again; nothing is graded."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL)
+    read = AsyncMock(side_effect=failure) if isinstance(failure, Exception) else AsyncMock(return_value=failure)
+    monkeypatch.setattr(AsyncSandbox, "exec", read)
+    judge = _mock_judge(server, CORRECT)
+
+    failed = client.post("/verify", json=_verify_body())
+
+    assert failed.status_code == 500, failed.text
+    assert read.await_count == 1 and judge.await_count == 0 and stopped == [started[0][0]]
+    # Nothing was kept from the attempt, so the same verify again is masked rather than graded without the log.
+    assert _graded(client.post("/verify", json=_verify_body())) == (0.0, True, "session_lost", False)
+
+
+@pytest.mark.parametrize(
+    ("seed", "settings", "reason", "graded"),
+    [
+        ("episode", {}, "", (1.0, False, None, True)),
+        # An agent's own /run sends its ending in the verify body, as the relay agent does.
+        (
+            "agent_run",
+            {"plugin_log_path": "/nonexistent/plugins.log"},
+            "max_iteration",
+            (1.0, True, "agent_limit", True),
+        ),
+    ],
+    ids=["episode_without_plugin_log_path", "agent_run"],
+)
+def test_without_a_plugin_log_to_read_nothing_is_read_or_refused(
+    workdir, stopped, monkeypatch, seed, settings, reason, graded
+) -> None:
+    """A harness that brings no OpenCode plugins is graded as before."""
+    server = _server(workdir, **settings)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
+    execs = _record_execs(monkeypatch, stopped)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(opencode_terminal_reason=reason))
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == graded
+    assert execs == [] and "opencode_plugin_log" not in verified.json()
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is needed to run the receipts plugin")
+def test_the_receipts_plugin_copies_the_plugin_lines_to_the_log() -> None:
+    ran = subprocess.run(
+        [NODE, "--test", str(Path(__file__).with_name("nemo_gym_receipts.test.mjs"))],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+
+
+# What OpenCode does with the plugins it is configured with: it imports each, calls its factory, and runs the hooks
+# the factories returned on every model call. Here, three calls.
+_PLUGIN_HOST = """
+import { pathToFileURL } from "node:url";
+const hooks = [];
+for (const path of process.argv.slice(1)) {
+  const plugin = (await import(pathToFileURL(path).href)).default;
+  hooks.push(await plugin({ client: { session: { abort: async () => {} } } }));
+}
+for (let call = 0; call < 3; call++) {
+  for (const hook of hooks) await hook["chat.params"]?.({ sessionID: "session", message: {} });
+}
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is needed to run the OpenCode plugins")
+def test_the_staged_plugins_report_to_verify_through_the_plugin_log(workdir, tmp_path, started) -> None:
+    files = _staged(tmp_path / "stage")
+    server = _server(
+        workdir,
+        episode_sandbox_files=files,
+        episode_sandbox_env={
+            "NEMO_GYM_MAX_TURNS": "2",
+            "NEMO_GYM_DISABLE_BASH": "1",
+            "NEMO_GYM_DISABLE_SUBAGENTS": "1",
+        },
+        plugin_log_path=str(tmp_path / "stage" / "plugins.log"),
+        required_plugin_markers=["tool_surface task=off bash=off"],
+    )
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    ((_, lent),) = started
+    # The staged plugins, run with the lent sandbox's environment as OpenCode would run them there.
+    ran = subprocess.run(
+        [NODE, "--input-type=module", "-e", _PLUGIN_HOST, *files],
+        env=os.environ | lent.env,
+        cwd=lent.workdir,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert ran.returncode == 0, ran.stderr
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200, verified.text
+    # The third call ran past the turn budget of two.
+    assert _graded(verified) == (1.0, True, "agent_limit", True)
+    assert verified.json()["opencode_terminal_reason"] == "max_iteration"
+    # The log holds what the plugins wrote to stderr, and nothing else that went there.
+    plugin_lines = [line for line in ran.stderr.splitlines(keepends=True) if "[nemo-gym-plugin]" in line]
+    assert verified.json()["opencode_plugin_log"] == "".join(plugin_lines)
+
+
+# ---------------------------------------------------------------------------
 # Agent-run seed, kept for an agent's own /run
 # ---------------------------------------------------------------------------
 
@@ -568,6 +911,59 @@ def test_a_workdir_a_harness_cannot_use_is_refused_at_startup(sandbox_workdir) -
 def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> None:
     with pytest.raises(ValueError, match="unknown_setting"):
         _server("/workspace", sandbox_config=_sandbox_config(unknown_setting=1))
+
+
+@pytest.mark.parametrize(
+    ("settings", "error"),
+    [
+        (
+            {"plugin_log_path": "/tmp/plugins.log", "episode_sandbox_env": {"NEMO_GYM_PLUGIN_LOG": "/tmp/other.log"}},
+            "must equal plugin_log_path",
+        ),
+        ({"episode_sandbox_env": {"NEMO_GYM_PLUGIN_LOG": "/tmp/plugins.log"}}, "must equal plugin_log_path"),
+        ({"required_plugin_markers": ["tool_surface task=off bash=off"]}, "set plugin_log_path"),
+        ({"plugin_log_path": "plugins.log"}, "plugin_log_path must be an absolute sandbox path"),
+        ({"episode_sandbox_files": {"nemo-gym-plugin.js": PLUGINS[0]}}, "must map absolute sandbox paths"),
+        ({"exa_cache_root": "/search-cache", "host": "127.0.0.1"}, "cannot reach the search cache proxy"),
+        ({"exa_cache_root": "/search-cache", "host": "0.0.0.0"}, "cannot reach the search cache proxy"),
+    ],
+    ids=[
+        "plugin_log_paths_differ",
+        "plugin_log_path_unset",
+        "markers_without_plugin_log",
+        "relative_plugin_log",
+        "relative_episode_file",
+        "search_cache_on_loopback",
+        "search_cache_on_any_address",
+    ],
+)
+def test_episode_settings_that_cannot_work_are_refused_at_startup(settings, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        _server("/workspace", **settings)
+
+
+@pytest.mark.parametrize("named", ["/tmp/plugins.log", ""])
+def test_plugin_log_settings_that_agree_are_accepted(named) -> None:
+    """NEMO_GYM_PLUGIN_LOG may repeat plugin_log_path, or be left empty for plugin_log_path to set."""
+    server = _server(
+        "/workspace", plugin_log_path="/tmp/plugins.log", episode_sandbox_env={"NEMO_GYM_PLUGIN_LOG": named}
+    )
+
+    assert server._lent_sandbox_config().env["NEMO_GYM_PLUGIN_LOG"] == "/tmp/plugins.log"
+
+
+def test_without_lending_the_search_cache_needs_no_sandbox_reachable_address() -> None:
+    """Only a lent sandbox is given the proxy's address: an agent's own /run works it out itself, so a server that
+    lends nothing starts on loopback as before."""
+    server = _server(None, exa_cache_root="/search-cache", host="127.0.0.1")
+
+    assert server._lent_sandboxes is None
+
+
+def test_an_episode_file_that_cannot_be_read_is_refused_at_startup() -> None:
+    missing = "resources_servers/opencode_search/opencode_bundle/nemo_gym_missing.js"
+    with pytest.raises(FileNotFoundError, match="nemo_gym_missing.js"):
+        _server("/workspace", episode_sandbox_files={"/tmp/nemo-gym-plugin-missing.js": missing})
 
 
 def test_only_a_lending_server_needs_one_worker() -> None:
