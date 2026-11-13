@@ -11,6 +11,9 @@ authors:
 - Sanyam Kapoor
 maintainers:
 - activatedgeek
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

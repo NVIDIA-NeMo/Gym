@@ -12,6 +12,9 @@ authors:
 - Christian Munley
 maintainers:
 - cmunley1
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

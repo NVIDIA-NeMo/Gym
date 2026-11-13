@@ -11,6 +11,9 @@ licensing: Apache-2.0
 authors: [Jarno Seppänen]
 maintainers:
 - jseppanen
+requirements:
+  gpu: false
+  network: allowlist
 reward: {range: [0.0, 1.0], higher_is_better: true}
 determinism: stochastic
 config_path: config.yaml

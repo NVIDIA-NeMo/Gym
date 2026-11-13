@@ -12,6 +12,9 @@ licensing: LicenseRef-NVIDIA-Evaluation-Dataset-License-Agreement
 authors: [Julien Veron Vialard]
 maintainers:
 - jveronvialard
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

@@ -12,6 +12,9 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

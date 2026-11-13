@@ -13,6 +13,9 @@ authors:
 - titu1994
 maintainers:
 - titu1994
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

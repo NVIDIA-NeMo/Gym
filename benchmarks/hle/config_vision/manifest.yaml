@@ -12,6 +12,9 @@ authors:
 - fsiino-nvidia
 maintainers:
 - fsiino-nvidia
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

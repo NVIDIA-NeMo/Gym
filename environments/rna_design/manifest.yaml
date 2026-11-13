@@ -13,6 +13,9 @@ authors:
 - Youhan Lee
 maintainers:
 - cmunley1
+requirements:
+  gpu: true
+  network: public
 reward:
   range:
   - 0.0

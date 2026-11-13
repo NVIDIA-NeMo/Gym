@@ -12,6 +12,9 @@ authors:
 - ushnish-de
 maintainers:
 - ushnish-de
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

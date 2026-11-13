@@ -12,6 +12,9 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - ryan-lempka
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

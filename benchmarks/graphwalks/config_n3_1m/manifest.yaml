@@ -12,6 +12,9 @@ authors:
 - Cheng-Ping Hsieh
 maintainers:
 - hsiehjackson
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

@@ -12,6 +12,9 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - gwarmstrong
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

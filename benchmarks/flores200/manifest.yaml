@@ -12,6 +12,9 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+requirements:
+  gpu: true
+  network: no-network
 reward:
   range:
   - 0.0

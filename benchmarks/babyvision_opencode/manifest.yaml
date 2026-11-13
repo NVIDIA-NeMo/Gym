@@ -12,6 +12,9 @@ authors:
 - Danial MohseniTaheri
 maintainers:
 - yfw
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

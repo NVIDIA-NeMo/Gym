@@ -13,6 +13,9 @@ authors:
   - Jeff Peng
 maintainers:
 - JeffPengCoder
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

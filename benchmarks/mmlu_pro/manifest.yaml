@@ -11,6 +11,9 @@ authors:
 - gwarmstrong
 maintainers:
 - fsiino-nvidia
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

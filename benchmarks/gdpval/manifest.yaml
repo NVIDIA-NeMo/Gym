@@ -18,6 +18,9 @@ maintainers:
 - athitten
 - marta-sd
 - vadam5
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

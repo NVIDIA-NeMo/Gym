@@ -12,6 +12,9 @@ authors:
 - Sergey Kolchenko
 maintainers:
 - azkalot1
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

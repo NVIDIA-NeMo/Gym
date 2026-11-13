@@ -11,6 +11,9 @@ authors:
 - Daniel Egert
 maintainers:
 - trias702
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

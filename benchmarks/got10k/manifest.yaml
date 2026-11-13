@@ -12,6 +12,9 @@ authors:
 - Pulkit Khandelwal
 maintainers:
 - pulkitkumar95
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

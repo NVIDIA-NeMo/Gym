@@ -13,6 +13,9 @@ authors:
 maintainers:
 - gwarmstrong
 - dkmisra
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0

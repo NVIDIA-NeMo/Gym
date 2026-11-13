@@ -13,6 +13,9 @@ authors:
 - Serge Panev
 maintainers:
 - AdamRajfer
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

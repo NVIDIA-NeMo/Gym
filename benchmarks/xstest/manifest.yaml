@@ -12,6 +12,9 @@ authors:
 - bxyu-nvidia
 maintainers:
 - dcfarris
+requirements:
+  gpu: true
+  network: no-network
 reward:
   range:
   - 0.0

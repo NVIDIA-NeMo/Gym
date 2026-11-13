@@ -12,6 +12,9 @@ authors:
   - NVIDIA NeMo Gym contributors
 maintainers:
 - abukharin-nv
+requirements:
+  gpu: false
+  network: public
 reward:
   range: [0.0, 1.0]
   higher_is_better: true

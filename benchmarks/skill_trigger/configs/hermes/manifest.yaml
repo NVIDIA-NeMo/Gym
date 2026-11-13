@@ -11,6 +11,9 @@ authors:
 - Daniel Burkhardt
 maintainers:
 - dburkhardt
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

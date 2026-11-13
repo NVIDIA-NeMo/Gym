@@ -13,6 +13,9 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - bxyu-nvidia
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

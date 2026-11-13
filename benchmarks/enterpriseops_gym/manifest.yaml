@@ -13,6 +13,9 @@ authors:
 - Khushi Bhardwaj
 maintainers:
 - kbhardwaj-nvidia
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
