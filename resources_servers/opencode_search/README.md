@@ -133,7 +133,10 @@ a crash an episode starts over from its input.
   files hold more than `episode_export_max_bytes`, and none is copied; or `failed` when the listing or a
   download failed or the copy ran past 300 s. Only a `copied` status leaves files on this host, and any
   other is logged. No copy changes the reward, `mask_sample` or `evaluation_completed`, and an identical
-  retry replays the record.
+  retry replays the record. A verify refused for its plugin log (422), or one that answers 500 once
+  `judge_max_consecutive_failures` trips, still makes the copy, but its reply has no `opencode_export_copy`,
+  so its failure row does not name the files. A verify whose plugin log cannot be read (500) copies
+  nothing, and neither does one masked as `session_lost`.
 * **Close.** `/close_session` stops the sandbox by ID, with or without the session cookie, and fences
   the ID: a seed for it gets 409 for `session_close_retry_window_seconds`. A close whose stop fails
   raises and keeps the sandbox, so a retried close stops it. A session that is never closed keeps its
