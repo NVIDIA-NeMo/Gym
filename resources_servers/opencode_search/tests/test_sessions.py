@@ -10,12 +10,14 @@ import os
 import shlex
 import shutil
 import subprocess
+from collections.abc import Awaitable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -24,6 +26,7 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, FailureHeader, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    LocalProvider,
     SandboxExecResult,
     SandboxResources,
     SandboxSpec,
@@ -43,6 +46,7 @@ from resources_servers.opencode_search.app import (
     SearchResourcesServer,
     SearchResourcesServerConfig,
     SearchSeedSessionRequest,
+    SearchVerifyRequest,
     terminal_reason_from_plugin_log,
 )
 
@@ -1857,14 +1861,6 @@ def test_a_graded_row_keeps_the_search_fields_and_echoes_its_request(workdir, se
 # ---------------------------------------------------------------------------
 # Lifecycle: re-seeds, stops that fail, hang or are cancelled, and sandboxes the relay agent stopped
 # ---------------------------------------------------------------------------
-
-from collections.abc import Awaitable
-
-import anyio
-
-from nemo_gym.core import FailureHeader
-from nemo_gym.sandbox import LocalProvider
-from resources_servers.opencode_search.app import SearchVerifyRequest
 
 
 async def _seed_agent_run(server: SearchResourcesServer) -> AsyncSandbox:
