@@ -176,7 +176,7 @@ The stop route ends a running harness exactly as at its time limit, so the episo
 
 Every Environment Server that drives sessions uses these endpoints, such as `single_agent_turn` for a Resources Server task and `harbor` for a task folder, where the Environment Server creates the sandbox itself and passes it in `sandbox_access`. See [Design Agent-Environment Interactions](/main/agent-interactions).
 
-`AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, and an optional `sandbox_access`. `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
+`AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, an optional `sandbox_access`, and an optional `agent_context` (see [Agent context](#agent-context)). `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
 
 The base class in [`nemo_gym/agents/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:
 
@@ -309,6 +309,75 @@ Accepting the seed or writing that configuration does not prove the harness cons
 MCP access and sandbox access are separate capabilities. A Resources Server can grant MCP tools without returning `sandbox_access`. An adapter that needs a sandbox must then use a configured agent-owned provider or reject the unsupported seed explicitly. Adding a provider does not add MCP or `direct_http` support. Close disconnects MCP clients; it stops an agent-owned sandbox and leaves a borrowed sandbox to its owner.
 
 Validate grant support with an authenticated MCP fixture and a real harness run: confirm tool discovery, an actual tool call, and the tool result reaching the model. Also test unavailable required servers (no inference or gradable answer), optional-server failure, name collisions, cleanup, and, when enforcement depends on a plugin or hook, a run where it does not load. For a sandboxed adapter, exercise both borrowed and agent-owned sandboxes when both are supported. State which transports the adapter consumes; a successful sandbox-only rollout with `resources_tool_transports: []` does not establish MCP support.
+
+### Agent context
+
+Some harnesses need task data beyond the initial model input, such as a document to render, images to embed, or the prompt for a later stage. The task row carries that data in `agent_context`, next to `verifier_metadata`, keyed by participant role, because an episode can seed several agents. The Environment Server sends each role's context to that role's agent session in `AgentSeedSessionRequest.agent_context`, and keeps it out of the task data sent to the Resources Server. The initial conversation stays in `responses_create_params.input`. Do not use `responses_create_params.metadata` to carry task data to the harness.
+
+The `single_agent_turn` Environment Server has one role, `agent`:
+
+```json
+{
+  "responses_create_params": {"input": [{"role": "user", "content": "What does the figure show?"}]},
+  "verifier_metadata": {"answer": "a cat"},
+  "agent_context": {
+    "agent": {
+      "values": {"tag": "figqa2"},
+      "artifacts": {"media": {"path": "test_media/figqa2/7f3c"}}
+    }
+  }
+}
+```
+
+Each Environment Server names its roles. It refuses with HTTP 422 a row that names a role it does not have, and an Environment Server that sends no context, such as `harbor`, `nemo_user_sim` or `swe_together`, refuses the key altogether, so an episode never runs without task data it was given. The `legacy_agent` relay is the exception: it sends the whole row to the agent's `/run`, where `agent_context` is one more row field.
+
+Each role's context has two maps:
+
+- `values` holds small inline JSON fields. One role's context, including its artifact references, is limited to 64 KiB as UTF-8 JSON.
+- `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.
+- A key appears in `values` or in `artifacts`, not both.
+- An empty context counts as none: the seed then omits the key.
+
+An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` (or a subclass), optionally unioned with `None`, takes an artifact; any other field takes a value. Omit an optional artifact to use its default of `None`. Unions mixing artifact and value types are unsupported; declare separate fields instead. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
+
+- the agent declares no model and the seed carries any context,
+- the seed carries a key the model does not declare,
+- a required key is missing, a value has the wrong type, or a key is supplied through the wrong map.
+
+No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes and in `retire_agent_session` when a checkpoint retires the session instead. Retirement does not call the close hook.
+
+A `SimpleAgent` subclass resolves its context in `_new_session_state()`, which the seed and a checkpoint restore both call; context resolved only in `_seed_agent_session_state()` is lost when a restore rebuilds the session. It puts the context into the model request in `_create_session_episode()`, which creates each session activation's episode. Override `_create_session_episode()`, never `responses()`: environment validation infers `custom-gym-agent-loop` for any agent that overrides `responses()`, while the agent loop is still Simple Agent's.
+
+```python
+class FigureContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    media: AgentContextArtifact
+    tag: str
+
+
+@dataclass
+class FigureSessionState(SimpleAgentSessionState):
+    media_dir: Path | None = None
+
+
+class FigureAgent(SimpleAgent):
+    agent_context_model = FigureContext
+
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureSessionState:
+        state = super()._new_session_state(body)
+        context = self.parse_agent_context(body)
+        media_dir = resolve_agent_context_artifact(context.media, Path(self.config.media_base_dir), kind="directory")
+        # dataclasses.fields: copy Simple Agent's state and add the resolved directory.
+        inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+        return FigureSessionState(**inherited, media_dir=media_dir)
+
+    async def _create_session_episode(self, state, body, **kwargs):
+        body = add_figure_images(body, state.media_dir)  # the agent's own request builder
+        return await super()._create_session_episode(state, body, **kwargs)
+```
+
+On an agent's legacy `/run` path, `agent_context` is one more field of the row the agent receives and may forward to the Resources Server. The agent-only routing described above applies to `single_agent_turn`.
 
 ## Configure the adapter
 
