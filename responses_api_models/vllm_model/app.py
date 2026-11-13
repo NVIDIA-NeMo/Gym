@@ -817,11 +817,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "the return_token_ids field it sends)"
             )
         # The frontend reads `reasoning` as an alias of `reasoning_content` and rejects a message that carries
-        # both (`400 duplicate field 'reasoning'`). Checked after validation, so the NEMO_GYM_REASONING_FIELD
-        # default is covered too.
+        # both (`400 duplicate field 'reasoning'`). Only a server that replays reasoning onto assistant messages
+        # writes both. Checked after validation, so the NEMO_GYM_REASONING_FIELD default is covered too.
         if (
             self.dynamo_frontend
             and self.uses_reasoning_parser
+            and self.uses_interleaved_reasoning
             and not self.preserve_reasoning_in_assistant_content
             and self.reasoning_field == "both"
         ):
@@ -1618,7 +1619,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.dynamo_frontend:
             self._prepare_dynamo_request(body_dict)
 
-        if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
+        # A Dynamo capture call carries its admission in the annotation, not as a top-level ng_capture.
+        capture = current_capture_context()
+        captured = body_dict.get("ng_capture") or (
+            self.config.dynamo_frontend
+            and capture is not None
+            and capture.external_staging
+            and capture.capture_admission is not None
+        )
+        if captured and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
             # vLLM ignores top_logprobs when specific IDs are requested. Equal
             # counts do not guarantee those IDs are the sampler's top-k head.
             raise HTTPException(

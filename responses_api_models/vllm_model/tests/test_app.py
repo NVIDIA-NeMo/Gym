@@ -84,6 +84,7 @@ from nemo_gym.models import (
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
     install_model_call_capture,
+    make_external_capture_handler,
     start_model_execution,
 )
 from nemo_gym.models.token_capture import (
@@ -1859,6 +1860,8 @@ class TestApp:
             # An echoed reasoning turn would carry both `reasoning` and its alias.
             ({"uses_reasoning_parser": True, "reasoning_field": "both"}, "duplicate field 'reasoning'"),
             ({"uses_reasoning_parser": True, "reasoning_field": "reasoning_content"}, None),
+            # Reasoning is parsed from responses but never replayed, so no message carries both keys.
+            ({"uses_reasoning_parser": True, "uses_interleaved_reasoning": False, "reasoning_field": "both"}, None),
             (
                 {
                     "uses_reasoning_parser": True,
@@ -6843,6 +6846,7 @@ def _make_top_logprobs_model(
     extra_body: dict[str, Any] | None = None,
     sampling_overrides: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
+    dynamo_frontend: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
@@ -6859,6 +6863,7 @@ def _make_top_logprobs_model(
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
         sampling_overrides=sampling_overrides,
+        dynamo_frontend=dynamo_frontend,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -6905,14 +6910,17 @@ class TestTopLogprobsHandling:
 
     @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
     @mark.parametrize("token_ids", [[1], list(range(16))])
-    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int]) -> None:
+    # The Dynamo handler sends the admission in the annotation, with no top-level ng_capture.
+    @mark.parametrize("backend", ["vllm_worker", "dynamo_worker"])
+    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int], backend: str) -> None:
         fields = {"logprob_token_ids": token_ids}
         model = _make_top_logprobs_model(
             return_token_id_information=False,
             extra_body=fields if source == "extra_body" else None,
             sampling_overrides=fields if source == "sampling_overrides" else None,
+            dynamo_frontend=backend == "dynamo_worker",
         )
-        model._external_capture_handler = VLLMWorkerCaptureHandler()
+        model._external_capture_handler = make_external_capture_handler(backend)
         body = {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 16}
         if source == "request":
             body.update(fields)
