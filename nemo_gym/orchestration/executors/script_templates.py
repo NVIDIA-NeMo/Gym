@@ -262,14 +262,22 @@ _DECLARED_EXTRAS_FILTER = (
 
 
 # A uv older than the checkout's `required-version` (a `>=X` lower bound in its pyproject.toml) is refused by `uv venv`
-# and `uv sync` with an error that never reaches the reader's report, so a private copy of the caller's uv is checked
-# against it up front. Run inside the checkout, with the private uv first on PATH.
+# and `uv sync`, with an error that never reaches the reader's report. The requirement is only known after the
+# checkout, so a private copy of the caller's uv is checked then: one that is too old is replaced by a fresh private
+# install (the one used when no uv runs at all), and the read fails with both versions named only when that install
+# cannot meet the requirement either. Run inside the checkout, with the private uv first on PATH.
 _UV_VERSION_CHECK = (
-    '_gym_uv_req="$(sed -n \'s/^required-version *= *"\\(>=\\)\\{0,1\\} *\\([0-9][0-9.]*\\).*/\\2/p\' pyproject.toml 2>/dev/null | head -n 1 || true)"; '
+    "_gym_uv_old() { "
+    "_gym_uv_req=\"$(sed -n 's/^required-version *= *\"\\(>=\\)\\{0,1\\} *\\([0-9][0-9.]*\\).*/\\2/p' "
+    'pyproject.toml 2>/dev/null | head -n 1 || true)"; '
     "_gym_uv_have=\"$(uv --version | awk '{print $2}')\"; "
-    'if [ -n "$_gym_uv_req" ] && [ "$(printf \'%s\\n%s\\n\' "$_gym_uv_req" "$_gym_uv_have" | sort -V | head -n 1)" != "$_gym_uv_req" ]; then '
-    'echo "gym: uv $_gym_uv_have on PATH is older than the $_gym_uv_req this Gym checkout requires '
-    "(required-version in pyproject.toml); update it with 'uv self update'\" >&2; exit 1; fi"
+    '[ -n "$_gym_uv_req" ] && '
+    '[ "$(printf \'%s\\n%s\\n\' "$_gym_uv_req" "$_gym_uv_have" | sort -V | head -n 1)" != "$_gym_uv_req" ]; }; '
+    "if _gym_uv_old; then "
+    'curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$GYM_SRC/uv-bin" sh || true; hash -r; '
+    "if _gym_uv_old; then "
+    'echo "gym: uv $_gym_uv_have is older than the $_gym_uv_req this Gym checkout requires '
+    "(required-version in pyproject.toml); update it with 'uv self update'\" >&2; exit 1; fi; fi"
 )
 
 

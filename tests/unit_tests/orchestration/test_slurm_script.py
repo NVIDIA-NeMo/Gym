@@ -782,6 +782,7 @@ def _run_private_uv_entrypoint(
     tmpdir: Path | None = None,
     uv_version: str = "0.0.0",
     required_version: str | None = None,
+    fresh_uv_version: str | None = None,
     check: bool = True,
 ) -> tuple[str, Path, Path]:
     """Run a private-uv reader entrypoint with stub git, uv and curl; return its report, the shared uv and curl log."""
@@ -811,7 +812,7 @@ def _run_private_uv_entrypoint(
     # unmanaged writes the user-level receipt.
     installer = (
         'dir="${UV_UNMANAGED_INSTALL:-${UV_INSTALL_DIR:-$HOME/.local/bin}}"; mkdir -p "$dir"; printf %s '
-        + shlex.quote(fake_uv)
+        + shlex.quote(fake_uv.replace(uv_version, fresh_uv_version or uv_version, 1))
         + ' > "$dir/uv"; chmod +x "$dir/uv"; if [ -z "${UV_UNMANAGED_INSTALL:-}" ]; then '
         'mkdir -p "$HOME/.config/uv"; echo "{\\"install_prefix\\":\\"$dir\\"}" > "$HOME/.config/uv/uv-receipt.json"; fi'
     )
@@ -834,7 +835,22 @@ def _run_private_uv_entrypoint(
     return result.stdout, shared, curl_log
 
 
-def test_a_private_uv_older_than_the_checkout_requires_fails_naming_both_versions(tmp_path: Path) -> None:
+def test_a_private_uv_older_than_the_checkout_requires_is_replaced_by_a_fresh_install(tmp_path: Path) -> None:
+    out, shared, curl_log = _run_private_uv_entrypoint(
+        tmp_path,
+        shared_uv="working",
+        uv_version="0.11.32",
+        fresh_uv_version="0.13.8",
+        required_version=">=0.13.4",
+    )
+    fields = dict(part.split("=", 1) for part in out.split())
+    assert curl_log.exists()  # the fresh install ran
+    assert fields["UV"] == f"{fields['SRC']}/uv-bin/uv"
+    assert "VENV_PREFERENCE=only-managed" in out  # and the read went on
+    assert "0.11.32" in shared.read_text()  # the user's own uv is left as it was
+
+
+def test_a_private_uv_that_stays_too_old_after_the_fresh_install_fails_naming_both_versions(tmp_path: Path) -> None:
     out, _, _ = _run_private_uv_entrypoint(
         tmp_path, shared_uv="working", uv_version="0.11.32", required_version=">=0.13.4", check=False
     )
@@ -844,10 +860,11 @@ def test_a_private_uv_older_than_the_checkout_requires_fails_naming_both_version
 
 @pytest.mark.parametrize("uv_version", ["0.13.4", "0.13.10", "1.0.0"])
 def test_a_private_uv_that_meets_the_requirement_runs_on(tmp_path: Path, uv_version: str) -> None:
-    out, _, _ = _run_private_uv_entrypoint(
+    out, _, curl_log = _run_private_uv_entrypoint(
         tmp_path, shared_uv="working", uv_version=uv_version, required_version=">=0.13.4"
     )
     assert "VENV_PREFERENCE=only-managed" in out
+    assert not curl_log.exists()  # no reinstall when the copy already meets the requirement
 
 
 @pytest.mark.parametrize("shared_uv", ["working", "broken", "missing"])
