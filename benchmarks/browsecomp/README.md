@@ -293,3 +293,8 @@ gym eval run --no-serve --config benchmarks/browsecomp/configs/browsecomp_openco
 With `++uvicorn_logging_show_200_ok=true` the logs show each episode's calls in order: `/seed_session`, the agent
 session, the model calls, the agent's close, `/verify` and `/close_session`. Run the relay preset the same way, with
 `--agent opencode_sandboxed_search_agent` and `prepare.py`'s rows; it has no `/close_session`.
+
+- Nothing checks the staged plugins' bytes per episode, so check them once here: in one lent sandbox, the SHA-256
+  digests of the `/tmp/nemo-gym-plugin-*.js` files equal those of the repository files `episode_sandbox_files` names.
+- To check a row of the failure table above, script the stubs to end a run that way, for example by answering a model
+  call with an error status, and compare each preset's row with the table.
