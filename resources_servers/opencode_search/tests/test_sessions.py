@@ -1028,6 +1028,9 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
         ),
         ({"episode_sandbox_files": {"/tmp/p.js": str(REPOSITORY / PLUGINS[0])}}, "relative to the Gym root"),
         ({"episode_sandbox_files": {"/tmp/p.js": "../p.js"}}, "relative to the Gym root"),
+        # The plugins read one key, and the lent sandbox's environment cannot pick one from a pool for each row.
+        ({"episode_sandbox_env": {"EXA_API_KEYS": "k0:k1"}}, "set one key as EXA_API_KEY"),
+        ({"sandbox_config": _sandbox_config(env={"EXA_API_KEYS": "k0:k1"})}, "set one key as EXA_API_KEY"),
         ({"exa_cache_root": "/search-cache", "host": "127.0.0.1"}, "cannot reach the search cache proxy"),
         ({"exa_cache_root": "/search-cache", "host": "0.0.0.0"}, "cannot reach the search cache proxy"),
     ],
@@ -1042,6 +1045,8 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
         "episode_file_in_opencode_storage",
         "absolute_episode_file_source",
         "parent_episode_file_source",
+        "search_key_pool",
+        "search_key_pool_in_sandbox_config",
         "search_cache_on_loopback",
         "search_cache_on_any_address",
     ],

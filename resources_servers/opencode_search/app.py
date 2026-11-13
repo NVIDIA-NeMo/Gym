@@ -272,9 +272,10 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # it: stage under /tmp.
     episode_sandbox_files: Dict[str, str] = Field(default_factory=dict)
     # Environment of the lent sandbox, over sandbox_config.env. An empty value sets nothing, so a config can name a
-    # setting it leaves off. Secrets come from an overlay, never from a config file. With exa_cache_root set,
-    # NEMO_GYM_EXA_BASE_URL defaults to this server's /mcp proxy, and this server must then have a sandbox-reachable
-    # host; set the variable here to choose another address.
+    # setting it leaves off. Secrets come from an overlay, never from a config file. The search key is one EXA_API_KEY:
+    # an EXA_API_KEYS pool is refused at startup. With exa_cache_root set, NEMO_GYM_EXA_BASE_URL defaults to this
+    # server's /mcp proxy, and this server must then have a sandbox-reachable host; set the variable here to choose
+    # another address.
     episode_sandbox_env: Dict[str, str] = Field(default_factory=dict)
     # Where the receipts plugin (opencode_bundle/nemo_gym_receipts.js) copies the OpenCode plugins' lines in the lent
     # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, masks a run
@@ -523,16 +524,24 @@ class SearchResourcesServer(SimpleResourcesServer):
 
     def _lent_sandbox_config(self) -> SandboxConfig:
         """sandbox_config as LentSandboxes takes it, so a lent sandbox matches an agent run's but for its workdir and
-        the episode settings."""
+        the episode settings.
+
+        An environment with a pool of search keys (EXA_API_KEYS) is refused: the OpenCode plugins read one key,
+        EXA_API_KEY, and this environment is fixed at startup, so no key can be picked from the pool for each row as
+        the relay agent does. The pool would reach the sandbox whole, and every search would go out without a key.
+        """
         settings = dict(self.config.sandbox_config)
         derive_cpu_env = settings.pop("derive_cpu_env", True)
         config = SandboxConfig.model_validate(settings)
         cpu_env = cpu_cap_env(SandboxResources.from_mapping(config.resources).cpu) if derive_cpu_env else {}
+        env = cpu_env | config.env | self._episode_env()
+        if env.get("EXA_API_KEYS"):
+            raise ValueError(
+                "The lent sandbox's environment sets EXA_API_KEYS, a pool of search keys the OpenCode plugins do not "
+                "read: set one key as EXA_API_KEY in episode_sandbox_env"
+            )
         return config.model_copy(
-            update={
-                "env": cpu_env | config.env | self._episode_env(),
-                "metadata": config.metadata | {"nemo_gym_agent": self.config.name},
-            }
+            update={"env": env, "metadata": config.metadata | {"nemo_gym_agent": self.config.name}}
         )
 
     def _episode_env(self) -> Dict[str, str]:
