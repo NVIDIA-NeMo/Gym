@@ -1762,8 +1762,8 @@ def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workd
 
 
 def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> None:
-    """Rollouts in a row whose judge could not be reached stop the run (500, retried on resume), and a verdict starts
-    the count again."""
+    """Rollouts in a row whose judge could not be reached trip the breaker, and verify answers 500; a verdict starts the
+    count again."""
     server = _server(workdir, judge_max_consecutive_failures=2)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
 
@@ -1786,7 +1786,8 @@ def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> Non
 
 
 def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
-    """With judge_max_consecutive_failures 0, rollouts without a verdict are masked one by one and the run goes on."""
+    """With judge_max_consecutive_failures 0, rollouts without a verdict are masked one by one, and verify never answers
+    500."""
     server = _server(workdir, judge_max_consecutive_failures=0)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     _mock_judge(server, NO_VERDICT)
