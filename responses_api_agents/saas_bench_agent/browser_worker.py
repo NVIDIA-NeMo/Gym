@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted lifecycle from https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/browser_worker.py (Apache-2.0).
+# Lifecycle adapted from https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/agent.py (Apache-2.0).
 """One native browser-use episode, with fresh apps and native final-state grading."""
 
 from __future__ import annotations
@@ -142,14 +142,22 @@ def execute(config: dict) -> dict:
                     raise RuntimeError("Browser actor/runtime failed without a model-attributed ending")
                 # Only confirmed model endings reach final-state grading;
                 # browser/CDP/screenshot/provider faults stay retryable.
-                verify = run_verify(task, slot_id, ports, hostname, str(output), run_suffix="_r0")
+                verify = run_verify(
+                    task,
+                    slot_id,
+                    ports,
+                    hostname,
+                    str(output),
+                    run_suffix="_r0",
+                    inconclusive_verification_retries=config.get("inconclusive_verification_retries", 1),
+                )
                 diagnostics = verifier_diagnostics(verify)
                 result.update(actor)
                 result.update(
                     native_trajectory=native,
                     verify=verify,
                     verifier_diagnostics=diagnostics,
-                    reward=measured_score(verify) if not diagnostics["unavailable"] and not actor_failed else 0.0,
+                    reward=measured_score(verify) if not diagnostics["unavailable"] else 0.0,
                     mask_sample=diagnostics["unavailable"],
                     failure_kind="saas_bench:verifier"
                     if diagnostics["unavailable"]

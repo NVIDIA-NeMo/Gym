@@ -1,9 +1,8 @@
-Native SaaS-Bench evaluation implementation.
-Source: https://github.com/bpritam14/Gym-evaluation/tree/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark
-Public import revision: e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d
-Upstream release revision: 31177a7a80040edf588388dd982af4b678d1e544
-Code: Apache-2.0. Task definitions, native task verifiers and inputs: CC-BY-4.0.
-SaaS-Bench Authors retain their original notices.
-Adaptations include Gym execution/failure handling and database connection compatibility.
-Original task criteria and weights are retained; adaptations are recorded in provenance.json.
-No v5 generation, RL training, checkpoints, credentials or rollout artifacts are included.
+SaaS-Bench: https://github.com/UniPat-AI/SaaS-Bench
+Upstream revision: 48c22deb18b98c0ed78f81e7f3be82bc162de2c8 (pre-v1.1).
+Original runtime: Apache-2.0; tasks, inputs and graders: CC-BY-4.0.
+Original copyright: SaaS-Bench Authors. Original licenses are retained.
+NVIDIA-authored rootless/OpenCode integration and NVIDIA modifications: Apache-2.0.
+95 unmodified graders are external, hash-pinned task data; 11 modified graders remain here.
+Modified graders differ from the public release and can produce different scores.
+See VENDORING.md for the exact changes and provenance.json for per-file bindings.

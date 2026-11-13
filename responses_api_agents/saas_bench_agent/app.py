@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/app.py (Apache-2.0).
 """Gym run endpoint: own one native SaaS lifecycle and direct OpenCode process."""
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.artifacts import NG_NO_GENERATION_METADATA
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
     AGENT_COMMAND_NOT_ALLOWED,
@@ -48,7 +48,12 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.saas_bench_agent.runtime import DEFAULT_BUNDLE_ROOT, HARNESS_VERSIONS, configure_cache
+from responses_api_agents.saas_bench_agent.runtime import (
+    DEFAULT_BUNDLE_ROOT,
+    HARNESS_VERSIONS,
+    check_bundle_code,
+    configure_cache,
+)
 
 
 _MODEL_ENDINGS = {
@@ -63,16 +68,17 @@ _MODEL_ENDINGS = {
 
 
 def default_outcome_policy() -> StageOutcomePolicyConfig:
-    """Count model failures, while preserving evaluation failures for recovery."""
+    """Grade model endings from app state; retry evaluation failures."""
     return StageOutcomePolicyConfig(
         by_stage={
+            "verification": StagePolicyConfig(default_action=OutcomeAction.FAIL),
             "agent": StagePolicyConfig(
                 by_failure_class={
-                    FailureClass.MODEL: OutcomeAction.COUNT_AS_ZERO,
+                    FailureClass.MODEL: OutcomeAction.VERIFY,
                     FailureClass.EVALUATION: OutcomeAction.RETRY,
                 },
                 default_action=OutcomeAction.RETRY,
-            )
+            ),
         }
     )
 
@@ -103,6 +109,7 @@ class SaasBenchConfig(BaseResponsesAPIAgentConfig):
     mcp_timeout_ms: int = Field(default=180000, ge=1000)
     agent_timeout: int = Field(default=3600, ge=1)
     episode_timeout: int = Field(default=7200, ge=1)
+    inconclusive_verification_retries: int = Field(default=1, ge=0, le=3)
 
 
 class SaasBenchRunRequest(BaseRunRequest):
@@ -137,6 +144,8 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         if self.config.num_workers != 1 or self.config.concurrency > self.config.slot_capacity:
             raise ValueError("SaaS episodes require num_workers=1 and concurrency <= slot_capacity")
+        if not (os.environ.get("LLM_BASE_URL") or os.environ.get("MINDRA_BASE_URL")):
+            raise ValueError("Set LLM_BASE_URL or MINDRA_BASE_URL to the judge endpoint before starting SaaS Bench")
         configure_cache(self.config.cache_root)
         if self.config.harness == "opencode" and self.config.command == "opencode":
             from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
@@ -150,6 +159,7 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         self.config.source_root = str(source)
         if not (source / "saas_bench/opencode/worker.py").is_file():
             raise ValueError(f"Missing SaaS OpenCode implementation at {source}")
+        check_bundle_code(source)
         # The prepared bundle joins shipped runtime code with verified task data.
         sys.path.insert(0, str(source))
 
@@ -257,11 +267,43 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                         except asyncio.TimeoutError:
                             os.killpg(process.pid, signal.SIGKILL)
                             await process.wait()
+                    await self._stop_recorded_apps(output, env)
                     raise
             result_path = output / "result.json"
             if not result_path.is_file():
                 raise HTTPException(500, f"Worker exited without result; inspect {output}")
             return self._response(body, json.loads(result_path.read_text()))
+
+    async def _stop_recorded_apps(self, output: Path, env: dict[str, str]) -> None:
+        """Reap detached Enroot processes even when a worker died during app readiness."""
+        state = output / "enroot-state"
+        if not any(state.glob("*.enroot.pid")):
+            return
+        script = (
+            "import os\nfrom pathlib import Path\n"
+            "from saas_bench.enroot_slot import stop_enroot_app\n"
+            "for path in Path(os.environ['SAAS_ENROOT_STATE_DIR']).glob('*.enroot.pid'):\n"
+            "    stop_enroot_app(path.name.removesuffix('.enroot.pid'))\n"
+        )
+        with (output / "cleanup.log").open("a") as log:
+            cleanup = await asyncio.create_subprocess_exec(
+                self.config.worker_python or sys.executable,
+                "-c",
+                script,
+                env={**env, "SAAS_ENROOT_STATE_DIR": str(state)},
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+            )
+            try:
+                await asyncio.wait_for(cleanup.wait(), timeout=120)
+                if cleanup.returncode:
+                    raise RuntimeError(f"App cleanup failed; inspect {output / 'cleanup.log'}")
+            except BaseException:
+                if cleanup.returncode is None:
+                    os.killpg(cleanup.pid, signal.SIGKILL)
+                    await cleanup.wait()
+                raise
 
     def _response(self, body: SaasBenchRunRequest, result: dict) -> SaasBenchVerifyResponse:
         from saas_bench.opencode.core import measured_score, response_items
@@ -345,6 +387,8 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                     ],
                 }
             ]
+        if masked and not native and not result.get("agent_output"):
+            items = []
         response = NeMoGymResponse.model_validate(
             {
                 "id": "resp_" + uuid4().hex,
@@ -365,6 +409,7 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                 }
                 else "completed",
                 "output": items,
+                "metadata": None if items else dict(NG_NO_GENERATION_METADATA),
                 "parallel_tool_calls": body.responses_create_params.parallel_tool_calls,
                 "tool_choice": body.responses_create_params.tool_choice,
                 "tools": body.responses_create_params.tools,

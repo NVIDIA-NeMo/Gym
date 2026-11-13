@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: CC-BY-4.0
-# Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_016/verify.py
-# Copyright: SaaS-Bench Authors; see bundled licenses.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_016/verify.py
+# Original license: CC-BY-4.0; Copyright: SaaS-Bench Authors; see bundled licenses.
+# NVIDIA modifications: Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged.
 # Adaptation: register the shipped Drupal collation for database reads; task checks unchanged.
 """Verifier for agriculture_016: FarmOS application chain -> Grocy deficit."""
 

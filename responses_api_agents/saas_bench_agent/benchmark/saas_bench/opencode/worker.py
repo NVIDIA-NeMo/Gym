@@ -1,7 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/worker.py
-# Copyright: SaaS-Bench Authors; see bundled licenses.
-# Gym adaptation: preserve task checks while separating model and evaluation failures.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """One process owns app startup, OpenCode, native verification and teardown."""
@@ -425,7 +421,7 @@ def execute(config: dict) -> dict:
                 if config.get("training_reward_mode", "native") != "native":
                     raise ValueError("Unknown training reward mode")
                 verify = run_verify(
-                    task, slot_id, port_map, hostname, str(output), run_suffix="_r0"
+                    task, slot_id, port_map, hostname, str(output), run_suffix="_r0", inconclusive_verification_retries=config.get("inconclusive_verification_retries", 1)
                 )
                 diagnostics = verifier_diagnostics(verify)
                 result["verifier_diagnostics"] = diagnostics
@@ -448,7 +444,7 @@ def execute(config: dict) -> dict:
                     verify=verify,
                     reward=0.0
                     if diagnostics["unavailable"]
-                    else 0.0 if health["termination"] in model_endings else measured_score(verify),
+                    else measured_score(verify),
                     status="completed",
                     mask_sample=diagnostics["unavailable"],
                     failure_kind="saas_bench:verifier"

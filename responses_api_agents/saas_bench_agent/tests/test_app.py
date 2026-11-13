@@ -23,6 +23,9 @@ from responses_api_agents.saas_bench_agent.app import SaasBenchAgent, SaasBenchC
 def agent(tmp_path, monkeypatch):
     from responses_api_agents.saas_bench_agent.runtime import BENCHMARK_ROOT
 
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr("responses_api_agents.saas_bench_agent.app.check_bundle_code", lambda source: None)
+
     monkeypatch.syspath_prepend(str(BENCHMARK_ROOT))
     source = tmp_path / "source"
     package = source / "saas_bench/opencode"
@@ -201,7 +204,7 @@ async def test_cancellation_reaps_actual_worker_process(agent, monkeypatch):
         ("permission_abort", "agent_command_not_allowed"),
     ],
 )
-def test_model_endings_are_explicit_counted_zeros(agent, ending, kind):
+def test_model_endings_keep_the_measured_grade(agent, ending, kind):
     from responses_api_agents.saas_bench_agent.app import SaasBenchVerifyResponse
 
     native = result(score=0.75, masked=True)
@@ -209,24 +212,24 @@ def test_model_endings_are_explicit_counted_zeros(agent, ending, kind):
         failure_kind="saas_bench:model_ending", execution_health={"termination": ending}, model_turn_observed=True
     )
     response = agent._response(request(), native)
-    assert response.reward == 0 and response.mask_sample is False
+    assert response.reward == 0.75 and response.mask_sample is False
     assert response.failure_kind == kind
-    assert response.failure_outcome_action == "count_as_zero"
+    assert response.failure_outcome_action == "verify"
     assert response.failure_outcome_attribution == "model"
     restored = SaasBenchVerifyResponse.model_validate(response.model_dump(mode="json"))
-    assert restored.failure_outcome_action == "count_as_zero"
+    assert restored.failure_outcome_action == "verify"
     assert restored.failure_outcome_attribution == "model"
 
 
 @pytest.mark.parametrize("kind", ["judge_failed", "judge_unparseable"])
-def test_judge_fault_wins_over_model_ending_and_requests_row_retry(agent, kind):
+def test_exhausted_judge_fault_wins_and_reports_terminal_evaluation_failure(agent, kind):
     native = result(score=0.75)
     native["verify"]["judge_failures"] = [{"failure_kind": kind, "reason": "fixture"}]
     native["execution_health"] = {"termination": "timeout"}
     response = agent._response(request(), native)
     assert response.mask_sample is True and response.reward == 0
     assert response.failure_kind == kind
-    assert response.failure_outcome_action == "retry"
+    assert response.failure_outcome_action == "fail"
     assert response.failure_outcome_attribution == "evaluation"
     assert response.native_metrics == {}
 
@@ -237,9 +240,9 @@ def test_timeout_flag_with_model_turn_keeps_canonical_failure_kind(agent):
     native["model_turn_observed"] = True
     response = agent._response(request(), native)
     assert response.failure_kind == "agent_timeout"
-    assert response.failure_outcome_action == "count_as_zero"
+    assert response.failure_outcome_action == "verify"
     assert response.failure_outcome_attribution == "model"
-    assert response.reward == 0 and response.mask_sample is False
+    assert response.reward == 0.75 and response.mask_sample is False
 
 
 @pytest.mark.parametrize("infra_kind", [None, "saas_bench:infrastructure"])
@@ -264,3 +267,72 @@ def test_browser_model_ending_requires_explicit_origin_even_for_cached_results(a
     response = agent._response(request(), native)
     assert response.mask_sample is masked
     assert response.failure_outcome_attribution == ("evaluation" if masked else "model")
+
+
+def test_start_failure_is_recoverable_without_a_saved_generation(agent):
+    from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
+
+    native = {
+        "status": "error",
+        "artifacts": "fixture",
+        "trajectory": [],
+        "native_trajectory": [],
+        "agent_output": "",
+        "mask_sample": True,
+        "failure_kind": "saas_bench:infrastructure",
+    }
+    row = agent._response(request(), native).model_dump(mode="json")
+    assert row["response"]["output"] == []
+    assert masked_infrastructure_kind(row) == "agent_run_error"
+
+
+def test_missing_judge_endpoint_fails_before_episodes(agent, monkeypatch):
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("MINDRA_BASE_URL", raising=False)
+    with pytest.raises(ValueError, match="LLM_BASE_URL"):
+        SaasBenchAgent(config=agent.config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.asyncio
+async def test_cancellation_stops_detached_apps(agent, monkeypatch, tmp_path):
+    import shutil
+    import signal
+
+    from responses_api_agents.saas_bench_agent.runtime import BENCHMARK_ROOT
+
+    source = Path(agent.config.source_root)
+    shutil.copy(BENCHMARK_ROOT / "saas_bench/enroot_slot.py", source / "saas_bench/enroot_slot.py")
+    # enroot remove is external; the real PID teardown must still reap a detached keeper.
+    executable = tmp_path / "enroot"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    (source / "saas_bench/opencode/worker.py").write_text(
+        "import json, subprocess, sys, time\nfrom pathlib import Path\n"
+        "o=Path(json.loads(Path(sys.argv[1]).read_text())['output'])\n"
+        "(o/'enroot-state').mkdir(exist_ok=True)\n"
+        "p=subprocess.Popen(['sleep','600'],start_new_session=True)\n"
+        "(o/'enroot-state/fixture.enroot.pid').write_text(str(p.pid))\n"
+        "(o/'app.pid').write_text(str(p.pid))\ntime.sleep(600)\n"
+    )
+    monkeypatch.setattr(type(agent), "resolve_model_base_url", lambda *args: "http://localhost:9/v1")
+    output = Path(agent.config.output_root) / hashlib.sha256(b"repeat-0").hexdigest()
+    task = asyncio.create_task(agent.run(request()))
+
+    async def wait_marker():
+        while not (output / "app.pid").exists():
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(wait_marker(), 20)
+    pid = int((output / "app.pid").read_text())
+    try:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 60)
+        path = Path(f"/proc/{pid}/stat")
+        assert not path.exists() or path.read_text().rpartition(")")[2].split()[0] == "Z"
+    finally:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

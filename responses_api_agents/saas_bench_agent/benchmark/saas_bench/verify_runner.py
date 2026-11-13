@@ -1,6 +1,7 @@
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/verify_runner.py
-# Copyright: SaaS-Bench Authors; see bundled licenses.
+# Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/verify_runner.py
+# Original license: Apache-2.0; Copyright: SaaS-Bench Authors; see bundled licenses.
 # Adaptation: optional bounded HTTP transport wrapper; native task checks unchanged.
 """Run each task's verify.py, parse the results, and write them to JSON files.
 
@@ -19,6 +20,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # -- SITE_CONFIG --------------------------------------------------------------
@@ -309,11 +311,8 @@ def _parse_verify_output(stderr_text: str) -> dict:
             score_found = True
         index += 1
 
-    if not score_found and checks:
-        total  = sum(c["weight"] for c in checks)
-        earned = sum(c["weight"] for c in checks if c["passed"])
-        score  = earned / total if total else 0.0
-        all_pass = all(c["passed"] for c in checks)
+    if not score_found:
+        errors.append("verifier stopped before its SCORE line")
 
     return {
         "checks":   checks,
@@ -327,7 +326,7 @@ def _parse_verify_output(stderr_text: str) -> dict:
 
 # -- Main entry point ---------------------------------------------------------
 
-def run_verify(
+def _run_verify_once(
     task: dict,
     slot_id: int,
     port_map: dict[str, int],
@@ -378,7 +377,7 @@ def run_verify(
 
     parsed = _parse_verify_output(proc.stderr)
     status = "PASS" if parsed["all_pass"] else ("FAIL" if parsed["checks"] else "ERROR")
-    errors = parsed["errors"]
+    errors = parsed["errors"] + _stopped_apps(task, port_map, hostname)
     if judge_failures:
         errors.append("Judge unavailable: " + ", ".join(f["failure_kind"] for f in judge_failures))
     if proc.returncode not in (0, 1):
@@ -405,3 +404,41 @@ def run_verify(
         result["raw_score"] = parsed["score"]
         result["diagnostics_stdout"] = proc.stdout
     return _save(result)
+
+
+def _stopped_apps(task: dict, port_map: dict[str, int], hostname: str) -> list[str]:
+    """Only score live app state: a stopped app makes the result inconclusive."""
+    import yaml
+    from saas_bench.slot import _wait_ready
+    apps = yaml.safe_load(Path(__file__).with_name("apps.yaml").read_text())["apps"]
+    errors = []
+    for site in task.get("meta", {}).get("meta_data", {}).get("sites", []):
+        if site not in port_map or site not in apps:
+            errors.append(f"Missing grading readiness binding: {site}")
+            continue
+        try:
+            _wait_ready(port_map[site], apps[site].get("health_path", "/"), 30, hostname)
+        except Exception as exc:
+            errors.append(f"{site} stopped answering during grading: {type(exc).__name__}: {exc}")
+    return errors
+
+
+def run_verify(task: dict, slot_id: int, port_map: dict[str, int], hostname: str,
+               result_dir: str, run_suffix: str = "", inconclusive_verification_retries: int = 0) -> dict:
+    """Bounded re-verification of unchanged live state, before application teardown."""
+    if not 0 <= inconclusive_verification_retries <= 3:
+        raise ValueError("inconclusive_verification_retries must be in 0..3")
+    attempts = []
+    started = time.monotonic()
+    for attempt in range(inconclusive_verification_retries + 1):
+        attempt_started = time.monotonic()
+        result = _run_verify_once(task, slot_id, port_map, hostname, result_dir,
+                                 run_suffix=f"{run_suffix}_verify_attempt{attempt}")
+        result["verification_wall_time_seconds"] = time.monotonic() - attempt_started
+        (Path(result_dir) / f"{task['task_id']}{run_suffix}_verify_attempt{attempt}_verify.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        attempts.append(result)
+        if result["status"] in {"PASS", "FAIL"}:
+            break
+    result = {**result, "verification_attempts": attempts, "verification_wall_time_seconds": time.monotonic() - started}
+    (Path(result_dir) / f"{task['task_id']}{run_suffix}_verify.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    return result

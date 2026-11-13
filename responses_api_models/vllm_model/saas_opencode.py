@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_models/vllm_model/saas_opencode.py (Apache-2.0).
 """SaaS adapter for Gym's chat/ reasoning convention; OpenCode stays unmodified."""
 
 import asyncio

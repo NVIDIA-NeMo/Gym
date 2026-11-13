@@ -7,9 +7,9 @@ state, and native final-state verifier scripts:
 - NeMo Gym → OpenCode harness 2.1.1 (CLI 1.17.11) → Eval Factory.
 
 The benchmark runtime, app definitions, container lifecycle/network helpers, native
-prompt builder, both harness entry points, and all 106 verifier scripts ship in
+prompt builder, both harness entry points, and 11 modified verifier scripts ship in
 `responses_api_agents/saas_bench_agent`. No separate SaaS Bench checkout is needed.
-Task descriptions, metadata, input media, app images, and browser binaries remain
+The 95 unmodified upstream verifiers, task descriptions, metadata, input media, app images, and browser binaries remain
 external data/binary assets. `prepare` verifies every task-data file against the
 committed manifest, then joins the data and shipped code in a run-local bundle.
 Reusing a bundle with changed code/data fails; use a fresh run directory.
@@ -19,6 +19,9 @@ Reusing a bundle with changed code/data fails; use a fresh run directory.
 ```bash
 # Run inside the provisioned runtime image, from the pinned Gym checkout.
 export SAAS_BENCH_DATA_DIR=/saas-data
+export LLM_BASE_URL=https://YOUR_JUDGE_HOST/v1
+export LLM_JUDGE_MODEL=YOUR_JUDGE_MODEL
+# Supply LLM_API_KEY securely at runtime.
 export SAAS_BENCH_CACHE_ROOT=/cache/saas-bench
 export SAAS_BENCH_WORKER_PYTHON=/opt/saas-worker/bin/python
 export SAAS_BENCH_OPENCODE=/opt/saas/bin/opencode
@@ -27,12 +30,13 @@ export SAAS_ENROOT_IMAGE_DIR=/saas-images
 export SAAS_ENROOT_RUNTIME_DIR=/saas-enroot-runtime
 export PLAYWRIGHT_BROWSERS_PATH=/saas-browsers
 # Select one: saas_bench_opencode or saas_bench_browser_use.
-gym eval prepare --benchmark saas_bench_opencode
-gym eval run --benchmark saas_bench_opencode --model-type vllm_model --split benchmark \
+gym eval prepare --benchmark saas_bench_opencode ++saas_bench_run_root=/runs/saas-kimi-001
+gym eval run --benchmark saas_bench_opencode --model-type vllm_model --split benchmark ++saas_bench_run_root=/runs/saas-kimi-001 \
   +policy_base_url=http://MODEL_HOST:8000/v1 +policy_model_name=MODEL_NAME
 ```
 
-The `saas_bench` benchmark name remains an OpenCode compatibility alias.
+The two supported benchmark names are `saas_bench_opencode` and `saas_bench_browser_use`; the unused `saas_bench` alias has been removed.
+Every invocation requires an explicit, unique `saas_bench_run_root`. Reusing a run root resumes that run and reuses saved scores; use a fresh root for each model/checkpoint. Dispatch concurrency defaults to the agent concurrency so queued rows do not spend the episode deadline waiting for a slot.
 For a smoke, set `+saas_bench_tasks=<native-task-id>` in BOTH prepare and run;
 prepare again when changing selectors; the two harnesses have separate prepared JSONLs.
 Prepared files stay in the per-job Gym checkout under `benchmarks/<harness>/data/`;
@@ -52,7 +56,7 @@ Site-specific filesystem paths and Slurm settings belong in deployment configura
 | Asset | Relative asset path | Container mount |
 |---|---|---|
 | Evaluation image | `serving_containers/saas-bench-eval-browser-use-0.13.7-opencode-1.17.11-svg-amd64.sqsh` | driver image |
-| Task data | `artifacts/datasets/saas_bench_eval_task_data_31177a7/` | `/saas-data:ro` |
+| Task data | a checkout of UniPat-AI/SaaS-Bench at `48c22deb` or a release containing all 323 manifest files | `/saas-data:ro` |
 | App images (31 SQSH files) | `assets/enroot_images/` | `/saas-images:ro` |
 | Rootless network and SquashFS helpers | `runtime/enroot/` | `/saas-enroot-runtime:ro` |
 | Chromium and ffmpeg | `runtime/saas-bench-playwright-1.62.0-amd64/` | `/saas-browsers:ro` |
@@ -84,16 +88,18 @@ No SFT/v5-generation stages or training changes are part of this evaluation adap
 
 ## Source and licensing
 
-Public import snapshot `e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d` (original upstream
-release `31177a7a80040edf588388dd982af4b678d1e544`):
-https://github.com/bpritam14/Gym-evaluation/tree/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark .
-The Apache-2.0 runtime is vendored with source headers, licenses, and SHA manifests.
-Benchmark tasks/verifier scripts retain CC-BY-4.0 and attribution; see
-`benchmark/NOTICE`, `benchmark/tasks/LICENSE`, and `benchmark/provenance.json`.
-The vendored implementation is excluded from auto-fix linting to preserve source
-semantics. Adapter, preparation, lifecycle, and protocol tests run on the actual
-Gym response schemas; the benchmark is experimental until a full reference
-score has been reproduced and reviewed.
+Upstream: https://github.com/UniPat-AI/SaaS-Bench at
+`48c22deb18b98c0ed78f81e7f3be82bc162de2c8` (before v1.1).
+Runtime code: Apache-2.0. Task/graders/media: CC-BY-4.0, retaining author notices.
+See `benchmark/VENDORING.md` for source mappings and every modified grader.
+Eleven graders differ from that public release: seven pre-existing semantic/schema
+adaptations plus four Drupal state-reader fixes. In particular, `business_052`
+requires exactly 24 percent instead of upstream's approximate 10.04 or 24 percent.
+Scores are therefore not claimed equivalent to unmodified public upstream.
+The 95 unmodified graders are external, pinned byte-for-byte in the data manifest;
+prepare and startup both validate their bytes. NVIDIA-authored extensions are
+identified separately in provenance, rather than attributed to upstream authors.
+The benchmark remains experimental pending full reference qualification.
 
 The helper release also provides `ip`, `ss`, `unsquashfs`, `mksquashfs`, and libraries
 missing from the base image. Runtime setup prepends its `usr/bin` and `usr/sbin`
@@ -114,11 +120,10 @@ permission errors and stale file handles; they are platform runtime, not caches.
 Set `SAAS_STATIC_SHELL=/saas-enroot-runtime/usr/bin/busybox`. Runtime admission
 rejects missing Enroot/network/UID helpers before dispatching episodes.
 
-`SAAS_BENCH_JUDGE_HTTP_TIMEOUT=120` enables the Gym-owned native-verifier transport
+`SAAS_BENCH_JUDGE_HTTP_TIMEOUT=120` configures the Gym-owned native-verifier transport
 wrapper. Only POST requests to the configured judge's `/chat/completions` endpoint
-receive the longer timeout and one transient retry. Native verifier scripts,
-criteria, weights and payloads remain unchanged; app requests keep their original
-timeouts, and exhausted judge errors remain masked. The opted-in verifier process
+receive the longer timeout and one transient retry. Verifier prompts and payloads are retained; the 11 disclosed grader adaptations still apply; app requests keep their original
+timeouts, and exhausted judge errors remain masked. The verifier process
 budget is 600 seconds. The fault channel is always active; this option controls the HTTP timeout.
 
 SQLCMD exec additionally enters the target PID namespace and root filesystem so
@@ -136,16 +141,16 @@ Judge HTTP exhaustion (including 429/5xx), invalid JSON and missing or empty
 completions are recorded separately from task verifier text. This works for both
 requests and urllib judge calls even when a task catches the exception and prints
 FAIL. The entire row is masked with a retry/evaluation outcome; legitimate NO
-answers remain task failures. Retry budgets remain owned by Gym/the caller.
+answers remain task failures. Verification retries occur inside the episode before teardown: `+saas_bench_inconclusive_verification_retries=1` permits one retry (range 0–3), with a separate retained receipt per attempt. Exhausted judge/verifier faults remain masked with terminal `fail`/evaluation attribution, because detached reverify cannot reconstruct live app state.
 
 Confirmed malformed model output, output caps and unrecovered model context
-limits count as zero. Browser-use preserves explicit model-call failure metadata;
+limits retain their measured final-state grade (including partial credit). Browser-use preserves explicit model-call failure metadata;
 unknown actor exceptions, Chrome/CDP startup, browser observation/screenshot faults
 and provider failures stay retryable evaluation faults, including after partial
-progress. An OpenCode timeout counts as `agent_timeout` only after generated
+progress. An OpenCode timeout is tagged `agent_timeout` only after generated
 content, an action or output-token evidence establishes a model turn. Empty or
 startup-only timeout traces remain retryable evaluation faults. Both harnesses run final-state verification for confirmed model endings before
-stopping applications, retaining measured checks for diagnostics. Verification
+stopping applications, using measured checks as the reward. A verifier missing its final SCORE line or a task app failing readiness makes grading inconclusive, even if earlier checks passed. Verification
 unavailability takes precedence over an actor failure. The typed
 failure_outcome_action and failure_outcome_attribution fields survive JSON
 serialization and recovery. Infrastructure startup failures remain retryable.
@@ -161,3 +166,9 @@ licenses remain attested in `benchmark/provenance.json`; no private checkout is
 required to inspect or run the shipped code. Header-link cleanup does not change
 any Python AST or task check. Dataset preparation binds to the shipped file
 bytes, so prepare a fresh bundle after changing revisions.
+
+### Current harness scope
+
+This uses legacy_agent and a SaaS-specific OpenCode worker, not stock opencode_agent. It does not promise cross-harness score parity: protocol repair and browser tooling differ. The recommended resources-server + stock-harness migration is documented in `benchmark/VENDORING.md` as follow-up work. Both requested harnesses remain supported here.
+
+Enroot app networks disable host-loopback access. Docker-compatible exec uses only host PATH and explicit `-e`/runtime flags; it does not pass judge keys or Gym configuration into app commands. Cancellation reaps detached Enroot app processes even during readiness startup. Deployment platform roots are explicit absolute paths, rather than a single cluster-specific hardcoded root.

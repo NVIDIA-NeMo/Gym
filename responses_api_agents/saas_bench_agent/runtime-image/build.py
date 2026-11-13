@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -32,7 +33,11 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true", help="Reuse this build directory after a failed installation")
     args = parser.parse_args()
     work = args.work_dir.resolve()
-    if any(work == Path(p) or work.is_relative_to(p) for p in ("/root", "/home/pritamb")):
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except KeyError:
+        home = Path.home().resolve()
+    if any(work == p or work.is_relative_to(p) for p in (Path("/root"), home)):
         raise ValueError("Build storage must be outside forbidden homes")
     work.mkdir(parents=True, exist_ok=args.resume)
     output = args.output.resolve()

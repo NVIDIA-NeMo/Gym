@@ -7,6 +7,7 @@ import errno
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import socket
 import tempfile
@@ -55,7 +56,11 @@ def _cpu_enroot_config(cache: Path) -> Path:
 
 def configure_cache(root: str) -> Path:
     cache = Path(root).resolve()
-    if any(cache == Path(p) or cache.is_relative_to(p) for p in ("/root", "/home/pritamb")):
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except KeyError:
+        home = Path.home().resolve()
+    if any(cache == p or cache.is_relative_to(p) for p in (Path("/root"), home)):
         raise ValueError("SaaS cache must be outside forbidden home directories")
     cache = cache / socket.gethostname().split(".")[0]
     directories = {
@@ -85,8 +90,8 @@ def configure_cache(root: str) -> Path:
     platform_root = os.environ.get("SAAS_ENROOT_PLATFORM_ROOT")
     if platform_root:
         platform = Path(platform_root).resolve()
-        if platform != Path("/raid/enroot"):
-            raise ValueError("SVG Enroot platform root must be /raid/enroot")
+        if not Path(platform_root).is_absolute() or platform == Path("/"):
+            raise ValueError("Enroot platform root must be an explicit absolute runtime directory")
         identity = "saas-" + os.environ.get("SLURM_JOB_ID", "interactive") + "-" + str(os.getpid())
         host_uid = os.environ.get("SLURM_JOB_UID", str(os.getuid()))
         if not host_uid.isdecimal():
@@ -141,6 +146,25 @@ def configure_cache(root: str) -> Path:
     return cache
 
 
+def check_bundle_code(bundle: Path) -> None:
+    """Reject stale prepared code before any episode can start."""
+    provenance = json.loads((BENCHMARK_ROOT / "provenance.json").read_text())
+    for item in provenance["files"]:
+        relative = item.get("vendored_path", item["source_path"])
+        target = bundle / relative
+        if (
+            not target.is_file()
+            or hashlib.sha256(target.read_bytes()).digest()
+            != hashlib.sha256((BENCHMARK_ROOT / relative).read_bytes()).digest()
+        ):
+            raise ValueError(f"Prepared bundle code differs from this checkout: {relative}; run prepare again")
+    manifest = json.loads((BENCHMARK_ROOT / "task-data-manifest.json").read_text())
+    for relative, digest in manifest["files"].items():
+        target = bundle / relative
+        if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"Prepared bundle data differs from pinned release: {relative}; run prepare again")
+
+
 def materialize_bundle(data_dir: str, destination: str | None = None) -> Path:
     """Join shipped verifier/runtime code with a hash-verified external data release."""
     import fcntl
@@ -163,13 +187,7 @@ def materialize_bundle(data_dir: str, destination: str | None = None) -> Path:
             for relative, digest in expected["files"].items():
                 if hashlib.sha256((output / relative).read_bytes()).hexdigest() != digest:
                     raise ValueError("Existing bundle data differs; select a fresh run directory")
-            provenance = json.loads((BENCHMARK_ROOT / "provenance.json").read_text())
-            for item in provenance["files"]:
-                if (
-                    hashlib.sha256((output / item["source_path"]).read_bytes()).hexdigest()
-                    != hashlib.sha256((BENCHMARK_ROOT / item["source_path"]).read_bytes()).hexdigest()
-                ):
-                    raise ValueError("Existing bundle code differs; select a fresh run directory")
+            check_bundle_code(output)
             return output
         temporary = Path(tempfile.mkdtemp(prefix=".saas-bundle-", dir=output.parent))
         try:

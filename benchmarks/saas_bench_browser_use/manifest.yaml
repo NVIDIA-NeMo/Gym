@@ -5,9 +5,7 @@ kind: benchmark
 integration_profile: external-agent-loop
 domain: other
 description: Native SaaS Bench evaluation using browser_use
-modality:
-- text
-- image
+modality: text, image
 licensing: CC-BY-4.0
 authors:
 - SaaS-Bench Authors
@@ -18,11 +16,11 @@ reward:
   higher_is_better: true
 determinism: stochastic
 agent_server: saas_bench_agent
+resources_server: null
 datasets:
 - name: saas_bench_browser_use
   type: benchmark
   jsonl_fpath: benchmarks/saas_bench_browser_use/data/saas_bench_browser_use_benchmark.jsonl
-  license: CC-BY-4.0
   prompt_config: null
   prepare_script: benchmarks/saas_bench/prepare.py
   num_repeats: 1

@@ -1,1342 +1,509 @@
 {
-  "source_repository": "https://github.com/bpritam14/Gym-evaluation",
-  "source_revision": "e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d",
+  "source_repository": "https://github.com/UniPat-AI/SaaS-Bench",
+  "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+  "upstream_version": "pre-v1.1",
   "files": [
     {
       "source_path": "saas_bench/__init__.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/__init__.py",
-      "source_sha256": "24082912a154c0865d92be1d6a9d6006e852728afd014ba520398f024c2043f6",
-      "vendored_sha256": "27a40f51a420a3419d1c0eb0f85ef7be5be509ff264c6c0e0f3dc1074306deea",
+      "vendored_sha256": "a306f651cd8b90fe49b9676050630cc73c162c8f2a2389ec08e61b69b7e4de16",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/__init__.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "origin": "upstream",
+      "python_ast_unchanged": true
     },
     {
       "source_path": "saas_bench/agent.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/agent.py",
-      "source_sha256": "10cc5911ec75e0f10aac0b20ffc8469d866dd9b93ae182dc57256b07e0ea176a",
-      "vendored_sha256": "7740c6e95b667c1df0086942c84c7c22eaf6d71956fce735caaf225d91f51e5d",
+      "vendored_sha256": "7324cea3c60798f6adc37e24fd4cf048141a72f1c18572697b10b3936a5aa328",
       "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/agent.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "a0da16e5ffd304869b28ae850a474e6cbdf6d6d174182e822860e9aff17375fb",
+      "origin": "upstream",
       "python_ast_unchanged": false,
-      "upstream_source_sha256": "325ab363ee7a206845b7312500e8d455fbf1fbd2fff577c501b5992a21e65583",
-      "gym_adaptation": "Preserve explicit model-call failure origin through native catch-all; browser/CDP/observation/provider faults remain evaluation faults; runtime-boundary recovery clears only recovered failures."
+      "gym_adaptation": "Gym model/runtime attribution, rootless application lifecycle or conclusive live-state verification; see VENDORING.md."
     },
     {
       "source_path": "saas_bench/loader.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/loader.py",
-      "source_sha256": "74c3cb0df36aa2340dd229f8409c4666e350c244b7ec219f675552e477ac05d2",
-      "vendored_sha256": "6ea2ef2ad4a8025b2ac356fbe5b7202cae5913075399d591e662b817a74698ff",
+      "vendored_sha256": "dcaf3f9b1051c074527b1d811d59fc478ce83a0f0fb9447be49f54b038a9ed8c",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "b588edc837a64ec45e1ef115191f098c9a8f608228396968de86bfbb02e6304c"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/loader.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "b588edc837a64ec45e1ef115191f098c9a8f608228396968de86bfbb02e6304c",
+      "origin": "upstream",
+      "python_ast_unchanged": true
     },
     {
       "source_path": "saas_bench/slot.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/slot.py",
-      "source_sha256": "d7bade3d553773bc4d6cd78c41810b2d216cb87bf26015879e5f5afc933b6b0f",
-      "vendored_sha256": "9f2bcac6b37330a42a3e001d14e25b4c86a503c215d5fc3cac8487e37076aa61",
+      "vendored_sha256": "33b7baef9660050f34fe8388ef119b5c572eb36f7ce2cdf942a5e49ce64e7093",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "fdf3ee2e17807cefbe40c5edf6756f1aa66b941bfecf73ff1066e579305f70aa"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/slot.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "bb19570706dc8446a9919e45fed83422efc2bd65c2e2ef92f723bf189b91648b",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Gym model/runtime attribution, rootless application lifecycle or conclusive live-state verification; see VENDORING.md."
     },
     {
       "source_path": "saas_bench/enroot_slot.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/enroot_slot.py",
-      "source_sha256": "1aca7b7534b96c7fd5dc6b207fb2baab5b09d4fd79307384fbf9c6403f143c10",
-      "vendored_sha256": "e63e66bca33271442de5caf01b656498d831e5c0eab633cc23829f0b9385537d",
+      "vendored_sha256": "aa0201ebde397d3c2d24bbd947a0f9d963bdd4608bbd57acaea5ec4c81993882",
       "license": "Apache-2.0",
-      "python_ast_unchanged": false,
-      "upstream_source_sha256": "bffc070c189badd54de569913af322128a23208ce2a20e432786f1c277ba313c",
-      "gym_adaptation": "Deployment-provided standard image/runtime mount defaults replace user-specific private filesystem defaults."
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/verify_runner.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/verify_runner.py",
-      "source_sha256": "bf9c8afb86e2cdcf5d879b9710647e08803bfd1c40ecf9e7b80429dad869beec",
-      "vendored_sha256": "c4fae4681f563bc21c66616210fc15d3eb958406886436a35624f82ed30bb186",
+      "vendored_sha256": "9b18a7b494cb588d298af89caa3d3b1f126ed53e3fa4a20dac53b614da1cbb91",
       "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/verify_runner.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "4fc062a1017dfcea7f68d23955edf695529f9d649940fe6eb7aa794d5a29499d",
+      "origin": "upstream",
       "python_ast_unchanged": false,
-      "adaptation": "Judge-only transport launcher and explicit infrastructure-warning propagation; native task checks unchanged",
-      "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged.",
-      "upstream_source_sha256": "bbd35af7f9cf81bf5d3297138f3bb648cec402e513713be8864af0a708933117"
+      "gym_adaptation": "Gym model/runtime attribution, rootless application lifecycle or conclusive live-state verification; see VENDORING.md."
     },
     {
       "source_path": "saas_bench/runtime_assets.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/runtime_assets.py",
-      "source_sha256": "62334af397b40c388c272daa3a3945fd6820e7bdd0404fad829141ef9f744b0f",
-      "vendored_sha256": "0c755533ef8c1d7ee95c00d0fb6975cce3b4787a629b1715a5a56cb43454e5e1",
+      "vendored_sha256": "71aa1ba0745e77e1b80c867233856721be51bfc4c3319fdb1fbe0dd4ebbc6550",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "f8ab30dbc66471726a04b8fd5d7eb08e532c1729667c787fb690f6e419789605"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/apps.yaml",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/apps.yaml",
-      "source_sha256": "1b41427c6c2e426ab0e2a461d3e085dda08f89ede977599b1da8e7b7bb44f587",
-      "vendored_sha256": "1b41427c6c2e426ab0e2a461d3e085dda08f89ede977599b1da8e7b7bb44f587",
+      "vendored_sha256": "2eb0d133eacc84453548b9d68fb5800feb65a6e9c650846389b62b8370f7351b",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "1b41427c6c2e426ab0e2a461d3e085dda08f89ede977599b1da8e7b7bb44f587"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/apps.yaml",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "6f50a5b4133eeeaee6cb80ee5bd1038f7bb13245a79e3fbad972005dd7aa990a",
+      "origin": "upstream"
     },
     {
       "source_path": "saas_bench/uid_shim.c",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_shim.c",
-      "source_sha256": "0d29c76c67719105529cbeeb66df5e571a81b21e6ed86b761e0d9d4c3e88c85c",
-      "vendored_sha256": "a23c12998036a54f3a58de4525678128210f4c5083e7c065a0948ddeec59ab1b",
+      "vendored_sha256": "a388dd8b4eb22ef32c0a56d56a31ad7e5920877fc46ebd7e316c5d552e25f852",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "4c59253ce2667573d8be819b52c7de60b4892cfe439a37bf6f9e90e6bd640d93"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/oo_community_init.sh",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/oo_community_init.sh",
-      "source_sha256": "49cf8689cd9ddb7929c7b0cca1a4689d12280f6772bbce2461f9870631e4dd4d",
-      "vendored_sha256": "b9865df59201bfdb4c84a06677ce37e3f3ec3aefa26fe76b92862c97853d7f06",
+      "vendored_sha256": "33ac0286cc2c0c9c9c9433290135e7bf719cd5c5e3da8bf90a898b6f1d342a51",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "66bef81050d8ac57b570c572d9e4546dfdb69097424699dc73af51d788d1ba90"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/oo_documentserver_init.sh",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/oo_documentserver_init.sh",
-      "source_sha256": "4de42e4ad58fdc84f5ff6d93c83269e0b062e720754fdd2b00997710eaa78ce3",
-      "vendored_sha256": "0b9cb661225697bea00222b1219f5e2b9a68b07394016f46fad44d27687fc094",
+      "vendored_sha256": "85ba34f2bc7a3a8c70858d0aa9c98b5630f22b19825644b3a7ed2576db511831",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "85ba34f2bc7a3a8c70858d0aa9c98b5630f22b19825644b3a7ed2576db511831"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/gosu",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/gosu",
-      "source_sha256": "fd6514f58edeca70c91ad49901fb234e05cc890137ebc577cb44be8b6b6642b6",
-      "vendored_sha256": "6aa484ee5beb0833ca7fc2722d8ac4aa5fd5fda283ad0e2f0bb897fd565c7a2c",
+      "vendored_sha256": "a0fc77b0a1e10e2cbba1b882a6e48701e32cfcef54596e9e95c27eb8c7e2d2b9",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "87e293835f541fb0470af762015f23223a8e9462392d735f82fdb9e05ae45368"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/id",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/id",
-      "source_sha256": "4f52b41d6d460754a4a1782fbaf943e00cf4f8fb87a84029382318a0c70b0faf",
-      "vendored_sha256": "d7cc3bf97fb53612b73b30fa17a613480838381838170b16a52fc0080e0a9684",
+      "vendored_sha256": "bc6ffb67175d971c2369336814357b78833eb7f6a7960f1b93ee8cfaa4df17d0",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "fb129364bb78217a2e40fc182c63ca4f5a4dac936398213a28befb61633cbca1"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/runuser",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/runuser",
-      "source_sha256": "86e5dd43ad6b5ad1020ebde00825399455c0a57454d1476c5e0306eca0fcdd56",
-      "vendored_sha256": "24505d03ca906e8d28c741c0281ab0e59f38ae644d115c7f9ca94636d6672844",
+      "vendored_sha256": "69811aef1048b09154ea22e909fc68f16c302ca2002f4ec07a0c104950044729",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "5255c91efffcc5a58db2eed6e8252187d1d427486bf7bf9f7ac7a5519fa9ecbd"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/service",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/service",
-      "source_sha256": "28d5b6717a7fcd769432ac43e4c3f1412403ff260effe52e4f522b0799c5001f",
-      "vendored_sha256": "80660c8568c003022de07cba05c7f280b0f5363d4891a58d1db636b52454e3a5",
+      "vendored_sha256": "f91c8ee10e4cbd815e37901b1ad46e55860e1df2b8d024ed987923bf4aff54e3",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "ae1fd9fb2ea74590d7344fc2723bf30cf8c47d0d79c3c542ecc336a3d0e7b363"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/setpriv",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/setpriv",
-      "source_sha256": "f506b65e4b791b9979489d2357ebde008208a8287dbc74982bfde81d23026f10",
-      "vendored_sha256": "6c52ce0f1ecdee14df76b2869bdb7a5e8bf8b45eee35881be52ade0a83185cd3",
+      "vendored_sha256": "02e1c2a1d90d42a035dcfde92084e37ad5d4d21ba5b3dfdd0c41c0c5a474ff66",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "fbcb2d2cf35eee92929b95e3c0a2529db5023c6276721d44fbd20d21faf13204"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/su",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/su",
-      "source_sha256": "d503d099a61c8c07078b770827370eff4feef95184e90b227aabcbb2b91e35a7",
-      "vendored_sha256": "162bab9c485a96d11fc346bbf935b1152e0931c213fac3d94f540441c64d2920",
+      "vendored_sha256": "7613dac20c55a7c98d97c6c58b6840b4df678698b651e1faa01eddf8eb247bc8",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "783472b0637575a26c74b8831eae4f3d136b19637ff4aec3dcb3d913f08e8033"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/su-exec",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/su-exec",
-      "source_sha256": "57018e9b015e180f9c924ac4b502bb30ce297e8823fc25ad14747eaa96f7e5cf",
-      "vendored_sha256": "95aa77f49c2e7b1d308bac91c0c8455a137bf0e287c3bd4766376e0dc444606e",
+      "vendored_sha256": "a0fc77b0a1e10e2cbba1b882a6e48701e32cfcef54596e9e95c27eb8c7e2d2b9",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "87e293835f541fb0470af762015f23223a8e9462392d735f82fdb9e05ae45368"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/uid_wrappers/sudo",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/uid_wrappers/sudo",
-      "source_sha256": "45ba4ab92521de3c19a84d7d2446d345a2e708bfd9db294353860e4072c26251",
-      "vendored_sha256": "351f7bf71cdddaf13f0f107f3afe7d65d9e1f11eebb2808a440481b9a5b29dbc",
+      "vendored_sha256": "36462bda47e4e3ec52487a5120c7151ac49496b328e99aae638246cd40043a10",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "63a2c31b671b17afc8ca6972f79ef9da11685e19e4fc46ab7e70eeb8f03c9de5"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/__init__.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/__init__.py",
-      "source_sha256": "f7bb28663d4b5b1cfe9c015d0e321589328852c51dc6ce9d5949c1c0e081763b",
-      "vendored_sha256": "cfbbcc0197f0bce22b5c00ec1b6512e7e4a26ea17aa2f351deed461b14173274",
+      "vendored_sha256": "c20802bc69d0a742d6c117df62298daf04fb4bddb6452ab1dd2373f894943d63",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e69b1b5a303f87be84aa2b69e78d715a2ed036c33df8608b1049db910259a9b8"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/browser.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/browser.py",
-      "source_sha256": "592922bfa2381707248337d3ff449f8b19e590258298cb132ec6cef6e676cebd",
-      "vendored_sha256": "1064754913382bcd21169b0c408a2ea98ffc47be0cbfebf2894e1d6705687bff",
+      "vendored_sha256": "e09884ab62407b5c2cc98d8616329cd53fca696aa69aca901e4c67e03b79fcbc",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e09884ab62407b5c2cc98d8616329cd53fca696aa69aca901e4c67e03b79fcbc"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/core.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/core.py",
-      "source_sha256": "099a1dc3fa87916f92627fee753f7926ff190a58568b7c424f177df43218259e",
-      "vendored_sha256": "8528c2dbab408238892a873709620cc5aa5243c0c8f144635590362634a24eea",
+      "vendored_sha256": "c951f983457b09d884c89a05cd78e8d3a37494acc73892cfc860ee330d76c059",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c951f983457b09d884c89a05cd78e8d3a37494acc73892cfc860ee330d76c059"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/observability.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/observability.py",
-      "source_sha256": "ba648a8f5f6dfe6c1c3d5a505ed1a57d25dc5b0d51e1761bc93273e5d8a8621b",
-      "vendored_sha256": "565b7f15445c561649477a24312d508182eecf2b355f29b7ca04c32d5d1154a1",
+      "vendored_sha256": "96cf49524c5cbf31de9ba9ca06732f930be4edba0e7cc6921d46806ce1a6efdb",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "96cf49524c5cbf31de9ba9ca06732f930be4edba0e7cc6921d46806ce1a6efdb"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/prompts.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/prompts.py",
-      "source_sha256": "680f6705df667ec4589a3510954272dd365b48ac2a9fca253c00b352be0bcddb",
-      "vendored_sha256": "9f3c781ea01712f8357cadb2e6899b8df0ee2eb4bd2c7760c4d861b93811ca6d",
+      "vendored_sha256": "29f6f6e227d8419d14da6782e75364342b56ae2e9539e297c4cc5884367a786a",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "29f6f6e227d8419d14da6782e75364342b56ae2e9539e297c4cc5884367a786a"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/protocol.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/protocol.py",
-      "source_sha256": "da5c483a982cea0fb9dcc7855d2b5b5e88a6a3658832296e6fa3f5f4286ba926",
-      "vendored_sha256": "667bad26c81db0755db85c12a407b7989cbe768cdd5695055c074861a10da669",
+      "vendored_sha256": "c4b60cb2634a7659ce8ff5a3a48cd8d80dddbcc0b183b9f28351de8284c8cff8",
       "license": "Apache-2.0",
-      "python_ast_unchanged": false,
-      "gym_adaptation": "Timeouts require generated content/action/output-token evidence before model attribution; startup-only/empty timeouts remain evaluation faults.",
-      "upstream_source_sha256": "2012518eddfe1215bab30347549444d0516d3603594a85cfa3b1d2b89ed4c60a"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/runtime_check.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/runtime_check.py",
-      "source_sha256": "de419443c54c1d5ed899ec5ba06abcc0f136811038ce62ae06a6b76b9bd5695c",
-      "vendored_sha256": "a172d00fafb6c0b2be44507b1957fee9f2784c63c72137ba7be060a95bc891ef",
+      "vendored_sha256": "56bbe623b51ea5781c273c73b5897deed148a348cf9dce0ad4494f4823e72631",
       "license": "Apache-2.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "f68cef7a523fb7186cfecdb2a179632097569d63b21e2cff4f541dbac7506f6e"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/verifier.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/verifier.py",
-      "source_sha256": "35ff75a388c07e3fbc204156f2b316ec694527d9376719918c42d1fa7bbc8831",
-      "vendored_sha256": "16aad715c70eb98690560b9e8e3dfdf6084279a610cb733c4fa46c11155f9456",
+      "vendored_sha256": "c35a57fa0466978d2890f14923b91f09281c3737adc169d29b31c12ac7bf48fe",
       "license": "Apache-2.0",
-      "python_ast_unchanged": false,
-      "gym_adaptation": "Structured judge faults and explicit model/evaluation endings; task verifier criteria and weights unchanged.",
-      "upstream_source_sha256": "f86f45a6bba7ba185c5f2845251bfd72e51b14ef5a7c5867dd683e5a3abf62cf"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/visual_refresh.mjs",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/visual_refresh.mjs",
-      "source_sha256": "8c2f0c1d17d009f54f391b395e11ec02b933d8ebd5c2ace6ad7518488b9edc22",
-      "vendored_sha256": "540672eb5f171132f0b7136b0e51ee0cb85f859c374fbe6a11f18ec8311e31d9",
+      "vendored_sha256": "92fbaddd6b8e326621679056db33e1a166583f08d034e4b5553c39186369945c",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "7101c2436ade430b731b158d424f2f33fcd6e9a06324cfcf2bc75cf03426b740"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "saas_bench/opencode/worker.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/worker.py",
-      "source_sha256": "5c4cbb7433a41dd19ef422716e8ca280dfd7b6dc375022585b8d6b00637a2b22",
-      "vendored_sha256": "b6f5e6195348517fef2d63348092db117cb4d4725a86ee5e9db60e6d4387c545",
+      "vendored_sha256": "8107d225bda31c4d9125421b8625f16a94e20e5b0260d11109b16f24d4174e97",
       "license": "Apache-2.0",
-      "python_ast_unchanged": false,
-      "gym_adaptation": "Timeouts require generated content/action/output-token evidence before model attribution; startup-only/empty timeouts remain evaluation faults.",
-      "upstream_source_sha256": "6d247edf9efa029bd1981436c0ee734bdda0da06423dab7c1912ff20e0c2dd70"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "docker/README.md",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/README.md",
-      "source_sha256": "50569743565d1d16d6742eee6e957c616a163875054b194961e4fc8fe79af965",
-      "vendored_sha256": "50569743565d1d16d6742eee6e957c616a163875054b194961e4fc8fe79af965",
+      "vendored_sha256": "ee24b34f2b8ab6b2e7d44ac402e5d53ad3342eb26b7c79070c3c4ce9d3ed79e8",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "50569743565d1d16d6742eee6e957c616a163875054b194961e4fc8fe79af965"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/README.md",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "50569743565d1d16d6742eee6e957c616a163875054b194961e4fc8fe79af965",
+      "origin": "upstream"
     },
     {
       "source_path": "docker/code-server-deps.Dockerfile",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/code-server-deps.Dockerfile",
-      "source_sha256": "cbfa6104253374cb4b3362c206b4313dd8f031402d12c9c5afee7b02f69ef785",
-      "vendored_sha256": "cbfa6104253374cb4b3362c206b4313dd8f031402d12c9c5afee7b02f69ef785",
+      "vendored_sha256": "728dfafa89f78f8b4545a48ba5b4ce20f04540ba9e59d32257067fad17f457ef",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "cbfa6104253374cb4b3362c206b4313dd8f031402d12c9c5afee7b02f69ef785"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/code-server-deps.Dockerfile",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "cbfa6104253374cb4b3362c206b4313dd8f031402d12c9c5afee7b02f69ef785",
+      "origin": "upstream"
     },
     {
       "source_path": "docker/mattermost.yml.tpl",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/mattermost.yml.tpl",
-      "source_sha256": "f417dd7eccbcaf04d9025625625d61d71e80e39c06e19d3856091fd1f56d9f65",
-      "vendored_sha256": "f417dd7eccbcaf04d9025625625d61d71e80e39c06e19d3856091fd1f56d9f65",
+      "vendored_sha256": "cb91779fe93ced8daf0776be7405d9e923c43a3d8f00360551bf632232edad7e",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "f417dd7eccbcaf04d9025625625d61d71e80e39c06e19d3856091fd1f56d9f65"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/mattermost.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "f417dd7eccbcaf04d9025625625d61d71e80e39c06e19d3856091fd1f56d9f65",
+      "origin": "upstream"
     },
     {
       "source_path": "docker/onlyoffice.yml.tpl",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/onlyoffice.yml.tpl",
-      "source_sha256": "b939e5a4b0d4be57c631287387d81e00dea2e7870f0be414373a5b2ff1200ff3",
-      "vendored_sha256": "b939e5a4b0d4be57c631287387d81e00dea2e7870f0be414373a5b2ff1200ff3",
+      "vendored_sha256": "c33811a5093df5a83b5a2541f47c4d635932b65586fc6dc1130e8423d73611b6",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "b939e5a4b0d4be57c631287387d81e00dea2e7870f0be414373a5b2ff1200ff3"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/onlyoffice.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "a5ab0b626b19f2644f816561dcc603ed9963794c298d5011261b8e9855a2b677",
+      "origin": "upstream"
     },
     {
       "source_path": "docker/owncloud.yml.tpl",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/owncloud.yml.tpl",
-      "source_sha256": "42848fd8ec4fea9c508736177066fae4dfccf83c80af49385ba2f611f1896d65",
-      "vendored_sha256": "42848fd8ec4fea9c508736177066fae4dfccf83c80af49385ba2f611f1896d65",
+      "vendored_sha256": "6012d389ff52eb2397677a196155182fd98b5ac0ddd01b1123a2b0e0801b03f4",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "42848fd8ec4fea9c508736177066fae4dfccf83c80af49385ba2f611f1896d65"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/owncloud.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "42848fd8ec4fea9c508736177066fae4dfccf83c80af49385ba2f611f1896d65",
+      "origin": "upstream"
     },
     {
       "source_path": "docker/pretix.yml.tpl",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/pretix.yml.tpl",
-      "source_sha256": "b453274b517d46fa0d57f915aaf5d07501b955997984e3154fd77d71a78ac588",
-      "vendored_sha256": "b453274b517d46fa0d57f915aaf5d07501b955997984e3154fd77d71a78ac588",
+      "vendored_sha256": "64e1fe7c519f94e2adf433ceb88f83cf731c1229964f7204c686314344fe24ca",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "b453274b517d46fa0d57f915aaf5d07501b955997984e3154fd77d71a78ac588"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/pretix.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "298157cfccaf8d63851159657ce69dd74e247f89fa6b147d47016ccdfb5bc280",
+      "origin": "upstream"
     },
     {
       "source_path": "docker/seeds/elabel-entrypoint.sh",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/seeds/elabel-entrypoint.sh",
-      "source_sha256": "83d453c50cb70b6c5efedbb020ef0905cd91c7f36fc61d5d41a8f728cf9fb215",
-      "vendored_sha256": "a8f14eaae25dd34b52f1d5f8c55640fe9fa857a126e39bdc6242dd2f4760ac77",
+      "vendored_sha256": "32a5343cfedea30628f63e59249d607d30d7cca1f8dc6f994fdd1d4dbf8d6924",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "199aaeac77b26024306f1b913b4a6be88fd11282ccf75e94ce258d66924db114"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "docker/seeds/recipya/config.json",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/docker/seeds/recipya/config.json",
-      "source_sha256": "8f0283da90bfee6afcdbcba367f0857b4945b9e929c8d904915fc6e8fc757eb1",
       "vendored_sha256": "8f0283da90bfee6afcdbcba367f0857b4945b9e929c8d904915fc6e8fc757eb1",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "8f0283da90bfee6afcdbcba367f0857b4945b9e929c8d904915fc6e8fc757eb1"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_003/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_003/verify.py",
-      "source_sha256": "ce821ed34563726c05bd2e4c4cbd7e121fb9dfd2aba3bbfaffb1c709282f82a7",
-      "vendored_sha256": "5b120c812dacca085b793b9f03986e522eb7a4c96c56aa1c8fc9764d41758a03",
+      "vendored_sha256": "0b5e9e5374a2ee3f285fc0a55a1f2a0afd57333b6bd11beb077f9acdfeb28512",
       "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_003/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "79fe401b2e5323d6213252798cd99c53a1268545ad7e9f569e0d675d03ff48ba",
+      "origin": "upstream",
       "python_ast_unchanged": false,
-      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged.",
-      "upstream_source_sha256": "79fe401b2e5323d6213252798cd99c53a1268545ad7e9f569e0d675d03ff48ba"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_007/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_007/verify.py",
-      "source_sha256": "e494972ac28ee712e2c61d8869c44fce4a6bd50d0542ba1365b40b034e9f1618",
-      "vendored_sha256": "2f80723485dcf5e1f0d216046b75842a756d80997dcf61ff8b2a5adb5a69b10e",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "0d3b5dbd8637eb90820b47fc280dc15e8e3dac41cb12125696415af2822e8c2b"
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_011/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_011/verify.py",
-      "source_sha256": "630dc868e63638eac88fe4df81c43f637785210b9111cbc053f1848ab2ab56c3",
-      "vendored_sha256": "c5793175f376dd08b6cdfbcab375ed1ab7fdd07ab737a8ad248ee14346974114",
+      "vendored_sha256": "e3e1fe1fc7cbe4d07e1211591d5d1a7ee63123f6e4ad28bcd32d27169a9f7b35",
       "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_011/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "fc961efc440b9b2e03789a37e109ef23e27987000e6b4b90e2e00f85837ffccc",
+      "origin": "upstream",
       "python_ast_unchanged": false,
-      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged.",
-      "upstream_source_sha256": "fc961efc440b9b2e03789a37e109ef23e27987000e6b4b90e2e00f85837ffccc"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_012/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_012/verify.py",
-      "source_sha256": "e28ed9b4f22fe78f2e5570f04ddea704e21283dfe50ef4cd1eb8d86650a04385",
-      "vendored_sha256": "0fc72c3cdf5d0a75def230ca4bb47bc944cc7ceb3d46f4c4bb7b31581b6345c6",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "fd77a07d56d716a1598d638cac8cb6b87cf75d3a52f6adf227ef4daad9024c26"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_013/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_013/verify.py",
-      "source_sha256": "d144124a63d83f36c2b1fab9d82ad8d0027f128810cd1f041b611c8358fb8b7b",
-      "vendored_sha256": "e4a6fc5bc71121ea240b9b2d0f30de4413200e576e8f069726bd2e66409b66ea",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "2c217b5f088179c5c0f976c7e9d61ced8617724d63d44c720dbb56093c6f98e8"
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_016/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_016/verify.py",
-      "source_sha256": "0f306986078af8deca38cb383397b7aab5bac4c0fbe2cbc0b0145a35a1ae0fd5",
-      "vendored_sha256": "c581f652c00bffad0831634731a257d28e30af44e647f4a25edbd107abad2865",
+      "vendored_sha256": "cd3f859771199f72cf255ac44bfa1843bdaf943db6d142bda10b00eef8e5966f",
       "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_016/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "bb83efbb9a088e91a043053aa0dbde76c2b0ba81988f34f43c39418fcaf2da0a",
+      "origin": "upstream",
       "python_ast_unchanged": false,
-      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged.",
-      "upstream_source_sha256": "bb83efbb9a088e91a043053aa0dbde76c2b0ba81988f34f43c39418fcaf2da0a"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_020/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_020/verify.py",
-      "source_sha256": "0aa38f92f9e9598931db41a1c993127bf1d6c62e05529afb6d22ba2c4ed87a3e",
-      "vendored_sha256": "65aaebc29afb175e4cd2ede22a3900fa53424a642806d0c5d006201f4b22da31",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "62c2eb61d2066b71b66fc69dde1b4bb8701cea2629c730fc6d52e593e613ea97"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_021/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_021/verify.py",
-      "source_sha256": "3044323448098e7fdb70925ddc05b2cad911dddd881c7587d19d60d1fafb760b",
-      "vendored_sha256": "9db88eb7f8cc39bb7ad81966de495e1fb48d3fcc342ebc4f50897df80bb6f222",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "bd5c32ce28212e9369e96b7f0eccae981f920e05ff193f3f10d68cc9a4547568"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_022/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_022/verify.py",
-      "source_sha256": "698e9ed5a1e89f4d06ca6427059a760d3f4ee61b2d7c6766f96d9ca407dc5427",
-      "vendored_sha256": "e1a470c2a216f8d146212118a53d72ec8db16d3ec19671860eaa91115c2ef7ad",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "9a591166e68e09f91dbcade0fd665d11ee8813b59a062fe3a1436e5c2b6d4f92"
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
     },
     {
       "source_path": "tasks/multi-m/Agriculture/agriculture_031/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_031/verify.py",
-      "source_sha256": "5a294be1cbed2e84b03f4f4392b85394f9172ae1e833154abbb3135f77efd3f8",
-      "vendored_sha256": "9fe58d4f10950550a758a95553ecd8fd01c8922b53acd03320ffeb04efc70dec",
+      "vendored_sha256": "dbd2098a17ae0dc993bf0ffb7a5b5cde45a6f7b06cc995af9cadb6578d5f7366",
       "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_031/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "4be322707ce7df1138460bc324b4695d14e64626a1f6d460b8ee902c04233de6",
+      "origin": "upstream",
       "python_ast_unchanged": false,
-      "gym_adaptation": "Database connection registers NOCASE_UTF8 with the shipped Drupal Unicode::strcasecmp callback; PHP errors go to stderr. All task checks, queries, criteria, weights and judge prompts unchanged.",
-      "upstream_source_sha256": "4be322707ce7df1138460bc324b4695d14e64626a1f6d460b8ee902c04233de6"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_038/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_038/verify.py",
-      "source_sha256": "983fecca445035b5c890133709ed0cfd0d18488851a9e8ccc4b34f7bdb2684b4",
-      "vendored_sha256": "f67f735365819f22d24b9e4939d165c030eacecc274fdd1b03d8a014f20e0e19",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "a16bbd3a7897b80bc058e7c5537259565ba34889eb7726200f89559ebaa60075"
-    },
-    {
-      "source_path": "tasks/multi-m/Agriculture/agriculture_042/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Agriculture/agriculture_042/verify.py",
-      "source_sha256": "b9f7181aa4dd427dfd2c5bc750b21411a1c1e9d151c95c43fce02c733ba853df",
-      "vendored_sha256": "b4269b65ac5bbde38a6c07ea3ce0b9eaf08430c8398d14f09db403e9ee79c681",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "67e4663e889871f93422cfd54278f342a7cbdca329aa1b010b0d7898ce31dd92"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_006/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_006/verify.py",
-      "source_sha256": "de70783758eab2d3544ae7f4e164223f9327ac2e9d01b4684e7fe75b7cba9a21",
-      "vendored_sha256": "e5f4d35ae4c8f7c6283555c2714b714642fdc50eecb58ccf35211576e24ab692",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "567a077dd6f6725a64b8fda2237d0955f4083c1c4da68278139fc93c9ca84887"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_011/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_011/verify.py",
-      "source_sha256": "7ea599171ab57dcdc2f8d1023b3711fb8e120a977fc934d96d74a90d066e8278",
-      "vendored_sha256": "d829f096f0bd39453dba80b0d26e61fdfe578f8c7459c9d17916f832961d4693",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "57d06953bdaa15c34610b35cc60938160ca2e7ab50023dad7d105f34ecd06c44"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_012/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_012/verify.py",
-      "source_sha256": "5c93092e9d74416b1a36d0879b13f0b1375c937d16f12dac5c06e4db278dd9dc",
-      "vendored_sha256": "ec0a7dba70b4a56c43661f7464c1cfeb65bfc90f9f9680acf77598ed78143f44",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "4fe770e25cc0c95be39f2cecbeb89aa75175ad5c7fabb7753b40344306e069b9"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_016/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_016/verify.py",
-      "source_sha256": "599d0e2e923b3fdcc4d3fb27823385391e3f75f34d44c832e9788c3e07dd4e12",
-      "vendored_sha256": "d86569ca80a00548bf8d7c1b782aa3e4bae4b512c72a926f53cac94c0f96e411",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c3c3204ee967b0a30ff4370891a61476c98b2d0c8cd137049da7871d70087000"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_020/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_020/verify.py",
-      "source_sha256": "1621a992423beedef45543e4c9fd3e3fbedb9bf6677c8eb3578cc69a057d3533",
-      "vendored_sha256": "f9eb0a22de64968fd2e51e9607855fa51a40c1a00b13fddc96e3d1a25f978110",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "b0fbfa0b0efd821cdbd7cb5097d63a542120fa4d226a65ac5d0cdc18004488ae"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_024/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_024/verify.py",
-      "source_sha256": "b74256ab8b90e1619b374e41ab4d2d742a09bf934f0d6d34ba66709455ff37c7",
-      "vendored_sha256": "6c5f17436b59135fbea462cef5b5409b90eba03263661dadc4f70f3f89915a93",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "d898c83faad4b86805266c5e5de902dc36835a5f14bc5d0dc336608fad5b9c37"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_027/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_027/verify.py",
-      "source_sha256": "e6c6babe781f075feb48303629c1b1c972428b868abec66f2ef899270e8e25a7",
-      "vendored_sha256": "057e8d7aa31ff468503b86ad475e3914b810a06563c5aac41a5016e8d9295463",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "ce602a0db4d73a78bc1259ea77391e643b8ab38b585a6db22225b73055304ce1"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_029/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_029/verify.py",
-      "source_sha256": "c62b3ae68dca8e08ce626496f5fac9fafa650c6b69023b17c5f9df0eb1eed107",
-      "vendored_sha256": "c3faab60287c001b9e39590f4896d5ef55fd9e647d0901cdff8c8c6c5c9a40f9",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "9d50fae61996d81e72c09e8589346882572868811dd0a1d70a98e9c82f940bf2"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_033/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_033/verify.py",
-      "source_sha256": "2ac84d394f0551d690f4cd9ebcc4f01e67c28c40c11af84f04a9ffab34d6bd23",
-      "vendored_sha256": "8dccb7add477fa5c300af25d563152771c0cb7615b001f022cb5adddb0299667",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "89f8b3e29ed6cfd50a9c8ee34af31f2fe26c2a9a55dd5ce06ee0106302aa1c61"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_035/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_035/verify.py",
-      "source_sha256": "6909b7ec7cee49fec4100ac3159c66f75f65b606f83452bfbb59317afe447f5b",
-      "vendored_sha256": "f18d8102bb1b3c9b30da820cba0ef7e10f213d519ddbd6470ee9586c6f29d62e",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "4205b46cb3f2f10e4f8dee3301ff730a28c292b90bf47e5b2935898f12b3a23c"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_060/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_060/verify.py",
-      "source_sha256": "2fd863214302123aef357eaffebdac896d4d8e3c574e9a0c1e51e25a6738c979",
-      "vendored_sha256": "ec0f868b529433338872fdebc49378af936869e61cdbf6ef46b927a617d91fd2",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "4a2caf80ffa78fe8fb81c77875e642bf1e17a2f74cb6e67b2b6e4f5e37be59de"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_063/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_063/verify.py",
-      "source_sha256": "45c4a923a5576a7c206c8af91384f18abd3666f7b74c9d18dd05f71360f2b055",
-      "vendored_sha256": "21b09e900470e96a93be264a00f3f183f2953aa33ae352f6fbe54f0e5f6b97d5",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "39859f95de0c5b5c464a00e0eb54862e0e9c30d39d75d6cece3565ed2043485d"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_065/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_065/verify.py",
-      "source_sha256": "52e99250efeb610603acf5f8eeee9a83f373355dd71de973573a3919c1c269f8",
-      "vendored_sha256": "854af75926022a998baf199a16f32544eaaa55b447dd395e7fd96dc4357b4999",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "cf8f76568c353543ebcdb848d4f6a73abfe4f609cdbe1494f5602997deed697f"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_066/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_066/verify.py",
-      "source_sha256": "710cc02e890363668dc2e6448525b0497ec9ff35b5bda9bbb188d60f54da25ee",
-      "vendored_sha256": "78e27ab13ef40ef199327eee7c970c68ef5bd0b542d4afb0cecddbfd9d4fe311",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c8ef75b1e953a382887b648e6ebc4229606bd45a06fa64b2b9fbb0f11b246e1f"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_067/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_067/verify.py",
-      "source_sha256": "b7facf91b137aceb765b1c6f0391e3dd2ae2fd416667165c3afaa1ed72c082f5",
-      "vendored_sha256": "cbe2063e82e048dafe12ef1ca97d032afa3da30e3ca9bf2a6acbabcc2342abd2",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "652871aed1b299bab8c166832f5c0e3e77dd66fc70ccbca707407af3dec5ea2c"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_068/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_068/verify.py",
-      "source_sha256": "31ea99e6c5b2c33c96cbd77d6b49addff281af44d9fc31409d0b276cb392206d",
-      "vendored_sha256": "44835c7061496587fae3cf368baab0671100c18eb1797c878bfa4ea839279e9e",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "61fc202fbf3d2500337c26b16e90e37d4c3970ea11d9f02f6bad39a1969d7400"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_069/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_069/verify.py",
-      "source_sha256": "3b32ccc7ca1c94232c509ebebececeadfdaa6f7a4b08e66680201a4243b1fdbe",
-      "vendored_sha256": "caccf24144bfe2e2d95e05e87a9171227e518f7b6dfa70cb76ef18b01ea1836f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "0c3746d8a3a3aee01881ad0010dade93836e2aca44bbfe838332f6cebe90d38e"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_070/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_070/verify.py",
-      "source_sha256": "4fd67096bc365c136309ee4c89583b8469d1dd20ea133c859c1bd4c154118c89",
-      "vendored_sha256": "5372ff8f36868f0ec54601c34c5d1ef104619a7e16c9f4df52e5b7dca412fb0f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "26ea50771504a307d9753c889ab8c27e84f4cac64429f4863f829c6f9a4a753f"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_072/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_072/verify.py",
-      "source_sha256": "9715e42745e313fa064fbf4c426025b3fe3635f7527a98e095d5351772a57863",
-      "vendored_sha256": "23d209dc540524a90f5db2cb0f5070c25943b872c21b1c3db109b4977fd6b06a",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "0383093ba28374a9baef1926239c759587408206306dd1b1c91fc80df9124558"
-    },
-    {
-      "source_path": "tasks/multi-m/Media/media_073/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/multi-m/Media/media_073/verify.py",
-      "source_sha256": "02a6db315ea1711bc264d3f8a76f80ce5044fc6bbd7403433d294da24ff517aa",
-      "vendored_sha256": "2f2ad139faa90da952e3b64fc6a5c54c8102c3a2e173289bab8a53ba3c16431e",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "1c72335b859184a77fcb3e405c7de6443ba9bbe127a447f7a7eb209b9d5acb53"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_023/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_023/verify.py",
-      "source_sha256": "3490322e7e381a8e92b325cfbfdbff7548fdd7688841f76622fad5fd66a8a6ef",
-      "vendored_sha256": "141ae8f9c2f28a21042f34dd955ae9c9bf3db744fd7bd8a443490362f17fa87e",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e07e705337d9d258a8429cf71f540074740c451ff4ad2ff6f9e68dbc34e6303d"
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
     },
     {
       "source_path": "tasks/uni-m/Business/business_031/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_031/verify.py",
-      "source_sha256": "5d4233bafde464c4acb3a02635b5840eeaa0b44acc803bf21098eb61258cce90",
-      "vendored_sha256": "d41ee9ee8b5d68af0512c7c139efa26fde0e7af0b1c6fa428a33626bf993a629",
+      "vendored_sha256": "aea13377bdec9490a5478087a9617e5dc8fdcfc996ac18e0f674515e0af7bc3a",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c74683e53a0362d285df3bbc4dce5cce033a40bc3c0a3a2bfd6a331f6c2a5fbc"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_031/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "492de1bd54adbc654daee1c00159884db99bc41fa7a28c420ae5a70422752df2",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use deployed contact DISPLAY_NAME and journal PUBLISHED_AT schema for offboarding checks."
     },
     {
       "source_path": "tasks/uni-m/Business/business_032/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_032/verify.py",
-      "source_sha256": "72ebfab22c3b09c6b42d7f6bd7eb37fa0fdd13fb649f693592a2f7a629e7e3fc",
-      "vendored_sha256": "b0293a1e8d867560d661a521d0c8133cb79e884f8368756829de9709d6965e76",
+      "vendored_sha256": "51b8a32e2b740c8ed2f37eb3692c044c7f2594f676ee3f04bfb5d73e06bd249b",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "a620f12f7e1ee6781ccf023acc5ed5ffa48a15adb6878aa7f7b8545b7157f2e0"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_032/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "8ee16868fbbcb337ac1d4a3e938dc012d24b460b7cb99422aa95c99192d05dda",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Normalize NULL debit/credit database values before numeric comparisons."
     },
     {
       "source_path": "tasks/uni-m/Business/business_051/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_051/verify.py",
-      "source_sha256": "336a85d8911ebd30503a72b18961641c1d0d89317b4b9b01077011d3be7d7955",
-      "vendored_sha256": "baef9ff00304e33ddf88d752ebadf4eb0bdc14dfe13071dc20c149d55be19421",
+      "vendored_sha256": "9d6bdd6f112f167de6ab913fe19eda4e6a4e86bca9621bec7f705a69273a6d87",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "8325599d71f8689b6513a33de397a97c87dc53268ee0897dba08437642c5c7ee"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_051/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "f8684959bddc2a911abd8011a12ae045c07e21c4d904be5394872562866529f0",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use deployed journal schema; require postings in one published journal; report database faults as verifier errors."
     },
     {
       "source_path": "tasks/uni-m/Business/business_052/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_052/verify.py",
-      "source_sha256": "9c51d563b67a622ce6161f8dd4c941b53258ed5c6dca8eb2dd97af63d797711b",
-      "vendored_sha256": "2466c155264c28ba33f5971c8e758f4ecd690422f5b367d194d34ce51f23031a",
+      "vendored_sha256": "208798331226e351584f90ab1ca6c7fe771fe9a8d60863e5bb1b5f7e381b2b51",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "9ef51323c4d775553fb261a2290a3d8a09277091576988be2268adc4c06685df"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_062/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_062/verify.py",
-      "source_sha256": "9048bdb380356a399d360fe4f4cf35d7575e29f6dbd44398450db8a6ac8d869a",
-      "vendored_sha256": "2d10928fa2e1c97ab8a0bff838a163c9f7a1d4dc7f99aee6ccd4df3a00482916",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "d2f1828c1a6f1f0a2d6b06d93b54f11812dd0ec3478578db6394f1e281eb3030"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_065/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_065/verify.py",
-      "source_sha256": "c55a3d7c8cfcfacd36f8a15675fad8a25ef049af49b2c2c6d59642e5cfa81add",
-      "vendored_sha256": "840590978874d626e0850ba18d543bbc049af5cac509b12073e4fe0ea889ceca",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "74203e2a938579ec899afe940239cb8b2ce2ccfd10d1f3b540708b2a006a16e7"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_084/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_084/verify.py",
-      "source_sha256": "125162b721e867a7b164bdb22827b84ccb068a5d87d0c1ee5efcca214c00474e",
-      "vendored_sha256": "f29e9b1be587312ae05333a7479bca1a0646e6f80ddb7c8aa18f54f4e7c66818",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "5bb8cd04c44bfe611a3bf019677aa5f0107f68d6cb22736cb8adefb15a76c4aa"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_110/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_110/verify.py",
-      "source_sha256": "bcaa959b2163340ecd1094ce8aee5f1e0bf26c7aa77abd6f995e42f5cc89956d",
-      "vendored_sha256": "bd0ba5dd358465510973148e6641a0c333fd7c6740fa4a2730f621de38a237b0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "b3070caff1cf313fc88f55e8ca8a4489f4de051d4d0b0b947090af5da701d1c7"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_121/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_121/verify.py",
-      "source_sha256": "f2e46d2b74c248a20b7b740288eb58033e26364ab8b437c881e490d2aae08414",
-      "vendored_sha256": "52701ea4531c42a7db427224fd057a834fa918c7bbff6bfc1732f474c2cbd9bc",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "3af7bb421bafa41808d974b5b180eb65cda986047b87880bbbd72b7b236253df"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_135/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_135/verify.py",
-      "source_sha256": "64d169f09be6cd194e31c50166929ed1d0b73251462af8696691390566f0a74e",
-      "vendored_sha256": "b463266760ef1ba0056370fec2347b8861693c1ce60f06745a273858eb186d21",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "64e6a017fd99bbf279f859b6751d384bbd21cc369a043e88347a73427ff6cf10"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_052/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "05f5d7c20d48505b7929232eab9081f0ce40e9d179218411a03552c484deabd3",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Require exactly 24 percent voucher discount (instead of upstream approximate 10.04 or 24); use SALES_ESTIMATES and search matching estimates."
     },
     {
       "source_path": "tasks/uni-m/Business/business_143/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_143/verify.py",
-      "source_sha256": "bcb904d04edaebace220b93f2ec0121b60c8f3d0b1d2569345fc1188af17f6cb",
-      "vendored_sha256": "353448bb5869f91e02cc3e6ec582bcb461b3ef8c63be86c340ef950f392fbe96",
+      "vendored_sha256": "fb271e31636c87751179df9a2b1b5cd51529126c9f0e952c6e724ccb14f66e0f",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e51fc3aadbd428d0fe56f5e42717ef9fbc7aaf4b5b05854f6690137294c3a269"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_144/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_144/verify.py",
-      "source_sha256": "f8af3c6a941634435f49a940eb90001e08a9daafe52b00129a7bcdc2a2f34c93",
-      "vendored_sha256": "3dd611504140ad306e30a4177dc3ad263ba62e3fe01d9a5e0a839d553de78abc",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "ed8d7b6d53af76b97524e50223b7dc917c85decf06006f43e50f441a72f5d171"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_155/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_155/verify.py",
-      "source_sha256": "23403bfa1c07462f2167daa9248b6f18f8a026f82d6afea891504a1dd2aa7c4d",
-      "vendored_sha256": "8b965f317596c7b009b70d48e1967876339d3ad97a517ca8c4194f9a2aad9b14",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7d114af258d528e37565a08baa57f4b817c3de57aba3c488e316cf57916e3b96"
-    },
-    {
-      "source_path": "tasks/uni-m/Business/business_302/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Business/business_302/verify.py",
-      "source_sha256": "987996b5c1978d5d5973806eabc5a17fe93e28ebf39f63707260713febe2b2e9",
-      "vendored_sha256": "1792633dd6ef1141c0a3aa16bfd293f6e53b3c39a01954b662a0f9c6af1d020f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "f4369093fc90f714aa3ef9a0178529df93c3ae84aef90c5aeae18224e14c19be"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_001/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_001/verify.py",
-      "source_sha256": "ab56ce9a01e438987f7a2fc1ce747fc04e6bf5c020b835727c40c847af2db8e9",
-      "vendored_sha256": "63496da7714ef79d46f74d632d390f993ee622a0dbf87e04209d939acaa9ce49",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e6bbca953e57a53d8b207a6b7ce758ef0252153ea89bdccaa232b75bec680f3d"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_002/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_002/verify.py",
-      "source_sha256": "3f49a1ee1a121fe21e6e2c56091fbe24cdd99cf5a1249ea29397e5d2eeb323c0",
-      "vendored_sha256": "117c284e2058430c09d60dd7f13334feeb2c53066cf949dfc5c1c1c5cc668782",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "72374bc8388c48e1de99aa54b73fe0f02de69e3d9d0e6e98217816c8f242c5cb"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_007/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_007/verify.py",
-      "source_sha256": "e79503862112db86c5d424e871846de6acb91e35705d3fc1e2c7d9c0d8859d28",
-      "vendored_sha256": "2bc5d78b739b70acb49962d88455704f0395bc5061aecad665867e1bf20af1de",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c49ca680ec0df966b61914b011b93e1216a625feb4e08d1e72d70eda7c880225"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_013/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_013/verify.py",
-      "source_sha256": "d5df6c89d68ef6ba20f916ee1cb919bf67d872a2572b63f7211b24a323beac1f",
-      "vendored_sha256": "e53be30530a0003163cbd5e9c109552680835e7dcc33073c664ffa66f38bd44a",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "126cdb9c660722eff43783e630c08154f3cf549a30be214fbe934c01120b7304"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_015/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_015/verify.py",
-      "source_sha256": "392077f2e9a23caf63a9c36a05a6cd0a52ece175e76d410d311af130bea845e3",
-      "vendored_sha256": "2820b86be75dc2e44fbd1c9355b7eb390cdae4f02831803138a86433be09fe74",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "5895adcc163fc9dd2ba5f3f4fbe50600ae4b00b190b25a45787e703c5b85d47d"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_017/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_017/verify.py",
-      "source_sha256": "35d8fa3ab0f3f35cf31467595fb3fe8a89df96af95ea03dcd77ffd9d7956d0af",
-      "vendored_sha256": "589963cbfda1a311e6bff5b4acfaa8359077869d71c48ec7cb90f619446072be",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c93c8ca2aa0d05b14c06ececb5b42fffa8a6c192368c585d82faf20fa7e3c7af"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_019/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_019/verify.py",
-      "source_sha256": "2d98dfa7f019312ddb2b507d93037c9a15a5c65f3b8db61af204c9a30f8579f7",
-      "vendored_sha256": "0514392b803f0709c4062a1ab473e689bd2963cac01792ece779974ea3ae8ef7",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "048a1659e20999df8ae161bf448938b1df0aa5b231af833cd70901ba0f75f2a6"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_021/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_021/verify.py",
-      "source_sha256": "d87cffd16aff4048c6c5be57d6ffb6aeac9c736a6224c3a758681643f6ad280b",
-      "vendored_sha256": "d01e853dd3d021821339f7a8c356f5b328797b7a2361a1653ec99eef838e1bda",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "3fd5d96204d0ce4984c91395fbc624e636c7420b5bc91af31d5032569adf0aec"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_023/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_023/verify.py",
-      "source_sha256": "68044c61bc6d6066a61b239e06b1f43bb7bda84b1ab179e76171f1a5d8811618",
-      "vendored_sha256": "4257b1222a50093985af936fb8ffadb62ef8d246982252cc1cbcbbabe6998902",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e73bbc77c11faed6b74345f86f428f02a0c9f304db58f88b49deacba74a202e0"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_025/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_025/verify.py",
-      "source_sha256": "a9613648972bbb3e907bc019c7f5683dc113539f646d55fd9ce0f1978c4bdc1f",
-      "vendored_sha256": "146324ce6dca6a6c14b1b0bf161b6350b98ea873dc62ad3a3f3df1a50f111ee1",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "9d95786c3284011d4bf92cc4877a4fb4319cca73aa1846fcef8207a5e010491c"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_026/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_026/verify.py",
-      "source_sha256": "adfb7d2163250a03fb9e7fc381cff4f6d2b34b510d38f76fb071a2db4ce85c4d",
-      "vendored_sha256": "2b939f844277ddd65a454e8a65c4908f8e96edbc51d6665eba748c16db745c44",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "f43d54a3861f3dac236d2dd66ef9fc2da2a0c535f0379e4840fb7d78d074b711"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_030/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_030/verify.py",
-      "source_sha256": "4277ae3610cadd56134034127fbea0bf8dbe29e22393df34a191edd2d061b7c2",
-      "vendored_sha256": "e8916ce5db12b30f39ba07bf7af109b95c8e9a979b8c9cd8162a8bc811f2a959",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "ecd377fb08a381c155c61587fcb5d8d3cae7d18436c8f87fb349842e6007b233"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_034/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_034/verify.py",
-      "source_sha256": "84a9e6073f7463bf942c4d74fb22e84ff8480a0f769e04b4555767052fe5b883",
-      "vendored_sha256": "a3a171dcc78f1f421a0beb474a2bbe86ecfde40bb16fdec3202ae71b5c5a2f9f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "b3ab51606a1d44805ddd238c849217ff0fe45b550716d7a74ba0a7f7f96c5bc5"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_038/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_038/verify.py",
-      "source_sha256": "45e3e1748423776238857f8aa29cb4c79bf04f4295fe6ad527cb0c86d6078ead",
-      "vendored_sha256": "b8fb15b2487cb572dc6ef4c9a61eb16a76c6a72c38c734b03ad864e31fb7bb41",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c1887bd4a8a4e3f70c82a8aa563f9b9ad043b27bf03a84ef733f995efbd6645b"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_045/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_045/verify.py",
-      "source_sha256": "f352e3a8e69757d0f689de99d3dc53fe64c04d3ec74bb24f02f2903fc2105b32",
-      "vendored_sha256": "1c7c1acc230d049b6b71ac31a21931cb0db49694bbbebfa6c7999932563837fc",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "f5adbabd2cb576ffd98163286da7f449f65c314104c1c0689be73774416c90cd"
-    },
-    {
-      "source_path": "tasks/uni-m/Healthcare/healthcare_048/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Healthcare/healthcare_048/verify.py",
-      "source_sha256": "a4ef2130f4a3e414358a945b4bef244ee53180a3c60076ec16a891d75f9cb27b",
-      "vendored_sha256": "53e50fada39348dbef16aa93132910019bc9b35924c11b507a002580542cadcc",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7445edc6951700d619d33cd85eb7971df1ad1d759410b58fb926fd1a28982bdf"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_002/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_002/verify.py",
-      "source_sha256": "46c92cc980a14c0b3d1e2a988b1875a357d230611ae363d1dbb49bbf2e6dd2b7",
-      "vendored_sha256": "988f400bc5584373efe35136bb6579cb03e518d695c6f7c2bbcb868bc1b22157",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "bb1c9452839c07ec0e4b4279bbd40c8ad251e07d8eec05e4513b2a6064b90bd0"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_004/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_004/verify.py",
-      "source_sha256": "b14ce7bde79ccb7170b694448b5561fca59eaa25a6fa6c814d16862917bb39de",
-      "vendored_sha256": "2c4897399ff9aee64b6fdbfc192ec66575bca5cfcfcc7f22d797c4d84bdf77e3",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "baf8e7db620b5be385d11e50f2a528a0c1f00695daf0b35e6bc0157eec296e0e"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_005/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_005/verify.py",
-      "source_sha256": "32b42eced8ab64aa736c07929fe91a59c2df28ed80d226a57ecfcb0c6d09e41d",
-      "vendored_sha256": "557f2e4391edc0a4e4e9392c69b1564a6431305636929f6e49c9b35338e35eb3",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "41e22472bde1adc0b77d7515eeb93795c66f12fd032f2de7d9502d368a1520c7"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_006/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_006/verify.py",
-      "source_sha256": "f2d8d5382518d695cfea2ca19e5b4a741e98aa2c8ac918b6f85cea3f4a6b92f3",
-      "vendored_sha256": "dbe9cdd0986af809ac663ab64ab4f6649ed8029e98340015e5e79407bfce2f1b",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7cbb05a4aac284c963fb22785fc4bcfddbfd2ac11951b739617c15db0562ec9a"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_143/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "ff65a2d7816f2d4ba196e4d019af02e62d95ddbf43ab8f6ca857d4efdae740a1",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use MANUAL_JOURNALS_ENTRIES and PUBLISHED_AT schema instead of upstream singular table and STATUS."
     },
     {
       "source_path": "tasks/uni-m/Software/software_008/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_008/verify.py",
-      "source_sha256": "9ff01c9f096874ca280629a1783b5f0ddf35b237fe00cbe4415c00243c9a0416",
-      "vendored_sha256": "a094bfb46476a413a989e5c3191681375895a74bd9984a58d236d93a60263ba4",
+      "vendored_sha256": "ff564e6d8ccd0116c7d1c0f8b271635a0a8c6d2183e4ed2ef513379d4259b581",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "4dcf6cc3c583700bb00d3567a82bef0200aece01906e0e190d9dfd2d87e39c52"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_009/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_009/verify.py",
-      "source_sha256": "5f05c5cb228bd65b64a6d09eae05755210c16eafeaf9f0f208e165c8f81f4754",
-      "vendored_sha256": "411777c8e2ea1991e5d3b7c27f635f7379e6b616937672fa8ed86731e250d6a0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "eac1812df616b28d53c55e3520bd012e021e69443da1e0b1c8db2e69da9af5f3"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_012/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_012/verify.py",
-      "source_sha256": "efa1b3f012e451b57800dbc199f3cd8c495a99221f85103e27429b87b536f1ec",
-      "vendored_sha256": "80005603bbb2b97ea6e87c52e409708275a05c1c752be1b5df1880647b042912",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "4a8b5e1f87e9dee20cbf66ae58102051d5a50ded8a44430e95574e50f7909701"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_014/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_014/verify.py",
-      "source_sha256": "a58aa2148c07498ac373cce86361e4586c2e12054cf3b7a806a933a33346919b",
-      "vendored_sha256": "cdf1ef6cb5dc98cd2337ad69ad11729778760b08a2c0fa42cedeb3688bd26f17",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "fce68a7ebd7c0cab711c82e79e40e2031748d5e1c256a66e8b5a7834877f6b2e"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_018/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_018/verify.py",
-      "source_sha256": "bed9dd2168b9afcb218ca19787398053cf77ccbb83a6646ccb68633cb9b95213",
-      "vendored_sha256": "29bb353e80bd4d3a918437226a6b487515784d510dbd7075cea586fa2a2e38d0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e6dd71d89fe856748338431437d176268d5f5e527a03a59b5c6502ac4c14a234"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_021/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_021/verify.py",
-      "source_sha256": "eee653838ecdcccca8aa55c31ffcf16b5d0bd7fae0ff17e57b871aa72246bf41",
-      "vendored_sha256": "d70935460671432731348e051a297875932c8d50e0ba405ba628e628c0cae9cc",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "9df7d2fc5f43d1b7a7bc36176667d775b4224b13db843e48cb25a9c972e68555"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_023/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_023/verify.py",
-      "source_sha256": "dcdbdea7454f10e9658408a95b71fb7d8e755670c3e69c1cd62a2d3e685bd7c4",
-      "vendored_sha256": "524366a14dae210bb484824d91f62f6f9820691d1a070ca237899be24326d4ac",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7e0640575fdb647beddf0abf2a639046305ae46be753d03a539b7460a89ddd38"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_024/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_024/verify.py",
-      "source_sha256": "e72f9c717abdb919f4d255baa9fbe9c57e99519a1f7a189048831c416c7ea611",
-      "vendored_sha256": "5240b407872761c5686603d2df2502932203fd9388a50c0db534fa0011bcb8c8",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "41594e567ff9a393baade79ab104afea17c7aa37ccdf363491acf3f6a875dcdb"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_008/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "db2dc6a1613cad6d27b6cec4e2a8414cd3f27cfaa309bc3f17e5e7e9747c482b",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Correct literal f-string construction in the title-check diagnostic (no check-weight change)."
     },
     {
       "source_path": "tasks/uni-m/Software/software_025/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_025/verify.py",
-      "source_sha256": "243699da859d2e20fcb0ee2ac9a9382b221f678bc2df637d5318a0a19ac60018",
-      "vendored_sha256": "e33b3a9e8360f9f80c1722cb1722c78a663c260e6ac6435d5c603461d2746f15",
+      "vendored_sha256": "443b3692a8d7a9920000dd6b5ea7b77e65e82f09349bb528a266500d716f4414",
       "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "bd904662db0a238bbb882755acb584f8862137da5715c6587853ce754abc1644"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_026/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_026/verify.py",
-      "source_sha256": "5a5e77fbdad84c5f053c5988b5e409619510e8b77d340e228baf277d0a4ddc41",
-      "vendored_sha256": "6579d83db4f4a9d0fbd936d84bfd0779ac9a5c25fa46ed25b1c580e7a5f97d68",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "9d6c4d55a3165140d0d704d9da0974f44d996b4d264292b5e81c17dc77dc2179"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_027/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_027/verify.py",
-      "source_sha256": "7b90f57a996d35897914a00ada18a0edc7f2a58f0b84cfdc4a2bbd5177fe05e5",
-      "vendored_sha256": "0ef72100d90c6e4fbef33ed591f6c2dd3b47af7d81496a2b13d35bd551fce664",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "6a1dcb7703266cc17763d865db0ca8611978ce1802b8cb24c98a62073316c305"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_029/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_029/verify.py",
-      "source_sha256": "6871d73e707fa6ee05f24c26ef39a9d1b3e41fbc86844eb39507d9b1b8fcfb0b",
-      "vendored_sha256": "2ba71c61b40175af9eb4ab4dfcac800f0bc4062890d57f16a46bd27655a7d737",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7bf3c5a98b97fe860bcb030b4c84a661d631e7d6d78725d59f18b2ce7dd3cf01"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_030/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_030/verify.py",
-      "source_sha256": "d4916d0accfb58060a8a87bce344aea7d9a9483a33a8687d0b6835370542b383",
-      "vendored_sha256": "c6e0404f01600a18d0030c4b097ff7c96c676b410bcfdc5045d90c2bd0fa00e4",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "042edeb1475aac6fe8d73ba70b8d9fe661673fdf88c587df1e5c45357945d41e"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_031/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_031/verify.py",
-      "source_sha256": "d062e314f7b2ee200e887e097b12c6296c3f2bc352f5046aca189538a952c784",
-      "vendored_sha256": "a8e965746fc263ece6616f2dea0ee7e3ef7f6cd6d6c37b258a1983599284264c",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "fc486af8347010f5ada466ed8d8db4f543c7484dd469aaded90157a62f8bf244"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_032/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_032/verify.py",
-      "source_sha256": "429e6fe6aa284c51042a42cb58190068cf859088680ecba940cfcdd745cff7ab",
-      "vendored_sha256": "dcb3462a8d40427625abb2c09a2bbaec3876a127fecb7854801a1465ca3e74e2",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "84eb8fc3e9f53bcc95419967f24161094c4a48883af4e4fa6f028142b6c5f1b5"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_033/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_033/verify.py",
-      "source_sha256": "4d2c685c5e8931058635abefc0088742c228e5dffc709bb7a9b9464ac7968c97",
-      "vendored_sha256": "a6b43a0fb42284d0c3a805f8bc97bd8385a50d01711775b6ef0d05e713d9c418",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "b68a93103e0f8cd8c223c5e70378e01699098f21535b610a1ebc1ff31a29cb5f"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_034/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_034/verify.py",
-      "source_sha256": "099858ea279edcfb661fa512e3dbca7f5d1d6218bbc46eadd60915237c49621a",
-      "vendored_sha256": "3afba8b2d900bfed902b9d3aeb19ddc19e38294de32fc66aa3a85dd7630e468a",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "5544c65723e520feb711bfcf12c882350163fdf88b81f3de8ff3e52bfa85f051"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_035/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_035/verify.py",
-      "source_sha256": "19879511599f8d8257ff598cc8d58a332389655a056df99a492a3c02cb63f784",
-      "vendored_sha256": "2a73dab594a2b6b3808a82e3bf0f686754d41f5cd85d5cb327f9361ada199c7c",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "4baef82eb0faa1a74c36f2e429d53b339b8ca96bca40b6c29b9cafd9527b77bb"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_038/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_038/verify.py",
-      "source_sha256": "2246d9ee42639db5d3e0ecefb94aaca6a7d3a56a709bdeba8f27148612a29be3",
-      "vendored_sha256": "966d23647301e0a392988c4fba5668c1923deac603e997cfc252f8b6ad265206",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "569079bcdd610248fa54f3af0d47bda3f26b94bc35a4c5591430451e3a23aac2"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_039/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_039/verify.py",
-      "source_sha256": "2f096fb98aae77fc51e9aae90cb16d239e72fe7195c0a884744a45e9392bdb26",
-      "vendored_sha256": "606c4b10106de9643d135ca0550b7dd9dc4c7718266e36a550c8a4f4f309442f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7fd5d073bc2fdff1e4bb676e44605dba1361b19a5eb44a5e1186df54b96507ea"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_040/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_040/verify.py",
-      "source_sha256": "083d335cd3ed87620d21a1c36d84c4d63eeabbade5872b3bd17226da2c77934f",
-      "vendored_sha256": "abb80ca973592ca144d493e13195628635f8c702b4df868a94996e2fab97d8f2",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "20b2f3806c04034b8a70df65325bc14afabf54fd88301777978c537d717a22a7"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_041/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_041/verify.py",
-      "source_sha256": "b64016237676e9052820165de3306a1a8d6b5de552a403c0ee41e8735b3410e6",
-      "vendored_sha256": "649a8465ec07a33c02a28117d5773153cacdc9aecb2e11ae53538c162e36618f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "7a30aa6d049ed59a5d79dbe9ab3e81e2e77152e202990b408a91343f15fcb8ad"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_042/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_042/verify.py",
-      "source_sha256": "d86ec85b4c32ffa4bbd6a75b4774ec2190e5238729d29f18046793ce259edccf",
-      "vendored_sha256": "1609d4bc01bdd9d00caa186ce411fa27bb11b4f35bc56f4157992a8b51f3fe54",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "2500cfeebc9e31633109c65d36e2354455cac88d15f6db1d8637c056e682e60e"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_043/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_043/verify.py",
-      "source_sha256": "d20204cdc88102ce789079add058be1f7f2bc52614de8c18e06f67b2e15583c2",
-      "vendored_sha256": "bb4ae17b768987f63f4c7d97dc91e42963aa012e72225429b451584281e207ce",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "febe6020825b802de2f5ad6997d815d67607e9754c14cecba5c4c5705f93a48f"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_044/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_044/verify.py",
-      "source_sha256": "1f9c72a8115555ddd120ad5bdf8ef8527f22ff45bacd9a6068434754e5f3293b",
-      "vendored_sha256": "368a82b36c4af29773459ae9a5767b722c7816a99090bfa9e362f23a4f47571f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "96a21b753b2b9e373d9db267beb7e28a2e5ef11a35d72754d6936085ced5e389"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_046/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_046/verify.py",
-      "source_sha256": "103dbf1da797021993b702bb5cc33e9832adb4b136500d7e415cbca8c7f47c60",
-      "vendored_sha256": "0376a4496bc095103e3287394623c3bf2c05f601d7295eab41483a1a5c574b1a",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "653bfebc558b7f47de8c630ac657cfc67f2b2fee8e1a8f01d26f6f7c84b3aefc"
-    },
-    {
-      "source_path": "tasks/uni-m/Software/software_047/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Software/software_047/verify.py",
-      "source_sha256": "6d8a25e3a45c5b1a6353386466f819ee34366aae9ede9b9f8e25e82e30a00191",
-      "vendored_sha256": "31f1f93b04f804e52e8d64553d61c73de7df5a3d6c41e19c0c4c3077b4e414a4",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "1db24b6f713428613b0f2555ca6060895bf707cb9c0b222fccf405b85bf5088b"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_009/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_009/verify.py",
-      "source_sha256": "393275e9082d1821a31c24618c97174f6c4d16b39d104edcdb58782073f4fb02",
-      "vendored_sha256": "b359ec55774e1a28353f44e446a032af5cf1e4e92c2d594973794b4eb9b489d0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "bfc417b9becae84ef42bae6d1d19d5a6a0843679abcb28a7af1115e9b7e48b0b"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_011/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_011/verify.py",
-      "source_sha256": "d958d71aef08f09b8b3b3893ddaabeb1174b57c00b629144cedbd5793b72548c",
-      "vendored_sha256": "a91e9740daff229b6637306cab1510ffd02c69472299ef069a40730f59e254c1",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "d758f2ce23be657aea5f4280ced51b15c73d728c2f915d7eb83bc94a4267b7ae"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_014/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_014/verify.py",
-      "source_sha256": "bf7b1593b788a05e30c79da140cb698b3187effe9b52f9b054d51764707cd5b5",
-      "vendored_sha256": "808b31d22e0b3ff9b1cef8918f462363f33b5519825adce24af83dfd462bea5f",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "8cb4dddb34641ae18fa29617144f892f5fcb21e2f9df44a2890234bfd60366a8"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_020/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_020/verify.py",
-      "source_sha256": "b603c1e997052693e190059d836de5e9968014f3d353d3dfbaa88264d450acd1",
-      "vendored_sha256": "e244e93b4703e36c297198d4bc7bf4994df8094800a11ed2e81350f7d7055225",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "809e1be7aea84598d24d3a2668b83473d1a027b27e394ceedd99aec9bc89196e"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_030/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_030/verify.py",
-      "source_sha256": "333eb268bcc89e3e0494ee2e03b027fd7344cd7a52a053995c7819e86c32f931",
-      "vendored_sha256": "55bccdea2f41792a09b3ebd530d279a20ef3cac12c5530aabef95e6b27f7fc67",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "23baa131f063bf28e93ce0708bcb9dff0cfbd3b03501c5a6db25812f573289bb"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_032/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_032/verify.py",
-      "source_sha256": "46cfb27fa246f8fd59c5e442cafa9ca0b04b3bb7330109468d127bdfe7b6f944",
-      "vendored_sha256": "9b0cdfed30a9ddd495d74243f3be26884f6b98cc8d5428a12ae4b0bc54d96572",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "c27f152794660a037679239a0ed5d32d6777f107d14f330329d0a5cfbd71ba14"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_042/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_042/verify.py",
-      "source_sha256": "f7f7af9f6cbd214ad18dc1c5233d13074cc8d4595f11466ebc9a505d722e126f",
-      "vendored_sha256": "380845483c40d69df7f4159e69abf7fbeb474de0161a04d94eae284bb877edc3",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "025bb937ff2ffd322835da91ce6b9e4d164bff606fe7b8a2b3595d415c8f3f6c"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_043/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_043/verify.py",
-      "source_sha256": "9b6a6dc532794223118d7f87859049cccee446927a40be5c81f0fe994bffd3f8",
-      "vendored_sha256": "da5aa1c08a7aa933ae03a7f2ea9ebfa0e29bad490aac24688373f37f4312a7d3",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "b241ca85ce8636032ba98a0f153d78ebaf6dbe0f35f3167c547e7678d5a37352"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_052/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_052/verify.py",
-      "source_sha256": "0100008fede4ceeb443102c28d47518a08f4c7992fe31ecc2e9ac12ea5d0ad77",
-      "vendored_sha256": "e66129beec1ee2c48fb6ee531577a27713a7edf182ef75020c14c7fc9a83a5b0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "e0d8e76862b7a30f4a9b4e01b58b082151fd9b6aced88e486995b5686f48105e"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_074/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_074/verify.py",
-      "source_sha256": "9b530827917e9979b1e0edd88c4dcf6d0f566322d62b059886e53b19bc8e6373",
-      "vendored_sha256": "78c0dd28b64353681925a69b1b5bf9390fecd35cc0b11dd263dd6b77354527d0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "888729ffa94fe8dc1b63e06f27beb9410762795bfd402089cd7ecba2c99651d6"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_082/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_082/verify.py",
-      "source_sha256": "ac336214f2b313ade636faccd6746a9ff420b0e468bad638e4a7c387c3e686cb",
-      "vendored_sha256": "6fbe4cf3b7c1a0091320acabe3327fc9e497e84b7c29fe9f1da89977c809e8e5",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "62ee15e36f8b35edf55f937d711ffe14b1f86607564440a9c094da330a142cb2"
-    },
-    {
-      "source_path": "tasks/uni-m/Teamwork/teamwork_083/verify.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/tasks/uni-m/Teamwork/teamwork_083/verify.py",
-      "source_sha256": "6af5d6853067a7fb4fb06725cde759bd8c942a011f25c35dd1077c3e8b9eedf3",
-      "vendored_sha256": "5eab454169626dd7753a4ae3a1e580270f87d350b45b10585441806e01f8e4a0",
-      "license": "CC-BY-4.0",
-      "python_ast_unchanged": true,
-      "upstream_source_sha256": "f95caf4d78197facb010351876653e6d1395e708c443e018fd866191d14628ae"
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_025/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "af2e5ff5e0f36dcbe944531deab29c2cdcbfb475da74280e96af85bf733ed642",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use JWT authorization for the deployed Taiga API instead of Token authorization."
     },
     {
       "source_path": "scripts/nrt/docker_enroot_shim.py",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/scripts/nrt/docker_enroot_shim.py",
-      "source_sha256": "482012409122883f0850e77448cbde4f611b37c5257b3161162f37a5f9748431",
-      "vendored_sha256": "5280fdf07eb5b7d5c593644c10d7cf354185fb2aa9c50fe935cf56ea8e04fea0",
+      "vendored_sha256": "1a50daf48c269cfaecb65fefdf65bd0af43f831ff1ac222ed4585c80ff05c54d",
       "license": "Apache-2.0",
-      "python_ast_unchanged": false,
-      "adaptation": "SQLCMD enters target PID namespace and root to load its resources; other command behavior unchanged",
-      "gym_adaptation": "Live service process start-time inspection for stock audits; PHP and SQLCMD exec enter a stable target-root working directory. Task criteria and weights unchanged.",
-      "upstream_source_sha256": "9e5cf567d5f71a0302bea9b93833d015bf26b61ff90e959a67fc0ab4174c949a"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "scripts/nrt/setup_podman_runtime.sh",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/scripts/nrt/setup_podman_runtime.sh",
-      "source_sha256": "16eaef372e68a348bd0edd7e6868974362be4d2e8c3ad560cafb455b12539d3b",
-      "vendored_sha256": "1a890fd0919ee8266f31dbc5a016e9c3e7fad349e9fac9688c9fc4897652c1f6",
+      "vendored_sha256": "fc546336d7a7d06061918a3fc9d844553add808d16a397ab7967c910ced28e01",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "64bf8597088e1240c189dd7754a62143e240d59aa34a1140b4074e903c8dbb05"
+      "origin": "nvidia-authored"
     },
     {
       "source_path": "scripts/nrt/load_images_from_tars.sh",
-      "source_url": "https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/scripts/nrt/load_images_from_tars.sh",
-      "source_sha256": "371219a663928f54d7f05be764cc4f1032180d571b20ac98f9ac6d477371fd6c",
-      "vendored_sha256": "c0df21c00f0513f2dbc240708ff5631a7b17792d83ff653664904d0b959d1a8f",
+      "vendored_sha256": "e88824caa45d9a34481d7570524f5875099760c38869472a8c45a9dc3a198b97",
       "license": "Apache-2.0",
-      "python_ast_unchanged": null,
-      "upstream_source_sha256": "5818d655da07e52b7e9f09e0d98fbcf01e410e39c0e43b8ff32c8c940342cee9",
-      "gym_adaptation": "Deployment-provided image tar mount replaces a user-specific private filesystem fallback."
+      "origin": "nvidia-authored"
     }
   ],
-  "public_import_snapshot": {
-    "repository": "https://github.com/bpritam14/Gym-evaluation",
-    "revision": "e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d",
-    "path": "responses_api_agents/saas_bench_agent/benchmark",
-    "note": "Public code snapshot for reviewer access; original source attestations above retained."
-  },
-  "upstream_revision": "31177a7a80040edf588388dd982af4b678d1e544",
-  "source_note": "Public import snapshot; upstream_revision and upstream_source_sha256 retain the original release attestations. No private repository is needed."
+  "external_verifiers": [
+    "tasks/multi-m/Agriculture/agriculture_007/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_012/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_013/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_020/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_021/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_022/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_038/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_042/verify.py",
+    "tasks/multi-m/Media/media_006/verify.py",
+    "tasks/multi-m/Media/media_011/verify.py",
+    "tasks/multi-m/Media/media_012/verify.py",
+    "tasks/multi-m/Media/media_016/verify.py",
+    "tasks/multi-m/Media/media_020/verify.py",
+    "tasks/multi-m/Media/media_024/verify.py",
+    "tasks/multi-m/Media/media_027/verify.py",
+    "tasks/multi-m/Media/media_029/verify.py",
+    "tasks/multi-m/Media/media_033/verify.py",
+    "tasks/multi-m/Media/media_035/verify.py",
+    "tasks/multi-m/Media/media_060/verify.py",
+    "tasks/multi-m/Media/media_063/verify.py",
+    "tasks/multi-m/Media/media_065/verify.py",
+    "tasks/multi-m/Media/media_066/verify.py",
+    "tasks/multi-m/Media/media_067/verify.py",
+    "tasks/multi-m/Media/media_068/verify.py",
+    "tasks/multi-m/Media/media_069/verify.py",
+    "tasks/multi-m/Media/media_070/verify.py",
+    "tasks/multi-m/Media/media_072/verify.py",
+    "tasks/multi-m/Media/media_073/verify.py",
+    "tasks/uni-m/Business/business_023/verify.py",
+    "tasks/uni-m/Business/business_062/verify.py",
+    "tasks/uni-m/Business/business_065/verify.py",
+    "tasks/uni-m/Business/business_084/verify.py",
+    "tasks/uni-m/Business/business_110/verify.py",
+    "tasks/uni-m/Business/business_121/verify.py",
+    "tasks/uni-m/Business/business_135/verify.py",
+    "tasks/uni-m/Business/business_144/verify.py",
+    "tasks/uni-m/Business/business_155/verify.py",
+    "tasks/uni-m/Business/business_302/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_001/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_002/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_007/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_013/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_015/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_017/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_019/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_021/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_023/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_025/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_026/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_030/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_034/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_038/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_045/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_048/verify.py",
+    "tasks/uni-m/Software/software_002/verify.py",
+    "tasks/uni-m/Software/software_004/verify.py",
+    "tasks/uni-m/Software/software_005/verify.py",
+    "tasks/uni-m/Software/software_006/verify.py",
+    "tasks/uni-m/Software/software_009/verify.py",
+    "tasks/uni-m/Software/software_012/verify.py",
+    "tasks/uni-m/Software/software_014/verify.py",
+    "tasks/uni-m/Software/software_018/verify.py",
+    "tasks/uni-m/Software/software_021/verify.py",
+    "tasks/uni-m/Software/software_023/verify.py",
+    "tasks/uni-m/Software/software_024/verify.py",
+    "tasks/uni-m/Software/software_026/verify.py",
+    "tasks/uni-m/Software/software_027/verify.py",
+    "tasks/uni-m/Software/software_029/verify.py",
+    "tasks/uni-m/Software/software_030/verify.py",
+    "tasks/uni-m/Software/software_031/verify.py",
+    "tasks/uni-m/Software/software_032/verify.py",
+    "tasks/uni-m/Software/software_033/verify.py",
+    "tasks/uni-m/Software/software_034/verify.py",
+    "tasks/uni-m/Software/software_035/verify.py",
+    "tasks/uni-m/Software/software_038/verify.py",
+    "tasks/uni-m/Software/software_039/verify.py",
+    "tasks/uni-m/Software/software_040/verify.py",
+    "tasks/uni-m/Software/software_041/verify.py",
+    "tasks/uni-m/Software/software_042/verify.py",
+    "tasks/uni-m/Software/software_043/verify.py",
+    "tasks/uni-m/Software/software_044/verify.py",
+    "tasks/uni-m/Software/software_046/verify.py",
+    "tasks/uni-m/Software/software_047/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_009/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_011/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_014/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_020/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_030/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_032/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_042/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_043/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_052/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_074/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_082/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_083/verify.py"
+  ]
 }

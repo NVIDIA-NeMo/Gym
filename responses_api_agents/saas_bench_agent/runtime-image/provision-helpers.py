@@ -5,6 +5,8 @@
 import argparse
 import hashlib
 import json
+import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -17,7 +19,11 @@ def main() -> None:
     parser.add_argument("--image-rootfs", type=Path, required=True)
     args = parser.parse_args()
     destination = args.destination.resolve()
-    if any(destination == Path(p) or destination.is_relative_to(p) for p in ("/root", "/home/pritamb")):
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except KeyError:
+        home = Path.home().resolve()
+    if any(destination == p or destination.is_relative_to(p) for p in (Path("/root"), home)):
         raise ValueError("Provisioning output must be outside forbidden homes")
     files = {}
 

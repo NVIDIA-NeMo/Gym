@@ -4,7 +4,8 @@ policy_base_url: ${oc.select:saas_bench_policy_base_url,http://127.0.0.1:8000/v1
 policy_model_name: ${oc.select:saas_bench_policy_model_name,policy}
 policy_api_key: ${oc.env:SAAS_BENCH_MODEL_API_KEY,EMPTY}
 observability_enabled: true
-saas_bench_output_root: ${oc.select:saas_bench_run_root,results/saas-bench}/episodes
+num_samples_in_parallel: ${oc.select:saas_bench_concurrency,1}
+saas_bench_output_root: ${saas_bench_run_root}/episodes
 saas_bench_sampling:
   temperature: 0.6
   top_p: 0.95
@@ -31,6 +32,7 @@ saas_bench_agent:
       opencode_version: 1.17.11
       concurrency: ${oc.select:saas_bench_concurrency,1}
       slot_capacity: ${oc.select:saas_bench_slot_capacity,4}
+      inconclusive_verification_retries: ${oc.select:saas_bench_inconclusive_verification_retries,1}
       max_steps: ${oc.select:saas_bench_max_steps,200}
       mcp_timeout_ms: ${oc.select:saas_bench_mcp_timeout_ms,180000}
       agent_timeout: ${oc.select:saas_bench_agent_timeout,3600}

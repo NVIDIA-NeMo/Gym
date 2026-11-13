@@ -1,7 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/saas_bench/enroot_slot.py
-# Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
 """Enroot-backed slot helpers for GPU nodes (no Podman/Docker).
 
 Activated when ``SAAS_NRT_ENROOT=1``.
@@ -873,6 +871,7 @@ exec "$@"
             str(_SLIRP_BIN),
             "--configure",
             "--mtu=65520",
+            "--disable-host-loopback",
             str(proc.pid),
             "tap0",
         ],
@@ -1038,6 +1037,7 @@ exec sleep infinity
             str(_SLIRP_BIN),
             "--configure",
             "--mtu=65520",
+            "--disable-host-loopback",
             str(proc.pid),
             "tap0",
         ],

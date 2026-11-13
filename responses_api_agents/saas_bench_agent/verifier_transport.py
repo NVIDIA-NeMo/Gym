@@ -5,6 +5,7 @@
 import io
 import json
 import os
+import re
 import runpy
 import socket
 import sys
@@ -53,7 +54,7 @@ def install_transport() -> None:
         return method.upper() == "POST" and any(
             parsed.scheme == target.scheme
             and parsed.netloc == target.netloc
-            and parsed.path == target.path.rstrip("/") + "/chat/completions"
+            and re.sub(r"/+", "/", parsed.path) == re.sub(r"/+", "/", target.path).rstrip("/") + "/chat/completions"
             for target in targets
         )
 

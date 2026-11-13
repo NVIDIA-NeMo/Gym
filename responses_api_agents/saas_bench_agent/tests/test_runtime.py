@@ -38,10 +38,15 @@ def test_materialization_validates_data_and_reused_code(tmp_path, monkeypatch):
         runtime.materialize_bundle(str(data), str(tmp_path / "other"))
 
 
-@pytest.mark.parametrize("root", ["/root/cache", "/home/pritamb/cache"])
-def test_forbidden_cache_roots(root):
+@pytest.mark.parametrize("root", ["/root/cache", "{home}/cache"])
+def test_forbidden_cache_roots(tmp_path, monkeypatch, root):
+    import pwd
+    from types import SimpleNamespace
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(home)))
     with pytest.raises(ValueError, match="forbidden"):
-        runtime.configure_cache(root)
+        runtime.configure_cache(root.format(home=home))
 
 
 @pytest.mark.parametrize(
@@ -88,7 +93,7 @@ def test_browser_worker_grades_live_state_and_always_stops(
     def grade(*args, **kw):
         slot.stop_apps.assert_not_called()
         assert __import__("os").environ["LLM_API_KEY"] == "judge-fixture"
-        return {"status": status, "score": 0.25 if status == "PASS" else 0.0}
+        return {"status": status, "score": 0.25 if status in {"PASS", "FAIL"} else 0.0}
 
     verifier.run_verify = MagicMock(side_effect=grade)
     actor = types.ModuleType("saas_bench.agent")
@@ -148,7 +153,7 @@ def test_browser_worker_grades_live_state_and_always_stops(
         return
     assert result["verify"]["status"] == status
     if actor_status in {"model_error", "context_limit"}:
-        assert result["reward"] == 0 and not result["mask_sample"]
+        assert result["reward"] == 0.25 and not result["mask_sample"]
         assert result["execution_health"]["termination"] == (
             "context_limit" if actor_status == "context_limit" else "malformed_tool_call"
         )
@@ -186,6 +191,7 @@ def test_gym_preparation_and_collection_use_same_dataset(tmp_path, monkeypatch, 
     monkeypatch.chdir(tmp_path)
     gym = Path(__file__).resolve().parents[3]
     config = OmegaConf.load(gym / f"benchmarks/saas_bench_{harness}/config.yaml")
+    config.saas_bench_run_root = str(tmp_path / "run")
     config.saas_bench_tasks = "fixture"
     selected = datasets_to_prepare(config)
     assert len(selected) == 1

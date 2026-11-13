@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Source: https://github.com/bpritam14/Gym-evaluation/blob/e8bdaf19ba99ec4f4fb689980d46bb6e2829ac2d/responses_api_agents/saas_bench_agent/benchmark/scripts/nrt/docker_enroot_shim.py
-# Copyright: SaaS-Bench Authors; see bundled licenses.
-# Vendored for native benchmark evaluation; original behavior retained.
 """Minimal ``docker exec`` / ``docker cp`` / start-time inspection compatibility for Enroot verifies.
 
 Task verify scripts invoke ``docker exec`` to inspect files or databases.
@@ -306,7 +304,7 @@ def docker_exec(args: list[str]) -> int:
         *namespace_flags,
         *inner,
     ]
-    result = subprocess.run(cmd, stdin=None if interactive else sys.stdin.buffer)
+    result = subprocess.run(cmd, stdin=None if interactive else sys.stdin.buffer, env={"PATH": os.environ.get("PATH", "")})
     return result.returncode
 
 

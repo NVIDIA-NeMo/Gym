@@ -70,7 +70,8 @@ def test_nonjudge_app_timeout_is_unchanged(monkeypatch):
 
 
 @pytest.mark.parametrize("client", ["requests", "urllib"])
-def test_caught_judge_fault_is_not_a_task_failure(tmp_path, monkeypatch, client):
+@pytest.mark.parametrize("base_suffix", ["", "/"])
+def test_caught_judge_fault_is_not_a_task_failure(tmp_path, monkeypatch, client, base_suffix):
     """An actual verifier subprocess may swallow HTTP errors; its grade must not."""
     import importlib.util
     from pathlib import Path
@@ -98,7 +99,7 @@ def test_caught_judge_fault_is_not_a_task_failure(tmp_path, monkeypatch, client)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    monkeypatch.setenv("LLM_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+    monkeypatch.setenv("LLM_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1{base_suffix}")
     monkeypatch.delenv("MINDRA_BASE_URL", raising=False)
     monkeypatch.setenv("SAAS_BENCH_JUDGE_HTTP_TIMEOUT", "30")
     monkeypatch.setenv("SAAS_VERIFIER_LAUNCHER", verifier_transport.__file__)
