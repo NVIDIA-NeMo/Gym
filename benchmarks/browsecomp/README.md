@@ -283,7 +283,9 @@ gym eval run --no-serve <the same --config and ++ arguments> \
   `/verify` copies the files before it stops the sandbox, to
   `<episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/`, and records the outcome in the row's
   `opencode_export_copy`. A copy that fails, runs past 300 seconds or exceeds `episode_export_max_bytes` (256 MiB) is
-  recorded there and never changes the grade.
+  recorded there and never changes the grade. A `/verify` refused for its plugin log (422), or one that answers 500
+  once `judge_max_consecutive_failures` trips, still copies the files there, but its failure row has no
+  `opencode_export_copy`; one whose plugin log cannot be read copies nothing.
 - `++observability_enabled=true` with a `++model_call_capture_dir` records each model call in the rollouts, as the
   harness conformance checker needs. It also adds a plugin to OpenCode, so use it in a run of its own.
 
