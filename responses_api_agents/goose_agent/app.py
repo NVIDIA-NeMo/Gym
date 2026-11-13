@@ -47,7 +47,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.goose_agent.conversion import (
@@ -486,10 +485,6 @@ class GooseAgent(SimpleResponsesAPIAgent):
         elif body != state.activation_request:
             raise HTTPException(409, "Goose sessions support one activation; retries must repeat the same request")
         return (await asyncio.shield(state.task)).model_copy(deep=True)
-
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        """Goose runs through an Environment Server, which owns verification."""
-        raise HTTPException(422, "Run Goose through an Environment Server such as single_agent_turn")
 
 
 if __name__ == "__main__":
