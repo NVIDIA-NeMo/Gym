@@ -19,7 +19,7 @@ from nemo_gym.agents.utils.sandbox_session import (
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure, supervised_launch_command
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
@@ -255,8 +255,6 @@ async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
 
 
 async def test_deadline_during_staging_never_launches(session, receipt_reader):
-    from time import monotonic
-
     cancelled = asyncio.Event()
 
     async def stage():
@@ -268,7 +266,11 @@ async def test_deadline_during_staging_never_launches(session, receipt_reader):
     collect = AsyncMock()
     with pytest.raises(TimeoutError):
         await session.execute(
-            stage_activation=stage, collect=collect, timeout=10, close_timeout=1, deadline=monotonic() + 0.01
+            stage_activation=stage,
+            collect=collect,
+            timeout=10,
+            close_timeout=1,
+            deadline=asyncio.get_running_loop().time() + 0.01,
         )
     assert cancelled.is_set() and not session.launch_started
     session.sandbox.exec.assert_not_awaited()
@@ -278,8 +280,6 @@ async def test_deadline_during_staging_never_launches(session, receipt_reader):
 
 
 async def test_deadline_shorter_than_supervisor_resolution_never_launches(session, receipt_reader):
-    from time import monotonic
-
     collect = AsyncMock()
     with pytest.raises(TimeoutError, match="expired before launch"):
         await session.execute(
@@ -287,11 +287,42 @@ async def test_deadline_shorter_than_supervisor_resolution_never_launches(sessio
             collect=collect,
             timeout=0.004,
             close_timeout=1,
-            deadline=monotonic() + 10,
+            deadline=asyncio.get_running_loop().time() + 10,
         )
     assert not session.launch_started
     session.sandbox.exec.assert_not_awaited()
     collect.assert_not_awaited()
+    await session.close(timeout=1)
+
+
+@pytest.mark.parametrize("skew", [10_000.0, -10_000.0])
+async def test_deadline_is_read_on_the_event_loop_clock(session, receipt_reader, monkeypatch, skew):
+    """`asyncio.timeout_at` reads the loop's clock, which uvloop on macOS runs apart from `time.monotonic()`. A deadline
+    on the loop's clock bounds the harness by what is left on that clock, however far `monotonic()` is from it: not
+    refused as expired when the loop's clock is behind, and not stretched to the whole timeout when it is ahead."""
+    loop = asyncio.get_running_loop()
+    loop_time = loop.time
+    monkeypatch.setattr(loop, "time", lambda: loop_time() + skew)
+    budgets = []
+    launch_command = supervised_launch_command
+
+    def record_budget(**kwargs):
+        budgets.append(kwargs["timeout"])
+        return launch_command(**kwargs)
+
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.supervised_launch_command", record_budget)
+
+    result = await session.execute(
+        stage_activation=AsyncMock(return_value=SandboxCommand(argv=["worker"])),
+        collect=AsyncMock(return_value="transcript"),
+        timeout=10,
+        close_timeout=1,
+        deadline=loop.time() + 5,
+    )
+
+    assert result == "transcript"
+    assert session.launch_started
+    assert len(budgets) == 1 and 4 < budgets[0] <= 5
     await session.close(timeout=1)
 
 

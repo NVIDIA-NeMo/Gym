@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
-from time import monotonic
 from typing import cast
 
 from nemo_gym.agents.utils.supervisor_client import (
@@ -215,6 +214,10 @@ class SandboxSession[Artifacts]:
         Cancellation stops the remote harness before releasing provider exec.
         Callers that merely stop waiting (such as disconnected HTTP requests)
         must shield their shared activation task.
+
+        ``deadline`` is a time on the event loop's clock, ``asyncio.get_running_loop().time()``, which is what
+        ``asyncio.timeout_at`` reads. It need not equal ``time.monotonic()``: under uvloop on macOS it differs, and a
+        deadline taken from ``monotonic()`` there is already expired.
         """
         if self.closing or self._stage_task is not None:
             raise RuntimeError(f"{self.harness} sandbox session is closing or already activated")
@@ -229,7 +232,7 @@ class SandboxSession[Artifacts]:
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
             if deadline is not None:
-                timeout = min(timeout, deadline - monotonic())
+                timeout = min(timeout, deadline - asyncio.get_running_loop().time())
             # The supervisor counts whole centiseconds; less than one cannot run the harness.
             if timeout < 0.01:
                 raise TimeoutError(f"{self.harness} activation deadline expired before launch")

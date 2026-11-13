@@ -628,6 +628,25 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     agent.server_client.post.assert_not_called()
 
 
+def test_first_activation_deadline_is_on_the_event_loop_clock(setup, monkeypatch):
+    """`asyncio.timeout_at` reads the event loop's clock, which uvloop on macOS runs apart from `time.monotonic()`.
+    With `monotonic()` far behind it, a deadline taken from `monotonic()` is already expired, and the activation times
+    out before OpenCode starts."""
+    from time import monotonic
+
+    agent, sandbox = setup
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: monotonic() - 10_000)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert sandbox.launch.called
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
 @pytest.mark.parametrize("owned", [False, True])
 @pytest.mark.parametrize("origin_stage", [None, "agent", "seed", "verification"])
 def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_session(setup, owned, origin_stage):

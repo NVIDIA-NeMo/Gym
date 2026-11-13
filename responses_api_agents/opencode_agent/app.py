@@ -1602,7 +1602,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
-        deadline = started + timeout
+        # The deadline is a time on the event loop's clock, which `asyncio.timeout_at` and the session's `execute` read;
+        # it need not equal `monotonic()` (uvloop on macOS), and a deadline taken from `monotonic()` is already expired.
+        deadline = asyncio.get_running_loop().time() + timeout
         failure: BaseException | None = None
         try:
             async with asyncio.timeout_at(deadline):
@@ -1853,8 +1855,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 if deadline is None:
                     # A first activation's budget starts once it holds a slot, as Pi's does: staging spends it,
-                    # and OpenCode runs for what remains.
-                    deadline = monotonic() + timeout
+                    # and OpenCode runs for what remains. On the event loop's clock, as `execute` reads it.
+                    deadline = asyncio.get_running_loop().time() + timeout
                 await state.execute(
                     payload,
                     media=media,
