@@ -611,11 +611,12 @@ def test_a_verify_after_the_close_is_masked_as_lost(workdir) -> None:
     assert judge.await_count == 0
 
 
-def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(workdir) -> None:
+@pytest.mark.parametrize("seed", ["episode", "agent_run"])
+def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(workdir, seed) -> None:
     """No verdict is not a measured 0: the row is masked, and the verify is not replayed but graded again."""
-    server = _server(workdir)
+    server = _server(workdir if seed == "episode" else None)
     client = TestClient(server.setup_webserver())
-    assert client.post("/seed_session", json=_seed()).status_code == 200
+    assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
     judge = _mock_judge(server, NO_VERDICT)
 
     inconclusive = client.post("/verify", json=_verify_body())
