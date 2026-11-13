@@ -130,10 +130,11 @@ a crash an episode starts over from its input.
   `opencode_export_copy`: `status`, `dir` (that directory), `files` (each file's size in bytes, by name),
   `bytes` (their total) and `detail` (why nothing was copied). `status` is `copied`, with no files when
   the directory is empty; `absent` when the sandbox has no `episode_export_dir`; `oversize` when the
-  files hold more than `episode_export_max_bytes`, and none is copied; or `failed` when the listing or a
-  download failed or the copy ran past 300 s. Only a `copied` status leaves files on this host, and any
-  other is logged. No copy changes the reward, `mask_sample` or `evaluation_completed`, and an identical
-  retry replays the record. A verify refused for its plugin log (422), or one that answers 500 once
+  files hold more than `episode_export_max_bytes`, and none is copied; or `failed` when the listing, a
+  download or a file operation on this host failed, a copied file's size differs from the listing, or
+  the copy ran past 300 s. Only a `copied` status leaves files on this host, and any other is logged.
+  No copy changes the reward, `mask_sample` or `evaluation_completed`, and an identical retry replays
+  the record. A verify refused for its plugin log (422), or one that answers 500 once
   `judge_max_consecutive_failures` trips, still makes the copy, but its reply has no `opencode_export_copy`,
   so its failure row does not name the files. A verify whose plugin log cannot be read (500) copies
   nothing, and neither does one masked as `session_lost`.
