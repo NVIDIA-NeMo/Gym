@@ -94,6 +94,7 @@ from nemo_gym.data.tasks.harbor.prepare import (
     _has_override,
     _listed,
     build_run,
+    output_root_from_overrides,
     prepare_target,
     resolve_agent,
     resolve_sandbox_config,
@@ -1567,30 +1568,30 @@ def _patterns(args: argparse.Namespace, name: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-@exit_cleanly_on_config_error
-def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
-    """Entry point for ``gym eval run <target> ...``."""
-    from nemo_gym.cli.main import _merge_config_paths, dispatch
-    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
-
-    if getattr(args, "no_serve", False):
-        args._parser.error("A Harbor target starts its own servers; drop --no-serve")
+def _resolve_target_agent(args: argparse.Namespace) -> tuple[AgentSelection, str | None]:
+    """The harness and sandbox provider a Harbor TARGET command names, or a parser error for a missing or
+    unknown one. Selectors resolve before preparation can download a registry dataset."""
     agent_name = getattr(args, "agent", None)
     if not agent_name:
         args._parser.error("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
     sandbox = getattr(args, "sandbox", None)
-    # Resolve selectors before preparation can download a registry dataset.
     try:
         agent = resolve_agent(agent_name)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
-    if agent.impl_name == ORACLE_AGENT:
-        # The oracle runs the reference solution, not a model: its run is `gym dataset validate`, whose results
-        # live under results/harbor/validation/ where no model run, resumed or not, can pick them up as its own.
-        validate_target(args, overrides, agent=agent)
-        return
+    return agent, sandbox
+
+
+def _prepare_target_run(
+    args: argparse.Namespace, overrides: list[str], agent: AgentSelection, sandbox: str | None
+) -> tuple[PreparedTaskset, Path, list[str]]:
+    """Prepare a Harbor TARGET and build its run config: the rows, ``run_config_<agent>.yaml`` and
+    ``skipped.json`` under ``results/harbor/<taskset>/``, and the command-line tokens that load them.
+
+    Shared by ``gym eval run`` and ``gym eval prepare``, so a prepared run is the run that ``run`` would start.
+    """
     try:
         # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
         # does not exist yet.
@@ -1609,6 +1610,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             compose_overlay=compose_overlay_from_overrides(overrides),
             rows_name=_rows_name(agent),
+            output_root=output_root_from_overrides(overrides),
             registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
             agent=agent.impl_name,
             allow_unsupported_pairing=pairing_override_from_overrides(overrides),
@@ -1633,6 +1635,39 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
     except (HarborTaskError, OSError) as exc:
         args._parser.error(str(exc))
+    return prepared, config_path, tokens
+
+
+@exit_cleanly_on_config_error
+def prepare_target_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    """Entry point for ``gym eval prepare <target> ...``: prepare a Harbor TARGET the way ``gym eval run`` does,
+    then stop before any server starts. The output is the one a run writes before it starts its servers."""
+    agent, sandbox = _resolve_target_agent(args)
+    if agent.impl_name == ORACLE_AGENT:
+        args._parser.error(
+            "`gym eval prepare` prepares a model run; the oracle plays the reference solutions through "
+            "`gym dataset validate`"
+        )
+    prepared, config_path, _ = _prepare_target_run(args, overrides, agent, sandbox)
+    print(f"Prepared {len(prepared.tasks)} task(s); rows written to {prepared.rows_path}")
+    print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
+
+
+@exit_cleanly_on_config_error
+def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
+    """Entry point for ``gym eval run <target> ...``."""
+    from nemo_gym.cli.main import _merge_config_paths, dispatch
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+
+    if getattr(args, "no_serve", False):
+        args._parser.error("A Harbor target starts its own servers; drop --no-serve")
+    agent, sandbox = _resolve_target_agent(args)
+    if agent.impl_name == ORACLE_AGENT:
+        # The oracle runs the reference solution, not a model: its run is `gym dataset validate`, whose results
+        # live under results/harbor/validation/ where no model run, resumed or not, can pick them up as its own.
+        validate_target(args, overrides, agent=agent)
+        return
+    prepared, config_path, tokens = _prepare_target_run(args, overrides, agent, sandbox)
     tokens = _merge_config_paths(tokens)
     collection = _resolved_collection(tokens, prepared)
     helper = RolloutCollectionHelper()

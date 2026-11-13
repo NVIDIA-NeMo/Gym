@@ -4053,6 +4053,98 @@ class TestComposeVolumeSourcesAtPrepare:
             )
         assert seen == [({"pgdata": "datasets/pgdata"}, None), ({"pgdata": "pg"}, {"pgdata": "gpu/pg"})]
 
+    def _target_args(self, tmp_path, agent="hermes_agent", **extra):
+        import argparse
+
+        def fail(message):
+            raise SystemExit(message)
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        return argparse.Namespace(
+            target=str(folder), agent=agent, sandbox="opensandbox", _parser=argparse.Namespace(error=fail), **extra
+        )
+
+    def test_prepare_writes_what_a_run_writes_and_starts_no_server(self, tmp_path, monkeypatch, capsys):
+        """`gym eval prepare TARGET` is the preparation half of `gym eval run TARGET`: the rows and the run config
+        are written, and neither a server nor the collector starts."""
+        import nemo_gym.cli.main as cli_main
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cli_main, "dispatch", lambda *a, **k: pytest.fail("prepare must not start servers"))
+        cli_eval.prepare_target_run(self._target_args(tmp_path), [])
+        output = capsys.readouterr().out
+        config = Path("results/harbor/ds/run_config_hermes_agent.yaml")
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "results" / "harbor" / "ds")
+            .glob("tasks*.jsonl")
+            .__next__()
+            .read_text()
+            .splitlines()
+        ]
+        assert [row["task_id"]["task_id"] for row in rows] == ["a"]
+        assert f"Run config written to {config}" in output
+        written = yaml.safe_load(config.read_text())
+        assert written["environment_routing_mode"] == "taskset"
+        assert "harbor_ds_environment" in written
+
+    def test_prepared_rows_do_not_depend_on_the_working_directory_when_the_output_root_is_set(
+        self, tmp_path, monkeypatch
+    ):
+        """A submitted run prepares in a fresh checkout on every allocation. The run config names the rows file, and a
+        continuation compares that config with the saved run's, so with the output root set (to a folder in the job
+        directory) two preparations from different working directories must write the same config."""
+        args = self._target_args(tmp_path)
+        agent = resolve_agent("hermes_agent")
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [f"+harbor_output_root={root}"]
+        configs = []
+        for name in ("checkout_a", "checkout_b"):
+            checkout = tmp_path / name
+            checkout.mkdir()
+            monkeypatch.chdir(checkout)
+            prepared, config_path, tokens = cli_eval._prepare_target_run(args, overrides, agent, "opensandbox")
+            assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+            assert not any("harbor_output_root" in token for token in tokens)
+            configs.append(config_path.read_text())
+            assert not (checkout / "results").exists()
+        assert configs[0] == configs[1]
+        assert str(root / "ds") in configs[0]
+
+    @pytest.mark.parametrize("quoted", ["'{root}'", "{root}"])
+    def test_a_hydra_quoted_output_root_is_the_path_it_spells(self, tmp_path, monkeypatch, quoted):
+        """`+harbor_output_root='/tmp/prepared rows'` is the folder `/tmp/prepared rows`, not a name with quotes in
+        it that lands beneath the working directory."""
+        from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+
+        root = tmp_path / "prepared rows"
+        overrides = ["+harbor_output_root=" + quoted.format(root=root)]
+        assert output_root_from_overrides(overrides) == root
+        monkeypatch.chdir(tmp_path)
+        args = self._target_args(tmp_path)
+        prepared, config_path, _ = cli_eval._prepare_target_run(args, overrides, resolve_agent("hermes_agent"), None)
+        assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+        assert not any(path.name.startswith("'") for path in tmp_path.iterdir())
+
+    def test_an_empty_output_root_is_the_default_and_a_non_path_is_refused(self):
+        from nemo_gym.data.tasks.harbor.prepare import DEFAULT_OUTPUT_ROOT, output_root_from_overrides
+
+        assert output_root_from_overrides([]) == DEFAULT_OUTPUT_ROOT
+        assert output_root_from_overrides(["+harbor_output_root=''"]) == DEFAULT_OUTPUT_ROOT
+        with pytest.raises(ValueError, match="path string"):
+            output_root_from_overrides(["+harbor_output_root=3"])
+
+    def test_prepare_for_the_oracle_is_refused_toward_dataset_validate(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit, match="gym dataset validate"):
+            cli_eval.prepare_target_run(self._target_args(tmp_path, agent="harbor_oracle_agent"), [])
+
+    def test_prepare_requires_an_agent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit, match="needs `--agent"):
+            cli_eval.prepare_target_run(self._target_args(tmp_path, agent=None), [])
+
     def test_registry_credentials_come_from_the_sandbox_image_auth(self, tmp_path, monkeypatch):
         """G7 round 24: prepare read registries anonymously, so a private Compose sidecar (registry.example.com...) stopped
         it with HTTP 403 though the sandbox block's `images.auth` would pull it. Prepare reads the same block's

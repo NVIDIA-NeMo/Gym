@@ -3289,3 +3289,141 @@ def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: 
     cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
     assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
     assert cache.stat().st_mode & 0o777 == 0o700
+
+
+def _target_config(tmp_path, **benchmark):
+    return SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "efb:latest",
+                "benchmarks": {
+                    "bmb": {
+                        "prepare": {"config_paths": ["extra.yaml"]},
+                        "run": {"num_samples_in_parallel": 8},
+                        **benchmark,
+                    }
+                },
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _render_target(tmp_path, **benchmark):
+    config = _target_config(tmp_path, **benchmark)
+    return build_sbatch_script(
+        config, "bmb", config.driver.benchmarks["bmb"], config.compute["hsg"], tmp_path / "jobs" / "x" / "bmb"
+    )
+
+
+def test_a_task_target_goes_to_prepare_and_run_before_their_overrides(tmp_path):
+    script = _render_target(tmp_path, target="/data/bmb", agent="opencode_agent", sandbox="opensandbox")
+    root = tmp_path / "jobs" / "x" / "bmb" / "artifacts" / "harbor"
+
+    prepare = next(line for line in script.splitlines() if "gym eval prepare" in line)
+    assert "gym eval prepare /data/bmb --agent opencode_agent --sandbox opensandbox " in prepare
+    assert f"+harbor_output_root={root}" in prepare
+    assert "+config_paths=[extra.yaml]" in prepare
+    run = script[script.index("GYM_CMD=(") :].split("\n)", 1)[0].split()
+    assert run[:8] == ["GYM_CMD=(", "gym", "eval", "run", "/data/bmb", "--agent", "opencode_agent", "--sandbox"]
+    assert run[8] == "opensandbox"
+    assert run[9] == f"+harbor_output_root={root}"
+    assert run[10].startswith("+output_jsonl_fpath=")
+    assert "+num_samples_in_parallel=8" in run
+
+
+def test_a_task_target_without_a_sandbox_names_only_the_agent(tmp_path):
+    script = _render_target(tmp_path, target="harbor:org/set@1.0", agent="opencode_agent")
+
+    assert "gym eval prepare harbor:org/set@1.0 --agent opencode_agent " in script
+    assert "--sandbox" not in script
+
+
+def test_a_task_target_with_an_empty_prepare_runs_no_separate_preparation(tmp_path):
+    """`gym eval run TARGET` prepares with its own settings, so a separate preparation built from the `prepare`
+    block alone would miss what only `run` carries (here a waiver of the harness admission check)."""
+    script = _render_target(
+        tmp_path,
+        target="/data/bmb",
+        agent="opencode_agent",
+        prepare={},
+        run={"allow_unsupported_pairing": True},
+    )
+
+    assert "gym eval prepare" not in script
+    run = script[script.index("GYM_CMD=(") :].split("\n)", 1)[0].split()
+    assert run[:6] == ["GYM_CMD=(", "gym", "eval", "run", "/data/bmb", "--agent"]
+    assert "+allow_unsupported_pairing=True" in run
+
+
+def test_a_task_target_is_shell_quoted():
+    from nemo_gym.orchestration.executors.utils import render_target_args
+
+    assert render_target_args("/data/my tasks", "opencode_agent", None, "/jobs/a b") == [
+        "'/data/my tasks'",
+        "--agent",
+        "opencode_agent",
+        "'+harbor_output_root=/jobs/a b'",
+    ]
+    assert render_target_args(None, None, None, "/jobs") == []
+
+
+@pytest.mark.parametrize(
+    "root", ["/jobs/a/artifacts/harbor", "/jobs/a b/artifacts/harbor", "/jobs/(x) 'y'/harbor", "/jobs/a=b,c/harbor"]
+)
+def test_a_rendered_output_root_is_the_same_path_after_the_shell_and_hydra(root):
+    from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+    from nemo_gym.orchestration.executors.utils import render_target_args
+
+    words = shlex.split(" ".join(render_target_args("/data/t", "opencode_agent", None, root)))
+    token = next(word for word in words if word.startswith("+harbor_output_root="))
+
+    assert str(output_root_from_overrides([token])) == root
+
+
+def test_a_benchmark_without_a_target_renders_no_target_arguments(tmp_path):
+    script = _render_target(tmp_path)
+
+    prepare = next(line for line in script.splitlines() if "gym eval prepare" in line)
+    assert "--agent" not in prepare
+    assert "--agent" not in script
+
+
+@pytest.mark.parametrize(
+    ("benchmark", "message"),
+    [
+        ({"agent": "opencode_agent"}, "without a `target`"),
+        ({"sandbox": "opensandbox"}, "without a `target`"),
+        ({"target": "/data/bmb"}, "without an `agent`"),
+        (
+            {"target": "/data/bmb", "agent": "opencode_agent", "command": "harness", "run": {}},
+            "both `command` and `target`",
+        ),
+    ],
+)
+def test_a_task_target_needs_an_agent_and_not_a_command(tmp_path, benchmark, message):
+    with pytest.raises(ValueError, match=message):
+        _target_config(tmp_path, **benchmark)
+
+
+def test_a_benchmark_without_a_target_saves_the_config_it_always_did(tmp_path):
+    saved = _target_config(tmp_path).driver.benchmarks["bmb"].model_dump()
+    assert not {"target", "agent", "sandbox"} & set(saved)
+
+    with_target = _target_config(tmp_path, target="/data/bmb", agent="opencode_agent").driver.benchmarks["bmb"]
+    assert with_target.model_dump()["target"] == "/data/bmb"
+    assert (
+        SubmitConfig.model_validate(
+            {
+                "services": {},
+                "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+                "driver": {"container": "efb:latest", "benchmarks": {"bmb": with_target.model_dump()}},
+                "job": {"output_path": str(tmp_path / "jobs")},
+            }
+        )
+        .driver.benchmarks["bmb"]
+        .target
+        == "/data/bmb"
+    )

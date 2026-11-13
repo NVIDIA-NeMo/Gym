@@ -38,7 +38,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_gym_cmd,
     render_write_file_from_base64,
 )
-from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_run_args, render_target_args
 from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
 
 
@@ -220,9 +220,15 @@ def _driver_command(
     manifest_writes: list[str],
 ) -> list[str]:
     gi = config.driver.gym_install
+    # A task target's rows live in the run directory, not in the fresh checkout this job works in.
+    target_args = render_target_args(
+        benchmark.target, benchmark.agent, benchmark.sandbox, f"{run_dir}/{ARTIFACTS_DIRNAME}/harbor"
+    )
+    # `gym eval run TARGET` prepares with its own settings, so a separate preparation runs only when one is
+    # configured: one built from the `prepare` block alone would not see settings that only `run` carries.
     prepare_cmd = None
     if benchmark.prepare:
-        prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
+        prepare_cmd = " ".join(["gym eval prepare", *target_args, *flatten_run_args(benchmark.prepare)])
 
     if benchmark.command is None:
         output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
@@ -230,7 +236,9 @@ def _driver_command(
         extra_flags = (
             [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
         )
-        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+        gym_cmd = render_gym_cmd(
+            "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(benchmark.run)
+        )
     else:
         # A command replaces `gym eval run`, so it reaches the policy/output path via env vars
         # instead (see _command_env) -- build_job_manifest merges those into the driver's env.

@@ -71,7 +71,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
-from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args, render_target_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
 from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EVAL_SUCCEEDED_FILENAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
 
@@ -1112,9 +1112,15 @@ def build_sbatch_script(
 
     gi = config.driver.gym_install
 
+    # A task target's rows live in the job directory, not in the fresh checkout this allocation works in.
+    target_args = render_target_args(
+        benchmark.target, benchmark.agent, benchmark.sandbox, f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor"
+    )
+    # `gym eval run TARGET` prepares with its own settings, so a separate preparation runs only when one is
+    # configured: one built from the `prepare` block alone would not see settings that only `run` carries.
     prepare_cmd = None
     if benchmark.prepare:
-        prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
+        prepare_cmd = " ".join(["gym eval prepare", *target_args, *flatten_run_args(benchmark.prepare)])
 
     # ABSOLUTE, not relative. The driver `cd`s into the Gym checkout so that a
     # benchmark's own relative `prepare_script` / `jsonl_fpath` resolve, which
@@ -1137,7 +1143,9 @@ def build_sbatch_script(
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
-        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+        gym_cmd = render_gym_cmd(
+            "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(run_args)
+        )
         # A job queued by `gym eval resubmit` resets the attempt budget and enables resume before exporters open:
         # a fresh start would delete the run's rollouts, whatever its original config says.
         # The auto-resume prologue, when there is one, has moved the variables into `_gym_resubmit` and

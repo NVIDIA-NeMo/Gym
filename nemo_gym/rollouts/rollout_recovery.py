@@ -1199,10 +1199,30 @@ _SEMANTIC_PARTS = (
 _SEMANTIC_ASSET_PATH = re.compile(r"(^|_)(prompt|prompts|template|templates|rubric|rubrics)_(.+_)?(dir|path|fpath)$")
 
 
-def _is_semantic(key: str) -> bool:
-    segments = key.split(".")
+def _is_taskset_folder(segments: list[str]) -> bool:
+    """Whether a key path is the ``folder`` of a Harbor taskset mapping, ``environment_servers.<impl>.tasksets.<name>.folder``.
+
+    The whole shape is checked, not a suffix: a task whose ID is ``folder`` (``...tasksets.<name>.tasks.folder``) or
+    a taskset named ``tasksets`` must not read as the folder."""
+    return (
+        len(segments) >= 5
+        and segments[-1] == "folder"
+        and segments[-3] == "tasksets"
+        and (segments[-5] == "environment_servers")
+    )
+
+
+def _is_semantic(key: "str | tuple[str, ...]") -> bool:
+    """Whether a difference at ``key`` refuses a resume. ``key`` is the path of mapping keys (so a key that contains a
+    dot, such as a versioned taskset name, stays one entry) or, for a caller that only has one, the dotted string."""
+    segments = key.split(".") if isinstance(key, str) else list(key)
     # A credential is redacted, so only its presence can differ; the key used does not change what is measured.
     if any(_is_credential_name(segment) for segment in segments):
+        return False
+    # Where a taskset's task folders sit is not what a run measures: a repository-relative or fetched target resolves
+    # under whatever checkout the run starts in. The digests under `tasks` pin the content, and they, the `paths` map
+    # and the dataset digests stay semantic, so a moved folder resumes and a changed task does not.
+    if _is_taskset_folder(segments):
         return False
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
@@ -1215,18 +1235,21 @@ def _is_semantic(key: str) -> bool:
     return not _OPERATIONAL_SETTING.search(segments[-1])
 
 
-def _differing_keys(saved: Any, current: Any, prefix: str = "") -> list[str]:
-    """Dotted keys whose values differ between two identities; a list is one value."""
+def _differing_paths(saved: Any, current: Any, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """The key paths whose values differ between two identities, one entry per mapping key; a list is one value.
+
+    A dotted string would run a key that contains a dot (a versioned taskset name) into its neighbours, so the
+    classification of a difference uses these paths and keeps the dotted form for the report."""
     if isinstance(saved, dict) and isinstance(current, dict):
-        keys = []
+        paths: list[tuple[str, ...]] = []
         for key in sorted(set(saved) | set(current), key=str):
-            dotted = f"{prefix}.{key}" if prefix else str(key)
+            path = (*prefix, str(key))
             if key not in saved or key not in current:
-                keys.append(dotted)
+                paths.append(path)
             else:
-                keys.extend(_differing_keys(saved[key], current[key], dotted))
-        return keys
-    return [] if saved == current else [prefix or "<root>"]
+                paths.extend(_differing_paths(saved[key], current[key], path))
+        return paths
+    return [] if saved == current else [prefix or ("<root>",)]
 
 
 def _configuration_drift(
@@ -1243,8 +1266,11 @@ def _configuration_drift(
     if current.config_digest not in _CONFIG_IDENTITIES or _digest(identity) != saved.config_digest:
         return None
     # An identity an earlier Gym saved may hold credentials: compare on its credential-safe form.
-    keys = _differing_keys(_credential_safe(identity), _CONFIG_IDENTITIES[current.config_digest])
-    return [key for key in keys if _is_semantic(key)], [key for key in keys if not _is_semantic(key)]
+    paths = _differing_paths(_credential_safe(identity), _CONFIG_IDENTITIES[current.config_digest])
+    return (
+        [".".join(path) for path in paths if _is_semantic(path)],
+        [".".join(path) for path in paths if not _is_semantic(path)],
+    )
 
 
 def _record_resume_drift(path: Path, saved: "RunManifest", current: "RunManifest", keys: list[str]) -> None:

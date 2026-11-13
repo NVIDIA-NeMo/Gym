@@ -197,6 +197,13 @@ def test_an_identity_that_is_not_the_digested_one_is_not_trusted(tmp_path: Path)
         ("servers.a.responses_api_agents.osworld_agent.exact_trace_transport_version", False),
         ("servers.p.responses_api_models.vllm_model.port", False),
         ("servers.p.responses_api_models.vllm_model.canary_cells", False),
+        # Where a taskset's folder sits is operational; what pins its content is not.
+        ("servers.e.environment_servers.harbor.tasksets.ds.folder", False),
+        ("servers.e.environment_servers.harbor.tasksets.ds.tasks.t1", True),
+        ("servers.e.environment_servers.harbor.tasksets.ds.paths.t1", True),
+        ("servers.e.environment_servers.harbor.tasksets.ds.dataset_digest", True),
+        ("servers.e.environment_servers.harbor.tasksets.ds.dataset_toml_digest", True),
+        ("servers.e.resources_servers.g.folder", True),
     ],
 )
 def test_the_classification_of_a_key(key: str, semantic: bool) -> None:
@@ -355,3 +362,65 @@ def test_a_null_that_is_the_setting_default_is_still_the_same_as_absent(tmp_path
 
     assert current.config_digest == json.loads(path.read_text())["config_digest"]
     assert validate_resume(path, current, materialized) is not None
+
+
+def harbor_server(taskset: str, folder: str, **changes: object) -> dict:
+    """A Harbor environment server's identity, built directly: ``merged`` splits its keys on dots, and a taskset name
+    can contain them (``ds-1.0``)."""
+    mapping = {
+        "folder": folder,
+        "tasks": {"t1": "digest-1", "t2": "digest-2", "folder": "digest-of-a-task-named-folder"},
+        "dataset_digest": "dataset-digest",
+        **changes,
+    }
+    return {"harbor_ds_environment": {"environment_servers": {"harbor": {"tasksets": {taskset: mapping}}}}}
+
+
+TASKSETS = ["ds", "ds-1.0", "ds.part.1", "tasksets"]
+
+
+@pytest.mark.parametrize("taskset", TASKSETS)
+def test_a_task_folder_in_another_checkout_resumes_and_is_recorded(tmp_path: Path, taskset: str) -> None:
+    """A repository-relative or fetched target resolves under whatever checkout an allocation starts in; the digests
+    beside the folder pin the tasks, so the same tasks at another location are the same run."""
+    path, materialized = saved_run(tmp_path, {**BASE, **harbor_server(taskset, "/tmp/gym-install-a/gym/tasks/ds")})
+    moved = {**BASE, **harbor_server(taskset, "/tmp/gym-install-b/gym/tasks/ds")}
+
+    assert validate_resume(path, current_manifest(tmp_path, moved), materialized) is not None
+    assert f"tasksets.{taskset}.folder" in resume_drift_path_for(path).read_text()
+
+
+@pytest.mark.parametrize("taskset", TASKSETS)
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"tasks": {"t1": "changed-digest", "t2": "digest-2", "folder": "digest-of-a-task-named-folder"}},
+        {"tasks": {"t1": "digest-1", "t2": "digest-2", "folder": "changed-digest"}},  # a task whose ID is `folder`
+        {"tasks": {"t1": "digest-1", "t2": "digest-2", "folder": "digest-of-a-task-named-folder", "t3": "d"}},
+        {"dataset_digest": "another-dataset"},
+        {"paths": {"t1": "nested/t1"}},  # a task found elsewhere in the dataset
+    ],
+)
+def test_a_changed_task_still_refuses_beside_a_moved_folder(tmp_path: Path, taskset: str, changes: dict) -> None:
+    path, materialized = saved_run(tmp_path, {**BASE, **harbor_server(taskset, "/tmp/gym-install-a/gym/tasks/ds")})
+    current = {**BASE, **harbor_server(taskset, "/tmp/gym-install-b/gym/tasks/ds", **changes)}
+
+    with pytest.raises(ConfigError, match="tasksets"):
+        validate_resume(path, current_manifest(tmp_path, current), materialized)
+
+
+@pytest.mark.parametrize(
+    ("key", "semantic"),
+    [
+        (("s", "environment_servers", "harbor", "tasksets", "ds", "folder"), False),
+        (("s", "environment_servers", "harbor", "tasksets", "ds-1.0", "folder"), False),
+        (("s", "environment_servers", "harbor", "tasksets", "ds.part.1", "folder"), False),
+        # A task whose ID is `folder`, a taskset named `tasksets`, and a folder elsewhere are not the mapping's folder.
+        (("s", "environment_servers", "harbor", "tasksets", "ds", "tasks", "folder"), True),
+        (("s", "environment_servers", "harbor", "tasksets", "tasksets", "tasks", "folder"), True),
+        (("s", "resources_servers", "g", "tasksets", "ds", "folder"), True),
+        (("s", "environment_servers", "harbor", "tasksets", "ds", "paths", "t1"), True),
+    ],
+)
+def test_the_folder_of_a_taskset_mapping_is_found_by_its_key_path(key: tuple[str, ...], semantic: bool) -> None:
+    assert _is_semantic(key) is semantic

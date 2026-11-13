@@ -834,14 +834,22 @@ profile results.
 
 Prepare a benchmark's data by running its `prepare.py` script and dump the result to disk.
 
+In place of `--benchmark`, a positional `TARGET` prepares a dataset in the Harbor task format for a harness, without starting a server: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/`. It does what `gym eval run TARGET` does before it starts its servers, with the same output under `results/harbor/<taskset>/`: the rows file, `run_config_<harness>.yaml` and `skipped.json`, and the line that names the run config. It fetches a `harbor:` reference and builds task images as a run would. It needs `--agent <harness>`, and refuses `harbor_oracle_agent`, whose run is `gym dataset validate`.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--agent HARNESS` | Task `TARGET` only: the harness to prepare for (a folder under `responses_api_agents/`, such as `hermes_agent`). |
+| `--sandbox PROVIDER` | Task `TARGET` only: sandbox provider for the task containers (for example `opensandbox`, `docker`). |
+| `--only-tasks PATTERNS` / `--exclude-tasks PATTERNS` | Task `TARGET` only: comma-separated task names or globs to keep or leave out. |
+| `--skip-unloadable` | Task `TARGET` only: use the loadable subset and record omitted tasks in `skipped.json`. |
+| `+harbor_output_root=DIR` | Task `TARGET` only: write the rows, run config and `skipped.json` under `DIR/<taskset>/` instead of `results/harbor/<taskset>/`. `gym eval run TARGET` takes it too. A submitted run sets it to a folder in its job directory. |
 
 ```bash
 gym eval prepare --benchmark aime24
+gym eval prepare ./my-tasks --agent opencode_agent --sandbox opensandbox
 ```
 
 ### `gym eval plan`

@@ -172,8 +172,11 @@ Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `prepare` | `{}` | Overrides forwarded to `gym eval prepare`. When non-empty, `gym eval prepare` runs in the driver before the benchmark. |
+| `prepare` | `{}` | Overrides forwarded to `gym eval prepare`. When non-empty, `gym eval prepare` runs in the driver before the benchmark. A benchmark with a `target` and an empty `prepare` runs no separate preparation: `gym eval run` prepares the target with the `run` settings. |
 | `run` | `{}` | Overrides forwarded to `gym eval run`. |
+| `target` | `null` | A Harbor task `TARGET`: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` reference. The driver passes it to `gym eval prepare` and `gym eval run` ahead of their overrides, so a task run needs no `command`. The rows and run config it prepares are kept in the benchmark's job directory (`artifacts/harbor/`), so a continuation in a fresh checkout finds the same files. Where the task folder sits does not decide whether a continuation resumes (the per-task digests do), but a `harbor:` reference is pulled again into each fresh checkout unless `NEMO_GYM_DATASETS_DIR` names a folder that outlives the allocation. Requires `agent`; cannot be combined with `command`. |
+| `agent` | `null` | The harness that runs the `target`, as `--agent` (a folder under `responses_api_agents/`, such as `opencode_agent`). |
+| `sandbox` | `null` | The sandbox provider for the `target`'s task containers, as `--sandbox` (for example `opensandbox`). |
 | `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
 | `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
 | `export` | `{}` | Exports of the finished run, by exporter name (`atif`, `mlflow`, `wandb`). Each value is that exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export. Slurm only, and not combinable with `command`. See [export](#export). |
@@ -272,6 +275,7 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
+- **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, or `target` combined with `command` is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 
 Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.
