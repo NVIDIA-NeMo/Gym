@@ -333,7 +333,7 @@ class TestServerWiring:
         assert fields["evaluation_timeout"].default == 1800
 
     def test_yaml_enables_anti_cheat_and_names_both_servers(self) -> None:
-        config = yaml.safe_load((SERVER_DIR / "configs" / "swe_internal_v1.yaml").read_text())
+        config = yaml.safe_load((SERVER_DIR / "configs" / "swe_internal_v1_legacy_agent.yaml").read_text())
         base = config["swe_internal_v1_resources_server"]["resources_servers"]["swe_internal_v1"]
         golden = config["swe_internal_v1_golden_patch_resources_server"]["resources_servers"]["swe_internal_v1"]
         assert base["apply_anti_cheating"] is True and base["is_verifying_golden_patch"] is False

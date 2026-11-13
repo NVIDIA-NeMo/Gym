@@ -226,7 +226,7 @@ async def check_swe_verifier_interruption(tmp_path: Path, module_name: str, pref
 
 def check_swe_session_config(module_name: str) -> None:
     root = Path(__file__).resolve().parents[2]
-    path = root / "resources_servers" / module_name / "configs" / f"{module_name}_single_agent_turn.yaml"
+    path = root / "resources_servers" / module_name / "configs" / f"{module_name}.yaml"
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
