@@ -292,6 +292,14 @@ async def test_extra_chat_params_forwarded():
     assert payload["top_p"] == 0.9
 
 
+@pytest.mark.asyncio
+async def test_max_output_tokens_caps_each_model_call():
+    llm = _make_llm(responses_create_params={"max_output_tokens": 32, "input": []})
+    _, mock_post = await _call(llm, _mock_response(), prompt="hello")
+
+    assert mock_post.call_args[0][0]["max_tokens"] == 32
+
+
 def test_context_limit_from_max_input_tokens():
     assert _make_llm(model_info={"max_input_tokens": 32000}).get_model_context_limit() == 32000
 

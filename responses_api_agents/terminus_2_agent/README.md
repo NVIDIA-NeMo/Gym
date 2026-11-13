@@ -103,14 +103,18 @@ Agent sessions treat the request's fields as follows:
 - Refused with 422 before any sandbox work: fields the converter cannot represent, such as `previous_response_id`,
   `conversation`, `prompt`, `max_tool_calls`, `truncation` or `background`.
 
-Both execution modes reject request-level `max_output_tokens` with HTTP 422 before binding the activation or
-starting host work; `/run` rejects it before seeding Resources. Terminus cannot enforce a shared output-token budget
-across model calls. Previously it reused this value as
-`max_tokens` on every call. Remove `responses_create_params.max_output_tokens` from task rows (or omit
-`max_output_tokens` from direct activation requests). To retain a per-call generation cap, configure
-`policy_model.responses_api_models.vllm_model.extra_body.max_tokens`, for example `8192`, on the Chat Completions
-Model Server. The agent's `model_info.max_output_tokens` still describes the model's output limit to Terminus;
-it is not a shared generation budget. Other sampling controls and model-server limits are unchanged.
+Request `max_output_tokens` depends on the execution mode:
+
+- Host path (`/v1/responses` without an agent session, and `/run`): it becomes `max_tokens` on every model call, a
+  per-call cap as before. `anyterminal_terminus_2` rows set it this way.
+- Agent sessions: refused with HTTP 422 before the activation binds or the sandbox runs. A session's request
+  describes the whole episode, and Terminus cannot enforce a budget shared across model calls. Remove
+  `responses_create_params.max_output_tokens` from session task rows. To keep a per-call cap, set
+  `policy_model.responses_api_models.vllm_model.extra_body.max_tokens`, for example `8192`, on the Chat Completions
+  Model Server.
+
+The agent's `model_info.max_output_tokens` describes the model's output limit to Terminus in both modes; it is not a
+generation budget. Other sampling controls and model-server limits are unchanged.
 
 `model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command. `reasoning_effort` and
 `max_thinking_tokens` must stay `null`: Harbor applies them only to the LiteLLM client it builds itself, which this

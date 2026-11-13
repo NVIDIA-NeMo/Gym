@@ -237,12 +237,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         return path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
 
     @staticmethod
-    def _validate_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        """Refuse an aggregate budget neither supported execution mode can enforce."""
+    def _refuse_episode_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse an agent session's max_output_tokens, which bounds the whole episode Terminus cannot enforce.
+
+        The host path keeps sending it as each model call's ``max_tokens``, which Terminal-Bench rows rely on.
+        """
         if body.max_output_tokens is not None:
             raise HTTPException(
                 422,
-                "Terminus 2 cannot enforce request max_output_tokens across model calls; "
+                "Terminus 2 cannot enforce request max_output_tokens across an agent session's model calls; "
                 "omit it and configure a per-call limit on the Model Server instead",
             )
 
@@ -250,7 +253,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, str]:
         """Apply the configured temperature and flatten the instructions and input into Terminus-2's instruction."""
-        self._validate_output_budget(body)
         body = body.model_copy(deep=True)
         if body.temperature is None:
             body.temperature = self.config.temperature
@@ -820,6 +822,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
             if state.task is None:
+                self._refuse_episode_output_budget(body)
                 prepared, instruction = self._prepare_request(body)
                 try:
                     # Terminus types keystrokes and calls no tools, so the request's tool fields stay out of its
@@ -876,7 +879,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Terminus 2 /run requires resources_server; use agent sessions instead")
-        self._validate_output_budget(body.responses_create_params)
         cookies = request.cookies
         seed_response = await self.server_client.post(
             server_name=self.config.resources_server.name,

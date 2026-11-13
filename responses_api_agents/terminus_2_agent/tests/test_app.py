@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 import yaml
-from fastapi import HTTPException
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.llms.chat import Chat
 from harbor.models.agent.context import AgentContext
@@ -274,11 +273,8 @@ class TestResponses:
             ],
         )
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
-            with pytest.raises(HTTPException, match="max_output_tokens") as refused:
-                await agent.responses(request=None, body=body.model_copy(update={"max_output_tokens": 32}))
-            assert refused.value.status_code == 422
-            agent._run_terminus.assert_not_awaited()
-            response = await agent.responses(request=None, body=body)
+            # On the host, max_output_tokens stays each model call's cap, as Terminal-Bench rows set it.
+            response = await agent.responses(request=None, body=body.model_copy(update={"max_output_tokens": 32}))
 
         assert response.model == "test-model"
         assert response.id == "chatcmpl-terminal"
@@ -289,6 +285,7 @@ class TestResponses:
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
         called_instruction = agent._run_terminus.await_args.args[1]
         assert called_instruction == "system config\n\ninput system\n\nsolve it"
+        assert agent._run_terminus.await_args.args[0].max_output_tokens == 32
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

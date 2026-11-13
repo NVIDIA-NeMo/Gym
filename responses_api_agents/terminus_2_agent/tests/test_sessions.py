@@ -1196,16 +1196,29 @@ class TestRun:
         assert refused.value.status_code == 422
         assert "resources_server" in refused.value.detail
 
-    async def test_run_with_an_output_budget_is_refused_before_seeding_resources(self) -> None:
-        agent = self._agent(resources_server=ResourcesServerRef(type="resources_servers", name="resources"))
+    async def test_run_forwards_max_output_tokens_to_the_host_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent = _agent(resources_server=ResourcesServerRef(type="resources_servers", name="resources"))
+        calls: list[tuple[str, object]] = []
+
+        class Stop(Exception):
+            pass
+
+        async def post(*, server_name: str, url_path: str, json: object, cookies: object) -> MagicMock:
+            calls.append((url_path, json))
+            if url_path != "/seed_session":
+                raise Stop
+            return MagicMock(cookies={})
+
+        agent.server_client.post = post
+        monkeypatch.setattr("responses_api_agents.terminus_2_agent.app.raise_for_status", AsyncMock())
         request = Request({"type": "http", "headers": [], "session": {}})
         body = Terminus2AgentRunRequest(responses_create_params={"input": "task", "max_output_tokens": 32})
 
-        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+        with pytest.raises(Stop):
             await agent.run(request, body)
 
-        assert refused.value.status_code == 422
-        agent.server_client.post.assert_not_awaited()
+        assert [path for path, _ in calls][0] == "/seed_session"
+        assert calls[1][1].max_output_tokens == 32
 
 
 class TestStageAndCollect:
