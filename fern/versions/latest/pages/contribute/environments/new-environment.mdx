@@ -501,6 +501,8 @@ Scores from setups of one protocol are comparable with each other, not with the 
 
 The catalog lists each setup and protocol as an entry of its own, combining the main manifest's facts with the ones the entry sets. In `gym list environments --json`, such an entry carries `setup_of` or `protocol_of`: the name of the main manifest, or of the protocol that lists the setup.
 
+In this repository, every manifest, setups and protocols included, must declare `maintainers`, `intended_use`, `capabilities`, `domains`, `requirements.gpu`, `requirements.network` and, for a benchmark, `primary_metric`. The `check-manifest-selection-fields` pre-commit hook enforces this. Write `unknown` for capabilities, domains, a requirement or a headline metric nobody knows; the hook rejects a scaffold `TODO`.
+
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 
 ### Prompt Sources
