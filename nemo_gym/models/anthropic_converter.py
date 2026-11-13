@@ -51,6 +51,7 @@ from uuid import uuid4
 # MessageCreateParams (request) is a TypedDict used purely as a hint; NeMoGymAnthropicMessage
 # (response) is the BaseModel used to validate what we emit.
 from anthropic.types.message_create_params import MessageCreateParams
+from pypdf import PdfReader
 
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -438,8 +439,8 @@ class AnthropicConverter:
         """Render an Anthropic `document` block (e.g. Claude Code reading a PDF) as text.
 
         Responses and Chat Completions inputs have no document part, so a PDF is passed as its extracted
-        text (requires the `pdf` extra) and a plain-text document as its text. Anything else becomes a
-        short note, so the tool result still reaches the model instead of failing the request.
+        text and a plain-text document as its text. Anything else becomes a short note, so the tool
+        result still reaches the model instead of failing the request.
         """
         source = block.get("source") or {}
         title = block.get("title")
@@ -447,10 +448,6 @@ class AnthropicConverter:
         if source.get("type") == "text":
             return source.get("data", "")
         if source.get("type") == "base64" and source.get("media_type") == "application/pdf":
-            try:
-                from pypdf import PdfReader
-            except ImportError:
-                return f"[{label}: PDF text extraction requires `pip install nemo-gym[pdf]`]"
             try:
                 reader = PdfReader(io.BytesIO(base64.b64decode(source["data"])))
                 pages = [page.extract_text() or "" for page in reader.pages]

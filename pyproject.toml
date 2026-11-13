@@ -103,6 +103,13 @@ dependencies = [
     # License: MIT https://github.com/anthropics/anthropic-sdk-python/blob/v0.109.2/LICENSE
     "anthropic<=0.109.2",
 
+    # pypdf: pure-Python PDF text extraction. The Anthropic Messages ingress in
+    # nemo_gym/models/anthropic_converter.py passes a PDF `document` block (e.g. Claude Code reading a PDF)
+    # to the model as its extracted text, so every install sees the same text.
+    # Updated Fri Nov 13, 2026 with pypdf>=5.1.0
+    # License: BSD 3-Clause https://github.com/py-pdf/pypdf/blob/main/LICENSE
+    "pypdf>=5.1.0",
+
     # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
     # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE
@@ -258,17 +265,7 @@ dependencies = [
 
 [project.optional-dependencies]
 all = [
-    "nemo-gym[dev,mlflow,pdf,ray,sandbox,wandb]",
-]
-
-# PDF: optional. The Anthropic Messages ingress (nemo_gym/models/anthropic_converter.py) passes a PDF `document`
-# block (e.g. Claude Code reading a PDF) to the model as its extracted text. Without this extra the block
-# becomes a short note instead.
-pdf = [
-    # pypdf: pure-Python PDF text extraction.
-    # Updated Thu Nov 12, 2026 with pypdf>=5.1.0
-    # License: BSD 3-Clause https://github.com/py-pdf/pypdf/blob/main/LICENSE
-    "pypdf>=5.1.0",
+    "nemo-gym[dev,mlflow,ray,sandbox,wandb]",
 ]
 
 # Ray: optional. Install it where `gym` runs when a configured server declares `ray_enabled = True`; those

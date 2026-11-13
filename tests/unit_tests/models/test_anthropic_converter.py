@@ -326,7 +326,6 @@ class TestAnthropicRequestToResponses:
         }
 
     def test_tool_result_pdf_document_becomes_text(self) -> None:
-        pytest.importorskip("pypdf")
         block = {
             "type": "document",
             "source": {
@@ -348,7 +347,6 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].output == "plain"
 
     def test_tool_result_unreadable_pdf_document_becomes_note(self) -> None:
-        pytest.importorskip("pypdf")
         block = {
             "type": "document",
             "title": "a.pdf",
