@@ -12,7 +12,6 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
@@ -995,6 +994,13 @@ def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: P
         validate_environment(manifest_path, validate_datasets=False)
 
 
+@pytest.fixture(autouse=True)
+def _link_targets_resolve_only_in_test_folders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link target is looked up in the linking manifest's own root and then in the search roots. Leave the search
+    roots out, so a manifest in the Gym checkout can never satisfy or change a test's link."""
+    monkeypatch.setattr("nemo_gym.environment.validation.component_search_roots", lambda: [])
+
+
 def _linked_manifest(tmp_path: Path, *, name: str = "demo/variant", **changes: object) -> Path:
     """A second benchmark manifest beside the asset's, reusing its config and declaring a link."""
     main_path = tmp_path / "benchmarks/demo/manifest.yaml"
@@ -1177,7 +1183,7 @@ def test_a_setup_in_another_root_finds_a_benchmark_by_name(tmp_path: Path, monke
     shutil.copytree(core / "benchmarks/demo", other_repo / "benchmarks/demo_setup")
     setup_path = other_repo / "benchmarks/demo_setup/manifest.yaml"
     _replace_manifest(setup_path, name="demo_setup", setup_of="demo")
-    monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(core))
+    monkeypatch.setattr("nemo_gym.environment.validation.component_search_roots", lambda: [core])
 
     assert validate_environment(setup_path, validate_datasets=False).name == "demo_setup"
 
