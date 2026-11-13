@@ -16,6 +16,7 @@ reward:
   higher_is_better: true
 determinism: unknown
 config_path: config.yaml
+resources_server: null
 agent_server: harbor_agent_general
 datasets:
 - name: genebench_pro
@@ -25,4 +26,5 @@ datasets:
   num_repeats: 4
 model_server: policy_model
 canonical_split: benchmark
-lifecycle: experimental
+prompt_source: agent
+lifecycle: active
