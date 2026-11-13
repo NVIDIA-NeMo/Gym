@@ -124,7 +124,9 @@ def fake_sdk(tmp_path: Path, monkeypatch: MonkeyPatch) -> dict[str, Any]:
     log = tmp_path / "sdk_call.json"
     requested: list[tuple[str, ...]] = []
 
-    def fake_environment(venv_root: Path, name: str, requirements: tuple[str, ...]) -> Path:
+    def fake_environment(
+        venv_root: Path, name: str, requirements: tuple[str, ...], uv_settings: dict[str, str] | None = None
+    ) -> Path:
         requested.append(requirements)
         return Path(sys.executable)
 
@@ -240,6 +242,18 @@ class TestConfig:
 
         assert _exporter(artifacts, tmp_path).required_packages() == ("evalrdl>=0.0.241",)
         assert _exporter(artifacts, tmp_path, requirement="evalrdl==1.2.3").required_packages() == ("evalrdl==1.2.3",)
+
+    def test_uv_settings_reach_the_environment_build_from_the_command_line(self, tmp_path: Path) -> None:
+        overrides = OmegaConf.from_dotlist(
+            ["rollouts_jsonl_fpath=r.jsonl", "uv_settings.UV_INDEX=https://i.example/simple"]
+        )
+        exporter = EvalRDLExporter.from_global_config(overrides)
+
+        assert EvalRDLExportConfig(rollouts_jsonl_fpath=Path("r.jsonl")).uv_settings == {}
+        assert exporter.config.uv_settings == {"UV_INDEX": "https://i.example/simple"}
+        assert flatten_export_args({"uv_settings": {"UV_INDEX": "https://i.example/simple"}}) == [
+            "+uv_settings.UV_INDEX=https://i.example/simple"
+        ]
 
 
 class TestRunDirectory:

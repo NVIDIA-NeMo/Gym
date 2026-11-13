@@ -221,7 +221,9 @@ def fake_acme_sdk(tmp_path: Path, monkeypatch: MonkeyPatch) -> dict[str, Any]:
     log = tmp_path / "acme_call.txt"
     requested: list[tuple[str, ...]] = []
 
-    def fake_environment(venv_root: Path, name: str, requirements: tuple[str, ...]) -> Path:
+    def fake_environment(
+        venv_root: Path, name: str, requirements: tuple[str, ...], uv_settings: dict[str, str] | None = None
+    ) -> Path:
         requested.append(requirements)
         return Path(sys.executable)
 

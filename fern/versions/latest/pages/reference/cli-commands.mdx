@@ -1154,7 +1154,8 @@ rollouts file, because EvalRDL would read both as one run). The run still needs 
 `<stem>_resolved_config.yaml` there, like the `mlflow` and `wandb` exporters. The `evalrdl` SDK is installed into the
 exporter's own virtual environment, so it never enters Gym's environment. The SDK is served by the EvalRDL
 service's own package index, `<service URL>/v1/client/simple/`; `evalrdl` is not on PyPI. Configure that index through
-uv's own index settings (for example `UV_EXTRA_INDEX_URL`) when you run the command, and do not point uv at an index that
+uv's own index settings (for example `UV_EXTRA_INDEX_URL`), either in the environment of the command or with
+`+uv_settings`, which applies only to building the SDK's environment. Do not point uv at an index that
 could carry another package named `evalrdl`, because the SDK runs with your token in its environment. The SDK reads the
 token from `$EVALRDL_TOKEN`, `$GITLAB_TOKEN` or `$GITLAB_PRIVATE_TOKEN`, then from `glab`, which cluster nodes usually
 lack, so set one of the variables there. The environment is built once and the SDK is not upgraded afterwards; when the
@@ -1172,6 +1173,7 @@ service stops accepting an old client, the export fails and names the environmen
 | `+timeout=SECONDS` | How long to wait for the verdict. Defaults to `1800`. |
 | `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
 | `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl>=0.0.241`. |
+| `+uv_settings.UV_NAME=VALUE` | A uv setting, by environment variable name, for building the SDK's environment only, such as `+uv_settings.UV_EXTRA_INDEX_URL=URL`. Names must start with `UV_`. Do not put credentials here; in a submit config these are saved in the job's records. |
 
 The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. With
 `+wait=false` the run counts as `succeeded` once EvalRDL has stored it, and the upload token is in the result. When

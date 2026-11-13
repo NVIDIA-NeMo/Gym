@@ -152,11 +152,17 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from nemo_gym.artifacts import ExportPreparationError, IsolatedExporter, RunArtifacts, unexportable_reason
+from nemo_gym.artifacts import (
+    ExportPreparationError,
+    IsolatedExportConfig,
+    IsolatedExporter,
+    RunArtifacts,
+    unexportable_reason,
+)
 from nemo_gym.config import RunExportConfig
 
 
-class AcmeExportConfig(RunExportConfig):
+class AcmeExportConfig(IsolatedExportConfig):
     """Settings of `gym eval export acme`."""
 
     project: str = Field(description="Acme project to upload to.")
@@ -171,9 +177,6 @@ class AcmeExporter(IsolatedExporter):
     worker_fpath: ClassVar[Path] = Path(__file__).with_name("acme_worker.py")
 
     config: AcmeExportConfig
-
-    def required_packages(self) -> tuple[str, ...]:
-        return (self.config.requirement,)
 
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
         try:
@@ -208,7 +211,7 @@ def run(payload: dict) -> dict:
 How it fits together:
 
 - **`build_payload(artifacts, workdir)`** runs in the main process. It returns a JSON-serializable dict for the worker, and anything it stages goes under `workdir`, which is removed afterwards. Raise `ExportPreparationError` when the run cannot be exported, and catch the `OSError` of a failed copy to do so: an `OSError` that escapes `build_payload` is not turned into a result for you. It becomes a `failed` result, before any environment is built.
-- **The environment** is built on first use from `required_packages()` (or a `requirements` class attribute), under `<uv_venv_dir>/exporters/<name>/`, and reused afterwards. A changed requirement list gets a fresh one. Where the SDK is installed from is the user's uv configuration, so do not hard-code a package index.
+- **The environment** is built on first use from the settings model's `requirement` (override `required_packages()` for several packages), under `<uv_venv_dir>/exporters/<name>/`, and reused afterwards. A changed requirement list gets a fresh one. Where the SDK is installed from is the user's uv configuration, so do not hard-code a package index. The settings model extends `IsolatedExportConfig`, which gives users `requirement` (give it your SDK as the default) and `uv_settings` (uv environment variables, such as `UV_INDEX`, applied only to building this environment).
 - **The worker** defines `run(payload) -> dict` and must not import `nemo_gym`: its environment does not have it. It returns `state` (`succeeded` by default, `skipped` or `failed`), and optionally `error`, `exit_code` and `detail`. An exception it raises becomes a `failed` result.
 - **The payload** reaches the worker as JSON on stdin and the result comes back in a file, so credentials stay out of the process list and anything the SDK prints cannot corrupt the result.
 - **The launch** makes the worker's environment the exporter's: the environment's `bin` leads `PATH`, so a bare `python` or an SDK command is the exporter's, and relative paths are made absolute before the worker changes into its scratch directory. The worker's own directory is kept off `sys.path`, so a module that sits beside it cannot shadow an SDK of the same name. A worker that reports a result and then exits non-zero fails, because an SDK that errors while flushing at exit has not delivered. A launch that cannot start is a `failed` result too.

@@ -15,6 +15,7 @@
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
+from pydantic import Field, field_validator
 
 from nemo_gym.artifacts.exporters.base import Exporter, ExportResult, ExportState
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
@@ -33,6 +35,35 @@ from nemo_gym.utils.venv_setup import setup_environment
 
 
 WORKER_HARNESS_FPATH = Path(__file__).with_name("_isolated_worker.py")
+
+
+_UV_SETTING_NAME = re.compile(r"UV_[A-Za-z0-9_]+")
+
+
+class IsolatedExportConfig(RunExportConfig):
+    """Settings every isolated exporter takes, on top of the shared ones."""
+
+    requirement: Optional[str] = Field(
+        default=None,
+        description="pip requirement installed into the exporter's virtual environment, such as a pinned SDK version. "
+        "Unset installs nothing.",
+    )
+    uv_settings: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "uv settings, by environment variable name (for example `UV_INDEX`), applied only to the commands that "
+            "build the exporter's environment. They are written to the submit config's saved records, so they must "
+            "not hold credentials."
+        ),
+    )
+
+    @field_validator("uv_settings")
+    @classmethod
+    def uv_names_only(cls, value: dict[str, str]) -> dict[str, str]:
+        bad = sorted(name for name in value if not _UV_SETTING_NAME.fullmatch(name))
+        if bad:
+            raise ValueError(f"uv_settings names must be uv environment variables starting with `UV_`, got {bad}")
+        return value
 
 
 class ExporterEnvironmentError(RuntimeError):
@@ -53,16 +84,20 @@ def exporter_venv_path(venv_root: Path, name: str, requirements: tuple[str, ...]
     return Path(venv_root) / "exporters" / name / digest / ".venv"
 
 
-def ensure_exporter_environment(venv_root: Path, name: str, requirements: tuple[str, ...]) -> Path:
+def ensure_exporter_environment(
+    venv_root: Path, name: str, requirements: tuple[str, ...], uv_settings: Optional[dict[str, str]] = None
+) -> Path:
     """Build the exporter's virtual environment if it is not ready, and return its Python.
 
-    Concurrent exports share one build: `setup_environment` serializes installers with a file lock and skips a
-    ready environment.
+    `uv_settings` (uv environment variables) apply to the `uv` commands only. Concurrent exports share one build:
+    `setup_environment` serializes installers with a file lock and skips a ready environment.
     """
     venv = exporter_venv_path(venv_root, name, requirements)
-    command = f"uv venv --allow-existing --python {shlex.quote(sys.executable)} {shlex.quote(str(venv))}"
+    assignments = "".join(f"{key}={shlex.quote(value)} " for key, value in (uv_settings or {}).items())
+    uv = f"env {assignments}uv" if assignments else "uv"
+    command = f"{uv} venv --allow-existing --python {shlex.quote(sys.executable)} {shlex.quote(str(venv))}"
     if requirements:
-        command += f" && uv pip install --python {shlex.quote(str(venv / 'bin/python'))} " + " ".join(
+        command += f" && {uv} pip install --python {shlex.quote(str(venv / 'bin/python'))} " + " ".join(
             shlex.quote(requirement) for requirement in requirements
         )
     try:
@@ -87,13 +122,13 @@ class IsolatedExporter(Exporter):
     process list. The worker file defines `run(payload) -> dict` and must not import `nemo_gym`.
     """
 
-    # pip requirement specifiers installed into the exporter's environment; override `required_packages` to
-    # take them from the config instead.
-    requirements: ClassVar[tuple[str, ...]] = ()
+    config_model: ClassVar[type[IsolatedExportConfig]]
     # The worker file; see `_isolated_worker.py` for its contract.
     worker_fpath: ClassVar[Path]
 
-    def __init__(self, config: RunExportConfig, *, venv_root: Path) -> None:
+    config: IsolatedExportConfig
+
+    def __init__(self, config: IsolatedExportConfig, *, venv_root: Path) -> None:
         super().__init__(config)
         self.venv_root = Path(venv_root).resolve()
 
@@ -103,7 +138,8 @@ class IsolatedExporter(Exporter):
         return cls(config, venv_root=Path(global_config_dict.get(UV_VENV_DIR_KEY_NAME) or WORKING_DIR))
 
     def required_packages(self) -> tuple[str, ...]:
-        return self.requirements
+        """The pip requirements installed into the exporter's environment; override for more than one."""
+        return (self.config.requirement,) if self.config.requirement else ()
 
     def worker_timeout_s(self, payload: dict[str, Any]) -> Optional[float]:
         """Seconds the worker may run before it is killed and the export fails; None for no limit.
@@ -125,7 +161,9 @@ class IsolatedExporter(Exporter):
             workdir = Path(workdir_name)
             try:
                 payload = self.build_payload(artifacts, workdir)
-                python = ensure_exporter_environment(self.venv_root, self.name, self.required_packages())
+                python = ensure_exporter_environment(
+                    self.venv_root, self.name, self.required_packages(), self.config.uv_settings
+                )
             except (ExportPreparationError, ExporterEnvironmentError) as exc:
                 return ExportResult.failed(str(exc))
             return self._run_worker(python, payload, workdir)
