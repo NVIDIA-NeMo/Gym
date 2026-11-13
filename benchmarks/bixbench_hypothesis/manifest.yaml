@@ -27,4 +27,4 @@ datasets:
 model_server: policy_model
 canonical_split: benchmark
 prompt_source: prepared
-lifecycle: experimental
+lifecycle: active
