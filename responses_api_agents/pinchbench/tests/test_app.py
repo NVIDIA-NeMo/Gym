@@ -260,6 +260,11 @@ def _assistant_usage_event(usage: dict) -> dict:
         # OpenClaw writes cacheRead=0 when the backend reported no cache details.
         ([{"input": 11, "output": 5, "cacheRead": 2}, {"input": 7, "output": 3, "cacheRead": 0}], None),
         ([{"input": 11, "output": 5, "cacheRead": 2}, {"input_tokens": 7, "output_tokens": 3}], None),
+        # An unmeasured cacheRead does not hide a measured nested detail.
+        ([{"input": 10, "output": 2, "cacheRead": 0, "input_tokens_details": {"cached_tokens": 5}}], 5),
+        ([{"input": 10, "output": 2, "cacheRead": None, "input_tokens_details": {"cached_tokens": 5}}], 5),
+        # A call reporting both counts its cache reads once.
+        ([{"input": 10, "output": 2, "cacheRead": 5, "input_tokens_details": {"cached_tokens": 5}}], 5),
         ([], None),
     ],
 )
@@ -267,6 +272,29 @@ def test_usage_from_transcript_reports_cache_reads_only_when_every_call_measured
     usage = PinchBenchAgent._usage_from_transcript([_assistant_usage_event(u) for u in usages])
 
     assert usage.input_tokens_details.cached_tokens == expected_cached
+
+
+@pytest.mark.parametrize("missing_usage", [{}, {"usage": None}, {"usage": "invalid"}])
+@pytest.mark.parametrize("missing_first", [True, False])
+def test_an_assistant_call_without_usage_makes_cache_reads_unknown(missing_usage, missing_first):
+    measured = _assistant_usage_event({"input": 10, "output": 2, "cacheRead": 5})
+    unmeasured = {"type": "message", "message": {"role": "assistant", "content": [], **missing_usage}}
+    events = [unmeasured, measured] if missing_first else [measured, unmeasured]
+
+    usage = PinchBenchAgent._usage_from_transcript(events)
+
+    assert usage.input_tokens == 10
+    assert usage.input_tokens_details.cached_tokens is None
+
+
+def test_a_non_assistant_message_without_usage_keeps_measured_cache_reads():
+    events = [
+        {"type": "message", "message": {"role": "user", "content": "Find AAPL."}},
+        _assistant_usage_event({"input": 10, "output": 2, "cacheRead": 5}),
+        {"type": "message", "message": {"role": "toolResult", "content": "ok"}},
+    ]
+
+    assert PinchBenchAgent._usage_from_transcript(events).input_tokens_details.cached_tokens == 5
 
 
 def test_collect_transcript_archives(tmp_path):

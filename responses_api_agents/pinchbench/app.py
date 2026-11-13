@@ -593,6 +593,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 continue
             usage = message.get("usage")
             if not isinstance(usage, dict):
+                # An assistant call without usage has no measured cache count either.
+                cache_measured = False
                 continue
             input_tokens += as_int(usage.get("input") or usage.get("input_tokens") or usage.get("prompt_tokens"))
             output_tokens += as_int(
@@ -604,11 +606,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             output_details = usage.get("output_tokens_details")
             if not isinstance(output_details, dict):
                 output_details = {}
-            if "cacheRead" in usage:
-                # OpenClaw's provider layer writes cacheRead=0 when the backend reported no cache details,
-                # so only a positive count is a measurement.
-                cache_read = usage["cacheRead"]
-                call_cached = cache_read if type(cache_read) is int and cache_read > 0 else None
+            # OpenClaw's provider layer writes cacheRead=0 when the backend reported no cache details, so only a
+            # positive cacheRead is a measurement. It takes precedence over the nested detail, which a call reporting
+            # both carries the same count in; otherwise the nested detail, a measured zero included, counts.
+            cache_read = usage.get("cacheRead")
+            if type(cache_read) is int and cache_read > 0:
+                call_cached = cache_read
             else:
                 cache_read = input_details.get("cached_tokens")
                 call_cached = cache_read if type(cache_read) is int and cache_read >= 0 else None
