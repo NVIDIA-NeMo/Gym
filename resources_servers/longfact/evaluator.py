@@ -87,6 +87,11 @@ class JsonEvaluator:
     ) -> SchemaT:
         params = self._create_params.model_copy(deep=True)
         params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        # Hosted overlays clear inherited sampling with null; omit those fields
+        # from the request so reasoning judges use their provider defaults.
+        for field in ("temperature", "top_p"):
+            if getattr(params, field) is None:
+                params.model_fields_set.discard(field)
         if constrain_json_schema:
             # Local vLLM supports guided JSON decoding; hosted judges can leave it disabled.
             params.text = {
@@ -235,24 +240,34 @@ class JsonEvaluator:
         ambiguous_latex_commands = {
             "begin",
             "beta",
+            "bf",
             "bar",
             "boxed",
             "binom",
+            "bullet",
+            "forall",
             "frac",
             "nu",
             "nabla",
+            "ne",
+            "neg",
             "neq",
             "not",
+            "notin",
             "rightarrow",
             "rho",
             "right",
             "rangle",
+            "rm",
             "theta",
             "tau",
+            "tan",
             "text",
+            "textbf",
             "times",
             "tfrac",
             "tilde",
+            "to",
             "top",
         }
 

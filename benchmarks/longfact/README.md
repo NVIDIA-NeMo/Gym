@@ -110,7 +110,7 @@ then select a retrieval backend with `LONGFACT_SEARCH_BACKEND`.
 
 The benchmark config uses a vLLM-served Qwen judge
 (`benchmarks/longfact/evaluator_local_vllm.yaml`). Its default temperature is
-`0.1`, matching [pinned SAFE's fact-checking temperature](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/eval/safe/config.py#L33-L35),
+`0.1`, matching [pinned SAFE's fact-checking temperature](https://github.com/google-deepmind/long-form-factuality/blob/9d27158d198ced0a9d8271a80147cae580614601/eval/safe/config.py#L38),
 and it applies no presence penalty. For an OpenAI-compatible
 endpoint instead, add `'+config_paths=[benchmarks/longfact/evaluator_openai.yaml]'`.
 Both read `LONGFACT_EVALUATOR_BASE_URL`, `LONGFACT_EVALUATOR_API_KEY` and

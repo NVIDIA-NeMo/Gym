@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/longfact/configs/longfact_single_agent_turn.yaml
+  - resources_servers/longfact/configs/longfact.yaml
   - benchmarks/longfact/evaluator_local_vllm.yaml
 
 # A judge or search failure fails one rollout (see the server README). Record it in the

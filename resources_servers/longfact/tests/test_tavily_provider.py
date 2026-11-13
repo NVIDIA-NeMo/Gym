@@ -169,7 +169,7 @@ async def test_provider_operation_deadline_cancels_the_search(tmp_path):
     provider = _provider(tmp_path, client, cache_mode="live", timeout_seconds=0.01, search_max_attempts=1)
 
     with pytest.raises(TavilyProviderError, match="failed after 1 attempts") as failure:
-        await provider.search("blocked operation")
+        await asyncio.wait_for(provider.search("blocked operation"), timeout=5)
 
     assert isinstance(failure.value.__cause__, TimeoutError)
     assert client.cancelled

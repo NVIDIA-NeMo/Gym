@@ -60,7 +60,27 @@ def test_free_form_json_parser_repairs_invalid_latex_escape():
     assert parsed.search_query == r"pressure \alpha relation"
 
 
-@pytest.mark.parametrize("command", [r"\frac{1}{2}", r"\upsilon", r"\underline{x}", r"\nu", r"\theta", r"\beta"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"\frac{1}{2}",
+        r"\upsilon",
+        r"\underline{x}",
+        r"\nu",
+        r"\theta",
+        r"\beta",
+        r"\to",
+        r"\textbf{x}",
+        r"\tan",
+        r"\neg",
+        r"\ne",
+        r"\notin",
+        r"\rm",
+        r"\forall",
+        r"\bf",
+        r"\bullet",
+    ],
+)
 def test_free_form_json_parser_preserves_latex_control_words(command):
     parsed = JsonEvaluator._parse_json(
         SearchDecision,
@@ -162,10 +182,12 @@ def test_free_form_json_parser_defaults_missing_continue_searching_to_true():
 
 
 class _CreateParams(NeMoGymResponseCreateParamsNonStreaming):
-    def __init__(self):
+    def __init__(self, *, temperature=None, top_p=None):
         super().__init__(
             input=[],
             text={"format": {"type": "json_schema", "name": "inherited_constraint", "schema": {}}},
+            temperature=temperature,
+            top_p=top_p,
         )
 
 
@@ -219,11 +241,11 @@ class _CapturingClient:
         return _Response(response)
 
 
-def _evaluator(client, *, attempts=1, identity=None):
+def _evaluator(client, *, attempts=1, identity=None, temperature=None, top_p=None):
     return JsonEvaluator(
         server_client=client,
         model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
+        create_params=_CreateParams(temperature=temperature, top_p=top_p),
         max_concurrency=1,
         max_attempts=attempts,
         timeout_seconds=1,
@@ -231,10 +253,15 @@ def _evaluator(client, *, attempts=1, identity=None):
     )
 
 
-def test_json_transport_preserves_prompt_and_omits_disabled_guided_decoding():
+@pytest.mark.parametrize(("temperature", "top_p"), [(None, None), (0.1, 0.8), (0.7, 0.8)])
+def test_json_transport_preserves_prompt_and_omits_disabled_guided_decoding(temperature, top_p):
     client = _CapturingClient()
 
-    parsed = asyncio.run(_evaluator(client).generate_json(SearchDecision, "Exact LongFact judge prompt"))
+    parsed = asyncio.run(
+        _evaluator(client, temperature=temperature, top_p=top_p).generate_json(
+            SearchDecision, "Exact LongFact judge prompt"
+        )
+    )
 
     params = client.requests[0]["json"]
     assert parsed.reasoning == "Enough evidence"
@@ -245,6 +272,12 @@ def test_json_transport_preserves_prompt_and_omits_disabled_guided_decoding():
     assert params.text is None
     assert "text" not in client.wire_requests[0]
     assert "reasoning" not in client.wire_requests[0]
+    if temperature is None:
+        assert "temperature" not in client.wire_requests[0]
+        assert "top_p" not in client.wire_requests[0]
+    else:
+        assert client.wire_requests[0]["temperature"] == temperature
+        assert client.wire_requests[0]["top_p"] == top_p
     assert client.requests[0]["_max_num_tries"] == 1
     assert client.requests[0]["timeout"] == 1
 

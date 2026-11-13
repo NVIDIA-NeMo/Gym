@@ -304,7 +304,8 @@ def test_search_traces_reference_one_unclipped_evidence_list(monkeypatch):
 
 
 @pytest.mark.parametrize("backend", ["tantivy", "tavily", "milvus"])
-def test_safe_variant_records_scoring_settings_and_nonsecret_corpus_identity(backend):
+@pytest.mark.parametrize("temperature", [0.1, 0.7])
+def test_safe_variant_records_scoring_settings_and_nonsecret_corpus_identity(backend, temperature):
     from resources_servers.longfact.verifier_fixture import _server_factory
 
     server = _server_factory()
@@ -314,7 +315,7 @@ def test_safe_variant_records_scoring_settings_and_nonsecret_corpus_identity(bac
     server.config.max_search_results = 4
     server.config.tavily_search_depth = "basic"
     server.config.evaluator_model_identity = "pinned-judge-snapshot"
-    server.config.evaluator_responses_create_params.temperature = 0.1
+    server.config.evaluator_responses_create_params.temperature = temperature
     server.config.tantivy_index_dir = "/corpus/index-v3"
     server.config.tantivy_corpus_db_path = "/corpus/snapshot-v3.db"
     # Dummy URI credentials verify that provenance strips userinfo, query and fragment.
@@ -334,7 +335,7 @@ def test_safe_variant_records_scoring_settings_and_nonsecret_corpus_identity(bac
     assert variant["tavily_search_depth"] == "basic"
     assert variant["evaluator_model_identity"] == "pinned-judge-snapshot"
     assert variant["evaluator_model_server"] == {"type": "responses_api_models", "name": "offline_judge"}
-    assert variant["evaluator_sampling"]["temperature"] == 0.1
+    assert variant["evaluator_sampling"]["temperature"] == temperature
     corpus = variant["retrieval_corpus"]
     if backend == "tantivy":
         assert corpus["index_dir"] == "/corpus/index-v3"

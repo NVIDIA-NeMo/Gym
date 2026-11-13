@@ -22,12 +22,16 @@ from nemo_gym.config.config_types import BenchmarkDatasetConfig, DatasetConfig
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.data.task_materialization import materialize_task
+from nemo_gym.environment.assets import asset_config_path
 
 
 @pytest.mark.parametrize("hosted_card", [False, True])
 @pytest.mark.parametrize("benchmark", [False, True])
 @pytest.mark.parametrize("milvus", [False, True])
-def test_published_configs_resolve_example_data_and_judge(monkeypatch, hosted_card, benchmark, milvus):
+@pytest.mark.parametrize("judge_temperature", [0.1, 0.7])
+def test_published_configs_resolve_example_data_and_judge(
+    monkeypatch, hosted_card, benchmark, milvus, judge_temperature
+):
     root = Path(__file__).resolve().parents[3]
     for key in tuple(os.environ):
         if key.startswith("LONGFACT_"):
@@ -37,15 +41,12 @@ def test_published_configs_resolve_example_data_and_judge(monkeypatch, hosted_ca
         "LONGFACT_EVALUATOR_API_KEY": "offline-placeholder",
         "LONGFACT_EVALUATOR_MODEL": "offline-o3",
         "LONGFACT_EVALUATOR_RESPONSE_MODEL": "offline-o3",
+        "LONGFACT_QWEN_JUDGE_TEMPERATURE": str(judge_temperature),
         "LONGFACT_SEARCH_BACKEND": "tavily",
         "TAVILY_API_KEY": "offline-placeholder",
     }.items():
         monkeypatch.setenv(key, value)
-    selected = (
-        "benchmarks/longfact/config.yaml"
-        if benchmark
-        else "resources_servers/longfact/configs/longfact_single_agent_turn.yaml"
-    )
+    selected = "benchmarks/longfact/config.yaml" if benchmark else asset_config_path("resources-server", "longfact")
     config_paths = [str(root / selected), str(root / "benchmarks/longfact/evaluator_local_vllm.yaml")]
     if hosted_card:
         config_paths.extend(
@@ -97,6 +98,8 @@ def test_published_configs_resolve_example_data_and_judge(monkeypatch, hosted_ca
         assert resources["evaluator_model_server"]["name"] == "longfact_openai_evaluator_model"
         assert resources["fact_check_mode"] == "gpt5_card_batch"
         assert resources["claim_extraction_prompt"] == "claim_listing_v1"
+        assert resources["evaluator_responses_create_params"]["temperature"] is None
+        assert resources["evaluator_responses_create_params"]["top_p"] is None
         assert (
             resolved["longfact_openai_evaluator_model"]["responses_api_models"]["openai_model"]["openai_model"]
             == "offline-o3"
@@ -105,7 +108,9 @@ def test_published_configs_resolve_example_data_and_judge(monkeypatch, hosted_ca
         assert resources["evaluator_model_server"]["name"] == "longfact_evaluator_model"
         assert resources["claim_extraction_prompt"] == "safe_v1"
         judge = resolved["longfact_evaluator_model"]["responses_api_models"]["vllm_model"]
-        assert judge["sampling_overrides"]["temperature"] == 0.1
+        assert resources["evaluator_responses_create_params"]["temperature"] == judge_temperature
+        assert resources["evaluator_responses_create_params"]["top_p"] == 0.8
+        assert not judge.get("sampling_overrides")
         assert "presence_penalty" not in judge["extra_body"]
     if milvus:
         assert resources["search_backend"] == "milvus"

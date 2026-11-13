@@ -27,3 +27,6 @@ longfact:
       evaluator_responses_create_params:
         input: []
         max_output_tokens: ${oc.env:LONGFACT_EVALUATOR_MAX_OUTPUT_TOKENS,8192}
+        # Clear inherited local-Qwen sampling for hosted reasoning judges.
+        temperature: null
+        top_p: null
