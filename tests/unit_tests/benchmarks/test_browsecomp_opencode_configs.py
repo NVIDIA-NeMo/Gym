@@ -459,8 +459,11 @@ def test_the_relay_preset_keeps_its_explicit_legacy_agent_relay() -> None:
 
 
 def test_the_relay_preset_resolves_no_episode_setting() -> None:
-    """gym eval run refuses to resume across a semantic setting, so a relay run saved before episode sessions existed
-    resumes only if the relay preset names none of them, not even as null."""
+    """gym eval run counts a null as a value and refuses to resume across a changed semantic setting, or across any
+    change to a run that saved only its configuration's digest. So a relay run saved before episode sessions existed
+    resumes with no drift only if the relay preset names none of the episode settings, not even as null. Named as
+    null, an operational one (plugin_log_path, episode_export_dir, episode_export_copy_dir) would still resume a run
+    that saved its configuration, with a drift warning."""
     _, relay = resolve(RELAY)
 
     assert {
