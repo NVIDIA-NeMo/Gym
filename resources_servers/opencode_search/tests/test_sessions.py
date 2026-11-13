@@ -1975,14 +1975,7 @@ async def test_an_agent_run_stop_finishes_when_its_release_is_cancelled(workdir,
     shielded from that: it finishes, and the server lets the sandbox go."""
     server = _server(None)
     sandbox = await _seed_agent_run(server)
-    finished: list[AsyncSandbox] = []
-
-    async def stop(self: AsyncSandbox) -> None:
-        # An await, as a provider's request has: a cancellation delivered here cuts short a stop that is not shielded.
-        await anyio.sleep(0)
-        finished.append(self)
-
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    finished = _record_finished_stops(monkeypatch)
 
     with anyio.CancelScope() as scope:
         scope.cancel()
