@@ -1,0 +1,68 @@
+---
+title: "Segment Rewards"
+description: "Reward parts of a rollout separately, so each segment of the call forest trains on its own reward."
+position: 4
+---
+
+<Info>
+
+**Goal**: Return rewards for parts of a rollout next to its `reward`, for training that keeps every captured model call.
+
+</Info>
+
+---
+
+## Segments of the Call Forest
+
+With token capture, every model call an agent makes is recorded with the call it continued. Together the calls form a forest. A new root starts wherever the context breaks: after a compaction, after the harness rewrites its history, and at every subagent. A trainer that keeps every call trains each root-to-leaf path, a segment, as its own sequence:
+
+```
+main:   c1 -> c2 -> c3   | compaction |   c4 -> c5 -> c6
+sub A:              a1 -> a2   (launched by a tool call in c2)
+
+segments: [c1 c2 c3]   [c4 c5 c6]   [a1 a2]
+```
+
+By default every segment trains on the rollout's `reward`. Return `segment_rewards` when your verifier can tell which part of the rollout did well, for example the steps before a compaction, the call that made a bad tool call, or a subagent's hand-back.
+
+`segment_rewards` is independent of `reward_components`. Components split the score by objective, while segment rewards split it by where in the rollout the work happened.
+
+## The Contract
+
+`BaseVerifyResponse.segment_rewards` is a list of `SegmentReward` entries. Each entry has a finite `reward` and exactly one target:
+
+| Target | The reward goes to |
+|---|---|
+| `output_index` | the model call that produced `response.output[output_index]`, an item the model wrote (a message, a tool call or reasoning) |
+| `launched_by` | every model call of the subagent launched by the tool call with this `call_id`, and of subagents it launched that have no entry of their own |
+
+```python
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, SegmentReward
+
+
+async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    output = body.response.output
+    segment_rewards = [
+        # The call that ran a destructive command trains on 0.
+        SegmentReward(output_index=index, reward=0.0)
+        for index, item in enumerate(output)
+        if item.type == "function_call" and "rm -rf" in item.arguments
+    ]
+    segment_rewards += [
+        # Each subagent trains on the quality of the result it handed back.
+        SegmentReward(launched_by=item.call_id, reward=score_hand_back(body, item.call_id))
+        for item in output
+        if item.type == "function_call" and item.name == "Agent"
+    ]
+    return BaseVerifyResponse(**body.model_dump(), reward=score_answer(body), segment_rewards=segment_rewards)
+```
+
+- `reward` stays the rollout's score. Evaluation metrics and single-reward trainers read only `reward`.
+- A segment trains on the entry of a call it trains, and on `reward` when none of its calls has one.
+- `output_index` needs the capture to record what each call wrote, which call-forest training does. An item matches its call by its served id (tool calls) or else by its content, and must match exactly one call.
+- `launched_by` needs the agent to report each subagent as an `AgentInvocation` that lists its model calls in `ng_agent_observations`. `claude_code_agent` and `hermes_agent` do.
+- An empty list is left out of the result.
+
+## How a Trainer Uses Them
+
+`resolve_segment_rewards(records, result)` from `nemo_gym.rollouts` takes a rollout's capture manifest rows and its `/run` result and returns the reward of every targeted call, keyed by `model_call_id`. Calls it leaves out keep `reward`. It raises `ValueError` when an entry targets nothing in the capture, when an item could have come from more than one call, or when two entries give one call different rewards, so a wrong target fails loudly instead of training on `reward`. It logs a warning when a launched subagent reported none of its captured calls.
