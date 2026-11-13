@@ -167,6 +167,7 @@ def test_public_capture_projection_fields_match_the_supported_schema():
     source = {
         "token_id_capture": {
             "enabled": True,
+            "allow_system_suffix": True,
             "auth": "diagnostic-canary",
             "access": {"opaque": "diagnostic-canary"},
             "arbitrary": ["diagnostic-canary"],
@@ -175,6 +176,7 @@ def test_public_capture_projection_fields_match_the_supported_schema():
     assert hide_secrets_in_container(source) == {
         "token_id_capture": {
             "enabled": True,
+            "allow_system_suffix": True,
             "auth": MASKED_VALUE,
             "access": {"opaque": MASKED_VALUE},
             "arbitrary": [MASKED_VALUE],

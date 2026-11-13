@@ -47,6 +47,7 @@ _CAPTURE_PUBLIC_FIELDS = frozenset(
         "lineage_store",
         "rebuild_response",
         "parent_resolution",
+        "allow_system_suffix",
         "allow_unresolved_continuations",
         "delta_records",
         "mask_incomplete_when_attributed",
