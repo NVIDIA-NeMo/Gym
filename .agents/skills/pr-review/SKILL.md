@@ -111,6 +111,11 @@ Apply the checks for the areas the diff touches.
   environments a reward profile is optional, not a merge gate (see
   CONTRIBUTING.md); behavior-changing verifier or agent code there needs the
   representative real smoke-rollout evidence AGENTS.md requires instead.
+- **Manifests (`manifest.yaml`).** A new or changed manifest fills the
+  selection fields (`maintainers`, `intended_use`, `training_allowed`,
+  `primary_metric` for benchmarks, and `requirements`), writing `unknown` where
+  nobody knows. A `TODO` left from the scaffold is a finding. Check that
+  `training_allowed` comes from the data's licence and terms, not a guess.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not
