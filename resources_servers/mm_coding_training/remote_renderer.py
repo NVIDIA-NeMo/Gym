@@ -9,6 +9,7 @@ import shlex
 import tempfile
 from pathlib import Path
 
+import anyio
 from PIL import Image
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
@@ -89,4 +90,7 @@ class RemoteRenderer:
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError) as error:
             raise RuntimeError("Remote renderer could not produce a valid measurement") from error
         finally:
-            await sandbox.stop()
+            # A client disconnect cancels this request, and an unshielded stop then never runs.
+            # 120 s is the bound that LentSandboxes gives its own stop (STOP_TIMEOUT_S).
+            with anyio.CancelScope(shield=True), anyio.fail_after(120):
+                await sandbox.stop()

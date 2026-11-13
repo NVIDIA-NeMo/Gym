@@ -96,3 +96,30 @@ def test_empty_or_unsupported_image_is_rejected() -> None:
     Image.new("RGB", (4, 4)).save(stream, format="BMP")
     with pytest.raises(ValueError):
         image_uri(stream.getvalue())
+
+
+@pytest.mark.asyncio
+async def test_cancelled_render_still_stops_the_sandbox() -> None:
+    import asyncio
+
+    import anyio
+
+    box = AsyncMock()
+    running, stopped = asyncio.Event(), []
+
+    async def hang(*args, **kwargs):
+        running.set()
+        await asyncio.Event().wait()
+
+    async def stop():
+        await asyncio.sleep(0)
+        stopped.append(True)
+
+    box.exec.side_effect, box.stop.side_effect = hang, stop
+    with patch("resources_servers.mm_coding_training.remote_renderer.AsyncSandbox", return_value=box):
+        # A client disconnect cancels the verify request through an anyio task group.
+        async with anyio.create_task_group() as requests:
+            requests.start_soon(renderer().render, "chart2code", "x")
+            await running.wait()
+            requests.cancel_scope.cancel()
+    assert stopped == [True]
