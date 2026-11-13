@@ -26,7 +26,8 @@ from scripts.harness_conformance.runner import run_process
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
 
-CASES = ("http-429", "http-500", "http-503", "reset", "stream-reset", "idle", "context-http", "context-precheck")
+CASES = ("http-429", "http-500", "http-503", "reset", "stream-reset", "idle")
+CONTEXT_CASES = ("context-http", "context-precheck")
 CONTEXT_ERROR = "This model's maximum context length is 32768 tokens. However, you requested 40000 tokens."
 
 
@@ -60,14 +61,6 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
         assert outcome == {"failure_kind": "model_request_error", "status_code": status}
         assert len(witness["attempts"]) == 3
         assert all(attempt["status_code"] == status for attempt in witness["attempts"])
-    elif case.startswith("context-"):
-        assert outcome == {"failure_kind": "model_context_limit"}
-        assert "context" in response["error"]["message"].lower()
-        if case == "context-precheck":
-            assert witness["attempts"] == []
-        else:
-            assert witness["attempts"]
-            assert all(attempt["status_code"] == 400 for attempt in witness["attempts"])
     else:
         assert outcome == {"failure_kind": "model_transport_error"}
         expected = {"reset": "Connection error.", "stream-reset": "terminated", "idle": "LLM idle timeout"}
@@ -80,10 +73,114 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
     retained = failure["_ng_failure_partial_response"]
     assert json.loads(retained["metadata"]["ng_agent_outcome"]) == outcome
     assert retained["error"] == response["error"]
-    # Context limits default to fail; transport / exhausted HTTP errors default
-    # to retry. Neither becomes a verified, rewarded rollout by accident.
-    assert failure["_ng_failure_terminal"] == case.startswith("context-")
+    # Transport and exhausted HTTP errors default to retry; neither becomes a verified, rewarded rollout.
+    assert failure["_ng_failure_terminal"] is False
     assert failure["ng_agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.environ.get("HARNESS") != "openclaw",
+    reason="Run the pinned Linux CLI in the OpenClaw conformance job (HARNESS=openclaw)",
+)
+@pytest.mark.parametrize("case", CONTEXT_CASES)
+def test_openclaw_context_overflow_reaches_verifier(case: str, tmp_path: Path) -> None:
+    """A context overflow is a limit: the partial work is graded as an incomplete response, not failed."""
+    output = (
+        Path(os.environ["PROBE_OUTPUT"]).parent / "error-regressions" / case
+        if "PROBE_OUTPUT" in os.environ
+        else tmp_path
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    result = run_process(
+        [sys.executable, __file__, "--case", case, "--output", str(output)], directory=output, timeout=180
+    )
+    assert result == {"returncode": 0, "timed_out": False}, (output / "episode.log").read_text()[-12000:]
+    witness = json.loads((output / "witness.json").read_text())
+    assert not witness["violations"]
+    assert witness["seeded"] == witness["closed"] == 1
+    if case == "context-precheck":
+        assert witness["attempts"] == []
+    else:
+        assert witness["attempts"]
+        assert all(attempt["status_code"] == 400 for attempt in witness["attempts"])
+    (response,) = witness["agent_responses"]
+    assert response["status"] == "incomplete"
+    assert response["error"] is None
+    assert "ng_agent_outcome" not in response["metadata"]
+    assert witness["verifications"] == [{"reward": 0.0, "answer_seen": False}]
+    assert not (output / "rollouts_failures.jsonl").read_text().strip()
+    (rollout,) = [json.loads(line) for line in (output / "rollouts.jsonl").read_text().splitlines()]
+    assert rollout["reward"] == 0.0
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.environ.get("HARNESS") != "openclaw",
+    reason="Run the pinned Linux CLI in the OpenClaw conformance job (HARNESS=openclaw)",
+)
+def test_openclaw_startup_timeout_reaches_verifier(tmp_path: Path) -> None:
+    output = Path(os.environ["PROBE_OUTPUT"]).parent / "startup-timeout" if "PROBE_OUTPUT" in os.environ else tmp_path
+    output.mkdir(parents=True, exist_ok=True)
+    result = run_process(
+        [sys.executable, __file__, "--case", "startup-timeout", "--output", str(output)],
+        directory=output,
+        timeout=180,
+    )
+    assert result == {"returncode": 0, "timed_out": False}, (output / "episode.log").read_text()[-12000:]
+    witness = json.loads((output / "witness.json").read_text())
+    assert witness["attempts"] == []
+    assert witness["seeded"] == witness["closed"] == 1
+    (response,) = witness["agent_responses"]
+    assert response["status"] == "incomplete"
+    assert response["error"] is None
+    assert "ng_agent_outcome" not in response["metadata"]
+    assert witness["verifications"] == [{"reward": 0.0, "answer_seen": False}]
+    assert not (output / "rollouts_failures.jsonl").read_text().strip()
+    (rollout,) = [json.loads(line) for line in (output / "rollouts.jsonl").read_text().splitlines()]
+    assert rollout["reward"] == 0.0
+    artifacts = json.loads((output / "cli-artifacts.json").read_text())
+    assert artifacts["cleanup"]["timed_out"] is True
+    assert artifacts["cleanup"]["cleanup_confirmed"] is True
+    assert "provider_plugin/policy.ready" not in artifacts["artifacts"]
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.environ.get("HARNESS") != "openclaw",
+    reason="Run the pinned Linux CLI in the OpenClaw conformance job (HARNESS=openclaw)",
+)
+def test_openclaw_replay_preserves_original_tool_ids(tmp_path: Path) -> None:
+    output = Path(os.environ["PROBE_OUTPUT"]).parent / "replay-identity" if "PROBE_OUTPUT" in os.environ else tmp_path
+    output.mkdir(parents=True, exist_ok=True)
+    result = run_process(
+        [
+            sys.executable,
+            "-m",
+            "scripts.harness_conformance.episode",
+            "--harness",
+            "openclaw",
+            "--scenario",
+            "tool_success",
+            "--directory",
+            str(output),
+            "--timeout",
+            "150",
+        ],
+        directory=output,
+        timeout=180,
+    )
+    assert result == {"returncode": 0, "timed_out": False}, (output / "episode.log").read_text()[-12000:]
+    witness = json.loads((output / "witness.json").read_text())
+    assert not witness["violations"]
+    original_ids = {call["id"] for call in witness["tool_calls"]}
+    assert original_ids and all("_" in call_id for call_id in original_ids)
+    replayed_ids = set()
+    result_ids = set()
+    for attempt in witness["attempts"]:
+        for message in attempt["request"]["messages"]:
+            if message["role"] == "assistant":
+                replayed_ids.update(call["id"] for call in message.get("tool_calls", []))
+            elif message["role"] == "tool":
+                result_ids.add(message["tool_call_id"])
+    assert replayed_ids == result_ids == original_ids
 
 
 async def run_case(case: str, output: Path) -> None:
@@ -118,6 +215,8 @@ async def run_case(case: str, output: Path) -> None:
         result = original_task(self)
         if case == "context-precheck":
             result["responses_create_params"]["input"][0]["content"] = "word " * 50000
+        if case == "startup-timeout":
+            result["responses_create_params"]["metadata"] = {"agent_timeout_sec": "0.5"}
         return result
 
     async def collect(self, state, *args, **kwargs):
@@ -211,7 +310,7 @@ async def run_case(case: str, output: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=CASES, required=True)
+    parser.add_argument("--case", choices=(*CASES, *CONTEXT_CASES, "startup-timeout"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     asyncio.run(run_case(args.case, args.output))

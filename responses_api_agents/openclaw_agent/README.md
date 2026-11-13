@@ -189,7 +189,7 @@ Per-session OpenClaw state/config, prompt, transcript, and supervisor output are
 `/tmp/nemo-gym-openclaw-sessions/`. OpenClaw reads the generated config directly without onboarding
 or creating bootstrap files in the task repository. Task HOME, XDG directories, PATH and
 dependencies are preserved for tools and verification.
-The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
+The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel and user-plugin
 execution and required direct-HTTP tool grants are unsupported. MCP tool grants become streamable-HTTP
 `mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`; `mcp_tool_timeout_seconds` sets
 their per-request timeout. Before the agent runs, the adapter connects to each grant with
@@ -206,6 +206,19 @@ from the run's stderr: a required grant fails the activation with HTTP 502, and 
 class (such as a missing executable) and the configured server's URL origin; the probe's own output, which can
 echo server responses, stays in its files in the session directory. OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
+
+In sandbox sessions, a bundled `nemo-gym` provider plugin preserves tool-call IDs and reasoning
+when replaying Gym model responses and keeps OpenClaw's openai-completions turn repairs; the
+local `/run` path does not load it. OpenClaw's generic custom-provider policy otherwise strips
+punctuation from IDs, breaking tool-result identity. The adapter requires the plugin's per-session
+readiness receipt before accepting a response. This detects a missing hook after execution;
+it does not prevent earlier model or tool calls. Missing readiness retains transcript evidence
+and fails activation before verification with a typed harness failure (`agent_route_failed`, operation
+`openclaw.replay_policy`); like any agent 5xx, the Environment Server reruns the episode under its attempt
+cap without grading it. The failure reason keeps the worker's own error,
+such as a startup crash. A supervisor timeout before any model/tool activity
+remains an incomplete response eligible for verification, even if startup ended before the
+receipt was written; the missing receipt is still recorded as an observation gap.
 
 Sandbox request support is deliberately explicit:
 
@@ -245,6 +258,11 @@ output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status 
 `model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
 to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
 still raise errors, with transcript evidence retained by close.
+A context overflow, which the CLI reports as an error of kind `context_overflow` in its JSON output after its own
+precheck or a provider refusal, is a limit rather than a failure: whatever the CLI's exit code, the response is
+`incomplete` with `incomplete_details.reason` `max_output_tokens` (the reason Gym's `vllm_model` gives a
+context-length refusal), keeps its partial output and carries no `ng_agent_outcome`, so it is verified. A failed
+cleanup still fails the activation.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -336,3 +354,38 @@ overrides it with `model_and_tools`. A restricted sandbox cannot download OpenCl
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
 benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
+
+## Conformance checks
+
+Run adapter tests in their own environment, including compatibility `/run`, concurrent signed-cookie
+isolation, borrowed-sandbox ownership, timeout/cancellation cleanup, close replay, and rollout/token
+capture routing:
+
+```bash
+gym env test +entrypoint=responses_api_agents/openclaw_agent +should_validate_data=true
+```
+
+On Linux, run the real pinned CLI against all eight scripted model/tool/error scenarios:
+
+```bash
+python -m scripts.harness_conformance.ci install --harness openclaw
+python scripts/run_harness_conformance.py --harness openclaw --output results/openclaw-conformance
+```
+
+Use a fresh output directory. Session setup installs OpenClaw 2026.6.11 and Node 22.19.0 in
+its local sandbox; no model credentials or host OpenClaw installation are required.
+The registry also selects OpenClaw in the shared conformance CI matrix.
+See the [runner guide](../../scripts/harness_conformance/README.md) for reports and rerun flags.
+These probes use an agent-owned local sandbox and retained-output verification; borrowed sandbox
+and real process cleanup are covered separately by the adapter tests. To enable the optional
+real CLI termination test after the probe installer has run:
+
+```bash
+export GYM_TEST_OPENCLAW_ENTRYPOINT=/tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11/openclaw/node_modules/openclaw/openclaw.mjs
+export GYM_TEST_OPENCLAW_NODE=/tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11/node/bin/node
+gym env test +entrypoint=responses_api_agents/openclaw_agent +should_validate_data=true
+```
+
+A passing token-capture routing test proves the generated URL includes the capture route;
+it does not establish training token-ID/logprob fidelity. Validate each real model/sandbox
+pairing separately and inspect its agent response, verifier result, health, and cleanup evidence.

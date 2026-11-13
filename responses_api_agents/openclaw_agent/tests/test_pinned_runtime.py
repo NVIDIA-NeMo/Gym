@@ -54,6 +54,11 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
         sandbox.expected_workdir = str(workdir)
         await agent.seed_agent_session(request, body)
         state = agent._session_records[body.agent_session_id].state
+        # Move the staged plugin with the session so the fake launch can activate its replay policy.
+        sandbox.files = {
+            path.replace(f"{state.session.session_dir}/", f"{directory}/", 1): contents
+            for path, contents in sandbox.files.items()
+        }
         state.session.session_dir = str(directory)
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Wait for the model response."))
         payload = staged(sandbox)
@@ -71,6 +76,7 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
         (directory / "home/.openclaw/openclaw.json").write_text(
             sandbox.files[f"{directory}/home/.openclaw/openclaw.json"]
         )
+        shutil.copytree(Path(__file__).parents[1] / "provider_plugin", directory / "provider_plugin")
         (directory / "prompt.txt").write_text(payload.pop("prompt"))
         (directory / "params.sh").write_text(shell_assignments(payload))
         process = await asyncio.create_subprocess_exec(

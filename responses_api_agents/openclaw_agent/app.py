@@ -61,7 +61,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
-    MODEL_CONTEXT_LIMIT,
+    AGENT_ROUTE_FAILED,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
@@ -76,6 +76,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NgFailureEvent,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -101,7 +102,12 @@ from responses_api_agents.openclaw_agent.observability import (
     build_openclaw_observations,
     discover_openclaw_session_tree,
 )
-from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
+from responses_api_agents.openclaw_agent.sandbox import (
+    _SANDBOX_PATH_CHECK,
+    PROVIDER_REPLAY_READY,
+    PROVIDER_REPLAY_RECEIPT,
+    OpenClawSandboxSession,
+)
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
@@ -433,7 +439,9 @@ if [ "$#" -gt 0 ]; then
 fi
 """
     check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
-    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+    # A provider's upload may create a missing parent as root; the plugin writes its readiness receipt beside itself.
+    owned = shlex.join([f"{directory}/home/.openclaw", f"{directory}/provider_plugin"])
+    return bootstrap + f"{check_paths} && mkdir -p {owned}"
 
 
 # One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
@@ -578,12 +586,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read pinned assistant errors or the CLI's typed context-overflow envelope."""
-        context_overflow = native_result.get("kind") == "context_overflow"
-        message = str(native_result.get("message" if context_overflow else "errorMessage") or "")
+        """Read pinned assistant errors. A context overflow is an incomplete response, never classified here."""
+        message = str(native_result.get("errorMessage") or "")
         match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
-        if context_overflow:
-            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if native_result.get("stopReason") in {"error", "aborted"}:
             if message in {"Connection error.", "terminated"} or re.fullmatch(
                 r"LLM idle timeout \(\d+(?:\.\d+)?s\): no response from model", message
@@ -769,6 +774,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
                         f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                     )
+            for name in ("index.mjs", "openclaw.plugin.json"):
+                await sandbox.upload(
+                    Path(__file__).with_name("provider_plugin") / name, f"{directory}/provider_plugin/{name}"
+                )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
@@ -879,7 +888,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     "allow": ["read", "write", "edit", "exec", "process"],
                     "exec": {"host": "gateway", "security": "full", "ask": "off"},
                 },
-                "plugins": {"enabled": False},
+                "plugins": {
+                    "enabled": True,
+                    "allow": ["nemo-gym"],
+                    "load": {"paths": [f"{state.session.session_dir}/provider_plugin"]},
+                    "entries": {"nemo-gym": {"enabled": True}},
+                },
             }
         )
         mcp_servers, required_grants = self._granted_mcp_servers(state.request)
@@ -956,6 +970,43 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         if state.observations is not None:
             state.observations.gaps.extend(mcp_gaps)
+        artifacts = state.session.artifacts or {}
+        policy_receipt = artifacts.get(PROVIDER_REPLAY_RECEIPT)
+        if policy_receipt != PROVIDER_REPLAY_READY:
+            transcript = artifacts.get(f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", "")
+            model_or_tool_activity = any(
+                isinstance(event.get("message"), dict) and event["message"].get("role") in {"assistant", "toolResult"}
+                for event in parse_openclaw_session_events(transcript)
+            )
+            # Startup counts toward the task budget. A supervisor timeout before
+            # any model/tool activity needs no replay policy and remains gradable.
+            startup_timeout = (
+                policy_receipt is None
+                and (state.session.cleanup or {}).get("timed_out")
+                and response.status == "incomplete"
+                and not response.output
+                and response.usage.total_tokens == 0
+                and not model_or_tool_activity
+            )
+            if not startup_timeout:
+                for record in state.observations.records:
+                    if record.kind == "agent_invocation":
+                        record.status = "failed"
+                # The receipt is the harness's own evidence that it replays model turns under the policy the adapter
+                # configured. A run that ended without it contradicts that configuration: a harness failure, not a
+                # sandbox fault, unconfirmed termination or a model outcome. Like any agent 5xx, it is ungraded and
+                # retryable. Keep the worker's own failure, such as a startup crash, in the reason.
+                cause = f": {response.error.message}" if response.error is not None else ""
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="openclaw.replay_policy",
+                    stage="agent",
+                    failure_reason=(
+                        "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+                        + cause
+                    )[:2000],
+                )
         if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
             # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
@@ -1108,6 +1159,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
+        # Record this on interrupted activations too, before close releases the sandbox.
+        if artifacts.get(PROVIDER_REPLAY_RECEIPT) != PROVIDER_REPLAY_READY:
+            gaps.append(ObservationGap(code="provider_replay_policy_unconfirmed"))
         stdout = artifacts.get("stdout.log", "")
         if "stdout.log" not in artifacts:
             gaps.append(ObservationGap(code="agent_stdout_unavailable"))
@@ -1218,22 +1272,21 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
         envelope_error = meta.get("error") if isinstance(meta, dict) else None
-        context_error = (
-            envelope_error
-            if isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow"
-            else None
+        # The pinned CLI's typed result when the prompt exceeds the model's context window, from its own precheck
+        # or a provider refusal. That is a limit, not a failure: the partial work is graded as an incomplete
+        # response, whatever the CLI's exit code. A missing or failed cleanup receipt still fails the activation.
+        context_limited = (
+            isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow" and not error
         )
-        terminal_result = context_error if context_error is not None else last
-        if context_error is not None:
-            error = error or str(context_error.get("message") or "OpenClaw context overflow")
-        if last.get("stopReason") == "error" or (
-            last.get("stopReason") == "aborted" and not (result and result["timed_out"])
-        ):
-            error = error or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
-        if result and result["return_code"] and not result["timed_out"]:
-            stderr = artifacts.get("stderr.log", "stderr unavailable")[-4000:]
-            error = error or f"OpenClaw exited {result['return_code']}: {stderr}"
-        incomplete = bool(result and result["timed_out"]) or last.get("stopReason") == "length"
+        if not context_limited:
+            if last.get("stopReason") == "error" or (
+                last.get("stopReason") == "aborted" and not (result and result["timed_out"])
+            ):
+                error = error or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
+            if result and result["return_code"] and not result["timed_out"]:
+                stderr = artifacts.get("stderr.log", "stderr unavailable")[-4000:]
+                error = error or f"OpenClaw exited {result['return_code']}: {stderr}"
+        incomplete = context_limited or bool(result and result["timed_out"]) or last.get("stopReason") == "length"
         if not incomplete and not error and last.get("stopReason") != "stop":
             error = "OpenClaw produced no terminal assistant result"
         status = "failed" if error else "incomplete" if incomplete else "completed"
@@ -1244,6 +1297,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             object="response",
             output=output,
             status=status,
+            # The Responses API names no context-window reason; Gym's vllm_model reports a context-length
+            # refusal as max_output_tokens too.
+            incomplete_details={"reason": "max_output_tokens"} if context_limited else None,
             error={"code": "server_error", "message": error} if error else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
@@ -1297,8 +1353,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             and not result["timed_out"]
             and not result["error"]
             and (
-                context_error is not None
-                or last.get("stopReason") == "error"
+                last.get("stopReason") == "error"
                 or (
                     last.get("stopReason") == "aborted"
                     and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
@@ -1311,7 +1366,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # owns verify/retry/fail policy for the preserved model response.
             # An idle watchdog abort is a model failure; the supervisor's whole-run
             # deadline and unrelated aborts must not be classified as transport errors.
-            return self.report_outcome(response, terminal_result)
+            # report_outcome leaves a context-limited (incomplete) response without an outcome.
+            return self.report_outcome(response, last)
         return response
 
     def model_post_init(self, __context: Any) -> None:

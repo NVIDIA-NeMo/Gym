@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,7 +38,12 @@ from nemo_gym.core import (
 )
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
+from responses_api_agents.openclaw_agent.app import (
+    OpenClawAgent,
+    OpenClawAgentConfig,
+    _sandbox_prepare_command,
+    _unique_usage_messages,
+)
 
 
 def seed(*, session_id: str | None = None) -> AgentSeedSessionRequest:
@@ -189,6 +195,18 @@ class Sandbox:
         self.files[f"{self.directory}/runtime.json"] = json.dumps(self.runtime_info)
         self.files[f"{self.directory}/stdout.log"] = self.stdout
         self.files[f"{self.directory}/stderr.log"] = self.stderr
+        config = json.loads(self.files.get(f"{self.directory}/home/.openclaw/openclaw.json", "{}"))
+        plugin = f"{self.directory}/provider_plugin"
+        plugins = config.get("plugins", {})
+        if (
+            f"{plugin}/index.mjs" in self.files
+            and f"{plugin}/openclaw.plugin.json" in self.files
+            and plugins.get("enabled")
+            and plugin in plugins.get("load", {}).get("paths", [])
+            and "nemo-gym" in plugins.get("allow", [])
+        ):
+            # What index.mjs writes when OpenClaw resolves the nemo provider's replay policy.
+            self.files[f"{plugin}/policy.ready"] = "nemo-gym-replay-v1\n"
         session_id = self.directory.rsplit("/", 1)[-1]
         self.files[f"{self.directory}/home/.openclaw/agents/main/sessions/{session_id}.jsonl"] = self.events
         return 0
@@ -271,9 +289,12 @@ def close_body(session_id):
 
 
 @pytest.mark.parametrize("model_timeout_seconds", [600, 1200])
-def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout_seconds):
+@pytest.mark.parametrize("token_capture", [False, True])
+def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout_seconds, token_capture):
     agent, sandbox = setup
     agent.config.model_timeout_seconds = model_timeout_seconds
+    agent.server_client.global_config_dict["token_id_capture"] = {"enabled": token_capture, "all_agents": True}
+    capture_suffix = "/training-token-capture" if token_capture else ""
     with patch.object(agent, "_run_openclaw", AsyncMock(side_effect=AssertionError("host OpenClaw must not run"))):
         with TestClient(agent.setup_webserver()) as client:
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
@@ -290,7 +311,12 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
                 f"bash {installer} /tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11 2026.6.11"
             )
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
-            result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "Fix the code"})
+            for name in ("index.mjs", "openclaw.plugin.json"):
+                source = Path(__file__).parents[1] / "provider_plugin" / name
+                assert sandbox.files[f"{directory}/provider_plugin/{name}"] == source.read_text()
+            result = client.post(
+                f"/ng-rollout/openclaw-smoke-a2{capture_suffix}/v1/responses", json={"input": "Fix the code"}
+            )
             assert result.status_code == 200, result.text
             body = result.json()
             assert body["status"] == "completed"
@@ -320,8 +346,14 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert models["models"]["providers"]["nemo"]["models"][0]["compat"]["supportsUsageInStreaming"] is True
             assert (
                 models["models"]["providers"]["nemo"]["baseUrl"]
-                == "http://model.example:9000/ng-rollout/openclaw-smoke-a2/v1"
+                == f"http://model.example:9000/ng-rollout/openclaw-smoke-a2{capture_suffix}/v1"
             )
+            assert models["plugins"] == {
+                "enabled": True,
+                "allow": ["nemo-gym"],
+                "load": {"paths": [f"{directory}/provider_plugin"]},
+                "entries": {"nemo-gym": {"enabled": True}},
+            }
             closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
             assert closed.status_code == 200, closed.text
             observations = closed.json()["agent_observations"]
@@ -336,6 +368,28 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+async def test_session_preparation_creates_every_seed_upload_parent(setup, tmp_path):
+    """Preparation runs as the sandbox user; a provider's upload may create a missing parent as root."""
+    agent, sandbox = setup
+    body = seed()
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    session_dir = agent._session_records[body.agent_session_id].state.session.session_dir
+    uploads = [path.removeprefix(f"{session_dir}/") for path in sandbox.files if path.startswith(f"{session_dir}/")]
+    assert "provider_plugin/index.mjs" in uploads
+    directory = tmp_path / "sessions" / "session"
+    task = tmp_path / "task"
+    task.mkdir()
+    prepared = subprocess.run(
+        ["/bin/sh", "-c", _sandbox_prepare_command(str(task), str(directory), str(tmp_path / "runtime"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    assert [name for name in uploads if not (directory / name).parent.is_dir()] == []
 
 
 def test_direct_run_without_resources_rejected_before_execution(setup):
@@ -1261,6 +1315,80 @@ async def test_two_sessions_keep_workspaces_model_routes_and_observations_separa
     )
     first.disconnect.assert_awaited_once()
     second.disconnect.assert_awaited_once()
+
+
+def test_concurrent_http_sessions_keep_signed_cookies_and_close_receipts_separate(setup):
+    agent, first = setup
+    second = Sandbox()
+    second.events = second.events.replace("Fixed", "Second result")
+    bodies = [seed(), seed()]
+    bodies[1].episode_id = EpisodeId(rollout_id="second", attempt=2)
+
+    async def overlap(sandbox, other, **kwargs):
+        sandbox.started.set()
+        await asyncio.wait_for(other.started.wait(), timeout=5)
+        return await sandbox.create(**kwargs)
+
+    async def launch_first(**kwargs):
+        return await overlap(first, second, **kwargs)
+
+    async def launch_second(**kwargs):
+        return await overlap(second, first, **kwargs)
+
+    first.launch.side_effect = launch_first
+    second.launch.side_effect = launch_second
+    with (
+        patch("responses_api_agents.openclaw_agent.app.AsyncSandbox.connect", AsyncMock(side_effect=[first, second])),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        cookies = []
+        for body in bodies:
+            client.cookies.clear()
+            response = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+            assert response.status_code == 200, response.text
+            cookies.append({"cookie": response.headers["set-cookie"].split(";", 1)[0]})
+        client.cookies.clear()
+        assert cookies[0] != cookies[1]
+        routes = [f"/ng-rollout/{body.episode_id.capture_key}/v1/responses" for body in bodies]
+        # A valid signed cookie still cannot activate another session's rollout.
+        assert client.post(routes[1], headers=cookies[0], json={"input": "task"}).status_code == 409
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            activations = [
+                pool.submit(client.post, route, headers=cookie, json={"input": "task"})
+                for route, cookie in zip(routes, cookies)
+            ]
+            responses = [future.result(timeout=10) for future in activations]
+        assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
+        assert [r.json()["output"][-1]["content"][0]["text"] for r in responses] == ["Fixed", "Second result"]
+        close = [
+            AgentCloseSessionRequest(agent_session_id=b.agent_session_id, episode_id=b.episode_id) for b in bodies
+        ]
+        assert (
+            client.post(
+                "/v1/agent_sessions/close", headers=cookies[0], json=close[1].model_dump(mode="json")
+            ).status_code
+            == 409
+        )
+        for index in (0, 1):
+            closed = client.post(
+                "/v1/agent_sessions/close", headers=cookies[index], json=close[index].model_dump(mode="json")
+            )
+            assert closed.status_code == 200, closed.text
+            observations = closed.json()["agent_observations"]
+            assert observations["source"] == "openclaw"
+            [invocation] = [r for r in observations["records"] if r["kind"] == "agent_invocation"]
+            assert invocation["conversation"][-1]["content"][0]["text"] == ["Fixed", "Second result"][index]
+            assert client.post(routes[index], headers=cookies[index], json={"input": "task"}).status_code == 409
+            if index == 0:
+                second.disconnect.assert_not_awaited()
+            replay = client.post(
+                "/v1/agent_sessions/close", headers=cookies[index], json=close[index].model_dump(mode="json")
+            )
+            assert replay.json() == closed.json()
+    for sandbox in (first, second):
+        sandbox.launch.assert_awaited_once()
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.parametrize("marker", [None, 7, "expired-session"])
@@ -2333,6 +2461,212 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert closed.status_code == 200, closed.text
 
 
+def served_app(agent):
+    """The agent's routes with the failure reply and header the agent server sends in production."""
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    return app
+
+
+def replay_policy_failure(response):
+    """The harness event of an activation refused for a missing replay-policy receipt, checked as the
+    single_agent_turn Environment Server receives it: a typed, retryable agent failure."""
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.core import FailureHeader, rebuild_failure
+    from nemo_gym.server_runtime import dependency_failure
+
+    assert response.status_code == 500, response.text
+    report = FailureHeader.decode(response.headers)
+    route = report.events[report.failure_id]
+    assert (route.boundary, route.failure_kind, route.operation) == ("agent", "agent_route_failed", "agent.responses")
+    cause = report.events[route.cause_id]
+    assert (cause.boundary, cause.failure_kind, cause.operation, cause.stage) == (
+        "harness",
+        "agent_route_failed",
+        "openclaw.replay_policy",
+        "agent",
+    )
+    assert "replay policy" in cause.failure_reason
+    # What raise_boundary_failure and _invoke_agent make of the reply: an episode failure caused by the typed
+    # agent failure, not terminal, so the collector reruns the attempt under its cap and never grades it.
+    remote = rebuild_failure(report)
+    remote.http_error = ClientResponseError(
+        SimpleNamespace(real_url="http://agent/ng-rollout/openclaw-smoke-a2/v1/responses"),
+        (),
+        status=response.status_code,
+    )
+    episode_failure = dependency_failure(remote, stage="agent")
+    assert episode_failure.episode_terminal is False
+    assert episode_failure.__cause__.__cause__.failure_kind == "agent_route_failed"
+    assert episode_failure.__cause__.__cause__.operation == "openclaw.replay_policy"
+    return cause
+
+
+@pytest.mark.parametrize("receipt", [None, "wrong-policy"])
+def test_missing_provider_policy_receipt_fails_closed_and_releases_borrowed_sandbox(setup, receipt):
+    agent, sandbox = setup
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            if receipt is None:
+                raise FileNotFoundError(source)
+            Path(destination).write_text(receipt)
+        else:
+            await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        cause = replay_policy_failure(response)
+        # A repeated activation replays the same harness failure.
+        replayed = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert replay_policy_failure(replayed).event_id == cause.event_id
+        sandbox.launch.assert_awaited_once()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
+        observations = closed.json()["agent_observations"]
+        assert "provider_replay_policy_unconfirmed" in [gap["code"] for gap in observations["gaps"]]
+        assert observations["records"][0]["status"] == "failed"
+        assert observations["records"][0]["conversation"][-1]["content"][0]["text"] == "Fixed"
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("activity", ["empty", "input", "empty_assistant", "tools"])
+@pytest.mark.parametrize("receipt", [None, "wrong-policy"])
+def test_startup_timeout_without_replay_policy_remains_incomplete(setup, activity, receipt):
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=143)
+    sandbox.events = {
+        "empty": "",
+        "input": json.dumps({"type": "session", "id": "session"})
+        + "\n"
+        + json.dumps({"type": "message", "message": {"role": "user", "content": "task"}}),
+        "empty_assistant": json.dumps(
+            {"type": "message", "message": {"role": "assistant", "content": [], "stopReason": "aborted"}}
+        ),
+        "tools": events(stop_reason="aborted"),
+    }[activity]
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            if receipt is None:
+                raise FileNotFoundError(source)
+            Path(destination).write_text(receipt)
+        else:
+            await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        startup_timeout = receipt is None and activity in {"empty", "input"}
+        if startup_timeout:
+            assert response.status_code == 200, response.text
+            assert response.json()["status"] == "incomplete"
+            assert response.json()["error"] is None
+            assert response.json()["output"] == []
+            assert "ng_agent_outcome" not in response.json()["metadata"]
+        else:
+            replay_policy_failure(response)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
+        observations = closed.json()["agent_observations"]
+        assert "provider_replay_policy_unconfirmed" in [gap["code"] for gap in observations["gaps"]]
+        assert observations["records"][0]["status"] == ("incomplete" if startup_timeout else "failed")
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+def test_startup_crash_without_receipt_keeps_the_worker_error(setup):
+    agent, sandbox = setup
+    sandbox.result.update(return_code=1)
+    sandbox.events = ""
+    sandbox.stderr = "Error: Config validation failed: plugins.load.paths"
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            raise FileNotFoundError(source)
+        await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        cause = replay_policy_failure(response)
+        assert "OpenClaw exited 1: Error: Config validation failed" in cause.failure_reason
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
+        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+    sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("envelope", ["text", "usage"])
+def test_startup_timeout_requires_no_stdout_output_or_usage(setup, envelope):
+    """A timed-out run whose answer or usage reached only stdout was active, so it still needs the receipt."""
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=143)
+    sandbox.events = ""
+    sandbox.stdout = json.dumps(
+        {"payloads": [{"text": "partial answer"}]}
+        if envelope == "text"
+        else {"payloads": [], "meta": {"agentMeta": {"usage": {"input": 7, "output": 3}}}}
+    )
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            raise FileNotFoundError(source)
+        await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        replay_policy_failure(response)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
+        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_interrupted_rejected_model_attempts_keep_invocation_ownership(setup) -> None:
+    from nemo_gym.trajectory import ModelCallRecord, join_agent_model_calls
+
+    agent, sandbox = setup
+    failure = {
+        "type": "message",
+        "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "429 retry"},
+    }
+    sandbox.events = "\n".join(json.dumps(failure) for _ in range(2))
+    sandbox.blocked = True
+    request, session_id, task = await activate(agent, sandbox)
+    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    config = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
+    root = close.agent_observations.records[0]
+    assert config["models"]["providers"]["nemo"]["headers"] == {"x-session-id": root.invocation_id}
+    assert root.model_calls == []
+    captured = [
+        ModelCallRecord(model_call_id=f"attempt-{i}", client_session_id=root.invocation_id, call_index=i)
+        for i in range(2)
+    ]
+    joined = join_agent_model_calls(close.agent_observations, captured)
+    assert [ref.model_call_id for ref in joined.records[0].model_calls] == ["attempt-0", "attempt-1"]
+    assert "model_call_ownership_unavailable" not in [gap.code for gap in joined.gaps]
+    sandbox.stop.assert_not_awaited()
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 @pytest.mark.parametrize("partial", [False, True])
 @pytest.mark.parametrize(
@@ -2398,47 +2732,24 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
 
 
 @pytest.mark.parametrize(
-    "stop_reason,message,envelope_error,expected",
+    "stop_reason,message",
     [
-        ("error", "Connection error.", None, {"failure_kind": "model_transport_error"}),
-        ("error", "terminated", None, {"failure_kind": "model_transport_error"}),
-        (
-            "aborted",
-            "LLM idle timeout (2s): no response from model",
-            None,
-            {"failure_kind": "model_transport_error"},
-        ),
-        (
-            None,
-            "Context overflow: prompt too large for the model (precheck).",
-            "context_overflow",
-            {"failure_kind": "model_context_limit"},
-        ),
-        (
-            "error",
-            "400 maximum context length exceeded",
-            "context_overflow",
-            {"failure_kind": "model_context_limit"},
-        ),
+        ("error", "Connection error."),
+        ("error", "terminated"),
+        ("aborted", "LLM idle timeout (2s): no response from model"),
     ],
 )
 @pytest.mark.parametrize("partial", [False, True])
-def test_model_transport_and_context_errors_reach_environment(
-    setup, stop_reason, message, envelope_error, expected, partial
-):
-    from nemo_gym.agents import AgentOutcomePolicyConfig, agent_outcome_policy
+def test_model_transport_errors_reach_environment(setup, stop_reason, message, partial):
+    from nemo_gym.agents import agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     transcript = [json.loads(line) for line in events(stop_reason=stop_reason).splitlines()]
     transcript[2]["message"].update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
-    if stop_reason is None:
-        transcript = transcript[:2] if partial else []
-    elif not partial:
+    if not partial:
         transcript = [transcript[2]]
     sandbox.events = "\n".join(json.dumps(event) for event in transcript)
-    if envelope_error:
-        sandbox.stdout = json.dumps({"meta": {"error": {"kind": envelope_error, "message": message}}})
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
@@ -2446,18 +2757,78 @@ def test_model_transport_and_context_errors_reach_environment(
         body = response.json()
         assert body["status"] == "failed"
         assert body["error"]["message"] == message
-        assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
+        assert json.loads(body["metadata"]["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
         assert any(item["type"] == "function_call_output" for item in body["output"]) == partial
-        # Context prechecks have no HTTP status: the environment can explicitly
-        # choose verification, rather than inheriting a fabricated HTTP 400.
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(body)).value == (
-            "fail" if envelope_error else "retry"
-        )
-        policy = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "verify"})
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(body), config=policy).value == (
-            "verify" if envelope_error else "retry"
-        )
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(body)).value == "retry"
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "stop_reason,message",
+    [
+        # The CLI's own precheck: no model call is made.
+        (None, "Context overflow: prompt too large for the model (precheck)."),
+        # The provider refused the prompt; the CLI's envelope types the refusal.
+        ("error", "400 maximum context length exceeded"),
+    ],
+)
+@pytest.mark.parametrize("partial", [False, True])
+# 1 with FailoverError is how 2026.6.11 surfaces a provider refusal; the others show the exit code is not consulted.
+@pytest.mark.parametrize("exit_code,stderr", [(0, ""), (1, "FailoverError: context"), (1, "diagnostics"), (2, "")])
+def test_context_overflow_is_an_incomplete_graded_response(setup, stop_reason, message, partial, exit_code, stderr):
+    from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+    from nemo_gym.core import NeMoGymResponse
+
+    agent, sandbox = setup
+    sandbox.result["return_code"] = exit_code
+    sandbox.stderr = stderr
+    transcript = [json.loads(line) for line in events(stop_reason=stop_reason).splitlines()]
+    transcript[2]["message"].update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
+    if stop_reason is None:
+        transcript = transcript[:2] if partial else []
+    elif not partial:
+        transcript = [transcript[2]]
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    sandbox.stdout = json.dumps({"meta": {"error": {"kind": "context_overflow", "message": message}}})
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        response = client.post(path, json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "incomplete"
+        assert body["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert body["error"] is None
+        # Only a failed response carries an outcome; this one is graded like any other limit.
+        assert "ng_agent_outcome" not in body["metadata"]
+        # The partial work is kept for the verifier.
+        assert [item["type"] for item in body["output"]] == (
+            ["reasoning", "function_call", "function_call_output"] if partial else []
+        )
+        assert body["usage"]["total_tokens"] == (15 if partial else 0)
+        typed = NeMoGymResponse.model_validate(body)
+        assert agent_outcome_policy(typed) == OutcomeAction.VERIFY
+        # The Environment Server's failure policy applies to failed responses only, so it cannot fail this one.
+        fail_context = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "fail"}, default_action="fail")
+        assert agent_outcome_policy(typed, config=fail_context) == OutcomeAction.VERIFY
+        assert client.post(path, json={"input": "task"}).json() == body
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        assert closed["agent_observations"]["records"][0]["status"] == "incomplete"
+    sandbox.launch.assert_awaited_once()
+
+
+def test_context_overflow_does_not_hide_a_failed_cleanup(setup):
+    agent, sandbox = setup
+    sandbox.result["error"] = "cleanup failed"
+    sandbox.events = ""
+    sandbox.stdout = json.dumps({"meta": {"error": {"kind": "context_overflow", "message": "Context overflow"}}})
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 502, response.text
+        assert response.json()["detail"] == "cleanup failed"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("failure", ["abort", "worker_exit", "cleanup", "untyped_envelope"])
@@ -2521,6 +2892,7 @@ async def test_capture_header_owns_rejected_attempts_in_each_session(setup, tran
             state.session.artifacts = {
                 f"home/.openclaw/agents/main/sessions/{owner}.jsonl": sandbox.events,
                 "stdout.log": "",
+                "provider_plugin/policy.ready": "nemo-gym-replay-v1\n",
             }
             state.session.cleanup = sandbox.result
 

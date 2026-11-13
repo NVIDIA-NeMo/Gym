@@ -59,6 +59,7 @@ def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_m
         return
     assert result.returncode == 0, result.stderr
     assert (directory / "home/.openclaw").is_dir()
+    assert (directory / "provider_plugin").is_dir()
     packages = " ".join(missing)
     if missing:
         assert (tmp_path / "packages.log").read_text().splitlines() == (

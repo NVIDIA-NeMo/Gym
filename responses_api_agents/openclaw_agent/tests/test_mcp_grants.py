@@ -12,7 +12,13 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.app import _mcp_probe_problem
-from responses_api_agents.openclaw_agent.tests.test_sandbox import close_body, seed, setup  # noqa: F401
+from responses_api_agents.openclaw_agent.tests.test_sandbox import (  # noqa: F401
+    close_body,
+    replay_policy_failure,
+    seed,
+    served_app,
+    setup,
+)
 
 
 def grant(name: str, *, required: bool) -> dict:
@@ -127,7 +133,7 @@ def test_mcp_grants_are_probed_before_the_agent_runs(setup, unreachable, failure
         directory = agent._session_records[session_id].state.session.session_dir
         result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
         assert [probe["name"] for probe in probes] == ["task_tools", "extra"]
-        # The probe runs with plugins off, as the agent run does.
+        # The probe needs only MCP discovery; the agent loads the provider replay plugin separately.
         assert probes[0]["config"]["plugins"] == {"enabled": False}
         assert probes[0]["config"]["mcp"]["servers"]["task_tools"] == {
             "url": "http://resources.example:8000/task_tools/mcp",
@@ -244,6 +250,35 @@ def test_server_that_fails_at_agent_startup_after_its_probe(setup, lost, require
     assert skipped(closed) == expected
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stage", ["probe", "agent_run"])
+def test_missing_replay_receipt_keeps_the_optional_grant_gap(setup, stage):  # noqa: F811
+    """An activation failed for its replay-policy receipt still reports the optional grant it ran without."""
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("task_tools", required=True), grant("extra", required=False)]
+    install_probe_fake(sandbox, {"extra"} if stage == "probe" else set(), "exit")
+    if stage == "agent_run":
+        sandbox.stderr = 'bundle-mcp: failed to start server "extra"\n'
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            raise FileNotFoundError(source)
+        await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        replay_policy_failure(result)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    problem = _PROBLEM["exit"] if stage == "probe" else "did not connect in the agent run"
+    assert skipped(closed) == [f"extra: {problem}"]
+    sandbox.disconnect.assert_awaited_once()
 
 
 def test_probe_problem_keeps_kind_and_origin_only(setup):  # noqa: F811
