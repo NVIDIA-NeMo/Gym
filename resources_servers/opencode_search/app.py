@@ -657,14 +657,23 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         A command after the start, since LentSandboxes has no setup hook. It runs from / because a command's default
         directory is the missing workdir.
+
+        A mkdir that exits non-zero refuses the seed with 422, which an Environment Server does not retry: the image
+        caused it (permission denied, a read-only root, a file in the way), so every episode would fail the same way.
+        A command that did not complete (an error type, such as a timeout) answers 500, which is retried, since a
+        fresh sandbox may succeed. Either way the base stops the sandbox the seed started.
         """
         workdir = self.config.sandbox_workdir
         result = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=60)
-        if result.return_code != 0 or result.error_type is not None:
-            output = (result.stderr or result.stdout or "").strip()[-500:]
+        output = (result.stderr or result.stdout or "").strip()[-500:]
+        if result.error_type is not None:
             raise RuntimeError(
                 f"Cannot create sandbox_workdir {workdir} in the lent sandbox "
                 f"(exit {result.return_code}, error {result.error_type}): {output}"
+            )
+        if result.return_code != 0:
+            raise ResourcesSeedRejectedError(
+                f"Cannot create sandbox_workdir {workdir} in the lent sandbox (exit {result.return_code}): {output}"
             )
 
     async def shutdown(self) -> None:

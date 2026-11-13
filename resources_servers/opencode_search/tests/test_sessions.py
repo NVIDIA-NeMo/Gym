@@ -408,16 +408,44 @@ def test_an_agent_run_seed_cannot_replace_an_episode_session(workdir, started) -
     assert len(started) == 1 and server.has_session_state("session")
 
 
+def test_an_episode_seed_cannot_replace_an_agent_run_session(workdir, started) -> None:
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_row()).status_code == 200
+    (session_id,) = server._agent_run_sandboxes
+    client.cookies.clear()
+
+    refused = client.post("/seed_session", json=_seed(session_id))
+
+    assert refused.status_code == 409, refused.text
+    assert len(started) == 1 and server._lent_sandboxes.get(session_id) is None
+
+
+def test_an_episode_seed_after_its_verify_conflicts(workdir, started) -> None:
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    _mock_judge(server, CORRECT)
+    assert client.post("/verify", json=_verify_body()).status_code == 200
+
+    refused = client.post("/seed_session", json=_seed())
+
+    assert refused.status_code == 409, refused.text
+    assert len(started) == 1
+
+
 @pytest.mark.parametrize(
-    "result",
+    ("result", "status"),
     [
-        SandboxExecResult(stdout="", stderr="mkdir: cannot create directory: Permission denied", return_code=1),
-        SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
+        # The image refuses the directory, as it would in every episode: 422, so the episode does not run again.
+        (SandboxExecResult(stdout="", stderr="mkdir: cannot create directory: Permission denied", return_code=1), 422),
+        # The command did not complete, which a fresh sandbox may clear: 500, which an Environment Server retries.
+        (SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"), 500),
     ],
     ids=["exit_code", "error_type"],
 )
 def test_an_episode_seed_that_cannot_create_its_workdir_stops_its_sandbox(
-    workdir, started, stopped, monkeypatch, result
+    workdir, started, stopped, monkeypatch, result, status
 ) -> None:
     server = _server(workdir)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
@@ -431,9 +459,35 @@ def test_an_episode_seed_that_cannot_create_its_workdir_stops_its_sandbox(
 
     failed = client.post("/seed_session", json=_seed())
 
-    assert failed.status_code == 500
+    assert failed.status_code == status, failed.text
     # From /, since a command's default directory is the workdir that does not exist yet.
     assert commands == [(f"mkdir -p -- {shlex.quote(str(workdir))}", "/")]
+    assert stopped == [started[0][0]]
+    assert not server.has_session_state("session") and server._lent_sandboxes.get("session") is None
+
+
+@pytest.mark.parametrize("failing", ["start", "serialize"])
+def test_an_episode_seed_whose_sandbox_cannot_start_or_be_described_stops_it_for_a_retry(
+    workdir, started, stopped, monkeypatch, failing
+) -> None:
+    """A provider failure may clear on a fresh sandbox, so the seed answers 500, which an Environment Server
+    retries."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    if failing == "start":
+        recorded_start = AsyncSandbox.start
+
+        async def start(self: AsyncSandbox, spec: Optional[SandboxSpec] = None, **kwargs: Any) -> AsyncSandbox:
+            await recorded_start(self, spec, **kwargs)
+            raise RuntimeError("the provider lost the sandbox it started")
+
+        monkeypatch.setattr(AsyncSandbox, "start", start)
+    else:
+        monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("cannot describe it")))
+
+    failed = client.post("/seed_session", json=_seed())
+
+    assert failed.status_code == 500, failed.text
     assert stopped == [started[0][0]]
     assert not server.has_session_state("session") and server._lent_sandboxes.get("session") is None
 
