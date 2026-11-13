@@ -1039,7 +1039,9 @@ def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
     """The reader failure named from its report with its exit code and stderr, and whether it reached its deadline
     (the only failure retried with twice the bound); (None, False) when it exited 0."""
     facts = {}
-    for line in output.splitlines():
+    # Split on "\n" only: str.splitlines() also breaks on "\r", and git's progress output ("Updating files: 83%")
+    # carries them, which would cut the stderr tail off at its first one.
+    for line in output.split("\n"):
         for name in ("BOUND", "RC", "ERR"):
             if line.startswith(f"__GYM_READER_{name}:"):
                 facts[name] = line.split(":", 1)[1].strip()
