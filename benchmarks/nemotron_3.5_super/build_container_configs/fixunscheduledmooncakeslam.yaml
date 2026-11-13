@@ -1,0 +1,40 @@
+input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
+
+slurm:
+  account: nemotron_rl_algo
+  partition: batch
+  qos: short
+  gpus-per-node: "4"
+  mem: "0"
+  container-mounts: ${oc.env:PWD}:${oc.env:PWD}
+
+shared_run_warmup_env_vars:
+  MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
+  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh
+  NUM_PREFILL_NODES: 2
+  NUM_DECODE_NODES: 2
+  ENABLE_MOONCAKE: 1
+  VLLM_PREFILL_ENGINES_PER_NODE: 4
+  VLLM_DECODE_ENGINES_PER_NODE: 1
+  # Prefill APIs are DP1; decode's API balances its four DP ranks internally.
+  ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE: 1
+  FLASHINFER_PRIMS_TS_DEFER_NVFP4_TOKEN_SCALE: 1
+  SLURM_COMMENT: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"720","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
+  MOUNTS: ${oc.env:PWD}:${oc.env:PWD},${oc.env:PWD}:/opt/Gym
+
+run:
+  env:
+    _copy: shared_run_warmup_env_vars
+    EXPERIMENT_NAME: swe_8n-11/super_3.5_GA-BF16-p2d2
+    SBATCH_TIMELIMIT: "01:00:00"
+  args: |
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config resources_servers/swe_rebench/configs/swe_rebench_opencode.yaml \
+    --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
+    --config resources_servers/swemer_v1/configs/swemer_v1_opencode.yaml \
+    --config resources_servers/swemer_v2/configs/swemer_v2_opencode.yaml \
+    --config resources_servers/swe_next/configs/swe_next_opencode.yaml \
+    ++input_jsonl_fpath=data/swe_8n-11.jsonl \
+    ++num_repeats=8 \
+    ++num_samples_in_parallel=1024
