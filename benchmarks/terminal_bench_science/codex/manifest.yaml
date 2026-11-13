@@ -10,6 +10,10 @@ modality: text
 licensing: Apache-2.0
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- gwarmstrong
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

@@ -11,6 +11,10 @@ licensing: unknown
 authors:
 - Adam Rajfer
 - Serge Panev
+maintainers:
+- AdamRajfer
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

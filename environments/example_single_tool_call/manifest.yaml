@@ -10,6 +10,11 @@ licensing: Apache-2.0
 authors:
 - fsiino-nvidia
 - bxyu-nvidia
+maintainers:
+- adil-a
+- ananthsub
+intended_use:
+- training
 reward:
   range:
   - 0.0

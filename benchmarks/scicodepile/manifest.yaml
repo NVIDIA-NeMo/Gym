@@ -10,6 +10,10 @@ modality: text
 licensing: Apache-2.0
 authors:
 - Rima Shahbazyan
+maintainers:
+- rimashahbazyan
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

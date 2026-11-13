@@ -10,6 +10,10 @@ modality: text
 licensing: unknown
 authors:
 - lilithgrigoryan
+maintainers:
+- lilithgrigoryan
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

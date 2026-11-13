@@ -11,6 +11,10 @@ licensing: MIT
 authors:
 - Christian Munley
 - Youhan Lee
+maintainers:
+- cmunley1
+intended_use:
+- training
 reward:
   range:
   - 0.0

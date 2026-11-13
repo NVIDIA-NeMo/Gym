@@ -10,6 +10,10 @@ description: Original MBPP in 14 Indic languages, with unchanged assertion tests
 modality: text
 licensing: Apache-2.0
 authors: [NVIDIA NeMo Gym contributors]
+maintainers:
+- anushaknvidia
+intended_use:
+- evaluation
 reward:
   range: [0, 1]
   higher_is_better: true

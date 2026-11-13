@@ -11,6 +11,13 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- ffrujeri
+- ananthsub
+- init-nikhil
+- yaoyu-33
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0

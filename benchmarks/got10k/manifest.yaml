@@ -10,6 +10,10 @@ modality: text, image
 licensing: CC-BY-NC-SA-4.0
 authors:
 - Pulkit Khandelwal
+maintainers:
+- pulkitkumar95
+intended_use:
+- evaluation
 reward:
   range:
   - 0.0
