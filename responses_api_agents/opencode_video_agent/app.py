@@ -30,6 +30,9 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 RUNTIME = PurePosixPath("/tmp/nemo-gym-video/video_runtime")
 LAUNCHER = RUNTIME / "launcher.json"
+# Response metadata the video verifiers read (resources_servers/video_mcqa/scoring.py). A failed run is graded on
+# an emptied copy while its row keeps the original response, so replaying that row reads the failure from here.
+EXECUTION_FAILURE_METADATA_KEY = "video_execution_failure"
 
 
 def digest(path: Path) -> str:
@@ -162,7 +165,8 @@ def tool_output(state: dict, tool_name: str = "watch_video") -> str | list[dict]
             else:
                 if tool_name in {"watch_video", "view_image", "view_video"}:
                     raise ValueError("Unsupported visual tool attachment MIME")
-    if parts and text and tool_name not in {"watch_video", "view_image", "view_video"}:
+    # As media_bridge.mjs replays it: only view_image drops its text beside the image.
+    if parts and text and tool_name != "view_image":
         parts.insert(0, {"type": "input_text", "text": str(text)})
     return parts if parts else str(text)
 
@@ -182,9 +186,9 @@ class OpenCodeVideoAgent(OpenCodeSandboxedAgent):
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
 
-    async def _create_opencode_config(self, request: Request) -> dict:
+    async def _create_opencode_config(self, request: Request, *, image_input: bool = False) -> dict:
         return video_config(
-            await super()._create_opencode_config(request),
+            await super()._create_opencode_config(request, image_input=image_input),
             output_tokens=self.config.max_output_tokens,
             model=self.config.opencode_model,
         )
@@ -308,9 +312,12 @@ class OpenCodeVideoAgent(OpenCodeSandboxedAgent):
             await sandbox.download(evidence, output)
         # A changed or missing source is a completed execution failure, never a valid answer.
         checked = await sandbox.exec(command=f"sha256sum {quote(str(destination))}", timeout_s=60)
+        result = self._sandbox_id_to_run_result[request.session[SESSION_ID_KEY]]
         if checked.return_code != 0 or not checked.stdout.startswith(binding.sha256 + " "):
-            result = self._sandbox_id_to_run_result[request.session[SESSION_ID_KEY]]
             result.update(opencode_failed=True, opencode_error_type="video_source_modified")
+        if self.config.execution_failure_reward_zero and result.get("opencode_failed"):
+            metadata = {**(response.metadata or {}), EXECUTION_FAILURE_METADATA_KEY: "true"}
+            response = response.model_copy(update={"metadata": metadata})
         return response
 
 

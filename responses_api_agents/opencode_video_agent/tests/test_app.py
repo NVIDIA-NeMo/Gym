@@ -3,20 +3,25 @@
 
 """Mocked setup tests only; no real sandbox, model or benchmark samples."""
 
+import base64
 import hashlib
 import json
+import shlex
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from pydantic import ValidationError
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from responses_api_agents.opencode_sandboxed_agent import app as parent_app
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent
 from responses_api_agents.opencode_video_agent.app import (
+    EXECUTION_FAILURE_METADATA_KEY,
     LAUNCHER,
     OpenCodeVideoAgent,
     OpenCodeVideoAgentConfig,
@@ -289,6 +294,19 @@ async def test_source_hash_mismatch_stops_before_native_loop(setup, monkeypatch)
     native.assert_not_awaited()
 
 
+def native_response() -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="resp_invented",
+        created_at=0,
+        model="policy_model",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=True,
+    )
+
+
 @pytest.mark.parametrize("capture,changed", [(False, False), (False, True), (True, False)])
 async def test_setup_calls_native_responses_and_preserves_private_evidence(setup, monkeypatch, capture, changed):
     agent, binding = setup
@@ -302,16 +320,18 @@ async def test_setup_calls_native_responses_and_preserves_private_evidence(setup
     sandbox = SimpleNamespace(exec=AsyncMock(side_effect=results), upload=AsyncMock(), download=AsyncMock())
     agent._sandbox_id_to_sandbox["sid"] = sandbox
     agent._sandbox_id_to_run_result["sid"] = {"opencode_failed": False}
-    native = AsyncMock(return_value="native-response")
+    native = AsyncMock(return_value=native_response())
     monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", native)
     request = SimpleNamespace(
         state=SimpleNamespace(_ng_video_binding=binding),
         cookies={"sandbox_id": "sid"},
         session={SESSION_ID_KEY: "sid"},
     )
-    assert await agent.responses(request, MagicMock()) == "native-response"
+    response = await agent.responses(request, MagicMock())
     native.assert_awaited_once()
     assert agent._sandbox_id_to_run_result["sid"]["opencode_failed"] is changed
+    # A modified source is an execution failure the verifier must also see when the row is replayed.
+    assert (response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == ("true" if changed else None)
     assert sandbox.upload.await_count == 4  # Runtime, source, media config, private launcher.
     assert sandbox.download.await_count == int(capture)
     # The directories are made from the root: the image need not contain the workdir.
@@ -415,8 +435,9 @@ async def test_config_and_run_delegate_to_parent_hooks(setup, monkeypatch):
     assert (await agent._create_opencode_config(request))["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"][
         "output"
     ] == 32768
+    await agent._create_opencode_config(request, image_input=True)
     assert await agent.run(request, body) == "native-result"
-    create.assert_awaited_once_with(request)
+    assert create.await_args_list == [call(request, image_input=False), call(request, image_input=True)]
     run.assert_awaited_once_with(request, body)
 
 
@@ -454,3 +475,109 @@ def test_unrelated_native_attachments_keep_text_export():
         )
         == "native text"
     )
+
+
+@pytest.mark.parametrize("tool", ["watch_video", "view_video"])
+def test_video_receipts_keep_their_text_before_the_video(setup, tool):
+    agent, _ = setup
+    video = {"mime": "video/mp4", "url": "data:video/mp4;base64,ZmFrZQ=="}
+    state = {"input": {}, "status": "completed", "output": "Frames: 120 total", "attachments": [video]}
+    part = {"type": "tool", "tool": tool, "callID": "original-call", "state": state}
+    items = agent._opencode_export_to_output_items({"messages": [{"info": {"role": "assistant"}, "parts": [part]}]})
+    assert [item.call_id for item in items] == ["original-call", "original-call"]
+    # The model saw the receipt beside the video (media_bridge.mjs), so the export keeps both, text first.
+    assert items[1].output == [
+        {"type": "input_text", "text": "Frames: 120 total"},
+        {"type": "input_video", "video_url": video["url"]},
+    ]
+
+
+def test_view_image_exports_only_its_image():
+    image = {"mime": "image/png", "url": "data:image/png;base64,ZmFrZQ=="}
+    state = {"status": "completed", "output": "Shown at full resolution.", "attachments": [image]}
+    assert tool_output(state, "view_image") == [{"type": "input_image", "image_url": image["url"], "detail": "auto"}]
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+async def run_real_parent_loop(agent, binding, monkeypatch, *, image=False, run_code=0, finish=None, final_sha=None):
+    """The stock OpenCode loop with only sandbox I/O and the model URL mocked."""
+    monkeypatch.setattr(parent_app, "sandbox_server_url", lambda _name, **kwargs: "http://model.invalid")
+    files = {}
+    hashes = [binding.sha256, final_sha or binding.sha256]
+    assistant = {"role": "assistant", **({"finish": finish} if finish else {})}
+    export = {"messages": [{"info": {"role": "user"}, "parts": []}, {"info": assistant, "parts": []}]}
+
+    async def upload(local, remote):
+        files[str(remote)] = Path(local).read_bytes()
+
+    async def download(remote, local):
+        Path(local).write_bytes(files.get(str(remote)) or json.dumps(export).encode())
+
+    async def run(*, command, **kwargs):
+        stdout = ""
+        if "opencode run" in command:
+            stdout = "Shell: /bin/bash\n" + ("OpenCode run finished" if run_code == 0 else "OpenCode crashed")
+            return SimpleNamespace(return_code=run_code, error_type=None, stdout=stdout, stderr="")
+        if "session list" in command:
+            stdout = '[{"id": "session-id"}]'
+        elif command.startswith("sha256sum "):
+            stdout = hashes.pop(0) + "  video\n"
+        return SimpleNamespace(return_code=0, error_type=None, stdout=stdout, stderr="")
+
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=run), upload=AsyncMock(side_effect=upload), download=AsyncMock(side_effect=download)
+    )
+    agent._sandbox_id_to_sandbox["sid"] = sandbox
+    request = SimpleNamespace(
+        state=SimpleNamespace(_ng_video_binding=binding),
+        cookies={"sandbox_id": "sid"},
+        session={SESSION_ID_KEY: "sid"},
+        json=AsyncMock(return_value={"responses_create_params": {"input": "Watch the video."}}),
+    )
+    content = [{"type": "input_text", "text": "Watch video/invented.mp4 and answer."}]
+    if image:
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64," + base64.b64encode(PNG).decode(),
+                "detail": "auto",
+            }
+        )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}])
+    response = await agent.responses(request, body)
+    launch = next(c.kwargs["command"] for c in sandbox.exec.await_args_list if "opencode run" in c.kwargs["command"])
+    config = next(arg.split("=", 1)[1] for arg in shlex.split(launch) if arg.startswith("OPENCODE_CONFIG_CONTENT="))
+    return response, json.loads(config), launch
+
+
+@pytest.mark.parametrize("image", [False, True], ids=["text_only", "inline_image"])
+async def test_the_real_parent_loop_launches_opencode_with_the_video_config(setup, monkeypatch, image):
+    agent, binding = setup
+    response, config, launch = await run_real_parent_loop(agent, binding, monkeypatch, image=image)
+    model = config["provider"]["nemo_gym"]["models"]["dummy_model"]
+    assert model["attachment"] is True and model["modalities"]["input"] == ["text", "image", "video"]
+    assert model["limit"] == {"context": 262144, "output": 32768}
+    assert config["provider"]["nemo_gym"]["npm"].endswith("nemotron_media_provider.mjs")
+    assert any(plugin.endswith("nemotron_media_plugin.mjs") for plugin in config["plugin"])
+    # The parent's attachment handling stays: lifted image limits and the -f upload only with an image.
+    assert config.get("attachment") == ({"image": parent_app.OPENCODE_IMAGE_LIMITS_UNRESTRICTED} if image else None)
+    assert ("-f /tmp/nemo-gym-attachments/image-1.png" in launch) is image
+    assert agent._sandbox_id_to_run_result["sid"]["opencode_failed"] is False
+    assert EXECUTION_FAILURE_METADATA_KEY not in (response.metadata or {})
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [{"run_code": 1}, {"finish": "length"}, {"final_sha": "0" * 64}],
+    ids=["run_failure", "length_limit", "source_modified"],
+)
+@pytest.mark.parametrize("reward_zero", [True, False])
+async def test_failed_runs_are_marked_for_the_verifier(setup, monkeypatch, failure, reward_zero):
+    agent, binding = setup
+    agent.config.execution_failure_reward_zero = reward_zero
+    response, _, _ = await run_real_parent_loop(agent, binding, monkeypatch, **failure)
+    assert agent._sandbox_id_to_run_result["sid"]["opencode_failed"] is True
+    # Only a run graded as a forced zero carries the marker, so its replayed answer stays zero too.
+    assert (response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == ("true" if reward_zero else None)
