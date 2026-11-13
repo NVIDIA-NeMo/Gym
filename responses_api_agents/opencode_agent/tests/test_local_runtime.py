@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import importlib
 import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,11 +14,12 @@ from omegaconf import OmegaConf
 
 from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY
 from nemo_gym.client import ServerClient
-from nemo_gym.config import GlobalConfigDictParser
+from nemo_gym.config import GlobalConfigDictParser, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
 from nemo_gym.models import HARNESS_NOTES
 from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, OpenCodeAgentRunRequest
+from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 
 
@@ -116,20 +118,27 @@ async def test_failed_install_retries_after_all_waiters_cancel() -> None:
         assert install.call_count == 2
 
 
-@pytest.mark.parametrize("shipped_config", [False, True])
+@pytest.mark.parametrize("shipped_config", [None, "opencode_agent.yaml", "opencode_legacy_agent.yaml"])
 @pytest.mark.parametrize("path", ["/v1/responses", "/ng-rollout/local-smoke/v1/responses"])
-def test_unseeded_responses_run_local_cli(shipped_config: bool, path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unseeded_responses_run_local_cli(
+    shipped_config: str | None, path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     agent = make_agent()
     if shipped_config:
         monkeypatch.chdir(Path(__file__).resolve().parents[3])
         _, configs = GlobalConfigDictParser().load_extra_config_paths(
-            [str(Path(__file__).resolve().parents[1] / "configs/opencode_agent.yaml")]
+            [str(Path(__file__).resolve().parents[1] / "configs" / shipped_config)]
         )
         config = OmegaConf.merge(*configs, {"policy_model_name": "test-model"})
-        agent.config = OpenCodeAgentConfig.model_validate(
+        agent_config = OpenCodeAgentConfig.model_validate(
             dict(config.opencode_agent.responses_api_agents.opencode_agent)
             | {"host": "localhost", "port": 8001, "name": "opencode"}
         )
+        module = importlib.import_module(f"responses_api_agents.opencode_agent.{Path(agent_config.entrypoint).stem}")
+        agent_class = (
+            module.OpenCodeLegacyAgent if shipped_config == "opencode_legacy_agent.yaml" else module.OpenCodeAgent
+        )
+        agent = agent_class(config=agent_config, server_client=agent.server_client)
     message = NeMoGymResponseOutputMessage(
         id="msg-local",
         role="assistant",
@@ -162,8 +171,21 @@ def test_unseeded_responses_run_local_cli(shipped_config: bool, path: str, monke
     provider.assert_not_called()
 
 
-async def test_unseeded_run_requires_resources_not_a_session() -> None:
+@pytest.mark.parametrize("with_resources", [False, True])
+def test_default_run_requires_environment_server(with_resources: bool) -> None:
     agent = make_agent()
+    if with_resources:
+        agent.config.resources_server = ResourcesServerRef(type="resources_servers", name="resources")
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/run", json={"responses_create_params": {"input": "task"}})
+    assert response.status_code == 422, response.text
+    assert "drive it through agent sessions" in response.json()["detail"]
+    agent.server_client.post.assert_not_called()
+
+
+async def test_legacy_run_requires_resources_not_a_session() -> None:
+    default = make_agent()
+    agent = OpenCodeLegacyAgent(config=default.config, server_client=default.server_client)
     with pytest.raises(HTTPException) as error:
         await agent.run(
             Request({"type": "http", "session": {}}),

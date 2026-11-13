@@ -66,7 +66,7 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
 
 def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
-    assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent"]
+    assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent", "opencode_legacy_agent"]
 
 
 @pytest.mark.parametrize(

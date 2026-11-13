@@ -43,6 +43,7 @@ from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
 
@@ -1872,13 +1873,15 @@ def test_missing_workdir_is_rejected(tmp_path):
     assert not (tmp_path / "s").exists()
 
 
-def test_close_response_cookie_blocks_legacy_run(setup):
+@pytest.mark.parametrize(("agent_class", "expected_status"), [(OpenCodeAgent, 422), (OpenCodeLegacyAgent, 409)])
+def test_close_response_cookie_blocks_local_run(setup, agent_class, expected_status):
     agent, sandbox = setup
+    agent = agent_class(config=agent.config, server_client=agent.server_client)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
         response = client.post("/run", json={"responses_create_params": {"input": "task"}})
-        assert response.status_code == 409
+        assert response.status_code == expected_status
     agent.server_client.post.assert_not_called()
 
 
