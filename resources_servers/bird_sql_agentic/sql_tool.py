@@ -18,7 +18,7 @@ ALLOWED_PREFIX = re.compile(r"^\s*(select|with|pragma\s+table_info)\b", re.IGNOR
 
 def check_sql_allowed(sql: str) -> Optional[str]:
     """Return an error message if ``sql`` is not allowed, else ``None``."""
-    s = sql.strip()
+    s = _strip_sql_comments(sql).strip()
     if s.endswith(";"):
         s = s[:-1].strip()
 
@@ -46,6 +46,56 @@ def _has_unquoted_semicolon(sql: str) -> bool:
         elif ch == ";":
             return True
     return False
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Replace ``--`` and ``/* */`` comments with a space, leaving quoted text untouched."""
+    out = []
+    i = 0
+    state = "NORMAL"
+    quote: Optional[str] = None
+    while i < len(sql):
+        ch = sql[i]
+        two = sql[i : i + 2]
+
+        if state == "NORMAL":
+            if ch in ("'", '"', "`"):
+                state = "STRING"
+                quote = ch
+                out.append(ch)
+                i += 1
+            elif two == "--":
+                state = "LINE_COMMENT"
+                out.append(" ")
+                i += 2
+            elif two == "/*":
+                state = "BLOCK_COMMENT"
+                out.append(" ")
+                i += 2
+            else:
+                out.append(ch)
+                i += 1
+
+        elif state == "STRING":
+            out.append(ch)
+            if ch == quote:
+                state = "NORMAL"
+            i += 1
+
+        elif state == "LINE_COMMENT":
+            if ch == "\n":
+                state = "NORMAL"
+                out.append(ch)
+            i += 1
+
+        else:  # BLOCK_COMMENT
+            if two == "*/":
+                state = "NORMAL"
+                i += 2
+            else:
+                i += 1
+
+    return "".join(out)
 
 
 def format_rows(

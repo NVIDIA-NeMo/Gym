@@ -106,6 +106,11 @@ class TestCheckSqlAllowed:
             "WITH t AS (SELECT 1) SELECT * FROM t",
             "PRAGMA table_info(students)",
             "SELECT 'a;b' FROM students",
+            "SELECT 1 /* ; */",
+            "SELECT 1; -- explanation",
+            "SELECT 1 -- explanation;\n",
+            "/* leading comment */ SELECT 1",
+            "SELECT '--not a comment' FROM students",
         ],
     )
     def test_allows_read_only_single_statements(self, sql) -> None:
@@ -119,13 +124,22 @@ class TestCheckSqlAllowed:
             "INSERT INTO students (name) VALUES ('x')",
             "PRAGMA writable_schema = ON",
             "ATTACH DATABASE 'other.sqlite' AS o",
+            "/* x */ DROP TABLE students",
         ],
     )
     def test_rejects_non_read_queries(self, sql) -> None:
         assert check_sql_allowed(sql) is not None
 
-    def test_rejects_multiple_statements(self) -> None:
-        assert check_sql_allowed("SELECT 1; DROP TABLE students") is not None
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; DROP TABLE students",
+            'SELECT "a--b"; DROP TABLE students',
+            "SELECT 1; -- hi\nDROP TABLE students",
+        ],
+    )
+    def test_rejects_multiple_statements(self, sql) -> None:
+        assert check_sql_allowed(sql) is not None
 
     def test_rejects_empty(self) -> None:
         assert check_sql_allowed("   ;  ") is not None
