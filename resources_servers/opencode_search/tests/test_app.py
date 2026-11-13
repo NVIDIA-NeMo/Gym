@@ -106,6 +106,11 @@ class TestLastAssistantText:
         assert _last_assistant_text(SimpleNamespace(output=[])) == ""
         assert _last_assistant_text(SimpleNamespace(output=None)) == ""
 
+    def test_skips_trailing_empty_message(self):
+        """An empty assistant message after the answer is not the answer; it must not hide it."""
+        response = SimpleNamespace(output=[_assistant_message("Exact Answer: 42"), _assistant_message("")])
+        assert _last_assistant_text(response) == "Exact Answer: 42"
+
 
 class TestJudgeRetryLadder:
     """The retry schedule is a WALL-CLOCK budget, not just a politeness delay.
