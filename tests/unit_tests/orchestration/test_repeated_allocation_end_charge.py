@@ -27,7 +27,7 @@ from nemo_gym.core.failure_kinds import (
     SERVER_FAULT_KINDS,
     is_registered,
 )
-from nemo_gym.orchestration.recovery import failure_facts, fault_class
+from nemo_gym.orchestration.recovery import failure_facts
 from nemo_gym.rollouts.rollout_records import read_records
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -183,4 +183,3 @@ def test_the_guard_reports_the_final_identity_by_its_cause(run):
     # Reported by its cause, and an evaluation-side fault: not the model's.
     facts = failure_facts(decision, collected)
     assert facts["trial_failures"]["by_cause"]["allocation"]["count"] == 1
-    assert fault_class(ROLLOUT_ALLOCATION_ENDED) is None

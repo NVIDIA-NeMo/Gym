@@ -37,7 +37,11 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
-from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE, ROLLOUT_ALLOCATION_ENDED
+from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT_INFRASTRUCTURE,
+    ROLLOUT_ALLOCATION_ENDED,
+    FailureClassificationConfig,
+)
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
@@ -58,10 +62,12 @@ from nemo_gym.rollouts.rollout_recovery import (
     masked_kept_answer_kind,
     matches_failure_class,
     observed_elapsed,
+    saved_failure_classification,
 )
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
+COUNTS_AS_ZERO_ROW_KEY = "_ng_failure_counts_as_zero"
 RUN_ID_KEY = "_ng_run_id"
 # Names the saved judge failure a judge-only re-judgment settles; the result keeps that failure's attempt identity.
 REJUDGED_FAILURE_ID_KEY = "_ng_rejudged_failure_id"
@@ -204,6 +210,9 @@ class _Outcome:
     has_reward: bool
     elapsed_seconds: float | None
     final_zero: bool = False
+    # A scored result whose producer applied ``count_as_zero`` (a failure the policy settled as the model's zero): the
+    # failure kind. It is a success to selection, so only the coverage report singles it out.
+    counted_zero_kind: str | None = None
     interruption_cause_unknown: bool = False
     saved_answer: bool = False
     unclassified_execution_failure: bool = False
@@ -545,7 +554,10 @@ def _has_eligible_interruption_cause(row: dict) -> bool:
 
 
 class RolloutRecords:
-    def __init__(self, manifest: RunManifest, expected: list[dict]):
+    def __init__(
+        self, manifest: RunManifest, expected: list[dict], *, classification: FailureClassificationConfig | None = None
+    ):
+        self.classification = classification
         self.manifest = manifest
         self.expected = {}
         for row in expected:
@@ -640,7 +652,7 @@ class RolloutRecords:
             self.attempt_counts[key[0]] += 1
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
         interruption = is_interruption_failure(row)
-        infrastructure = is_infrastructure_agent_timeout(row)
+        infrastructure = is_infrastructure_agent_timeout(row, classification=self.classification)
         failure_class = row.get("_ng_failure_class")
         if failure_class is None and infrastructure:
             # A graded result of an agent timeout whose window held a server-side fault (Harbor's graded zero) is not
@@ -669,8 +681,10 @@ class RolloutRecords:
             row.get(TASK_INDEX_KEY_NAME),
             row.get(ROLLOUT_INDEX_KEY_NAME),
             key[1],
-        ) in self.rerun_masked and masked_kept_answer_kind(row) is not None
-        masked_infrastructure = masked_infrastructure_kind(row) is not None or rerun_approved
+        ) in self.rerun_masked and masked_kept_answer_kind(row, classification=self.classification) is not None
+        masked_infrastructure = (
+            masked_infrastructure_kind(row, classification=self.classification) is not None or rerun_approved
+        )
         if masked_infrastructure and key not in self.payloads:
             # The results file keeps no resubmit offset, so a masked attempt counts whenever it was saved: a resubmit
             # still gives the process it starts a fresh budget, as for every failure.
@@ -688,7 +702,13 @@ class RolloutRecords:
             # The producer settled this rollout as a scored zero, or the agent's deadline ended it with its answer
             # kept (the model's result, as recovery classifies it): final, so no policy reopens it.
             final_zero=(row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")))
-            or is_answered_agent_deadline(row),
+            or is_answered_agent_deadline(row, classification=self.classification),
+            counted_zero_kind=(
+                str(row.get("failure_kind") or "unknown")
+                if failure_class is None
+                and (row.get("failure_outcome_action") == "count_as_zero" or row.get(COUNTS_AS_ZERO_ROW_KEY) is True)
+                else None
+            ),
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
@@ -729,7 +749,7 @@ class RolloutRecords:
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
-        state = cls(manifest, expected)
+        state = cls(manifest, expected, classification=saved_failure_classification(output))
         unexpected = manifest.next_attempt.keys() - state.expected.keys()
         if unexpected:
             raise ConfigError(f"Run manifest reserves attempts for unknown rollouts: {sorted(unexpected)!r}.")
@@ -980,9 +1000,20 @@ class RolloutRecords:
         failures = self.selected_records("failure")
         # Settled final zeros are complete and in the denominator, and still failures for health.
         final_zeros = sum(self.payloads[key].final_zero for key in failures)
+        # Scored successes the policy counted as the model's zero are already in ``successful``: they are reported
+        # apart from ``final_zeros`` (failed rollouts only), so no completion formula counts them twice.
+        scored_zeros = Counter(
+            self.payloads[(identity, self.latest[identity])].counted_zero_kind
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+            and self.payloads[(identity, self.latest[identity])].counted_zero_kind
+        )
         failed_final = sum(
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
+        # A failure record whose producer set mask_sample (a judge or verifier outage, for example) is excluded from
+        # the score rather than counted as a zero. It is a failure, so it is never in ``masked``: report it here.
+        failed_masked = sum(self.payloads[key].masked for key in failures)
         # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
         masked_retryable = sum(
             self.payloads[(identity, self.latest[identity])].masked_infrastructure
@@ -992,6 +1023,10 @@ class RolloutRecords:
             if self.disposition(identity) == "success"
         )
         settled = counts["success"] - masked_retryable + final_zeros
+        # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
+        # (terminal, at their attempt cap, or ``stopped_not_retried``, which resume does not run again) are not open,
+        # even when they are not settled.
+        open_rollouts = masked_retryable + (len(failures) - failed_final) + not_started + missing
         return {
             "schema_version": 2,
             "selection_policy": self.manifest.selection_policy,
@@ -1004,7 +1039,10 @@ class RolloutRecords:
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
+            "failed_masked": failed_masked,
             "final_zeros": final_zeros,
+            "counted_zeros_in_successful": sum(scored_zeros.values()),
+            "counted_zero_kinds": dict(sorted(scored_zeros.items())),
             "failed_not_final": len(failures) - failed_final,
             "failed_by_class": dict(sorted(Counter(self.payloads[key].failure_class for key in failures).items())),
             "intentionally_omitted": counts["omitted"],
@@ -1021,6 +1059,7 @@ class RolloutRecords:
             "retryable": sum(
                 self._retryable(identity) and self.failure_count(identity) < max_attempts for identity in self.expected
             ),
+            "open": open_rollouts,
             "max_rollout_attempts": max_attempts,
             "attempt_extension": self.attempt_extension,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,

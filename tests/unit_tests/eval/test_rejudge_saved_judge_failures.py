@@ -24,7 +24,9 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
 
 
-def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Path, list[dict]]:
+def _run(
+    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
+) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
     source = tmp_path / "source.jsonl"
@@ -38,14 +40,18 @@ def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Pat
         for index, row in enumerate(store.pending()):
             store.record_dispatch(row)
             if index < judge_failures:
-                failure = row | {
-                    "_ng_failure_class": "judge_failed",
-                    "_ng_failure_id": f"judge-{index}",
-                    "failure_kind": "judge_failed",
-                    "mask_sample": True,
-                    "reward": 0.0,
-                    "response": ANSWER,
-                }
+                failure = (
+                    row
+                    | {
+                        "_ng_failure_class": "judge_failed",
+                        "_ng_failure_id": f"judge-{index}",
+                        "failure_kind": "judge_failed",
+                        "mask_sample": True,
+                        "reward": 0.0,
+                        "response": ANSWER,
+                    }
+                    | (evidence or {})
+                )
                 store.record_outcome(failure)
                 failures.append(failure)
             else:
@@ -67,6 +73,46 @@ def _settle(output: Path, failure: dict, reward: float) -> None:
         }
         assert store.record_rejudgment(failure, result)
         store.close_rejudgment(logical_rollout_id(failure), pending.operation_id)
+
+
+def test_a_settled_row_keeps_the_evidence_of_the_judge_failure_it_settles(tmp_path):
+    evidence = {
+        "ng_perf": {"model_calls": 3, "total_tokens": 1200},
+        "_ng_elapsed_s": 12.5,
+        "ng_model_call_capture": {"calls": [{"model_call_id": "policy-0"}]},
+        "document_delivery": {"pages": 4},
+    }
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=evidence)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        # What /verify returns: the grade and its own fields, none of the row's evidence.
+        result = {
+            "_ng_task_index": failure["_ng_task_index"],
+            "_ng_rollout_index": failure["_ng_rollout_index"],
+            "agent_ref": failure["agent_ref"],
+            "_ng_run_id": failure["_ng_run_id"],
+            "_ng_attempt_index": failure["_ng_attempt_index"],
+            "response": ANSWER,
+            "reward": 0.5,
+            "mask_sample": False,
+            "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        assert store.record_rejudgment(failure, result)
+        store.close_rejudgment(logical_rollout_id(failure), pending.operation_id)
+    settled = next(row for row in RolloutStore.read(output).selected("success") if row["reward"] == 0.5)
+    assert {key: settled[key] for key in evidence} == evidence
+    assert settled["mask_sample"] is False and "failure_kind" not in settled
+    assert not any(key.startswith("_ng_failure") for key in settled)
+    assert settled["_ng_rejudged_failure_observations"]["ng_perf"] == evidence["ng_perf"]
+
+
+async def test_a_run_with_nothing_due_runs_no_pass(tmp_path, monkeypatch):
+    output, _ = _run(tmp_path, judge_failures=0)
+    before = output.read_bytes()
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert output.read_bytes() == before and not (output.parent / "reverification").exists()
 
 
 def test_due_judge_failures_are_the_selected_ones_with_failure_attempts_left(tmp_path, monkeypatch):

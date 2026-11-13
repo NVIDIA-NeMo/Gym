@@ -20,6 +20,7 @@ from pathlib import Path
 import orjson
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
@@ -739,17 +740,24 @@ def test_duplicate_repeat_indices_are_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("field", ["aggregate_metrics", "materialized_inputs"])
 @pytest.mark.parametrize("role", ["baseline", "candidate"])
-def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role: str) -> None:
+@pytest.mark.parametrize("source_list", [False, True])
+def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role: str, source_list: bool) -> None:
     pair = _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))
     pair[role][field] = "unsupported.json"
+    if source_list:
+        pair[role] = [pair[role]]
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
     sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
 
     with pytest.raises(ConfigError, match="Cannot load suite manifest") as error:
         _compare(path)
 
-    assert f"models.model.test.{role}.{field}" in str(error.value)
-    assert "Extra inputs are not permitted" in str(error.value)
+    cause = error.value.__cause__
+    assert isinstance(cause, ValidationError)
+    errors = cause.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "extra_forbidden"
+    assert errors[0]["loc"] == ("models", "model", "test", role, 0, field)
     assert {file: file.read_bytes() for file in sources} == sources
 
 

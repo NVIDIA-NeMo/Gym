@@ -31,7 +31,7 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
 
 
-def _fetch_official_tasks() -> Path:
+def fetch_official_tasks() -> Path:
     """Sparse-clone the pinned official tasks/ tree, reusing a checkout already at that revision."""
     checkout, revision = SOURCE_CHECKOUT, SOURCE_REVISION
     if (checkout / ".git").is_dir() and _git("rev-parse", "HEAD", cwd=checkout) == revision:
@@ -45,7 +45,7 @@ def _fetch_official_tasks() -> Path:
     return checkout / "tasks"
 
 
-def _task_definition(path: Path) -> tuple[dict, str]:
+def task_definition(path: Path) -> tuple[dict, str]:
     content = path.read_text()
     pieces = content.split("---", 2)
     if len(pieces) != 3 or pieces[0].strip():
@@ -59,12 +59,38 @@ def _toml_value(value: str | int | float | bool) -> str:
     return json.dumps(value)
 
 
-def _task_toml(name: str, definition: dict) -> str:
+def task_toml(
+    name: str,
+    definition: dict,
+    docker_image: str | None = None,
+    *,
+    skills_dir: str | None = None,
+    current_schema: bool = False,
+) -> str:
+    """The task.toml for one SkillsBench task definition.
+
+    ``current_schema`` writes Harbor's current spellings (``network_mode``, without the deprecated ``version``) for
+    Gym's ``harbor`` environment server; without it the file keeps the ones this path's pinned Harbor reads.
+    """
     sandbox = definition.get("sandbox") or definition["environment"]
     verifier = definition["verifier"]
     agent = definition["agent"]
     oracle = definition.get("oracle") or {}
     metadata = definition.get("metadata") or {}
+    environment = {"docker_image": docker_image} if docker_image else {}
+    environment.update(
+        build_timeout_sec=sandbox["build_timeout_sec"],
+        cpus=sandbox["cpus"],
+        memory_mb=sandbox["memory_mb"],
+        storage_mb=sandbox["storage_mb"],
+        gpus=sandbox["gpus"],
+    )
+    if current_schema:
+        environment["network_mode"] = sandbox["network_mode"]
+    else:
+        environment["allow_internet"] = sandbox["network_mode"] != "no-network"
+    if skills_dir:
+        environment["skills_dir"] = skills_dir
     sections = {
         "metadata": {
             "task_name": name,
@@ -73,16 +99,9 @@ def _task_toml(name: str, definition: dict) -> str:
         },
         "verifier": {"timeout_sec": verifier["timeout_sec"]},
         "agent": {"timeout_sec": agent["timeout_sec"]},
-        "environment": {
-            "build_timeout_sec": sandbox["build_timeout_sec"],
-            "cpus": sandbox["cpus"],
-            "memory_mb": sandbox["memory_mb"],
-            "storage_mb": sandbox["storage_mb"],
-            "gpus": sandbox["gpus"],
-            "allow_internet": sandbox["network_mode"] != "no-network",
-        },
+        "environment": environment,
     }
-    lines = ['version = "1.0"']
+    lines = [] if current_schema else ['version = "1.0"']
     for section, fields in sections.items():
         lines.extend(("", f"[{section}]"))
         lines.extend(f"{key} = {_toml_value(value)}" for key, value in fields.items())
@@ -90,11 +109,11 @@ def _task_toml(name: str, definition: dict) -> str:
         if env:
             lines.extend(("", f"[{section}.env]"))
             lines.extend(f"{json.dumps(key)} = {_toml_value(value)}" for key, value in env.items())
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines).lstrip("\n") + "\n"
 
 
-def _adapt_task(source: Path, destination: Path, skill_mode: str, docker_image: str | None = None) -> None:
-    definition, instruction = _task_definition(source / "task.md")
+def adapt_task(source: Path, destination: Path, skill_mode: str, docker_image: str | None = None) -> None:
+    definition, instruction = task_definition(source / "task.md")
     if definition.get("schema_version") != "1.3" or definition["verifier"].get("type") != "test-script":
         raise ValueError(f"Unsupported SkillsBench task format: {source}")
     sandbox = definition.get("sandbox") or definition["environment"]
@@ -111,12 +130,7 @@ def _adapt_task(source: Path, destination: Path, skill_mode: str, docker_image: 
 
     destination.mkdir()
     (destination / "instruction.md").write_text(instruction)
-    task_toml = _task_toml(source.name, definition)
-    if docker_image:
-        task_toml = task_toml.replace(
-            "[environment]\n", f"[environment]\ndocker_image = {_toml_value(docker_image)}\n", 1
-        )
-    (destination / "task.toml").write_text(task_toml)
+    (destination / "task.toml").write_text(task_toml(source.name, definition, docker_image))
     shutil.copytree(source / "environment", destination / "environment")
     if skill_mode == "with-skill":
         dockerfile = destination / "environment" / "Dockerfile"
@@ -151,10 +165,38 @@ def _adapt_task(source: Path, destination: Path, skill_mode: str, docker_image: 
     solution_script.chmod(0o755)
 
 
+def load_image_manifest(manifest_path: str | Path, source_dir: Path, task_names: set[str]) -> dict[str, str]:
+    """The published image per task from an image manifest built from the checkout at ``source_dir``.
+
+    A relative path names a file in this Gym checkout, e.g. the pinned benchmarks/skillsbench/images.json.
+    """
+    manifest_file = Path(manifest_path).expanduser()
+    if not manifest_file.is_absolute():
+        manifest_file = GYM_ROOT / manifest_file
+    manifest = json.loads(manifest_file.read_text())
+    source_revision = manifest.get("source_revision")
+    if source_revision:
+        actual_revision = _git("-C", str(source_dir.parent), "rev-parse", "HEAD")
+        if actual_revision != source_revision:
+            raise ValueError(
+                f"Image manifest was built from SkillsBench {source_revision}, "
+                f"but {source_dir.parent} is at {actual_revision}"
+            )
+    images = {
+        item["task_name"]: item["docker_image"]
+        for item in manifest["tasks"]
+        if item.get("success") and item.get("docker_image")
+    }
+    missing = task_names - images.keys()
+    if missing:
+        raise ValueError(f"Image manifest is missing {len(missing)} tasks: {', '.join(sorted(missing))}")
+    return images
+
+
 def prepare() -> Path:
     """Build a Harbor task tree and Gym index from an official SkillsBench checkout."""
     source_override = os.environ.get(SOURCE_ENV_VAR)
-    source_dir = Path(source_override).expanduser().resolve() if source_override else _fetch_official_tasks()
+    source_dir = Path(source_override).expanduser().resolve() if source_override else fetch_official_tasks()
     if not source_dir.is_dir():
         raise FileNotFoundError(f"Set {SOURCE_ENV_VAR} to the official SkillsBench tasks/ directory: {source_dir}")
     task_dirs = sorted(path for path in source_dir.iterdir() if (path / "task.md").is_file())
@@ -165,38 +207,18 @@ def prepare() -> Path:
         raise ValueError(f"{SKILL_MODE_ENV_VAR} must be 'with-skill' or 'no-skill', got {skill_mode!r}")
 
     image_manifest_path = os.environ.get(IMAGE_MANIFEST_ENV_VAR)
-    images = None
-    if image_manifest_path:
-        # A relative path names a file in this Gym checkout, e.g. the pinned benchmarks/skillsbench/images.json.
-        manifest_file = Path(image_manifest_path).expanduser()
-        if not manifest_file.is_absolute():
-            manifest_file = GYM_ROOT / manifest_file
-        manifest = json.loads(manifest_file.read_text())
-        source_revision = manifest.get("source_revision")
-        if source_revision:
-            actual_revision = subprocess.check_output(
-                ["git", "-C", str(source_dir.parent), "rev-parse", "HEAD"], text=True
-            ).strip()
-            if actual_revision != source_revision:
-                raise ValueError(
-                    f"Image manifest was built from SkillsBench {source_revision}, "
-                    f"but {source_dir.parent} is at {actual_revision}"
-                )
-        images = {
-            item["task_name"]: item["docker_image"]
-            for item in manifest["tasks"]
-            if item.get("success") and item.get("docker_image")
-        }
-        missing = {task.name for task in task_dirs} - images.keys()
-        if missing:
-            raise ValueError(f"Image manifest is missing {len(missing)} tasks: {', '.join(sorted(missing))}")
+    images = (
+        load_image_manifest(image_manifest_path, source_dir, {task.name for task in task_dirs})
+        if image_manifest_path
+        else None
+    )
 
     staging = DATA_DIR / "tasks.staging"
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     for source in task_dirs:
-        _adapt_task(source, staging / source.name, skill_mode, images[source.name] if images else None)
+        adapt_task(source, staging / source.name, skill_mode, images[source.name] if images else None)
     if TASKS_DIR.exists():
         shutil.rmtree(TASKS_DIR)
     staging.rename(TASKS_DIR)

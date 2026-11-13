@@ -141,7 +141,7 @@ def judge_slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (bins / "sbatch").write_text(
         '#!/bin/bash\nhere="$(dirname "$0")"\n'
         'n=$(cat "$here/sbatch_count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$here/sbatch_count"\n'
-        'echo "$PWD" > "$here/cwd"\nenv > "$here/env"\nprintf "%s\\n" "$@" >> "$here/sbatch_args"\n'
+        'echo "$PWD" > "$here/cwd"\nenv > "$here/env"\numask > "$here/umask"\nprintf "%s\\n" "$@" >> "$here/sbatch_args"\n'
         "echo $((4241 + n))\n"
     )
     (bins / "sacct").write_text(
@@ -403,6 +403,56 @@ def test_the_queued_job_settles_the_run_through_its_own_settle_path_and_inspect_
     assert (job_dir / "artifacts" / "quality_summary.json").exists()
     # The chain accounting is still the policy chain's.
     assert (job_dir / ".gym_job_chain").read_text() == "100\n"
+
+
+def _modes(root: Path) -> dict[str, int]:
+    """The permission bits of everything under (and including) ``root``, keyed by its path relative to ``root``."""
+    return {str(path.relative_to(root)): path.stat().st_mode & 0o777 for path in [root, *root.rglob("*")]}
+
+
+def test_the_judge_only_jobs_outputs_and_journals_are_readable_like_the_runs_other_artifacts(
+    tmp_path,
+    judge_slurm_bin,
+    monkeypatch,
+    verifier,  # noqa: F811
+) -> None:
+    """Only the staged driver script is owner-only. The job inherits the dispatch's umask from sbatch, so a dispatch that
+    left ``umask 077`` set made the reverification folder 0700 and its files 0600: a second user reading the run to
+    certify it stopped with "Permission denied"."""
+    previous = os.umask(0o022)  # the usual login umask, which the run's other artifacts are created under
+    try:
+        job_dir = _model_served_run(tmp_path)
+        out = recover(*_handle(job_dir), judge_partition="cpu")
+        assert out.dispatched == "reverify", out.decision.reason
+
+        # What a reader of the run needs: the journal inspect reads is readable like the rest of the run directory.
+        assert (job_dir / JUDGE_JOB_JOURNAL_NAME).stat().st_mode & 0o777 == 0o644
+        # The driver script is the one owner-only file the dispatch stages.
+        (script,) = job_dir.glob("reverify-*.sh")
+        assert script.stat().st_mode & 0o777 == 0o600
+        # The job inherits the dispatch's umask from sbatch: the caller's, not the private one of the script.
+        inherited = int((judge_slurm_bin / "umask").read_text(), 8)
+        assert inherited == 0o022
+
+        # The job, under the umask it inherited, creates the reverification folder and its receipt.
+        async def run_from_config(self, config):
+            pass
+
+        monkeypatch.setattr(RolloutAggregationHelper, "run_from_config", run_from_config)
+        monkeypatch.setenv("SLURM_JOB_ID", "4242")
+        os.umask(inherited)
+        config = _queued_reverify_config(_queued_script(job_dir))
+        eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+    finally:
+        os.umask(previous)
+
+    receipt = Path(out.judge_job["receipt"])
+    assert receipt.exists()
+    modes = _modes(job_dir / "reverification")
+    assert len(modes) > 2, modes
+    for name, mode in modes.items():
+        assert mode & 0o044 == 0o044 and mode & 0o200, (name, oct(mode))
+    assert modes["."] == 0o755 and modes[str(receipt.relative_to(job_dir / "reverification"))] == 0o644
 
 
 def test_the_judge_only_job_does_not_inherit_the_collection_limit(tmp_path, judge_slurm_bin) -> None:

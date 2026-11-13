@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG DOCUMENT_TOOLS_IMAGE
+FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS cli
+ARG OPENCODE_VERSION=1.19.4
+RUN npm install --prefix /opt/cli --omit=dev opencode-ai@${OPENCODE_VERSION}
+
+FROM ${DOCUMENT_TOOLS_IMAGE}
+ARG OPENCODE_VERSION=1.19.4
+COPY --from=cli /usr/local/bin/node /usr/local/bin/node
+COPY --from=cli /opt/cli /opt/cli
+COPY resources_servers/officeqa/opencode-model.json /opt/cli/opencode-model.json
+# Select the x64 baseline package independently of the build host's AVX2 support.
+RUN case "$(uname -m)" in \
+      x86_64) opencode_arch=x64-baseline ;; \
+      aarch64) opencode_arch=arm64 ;; \
+      *) echo 'OfficeQA OpenCode images require x86_64 or aarch64' >&2; exit 1 ;; \
+    esac \
+    && ln -s /opt/cli/node_modules/opencode-linux-${opencode_arch}/bin/opencode /opt/cli/opencode \
+    && ln -s /opt/cli/opencode /usr/local/bin/opencode \
+    && mkdir -p /workspace/task/.cache/opencode/bin \
+    && ln -s /usr/bin/rg /workspace/task/.cache/opencode/bin/rg \
+    && chmod -R a+rX /opt/cli \
+    && chown -R 65534:65534 /workspace/task \
+    && test "$(opencode --version)" = "${OPENCODE_VERSION}" \
+    && sha256sum /opt/cli/opencode \
+    && opencode --version > /usr/local/share/document-tools/opencode-version.txt \
+    && node --version > /usr/local/share/document-tools/node-version.txt \
+    && mkdir -p /tmp/opencode \
+    && chown -R 65534:65534 /tmp/opencode
+USER 65534:65534

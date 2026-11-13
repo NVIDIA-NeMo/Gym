@@ -262,6 +262,8 @@ if kill -0 "$harness" 2>/dev/null; then
     forced=1
     scan
     kill -TERM "$harness" 2>/dev/null
+    # The initial /proc scan can be slow. Give the harness its full grace period after TERM.
+    now
     grace=$((NOW + cleanup))
     # Once the harness has exited, the drain below scans for what it left.
     while sleep 0.05; kill -0 "$harness" 2>/dev/null; do

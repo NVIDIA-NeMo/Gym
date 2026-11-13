@@ -20,7 +20,12 @@ import orjson
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval.comparison.schema import ReportFormat
-from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult, SuiteStatistics
+from nemo_gym.eval.comparison.suite.schema import (
+    SuiteComparisonResult,
+    SuiteRunSummary,
+    SuiteStatistics,
+    summary_sources,
+)
 
 
 def _number(value: float | None) -> str:
@@ -58,6 +63,26 @@ def render_suite_summary(result: SuiteComparisonResult) -> str:
             lines.append(f"  Interval unavailable: {statistics.interval_unavailable_reason}")
     lines.extend(f"Warning: {warning}" for warning in result.warnings)
     return "\n".join(lines)
+
+
+def _source_lines(label: str, run: SuiteRunSummary) -> list[str]:
+    lines = [
+        f"- {label}: `{_text(run.aggregate_metrics)}`; agent `{_text(run.agent)}`.",
+        f"  Rollouts: `{_text(run.rollouts)}`.",
+    ]
+    if run.environment_server is not None:
+        lines.append(f"  Environment server: `{_text(run.environment_server)}`.")
+    lines.append(
+        f"  Coverage: {run.coverage.status}; recorded tasks: {run.coverage.recorded_task_count}; "
+        f"planned tasks: {run.coverage.planned_task_count if run.coverage.planned_task_count is not None else 'unverified'}."
+    )
+    lines.append(f"  Repeats: {run.repeat_count}; local repeat indices: {_text(run.repeat_indices)}.")
+    if run.materialized_inputs:
+        lines.append(f"  Materialized inputs: `{_text(run.materialized_inputs)}`.")
+    if run.failures is not None:
+        lines.append(f"  Saved failure counts (entire rollout file): `{_text(run.failures.source)}`.")
+    lines.extend(f"  {_text(note)}" for note in run.coverage.notes)
+    return lines
 
 
 def render_suite_markdown(result: SuiteComparisonResult) -> str:
@@ -131,20 +156,15 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
     for cell in result.cells:
         lines.append(f"### {_text(cell.model)} / {_text(cell.benchmark)}")
         lines.append("")
-        for role, run in (("Candidate", cell.candidate), ("Baseline", cell.baseline)):
-            lines.append(f"- {role}: `{_text(run.aggregate_metrics)}`; agent `{_text(run.agent)}`.")
-            if run.environment_server is not None:
-                lines.append(f"  Environment server: `{_text(run.environment_server)}`.")
-            lines.append(
-                f"  Coverage: {run.coverage.status}; recorded tasks: {run.coverage.recorded_task_count}; "
-                f"planned tasks: {run.coverage.planned_task_count if run.coverage.planned_task_count is not None else 'unverified'}."
-            )
-            if run.materialized_inputs:
-                lines.append(f"  Materialized inputs: `{_text(run.materialized_inputs)}`.")
-            if run.failures is not None:
-                lines.append(f"  Saved failure counts (entire rollout file): `{_text(run.failures.source)}`.")
-            for note in run.coverage.notes:
-                lines.append(f"  {_text(note)}")
+        for role, collection in (("Candidate", cell.candidate), ("Baseline", cell.baseline)):
+            if collection.sources:
+                lines.append(
+                    f"- {role}: {len(collection.sources)} pooled source runs; "
+                    f"{collection.repeat_count} total repeats; coverage: {collection.coverage.status}."
+                )
+            for index, run in enumerate(summary_sources(collection), 1):
+                label = f"{role} source {index}" if collection.sources else role
+                lines.extend(_source_lines(label, run))
         if cell.statistics and cell.statistics.interval_unavailable_reason:
             lines.append(f"Interval unavailable: {_text(cell.statistics.interval_unavailable_reason)}")
         lines.append("")
@@ -161,12 +181,13 @@ def write_suite_reports(result: SuiteComparisonResult, output_dir: Path, report_
     """Write separate suite artifacts without overwriting single-run comparison reports."""
     sources = {result.suite_fpath.resolve()}
     for cell in result.cells:
-        for run in (cell.baseline, cell.candidate):
-            sources.update((run.rollouts.resolve(), run.aggregate_metrics.resolve()))
-            if run.materialized_inputs:
-                sources.add(run.materialized_inputs.resolve())
-            if run.failures is not None:
-                sources.add(run.failures.source.resolve())
+        for collection in (cell.baseline, cell.candidate):
+            for run in summary_sources(collection):
+                sources.update((run.rollouts.resolve(), run.aggregate_metrics.resolve()))
+                if run.materialized_inputs:
+                    sources.add(run.materialized_inputs.resolve())
+                if run.failures is not None:
+                    sources.add(run.failures.source.resolve())
     names = [
         name
         for extension, name in (("md", "suite_compare_report.md"), ("json", "suite_compare_report.json"))

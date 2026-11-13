@@ -29,6 +29,8 @@ NO_FACTS = {
     "judge_verdicts": None,
     "judge_error": False,
     "judge_unparsed": False,
+    "judge_error_message": False,
+    "invalid_judge_response": False,
     "games_unjudged": False,
     "rubric": None,
     "library_reward": None,

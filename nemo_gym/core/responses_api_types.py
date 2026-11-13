@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Mapping
 from typing import (
     Annotated,
     Any,
@@ -59,6 +60,9 @@ from openai.types.chat.completion_create_params import (
     ReasoningEffort,
     ResponseFormat,
     WebSearchOptions,
+)
+from openai.types.chat.completion_create_params import (
+    PromptCacheOptions as ChatPromptCacheOptions,
 )
 from openai.types.responses import (
     ApplyPatchToolParam,
@@ -119,10 +123,13 @@ from openai.types.responses.response_create_params import (
     ResponsesModel,
     ResponseTextConfigParam,
     StreamOptions,
+    ToolChoiceSpecificProgrammaticToolCallingParam,
 )
+from openai.types.responses.response_create_params import PromptCacheOptions as ResponsesPromptCacheOptions
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_function_tool_call import Caller as FunctionToolCallCaller
 from openai.types.responses.response_function_web_search import ActionFind, ActionOpenPage, ActionSearch
 from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
@@ -135,6 +142,7 @@ from openai.types.responses.response_input_item import (
     McpApprovalResponse,
     ResponseCustomToolCallOutput,
 )
+from openai.types.responses.response_input_param import FunctionCallOutputCaller
 from openai.types.responses.response_output_item import (
     AdditionalTools as OutputAdditionalTools,
 )
@@ -144,6 +152,8 @@ from openai.types.responses.response_output_item import (
     McpApprovalRequest,
     McpCall,
     McpListTools,
+    Program,
+    ProgramOutput,
 )
 from openai.types.responses.response_output_item import (
     LocalShellCallOutput as OutputLocalShellCallOutput,
@@ -167,6 +177,7 @@ from openai.types.responses.tool_param import (
     ImageGeneration,
     LocalShell,
     Mcp,
+    ProgrammaticToolCalling,
 )
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import ComparisonFilter, CompoundFilter, FunctionDefinition
@@ -391,6 +402,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
     """
 
     call_id: str
+    caller: Optional[FunctionCallOutputCaller] = None
     output: Union[str, ResponseFunctionCallOutputItemListParam]
     type: Literal["function_call_output"] = "function_call_output"
     id: Optional[str] = None
@@ -398,6 +410,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
 
 
 class NeMoGymResponseFunctionToolCall(BaseModel):
+    caller: Optional[FunctionToolCallCaller] = None
     arguments: str
     call_id: str
     name: str
@@ -507,6 +520,14 @@ class NeMoGymImageGenerationCall(ImageGenerationCall):
 
 class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
     """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
+
+
+class NeMoGymResponseProgram(Program):
+    """An OpenAI `program` item, kept with its opaque fingerprint for replay."""
+
+
+class NeMoGymResponseProgramOutput(ProgramOutput):
+    """The result of an OpenAI `program` item."""
 
 
 class NeMoGymLocalShellCall(LocalShellCall):
@@ -646,9 +667,9 @@ RESPONSES_TO_TRAIN = {
 #   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
 #   mcp_call, computer_call, local_shell_call.
 #
-# training_variant_of() is reached only from ChatCompletionsConverter.postprocess_assistant_message_dict,
-# which passes response_output[-1].
-# That list is local to the function.
+# training_variant_of() is reached only from the chat converter's _attach_token_information, which passes
+# response_output[-1].
+# That list is built by ChatCompletionsConverter._lift_assistant_message.
 # It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage,
 # NeMoGymResponseFunctionToolCall or NeMoGymResponseCustomToolCall (the
 # function bridge's lift), all registered above.
@@ -847,6 +868,8 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
         Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
         Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymResponseProgram, Tag("program")],
+        Annotated[NeMoGymResponseProgramOutput, Tag("program_output")],
         Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
         Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
         Annotated[NeMoGymComputerCallOutput, Tag("computer_call_output")],
@@ -970,6 +993,7 @@ NeMoGymToolParam: TypeAlias = Union[
     WebSearchToolParam,
     Mcp,
     NeMoGymCodeInterpreterToolParam,
+    ProgrammaticToolCalling,
     ImageGeneration,
     LocalShell,
     NeMoGymFunctionShellToolParam,
@@ -993,6 +1017,7 @@ NeMoGymToolChoice: TypeAlias = Union[
     ToolChoiceFunctionParam,
     ToolChoiceMcpParam,
     ToolChoiceCustomParam,
+    ToolChoiceSpecificProgrammaticToolCallingParam,
     ToolChoiceApplyPatchParam,
     ToolChoiceShellParam,
 ]
@@ -1045,6 +1070,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     moderation: Optional[Moderation] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
+    prompt_cache_options: Optional[ResponsesPromptCacheOptions] = None
     safety_identifier: Optional[str] = None
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
@@ -1089,6 +1115,8 @@ NeMoGymResponseOutputItem = Annotated[
         Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
         Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
         Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymResponseProgram, Tag("program")],
+        Annotated[NeMoGymResponseProgramOutput, Tag("program_output")],
         Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
         Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
         Annotated[NeMoGymResponseComputerCallOutput, Tag("computer_call_output")],
@@ -1124,6 +1152,7 @@ _register_item_tags(NeMoGymResponseOutputItem, _RESPONSE_OUTPUT_ITEM_TAG_BY_CLAS
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
     cached_tokens: Optional[int]
+    cache_write_tokens: Optional[int] = None
 
 
 class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
@@ -1135,28 +1164,19 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
     @classmethod
-    def sum_from_list(cls, usages: "NeMoGymResponseUsage") -> "NeMoGymResponseUsage":
-        final_usage = NeMoGymResponseUsage(
+    def sum_from_list(cls, usages: List["NeMoGymResponseUsage"]) -> "NeMoGymResponseUsage":
+        total = None
+        for usage in usages:
+            total = accumulate_response_usage(total, usage)
+        if total is not None:
+            return total
+        return cls(
             input_tokens=0,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),
             output_tokens=0,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=0,
         )
-        for usage in usages:
-            final_usage.input_tokens += usage.input_tokens
-            final_usage.input_tokens_details.cached_tokens = _add_optional_token_counts(
-                final_usage.input_tokens_details.cached_tokens,
-                usage.input_tokens_details.cached_tokens,
-            )
-            final_usage.output_tokens += usage.output_tokens
-            final_usage.output_tokens_details.reasoning_tokens = _add_optional_token_counts(
-                final_usage.output_tokens_details.reasoning_tokens,
-                usage.output_tokens_details.reasoning_tokens,
-            )
-            final_usage.total_tokens += usage.total_tokens
-
-        return final_usage
 
 
 def _add_optional_token_counts(left: Optional[int], right: Optional[int]) -> Optional[int]:
@@ -1180,6 +1200,10 @@ def accumulate_response_usage(
     result.output_tokens += additional.output_tokens
     result.total_tokens += additional.total_tokens
     if result.input_tokens_details is not None and additional.input_tokens_details is not None:
+        result.input_tokens_details.cache_write_tokens = _add_optional_token_counts(
+            result.input_tokens_details.cache_write_tokens,
+            additional.input_tokens_details.cache_write_tokens,
+        )
         result.input_tokens_details.cached_tokens = _add_optional_token_counts(
             result.input_tokens_details.cached_tokens,
             additional.input_tokens_details.cached_tokens,
@@ -1245,6 +1269,14 @@ NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
 
 class NeMoGymChoice(Choice):
     message: NeMoGymChatCompletionOutputMessage
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_repetition_finish_reason(cls, value: Any) -> Any:
+        """Retain vLLM's repetition cause while using the SDK's stop category."""
+        if isinstance(value, dict) and value.get("finish_reason") == "repetition":
+            return {**value, "finish_reason": "stop", "native_finish_reason": "repetition"}
+        return value
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -1421,18 +1453,39 @@ class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
 
+def _discriminate_chat_message(value: Any) -> Optional[str]:
+    """Pick the chat message member from its role, and the training variant when token metadata is present.
+
+    Without a discriminator Pydantic validates each message against every member of the union to find
+    the best match; the role already decides it. For a ``dict`` message, ``_validate_atomic_token_metadata``
+    has run first, so one token field means all the required ones are present. Any other mapping skips
+    that check and is still rejected by the training member's own required fields.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    role = value.get("role")
+    if role == "assistant" and "prompt_token_ids" in value:
+        return "assistant__training"
+    return role if isinstance(role, str) else None
+
+
 NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
     Union[
-        NeMoGymChatCompletionDeveloperMessageParam,
-        NeMoGymChatCompletionSystemMessageParam,
-        NeMoGymChatCompletionUserMessageParam,
-        NeMoGymChatCompletionAssistantMessageParam,
-        NeMoGymChatCompletionToolMessageParam,
+        Annotated[NeMoGymChatCompletionDeveloperMessageParam, Tag("developer")],
+        Annotated[NeMoGymChatCompletionSystemMessageParam, Tag("system")],
+        Annotated[NeMoGymChatCompletionUserMessageParam, Tag("user")],
+        Annotated[NeMoGymChatCompletionAssistantMessageParam, Tag("assistant")],
+        Annotated[NeMoGymChatCompletionToolMessageParam, Tag("tool")],
         # Keep deprecated function messages out of this union.
         # NeMoGymChatCompletionFunctionMessageParam,
         # Training variants.
-        NeMoGymChatCompletionAssistantMessageForTrainingParam,
+        Annotated[NeMoGymChatCompletionAssistantMessageForTrainingParam, Tag("assistant__training")],
     ],
+    Discriminator(
+        _discriminate_chat_message,
+        custom_error_type="chat_message_role",
+        custom_error_message="Chat message needs a 'role' of developer, system, user, assistant or tool",
+    ),
     BeforeValidator(_validate_atomic_token_metadata),
 ]
 
@@ -1476,6 +1529,48 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_empty_assistant_annotations(cls, value: Any) -> Any:
+        """Accept response history replayed by Copilot without a response-only empty field.
+
+        The SDK serializes absent Chat Completion annotations as null, and providers may
+        return an empty list. Copilot replays the entire message; annotations are not a
+        Chat request field. Non-empty values still fail strict validation instead of
+        silently losing citation information.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        return {
+            **value,
+            "messages": [
+                {key: item for key, item in message.items() if key != "annotations"}
+                if isinstance(message, dict) and message.get("role") == "assistant" and not message.get("annotations")
+                else message
+                for message in value["messages"]
+            ],
+        }
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_copilot_message_source(cls, value: object) -> object:
+        """Remove Copilot's client-only provenance from replayed messages.
+
+        Copilot attaches this UI metadata to background tool results. It is not
+        Chat Completion model input; retain the tool content and call identity.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        return {
+            **value,
+            "messages": [
+                {key: item for key, item in message.items() if key != "__copilotMessageSource"}
+                if isinstance(message, dict)
+                else message
+                for message in value["messages"]
+            ],
+        }
+
+    @model_validator(mode="before")
+    @classmethod
     def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
         """Drop ``provider_specific_fields`` from replayed assistant history.
 
@@ -1485,6 +1580,11 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
         a model server needs, and the strict message schema would reject it.
         """
         if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        # Copy only when some message carries the key, so a clean request is not rebuilt.
+        if not any(
+            isinstance(message, dict) and "provider_specific_fields" in message for message in value["messages"]
+        ):
             return value
         value = value.copy()
         value["messages"] = [
@@ -1512,6 +1612,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     presence_penalty: Optional[float] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
+    prompt_cache_options: Optional[ChatPromptCacheOptions] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Overlay on agentic_mme.yaml. Supply keys through private Gym configuration.
+# Enabling this overlay explicitly allows task images to be uploaded to SerpAPI for Google Lens.
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      retrieval:
+        mode: live
+        search_provider: serpapi
+        serpapi_api_key: ${agentic_mme_serpapi_api_key}
+        jina_api_key: ${agentic_mme_jina_api_key}
+        allow_image_upload: true

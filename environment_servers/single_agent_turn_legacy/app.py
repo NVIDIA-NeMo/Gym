@@ -24,6 +24,8 @@ from nemo_gym.core import (
     EpisodeId,
     FailureReportRow,
     maybe_rollout_id_from_run_body,
+    model_sampling_from_run_body,
+    skips_token_capture,
 )
 from nemo_gym.data import materialize_task
 from nemo_gym.server_runtime import (
@@ -58,13 +60,13 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
+        is_episode_request = "episode_id" in row and "task" in row
         request = (
-            SingleAgentTurnRequest.model_validate(row)
-            if "episode_id" in row and "task" in row
-            else self._episode_request_from_row(row)
+            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
-        return self._legacy_result(response)
+        # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
+        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
@@ -96,6 +98,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return SingleAgentTurnRequest(
             episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
+            model_sampling=model_sampling_from_run_body(row),
+            skip_token_capture=skips_token_capture(row),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:

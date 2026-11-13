@@ -103,7 +103,7 @@ def test_a_tau_style_trial_that_ended_on_the_policys_context_limit_is_an_exact_m
     assert passed is True and report["exact"] is True, reason
     assert "lower bound" not in reason and "UNVERIFIED" not in reason
     assert report["model"] == {"count": 1, "fraction": 0.05, "kinds": {"model_context_limit": 1}}
-    assert report["evaluation"] == {"count": 0, "fraction": 0.0, "kinds": {}, "server": 0}
+    assert report["evaluation"] == {"count": 0, "fraction": 0.0, "kinds": {}, "server": 0, "server_kinds": {}}
     assert task["failures"]["trial_failures"]["by_cause"]["request"] == {"count": 1, "rate": 0.05}
 
 
@@ -112,6 +112,55 @@ def test_an_lmarena_style_trial_rejected_upstream_for_its_context_is_an_exact_mo
     assert passed is True and report["exact"] is True, reason
     assert report["model"]["kinds"] == {"model_context_limit": 1}
     assert report["evaluation"]["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        {"by_failure_kind": {"model_context_limit": "evaluation"}},
+        {"by_stage": {"agent": {"by_failure_kind": {"model_context_limit": "evaluation"}}}},
+        {"by_status_code": {400: "evaluation"}},
+    ],
+    ids=["refined-kind", "event-stage", "event-status"],
+)
+def test_a_refined_rejection_uses_shared_classification_with_its_events_context(rules):
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig
+    from nemo_gym.orchestration.recovery import trial_verdict
+
+    collected = _lmarena_style_run()
+    [call] = collected.results[0]["ng_trial_observations"]["model_calls"]
+    event = call["response_metadata"]["failure_report"]["events"]["ctx-1"]
+    event["stage"] = "agent"
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    _, _, report = trial_verdict(decision, collected, classification=FailureClassificationConfig.model_validate(rules))
+    assert report["evaluation"]["kinds"] == {"model_context_limit": 1}
+    assert report["model"]["count"] == 0
+    assert report["unknown"]["count"] == 0
+    assert event["failure_kind"] is None  # Reporting does not rewrite the saved observation.
+
+
+@pytest.mark.parametrize("policy_call", [True, False], ids=["server-error", "non-policy-rejection"])
+def test_stage_rules_match_the_observed_kind_before_http_reporting_labels(policy_call):
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig
+    from nemo_gym.orchestration.recovery import trial_verdict
+
+    collected = (
+        _lmarena_style_run(upstream=503, kind="model_request_error")
+        if policy_call
+        else _tau_style_run(model="simulated_user", merged=False)
+    )
+    [call] = collected.results[0]["ng_trial_observations"]["model_calls"]
+    event = call["response_metadata"]["failure_report"]["events"]["ctx-1"]
+    event["stage"] = "agent"
+    classification = FailureClassificationConfig.model_validate(
+        {"by_stage": {"agent": {"by_failure_kind": {"model_request_error": "model"}}}}
+    )
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    _, _, report = trial_verdict(decision, collected, classification=classification)
+    expected_kind = "model_server_error" if policy_call else "non_policy_model_rejection"
+    assert report["model"]["kinds"] == {expected_kind: 1}
+    assert report["evaluation"]["count"] == 0
+    assert report["unknown"]["count"] == 0
 
 
 def test_a_policy_rejection_without_a_context_reason_stays_a_request_error():

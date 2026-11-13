@@ -28,14 +28,35 @@ The agent + its `example` dataset are defined in this server's own `configs/scic
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
 each scored sub-step the server builds a program (`accumulated_code` + HDF5/compare helpers + the
-sub-step's sanitized test assertions) and runs it in a **Ray subprocess** (`scicode_integration/runner.py`);
+sub-step's sanitized test assertions) and runs it in a **subprocess** (`scicode_integration/runner.py`);
 exit code 0 = pass. The HDF5 target-loading and comparison helpers (`process_hdf5_to_tuple`,
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
-The generated code runs in this server's own venv. `pyproject.toml` declares its
-scientific dependencies (`scipy>=1.14.1`, `numpy`, `matplotlib`, `h5py`, `sympy`,
-and `networkx`); `uv.lock` records the exact versions installed by `uv sync --locked`.
+By default, generated code runs in a separate local Python 3.11 environment with the scientific
+stack frozen in `grading-requirements.lock`, including SciPy 1.10.1 and
+`scipy.integrate.simps`. The server needs `uv` and download access when creating
+or updating that environment; a matching prebuilt environment can be reused
+offline. A changed lock or Python version recreates the environment and applies
+`uv pip sync`, removing obsolete packages. Explicit `grading_interpreters`
+(such as SciCode-Verified's 2024/2025 environments) take precedence.
+
+When `sandbox` is configured, grading uses the explicitly configured interpreters
+and test data inside the image. The server skips local environment creation,
+interpreter preflight, and test-data checksum checks; the sandbox runner checks the data.
+
+After editing `grading-requirements.txt`, regenerate the lock with:
+
+```bash
+uv pip compile resources_servers/scicode/grading-requirements.txt \
+  --python-version 3.11 --universal --no-header --emit-index-url \
+  --index-url https://pypi.org/simple \
+  --output-file resources_servers/scicode/grading-requirements.lock
+```
+
+Default step outputs use the environment name `scicode`. Grading fixes can
+change scores for problems that previously failed due to scientific API
+incompatibilities, including problems 2 and 28.
 
 **Scoring notes** (mirroring nemo-skills):
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
