@@ -38,7 +38,9 @@ from pydantic import (
     ValidationError,
     field_validator,
     model_serializer,
+    model_validator,
 )
+from starlette.datastructures import Headers
 from starlette.middleware import Middleware
 
 
@@ -77,7 +79,7 @@ from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_H
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
+from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, mcp_session_token
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
@@ -150,6 +152,21 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    mcp_server_name: Optional[str] = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="The name the MCP endpoint lists itself under in /seed_session's MCP metadata, which clients "
+        "name its tools by (default: this server's name). For an endpoint that code a model can read calls, "
+        "such as a harness in a sandbox. Needs expose_tools_over_mcp",
+    )
+    mcp_bearer_token: bool = Field(
+        default=False,
+        description="Hand out MCP session tokens as a standard 'Authorization: Bearer' header instead of "
+        f"{NEMO_GYM_MCP_SESSION_TOKEN_HEADER}, and require one for tools/list too, which then lists only the "
+        "session's tools; a tool outside the session's grant is answered as an unknown tool, and errors name no "
+        "framework. For clients that pass the seed's MCP headers as given, as the environment server's MCP grants "
+        "do. Needs expose_tools_over_mcp",
+    )
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -164,6 +181,17 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     )
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
+
+    @model_validator(mode="after")
+    def _mcp_options_need_the_mcp_endpoint(self) -> "BaseResourcesServerConfig":
+        """Refuse the MCP endpoint's options on a server that serves no MCP endpoint, where they would do nothing."""
+        options = [name for name in ("mcp_server_name", "mcp_bearer_token") if getattr(self, name)]
+        if options and not self.expose_tools_over_mcp:
+            raise ValueError(
+                f"{' and '.join(options)} configure this server's MCP endpoint, which it serves only with "
+                "expose_tools_over_mcp: true"
+            )
+        return self
 
 
 class BaseResourcesServer(BaseServer):
@@ -1012,16 +1040,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ``None`` without a token or for one that does not verify; the MCP endpoint rejects a bad token.
         An attempt claim that does not decode counts as missing.
         """
-        header = NEMO_GYM_MCP_SESSION_TOKEN_HEADER.lower().encode()
-        token = next((value for key, value in scope.get("headers", ()) if key.lower() == header), None)
-        if token is None:
-            return None
-        try:
-            text = token.decode()
-        except UnicodeDecodeError:
+        header = "Authorization" if self.config.mcp_bearer_token else NEMO_GYM_MCP_SESSION_TOKEN_HEADER
+        text = mcp_session_token(Headers(scope=scope), header)
+        if text is None:
             return None
         if self._mcp_token_serializer is None:
-            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_middleware_key())
+            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_secret())
         payload = mcp_session_token_payload(self._mcp_token_serializer, text)
         if not isinstance(payload, dict) or not isinstance(payload.get("sid"), str):
             return None
@@ -1087,7 +1111,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
-        return normalize_tool_name(name, self.config.name or self.__class__.__name__)
+        # MCP clients namespace tools by the name the endpoint lists itself under
+        return normalize_tool_name(name, self.config.mcp_server_name or self.config.name or self.__class__.__name__)
 
     def mcp_tools(self, harvested: list["MCPTool"], catchall: Optional[Any]) -> Optional[list["MCPTool"]]:
         """Return the MCP tools to expose (default: the auto-harvested typed POST routes).

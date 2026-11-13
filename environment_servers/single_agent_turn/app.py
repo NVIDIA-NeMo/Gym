@@ -160,6 +160,25 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # Fail at startup, not on the first episode, when a tool server cannot serve its tools.
         for name in self.tool_server_names:
             self._check_tool_server(name, self.config.resources_server.name)
+        self._check_mcp_server_names()
+
+    def _check_mcp_server_names(self) -> None:
+        """Refuse a pairing that grants two MCP endpoints listed under one name: MCP clients name each tool by the
+        endpoint that serves it (``mcp__<name>__<tool>``), so the two endpoints' tools would collide. Each endpoint
+        lists itself under its ``mcp_server_name``, else its server's name."""
+        granted = [self.config.resources_server.name] if "mcp" in self.config.resources_tool_transports else []
+        granted += self.tool_server_names
+        listed: dict[str, str] = {}
+        for name in granted:
+            config = get_first_server_config_dict(self.server_client.global_config_dict, name)
+            listed_as = config.get("mcp_server_name") or name
+            if listed_as in listed:
+                raise ValueError(
+                    f"Environment Server {self.config.name!r} grants the MCP tools of {listed[listed_as]!r} and "
+                    f"{name!r}, which both list themselves as {listed_as!r}, so their tools' names would collide; "
+                    "give one of them another mcp_server_name"
+                )
+            listed[listed_as] = name
 
     def _check_tool_server(self, name: str, resources_server_name: str) -> None:
         server = f"Environment Server {self.config.name!r}"

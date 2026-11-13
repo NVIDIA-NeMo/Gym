@@ -377,6 +377,46 @@ def test_a_server_that_grants_an_mcp_resources_servers_tools_starts(listed_by: s
     assert environment_server.tool_server_names == ["search"]
 
 
+@pytest.mark.parametrize(
+    ("resources_listed_as", "search_listed_as", "transports", "collides"),
+    [
+        # Both endpoints are granted over MCP under one name.
+        ("company", "company", ["direct_http", "mcp"], True),
+        # The tool server takes the resources server's own name.
+        (None, "resources", ["mcp"], True),
+        # The resources server's endpoint is not granted over MCP, so only the tool server's is listed.
+        ("company", "company", ["direct_http"], False),
+        ("company", "search_tools", ["mcp"], False),
+    ],
+)
+def test_a_pairing_that_grants_two_mcp_endpoints_listed_under_one_name_does_not_start(
+    resources_listed_as: str | None, search_listed_as: str, transports: list, collides: bool
+) -> None:
+    configured, client = _environment_server()
+    resources = client.global_config_dict.resources.resources_servers.test
+    resources.update({"expose_tools_over_mcp": True, "mcp_server_name": resources_listed_as})
+    client.global_config_dict["search"] = {
+        "resources_servers": {
+            "tavily_search": {
+                "host": "search",
+                "port": 8000,
+                "entrypoint": "app.py",
+                "expose_tools_over_mcp": True,
+                "mcp_server_name": search_listed_as,
+            }
+        }
+    }
+    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**configured.config.model_dump(), "tool_servers": [_SEARCH], "resources_tool_transports": transports}
+    )
+
+    if collides:
+        with pytest.raises(ValueError, match="'resources' and 'search', which both list themselves as"):
+            SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+    else:
+        assert SingleAgentTurnEnvironmentServer(config=config, server_client=client).tool_server_names == ["search"]
+
+
 async def test_token_capture_keeps_prefixed_twin_route() -> None:
     environment_server, client = _environment_server(token_capture=True)
 
