@@ -169,12 +169,10 @@ def execute(config: dict) -> dict:
         if execution.error:
             errors.append("agent_execution")
         returncode = execution.agent_proc.returncode if execution.agent_proc is not None else None
-        deadline_reached = execution.elapsed_time >= timeout and returncode in (
-            -signal.SIGTERM,
-            -signal.SIGKILL,
-            143,
-            137,
-        )
+        # The pinned runner reports exactly the budget on TimeoutExpired. Enroot may
+        # translate termination into exit 1 rather than a negative signal status.
+        # Its exception path also uses the budget, but carries execution.error.
+        deadline_reached = execution.elapsed_time >= timeout and not execution.error and returncode not in (None, 0)
         usage = backend.collect_usage(output.name, output, execution.elapsed_time)
         (output / "usage.json").write_text(json.dumps(usage, indent=2))
         write_trace_artifact(output, output.name, usage)

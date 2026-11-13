@@ -197,9 +197,10 @@ def test_execute_masks_infrastructure_and_transcript_failures(episode, mode):
     assert state["calls"][-1] == "remove"
 
 
-def test_native_deadline_is_scored(episode):
+@pytest.mark.parametrize("returncode", [-signal.SIGTERM, -signal.SIGKILL, 137, 143, 1])
+def test_native_deadline_is_scored(episode, returncode):
     state, config = episode
-    state.update(exit=-signal.SIGTERM, elapsed=300)
+    state.update(exit=returncode, elapsed=300)
     result = worker.execute(config)
     assert result["task_deadline_reached"] and not result["mask_sample"]
 
@@ -227,3 +228,12 @@ def test_changed_prompt_prevents_native_execution(episode):
     with pytest.raises(ValueError, match="prompt changed"):
         worker.execute(config)
     assert state["calls"] == []
+
+
+@pytest.mark.parametrize("elapsed,error", [(299, None), (300, "container startup failed")])
+def test_nonzero_exit_without_native_deadline_remains_masked(episode, elapsed, error):
+    state, config = episode
+    state.update(exit=1, elapsed=elapsed, error=error)
+    result = worker.execute(config)
+    assert result["mask_sample"]
+    assert not result["task_deadline_reached"]
