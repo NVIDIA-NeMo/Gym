@@ -1,5 +1,5 @@
 input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
-output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___fixunscheduledmooncakeslam.sqsh
 
 slurm:
   account: nemotron_rl_algo
@@ -8,6 +8,12 @@ slurm:
   gpus-per-node: "4"
   mem: "0"
   container-mounts: ${oc.env:PWD}:${oc.env:PWD}
+
+vllm:
+  repo: https://github.com/bxyu-nvidia/vllm.git
+  branch: bxyu/v0.32.0-fixunscheduledmooncakeslam
+  version: "0.32.0"
+  precompiled_wheel_commit: v0.32.0
 
 shared_run_warmup_env_vars:
   MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
