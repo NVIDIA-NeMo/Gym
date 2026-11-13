@@ -38,6 +38,7 @@ from nemo_gym.verification import (
     VerifierFixture,
     call_judge,
     record_parsed_judge_verdict,
+    record_rejected_judge_reply,
 )
 from resources_servers.eqbench4.judging import (
     NO_FINAL_STATE,
@@ -330,6 +331,10 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
                 if reply.incomplete_details and reply.incomplete_details.reason
                 else "no JSON verdict in the judge output"
             )
+            if attempt < self.config.judge_max_attempts:
+                # A reply rejected before a retry is accounted for; an order that never yields a verdict is not, so
+                # its grading stays unknown.
+                record_rejected_judge_reply()
         logger.warning(
             "No pairwise verdict for scenario %s against %s (%s) after %d attempt(s): %s",
             body.scenario_id,

@@ -126,6 +126,20 @@ async def test_an_order_without_a_verdict_keeps_the_score_but_leaves_the_grading
     assert len(operation.dependencies) == 4
 
 
+async def test_a_reply_rejected_before_a_successful_retry_still_completes_the_grading(tmp_path: Path) -> None:
+    transport = JudgeTransport(script=["no verdict here"])
+    result, invocation = await verify_observed(
+        judged_server(tmp_path, transport, judge_max_attempts=2), make_request()
+    )
+
+    assert sum(len(comparison.unreadable_orders) for comparison in result.comparisons) == 0
+    (operation,) = invocation.grading_operations
+    assert operation.outcome == "completed"
+    # The rejected reply stays a dependency of the grade, beside the four accepted ones.
+    assert len(operation.dependencies) == 5
+    assert operation.result_binding_sha256 == grading_result_binding(result)
+
+
 async def test_a_failed_judge_transport_is_a_failed_grading(tmp_path: Path) -> None:
     server = make_server(tmp_path)
     server.server_client.post = AsyncMock(side_effect=ConnectionError("judge endpoint down"))
