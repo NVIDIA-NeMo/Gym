@@ -90,9 +90,11 @@ same model and judge in the same time window, shows they agree. What still diffe
 - **Process context the model does not see.** `opencode_agent` runs OpenCode with private HOME and XDG directories,
   loads its own task-environment plugin before the staged ones, and starts OpenCode with `--format json` and its own
   session title.
-- **Artifacts.** The relay agent saves OpenCode's export on the host and puts OpenCode's output in each row
-  (`opencode_results_fpath`, `opencode_run_stdout`, `opencode_run_stderr`). The session preset's rows carry the agent's
-  trajectory and observations and the plugin log (`opencode_plugin_log`) instead.
+- **Token usage.** Both presets count input tokens as uncached input plus cache reads and writes, and output tokens as
+  output plus reasoning, over every assistant message, compaction summaries included. The relay takes each message's
+  total from the total OpenCode stored; the session preset adds input and output. The session preset reports cached
+  and reasoning token details as null where OpenCode stored 0 or a message has no counts; the relay reports OpenCode's
+  numbers.
 
 ### Failure accounting
 
@@ -146,6 +148,31 @@ that needs longer, which its attempts allow, times the episode out. A job time l
 such runs first. `ttl_s` stays above the deadline plus two cleanup steps, since `/verify` stops the sandbox before it
 calls the judge and, after a deadline, the cleanup stops it. The relay preset has no episode deadline: its agent's
 `sandbox_timeout: 21600` bounds the run, and the judge's limits are the same.
+
+### Row fields
+
+The relay agent adds its run's fields to each row after `/verify`; a session row carries the agent's trajectory and
+observations and the plugin log instead:
+
+| Relay row | Session row |
+| --- | --- |
+| `opencode_failed`, `opencode_exit_code`, `opencode_error_type` | No such fields: `response.status` says how the run ended, and a run the outcome policy does not grade is a failure row. The agent's invocation and sandbox observation in `ng_agent_observations` give the run's status, error type and exit code |
+| `opencode_export_found`, `opencode_finished` | None: a run that leaves no assistant result fails before `/verify` |
+| `opencode_results_fpath` (OpenCode's export, saved on the host), `opencode_run_stdout`, `opencode_run_stderr` | `opencode_plugin_log`, the plugins' lines; OpenCode's export only with `BROWSECOMP_OPENCODE_EXPORT_DIR` (see [Compare the two presets](#compare-the-two-presets)) |
+| `opencode_plugins_loaded`, `opencode_terminal_reason` | The same fields, read from the plugin log |
+| `opencode_attachment_count` | None: the rows hold no images |
+| `ng_trajectory` and `ng_agent_observations`, only when the agent correlates rollouts, for example with `++observability_enabled=true` | Both, from the agent's close |
+| `response.output`: the assistant items, and the user messages OpenCode adds during the run, such as the one that continues it after a compaction | The assistant items only |
+| An errored tool call's `function_call_output`: empty | The tool's error text, and both items' status is `incomplete` |
+| A last reply cut at the output limit: `status: incomplete` with `incomplete_details.reason: max_output_tokens` | `status: incomplete` with `incomplete_details: null` |
+| `response.metadata`: none | `harness_execution`, `opencode_version`, `harness_hostname`, `harness_pid` and `agent_timeout_sec`, and `ng_agent_outcome` on a failed response |
+
+Grading reads only the last assistant text, so none of these changes a reward. Two relay agent settings have no session
+counterpart. `execution_failure_reward_zero`, which gives a run with `opencode_failed` set a reward of 0, is off in the
+relay preset (its default); a failed session run follows `agent_outcome_policy`. The relay sets OpenCode's
+`chunkTimeout` to its 21,600,000 ms run budget, so it never ends a model call before the run ends, and the session
+preset sends `timeout: false` and no `chunkTimeout`: neither preset puts a deadline on a single model call. A later
+OpenCode release defaults `chunkTimeout` to five minutes, so check this before changing `opencode_version`.
 
 ### Run the session preset
 
@@ -227,6 +254,9 @@ gym eval run --no-serve <the same --config and ++ arguments> \
   and opt-in arms, and `++route_failures_to_sidecar=true` for both.
 - Pin the session preset to the OpenCode binary the relay agent installs, so both run one build.
 - Compare question by question: each row's `reward`, `mask_sample` and `failure_kind`, and the failure rows.
+- Compare token counts by `response.usage.input_tokens` and `output_tokens`, which both presets count the same way;
+  for a total, add the two on both, since the relay's `total_tokens` is OpenCode's stored total. Leave out the cached
+  and reasoning details (see Token usage above).
 - Each session row's `opencode_plugin_log` shows the tool surface the run had, the search guard's settings and how
   the run ended. `BROWSECOMP_OPENCODE_EXPORT_DIR` also keeps each session's OpenCode export, for example to check where
   compaction started; the Resources Server stops the sandbox at `/verify`, so point it at storage that outlives the
