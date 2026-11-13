@@ -38,7 +38,7 @@ lvbench_agentic:
         workdir: /testbed/work
         resources:
           cpu: 2
-          memory: 8Gi
+          memory_mib: 8192
         ttl_s: 3300
         ready_timeout_s: 1200
 

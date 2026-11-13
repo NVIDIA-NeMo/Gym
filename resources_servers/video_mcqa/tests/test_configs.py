@@ -7,6 +7,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServerConfig
+from nemo_gym.sandbox import SandboxResources
 from resources_servers.video_mcqa.app import VideoMCQAResourcesServerConfig
 from resources_servers.video_mcqa.tests.test_app import make_server
 from responses_api_agents.opencode_video_agent.app import OpenCodeVideoAgentConfig
@@ -48,6 +49,10 @@ def test_actual_composed_configs_resolve_and_validate(tmp_path, benchmark, setti
         assert agent.max_steps == 1
     else:
         assert agent.opencode_max_context_window == 524288 and agent.max_output_tokens == 65536
+        # The sandbox resources are the provider-neutral ones every provider accepts.
+        assert SandboxResources.from_mapping(agent.sandbox_config["resources"]) == SandboxResources(
+            cpu=2, memory_mib=8192
+        )
     environment = LegacyAgentEnvironmentServerConfig(
         name=agent_name + "_environment",
         host="127.0.0.1",
