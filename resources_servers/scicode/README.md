@@ -82,7 +82,9 @@ the one that passed, else the last one tried; `null` for a sentinel step), `stat
 `timed_out`, `exit` (as in `step_exits`), `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
 `AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`; `null` when there is none) and the last
 `output_tail_chars` characters (default 2000; 0 keeps none, negative values are rejected) of `stdout_tail`
-and `stderr_tail`. The per-environment
+and `stderr_tail`. A provider-confirmed execution OOM synthesizes `exception_class: MemoryLimitExceeded`
+and `returncode: 137` from provider evidence; these do not claim an observed Python traceback or process exit.
+The per-environment
 pass bits and error text of SciCode-Verified's OR grading stay in `step_environment_results` /
 `step_environment_errors`; the record adds the execution details of the decisive run. The tails contain model-generated output and tracebacks, so the flag is off by
 default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. With
