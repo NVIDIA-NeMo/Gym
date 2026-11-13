@@ -831,6 +831,7 @@ def _run_private_uv_entrypoint(
     env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"} | ({"TMPDIR": str(tmpdir)} if tmpdir else {})
     result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=check)
     if not check:
+        assert result.returncode != 0, result.stdout + result.stderr
         return result.stdout + result.stderr, shared, curl_log
     return result.stdout, shared, curl_log
 
