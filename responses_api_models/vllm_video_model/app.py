@@ -56,6 +56,14 @@ class ToolMediaConverter(ResponsesConverter):
     ) -> None:
         output = m["output"]
         if isinstance(output, list) and any(part["type"] in {"input_image", "input_video"} for part in output):
+            # Chat has no "original" detail; like the shared tool-image path, send it as "high". Only tool
+            # images: a user image with "original" stays unsupported.
+            output = [
+                {**part, "detail": "high"}
+                if part["type"] == "input_image" and part.get("detail") == "original"
+                else part
+                for part in output
+            ]
             # The message formatter maps each structured media part and
             # flushes the preceding assistant tool calls. It does not sort calls.
             self._format_message(
@@ -83,6 +91,7 @@ class VideoVLLMModel(VLLMModel):
         return ToolMediaConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
         )
 
 
