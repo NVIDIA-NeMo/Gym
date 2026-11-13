@@ -479,7 +479,7 @@ runs get it; never only into the quantized one.
    BF16 config, so both runs keep one limit.
 4. Resolve both (`gym eval submit --config <file> --resolve-only`) and diff them. Only these may differ:
    the fields of step 2, each benchmark's `run.policy_model_name` (submit derives it from the served name),
-   and the MLflow fields of steps 5 and 6 (the precision tag, the `modelopt_*` tags and the experiment name).
+   and the MLflow fields of steps 5 and 6 (the precision tag, the `quantization_run_*` tags and the experiment name).
    The `pair_id` and every other serving, benchmark and scoring setting stay identical. Run both at the same
    Gym commit with the same `num_repeats`, and keep the policy timeout on the model (run-and-babysit-eval,
    section 6). Repeat the diff after any change to the BF16 config.
@@ -491,13 +491,12 @@ runs get it; never only into the quantized one.
    existing tags and do not add a second exporter. Tags alone do not turn tracking on (it needs the tracking
    URI, experiment and run name): if the BF16 config does not track, say that the pair is not recorded in
    MLflow.
-6. Carry the export's provenance. Model Optimizer's PTQ with MLflow tracking leaves `.experiment.json` in
-   the checkpoint directory. When it is there, the quantized run takes its `experiment_name` as
-   `mlflow_experiment_name` (unless the requester names another experiment) and its `run_name`, `run_id`
-   and `run_url` as the tags `modelopt_run_name`, `modelopt_run_id` and `modelopt_run_url`, in the same
-   place as step 5. The evaluation run stays on your own tracking server and keeps its own run name; the
-   tags link it to the PTQ run. The file's `tracking_uri` and `experiment_id` belong to the PTQ's tracking
-   server: do not copy them. No file (or a Hub checkpoint) means there is nothing to carry.
+6. Carry the export's provenance. When the quantization run was tracked (an MLflow run, for example) and
+   the requester gives its name, id or URL, add them as the tags `quantization_run_name`,
+   `quantization_run_id` and `quantization_run_url`, in the same place as step 5, and use the experiment
+   the requester names as `mlflow_experiment_name`. The evaluation run stays on your own tracking server and
+   keeps its own run name; the tags only link it to the quantization run. Do not copy that run's tracking URI
+   or experiment id. With no such run, there is nothing to carry.
 
 The smoke (section 6) of the quantized config reads the same fields as the BF16 one: a difference in the
 model's own faults (`evaluation_health.model.kinds`, `failures.response_failures.by_cause`) between the two
@@ -520,5 +519,5 @@ smokes belongs to the export or its serving recipe, and goes to the export's own
 - [ ] The resolved config shows the intended served name, parallelism, parsers and reasoning switch.
 - [ ] Nothing in the "keep identical" column differs from the run you compare against.
 - [ ] A quantized variant's resolved config differs from the BF16 one only where section 9, step 4
-  allows, and both runs carry the pairing tags on the MLflow route they use (and the `modelopt_*` tags when
-  `.experiment.json` exists).
+  allows, and both runs carry the pairing tags on the MLflow route they use (and the `quantization_run_*`
+  tags when the quantization run was tracked).
