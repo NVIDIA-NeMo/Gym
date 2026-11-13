@@ -2,7 +2,7 @@
 
 This directory holds the source for the NeMo Gym documentation site, [docs.nvidia.com/nemo/gym](https://docs.nvidia.com/nemo/gym).
 
-This README covers only setting up your machine to preview the docs locally. For how to write, check and publish pages, follow the [`nemo-gym-docs` skill](../.agents/skills/nemo-gym-docs/SKILL.md), which people and coding agents both use.
+This README covers only setting up your machine to preview the docs locally. For how to write, check and publish pages, follow the [`nemo-gym-docs`](../.agents/skills/nemo-gym-docs/SKILL.md) skill, which people and coding agents both use.
 
 You don't need local setup to contribute. Edit pages under `fern/versions/latest/pages/` and open a PR: CI checks your changes and comments a link to a preview of the site.
 
