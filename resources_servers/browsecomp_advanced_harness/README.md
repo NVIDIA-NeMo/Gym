@@ -105,6 +105,9 @@ verbose_phase_log: false                     # log every cache get and put, not 
 - **Writes are best-effort.** A failed write is logged as `[cache][put_error]` and counted in the `[cache]`
   summary at `/verify`; the tool call still returns the provider's result. Startup refuses a writable cache on a root
   this process cannot write, and a read-only cache on a root that does not exist.
+- **Diagnostics.** The server logs the `[cache]` line (this server process's running totals) and the
+  per-rollout `[browsecomp][phases]` line at `/verify`, plus sandbox start and stop lines, at INFO.
+  `NEMO_GYM_LOG_LEVEL=WARNING` silences them.
 - **The cache grows without bound.** Nothing evicts entries; prune the directory between experiments as needed.
 - **Fuzzy index.** With fuzzy matching on, each process appends the queries it caches to its own shard under
   `<root>/index/`. Merge the shards into the read-only SQLite FTS5 index offline, while no run writes to the root:

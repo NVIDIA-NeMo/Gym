@@ -16,6 +16,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -26,6 +27,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from resources_servers.browsecomp_advanced_harness import app as APP
 from resources_servers.browsecomp_advanced_harness.app import (
     BrowseRequest,
     TavilySearchRequest,
@@ -246,3 +248,23 @@ class TestFuzzyCandidatesAreDeterministic:
             MagicMock(fetchall=MagicMock(return_value=[("matched norm",)])),
         ]
         assert idx._candidates(conn, "alpha beta gamma") == ["matched norm"]
+
+
+@pytest.mark.parametrize(("level_env", "info_enabled"), [(None, True), ("warning", False)])
+def test_configure_logging_shows_diagnostics_unless_silenced(monkeypatch, level_env, info_enabled: bool) -> None:
+    names = (APP.__name__, "resources_servers.browsecomp_advanced_harness")
+    saved = {name: logging.getLogger(name).level for name in names}
+    monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: None)  # leave the root handlers to pytest
+    if level_env is None:
+        monkeypatch.delenv("NEMO_GYM_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("NEMO_GYM_LOG_LEVEL", level_env)
+    try:
+        APP._configure_logging()
+        assert (
+            logging.getLogger("resources_servers.browsecomp_advanced_harness.search_cache").isEnabledFor(logging.INFO)
+            is info_enabled
+        )
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)

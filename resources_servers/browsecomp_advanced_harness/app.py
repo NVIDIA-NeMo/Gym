@@ -2248,8 +2248,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return is_correct, extracted, True
 
 
+def _configure_logging() -> None:
+    """Show this server's INFO diagnostics (sandbox lifecycle, cache and phase lines) by default.
+
+    Root stays at WARNING: at INFO the HTTP client logs a line per call. NEMO_GYM_LOG_LEVEL overrides
+    the level of this server's own loggers, for example WARNING to silence the diagnostics."""
+    logging.basicConfig(level=logging.WARNING)
+    for logger_name in (__name__, "resources_servers.browsecomp_advanced_harness"):
+        logging.getLogger(logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
+
+
 if __name__ == "__main__":
+    _configure_logging()
     TavilySearchResourcesServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
     # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
     app = TavilySearchResourcesServer.run_webserver()  # noqa: F401

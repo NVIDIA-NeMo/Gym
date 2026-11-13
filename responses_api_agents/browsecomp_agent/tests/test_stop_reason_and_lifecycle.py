@@ -25,6 +25,7 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from responses_api_agents.browsecomp_agent import app as APP
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
 from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession
 from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import _seed
@@ -80,3 +81,23 @@ async def test_agent_close_logs_once_per_successful_release(caplog, owns_sandbox
     assert "status=failed:RuntimeError" in lines[0] and "status=ok" in lines[1]
     assert all(f"session={seed.agent_session_id} provider=docker id=agent-box" in line for line in lines)
     assert float(lines[1].rsplit("lifetime_s=", 1)[1]) >= 0.0
+
+
+@pytest.mark.parametrize(("level_env", "info_enabled"), [(None, True), ("warning", False)])
+def test_configure_logging_shows_diagnostics_unless_silenced(monkeypatch, level_env, info_enabled: bool) -> None:
+    names = (APP.__name__, "responses_api_agents.browsecomp_agent")
+    saved = {name: logging.getLogger(name).level for name in names}
+    monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: None)  # leave the root handlers to pytest
+    if level_env is None:
+        monkeypatch.delenv("NEMO_GYM_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("NEMO_GYM_LOG_LEVEL", level_env)
+    try:
+        APP._configure_logging()
+        assert (
+            logging.getLogger("responses_api_agents.browsecomp_agent.sandbox").isEnabledFor(logging.INFO)
+            is info_enabled
+        )
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)
