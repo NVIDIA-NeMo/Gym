@@ -287,7 +287,7 @@ class FlashInferBuilder(BaseBuilder):
         self._head_sha = await self._preflight_check_git_repo(self.config.repo, self.config.branch)
 
     def get_srun_command_str(self) -> str:
-        """Reuse matching binaries, align cubins if needed, and invalidate modules without JIT."""
+        """Reuse matching binaries, align mismatched packages, and invalidate modules without JIT."""
         if self._head_sha is None:
             raise RuntimeError("Run FlashInfer preflight checks before generating the build command")
 
@@ -311,13 +311,14 @@ class FlashInferBuilder(BaseBuilder):
 
             command -v uv >/dev/null || "$BUILD_PYTHON" -m pip install uv
             # Python 1: check the Python release through metadata before importing
-            # FlashInfer, which rejects mismatched cubins at import time. Align only
-            # the cubin wheel when needed, then preserve the remaining binary packages.
+            # FlashInfer, which rejects mismatched cubins and JIT caches at import time.
+            # Align incompatible binary packages before backing up the existing caches.
             # Save the version suffix and back up existing AOT overrides.
             # Run outside the checkout so imports refer to the base image's package.
             cd /
             "$BUILD_PYTHON" - "${BUILD_PIP_ARGS[@]}" <<'PY'
             import importlib.metadata as metadata
+            import importlib.util
             import json
             import os
             import shutil
@@ -343,6 +344,42 @@ class FlashInferBuilder(BaseBuilder):
                 )
                 if metadata.version("flashinfer-cubin") != version:
                     raise RuntimeError(f"Failed to install flashinfer-cubin=={version} in {sys.executable}")
+
+            try:
+                jit_version = metadata.version("flashinfer-jit-cache")
+            except metadata.PackageNotFoundError:
+                jit_version = None
+            providers = {
+                dist.metadata["Name"].lower().replace("_", "-"): dist.version
+                for dist in metadata.distributions()
+                if dist.metadata["Name"].lower().replace("_", "-").startswith("flashinfer-jit-cache-")
+            }
+            if jit_version is not None and (
+                not (jit_version == version or jit_version.startswith(version + "+"))
+                or any(provider_version != jit_version for provider_version in providers.values())
+            ):
+                print(f"Aligning flashinfer-jit-cache and providers with FlashInfer {version}", flush=True)
+                # FlashInfer selects a published CUDA wheel compatible with this
+                # interpreter's PyTorch. Reuse the installed set of GPU providers;
+                # a monolithic cache instead uses the visible GPUs in minimal mode.
+                # The CLI downloads shim metadata via pip even when uv installs it.
+                if importlib.util.find_spec("pip") is None:
+                    subprocess.run(
+                        ["uv", "pip", "install", *sys.argv[1:], "--no-deps", "pip"], check=True,
+                    )
+                command = [sys.executable, "-m", "flashinfer", "install-jit-cache-wheel",
+                           "--flashinfer-version", version, "--mode", "minimal"]
+                for provider in sorted(providers):
+                    command.extend(["--sm", provider.removeprefix("flashinfer-jit-cache-")])
+                # The installer must import FlashInfer to repair the broken cache.
+                # Bypass checks only in that child; validate normally here afterwards.
+                subprocess.run(command, check=True, env={**os.environ, "FLASHINFER_DISABLE_VERSION_CHECK": "1"})
+                jit_version = metadata.version("flashinfer-jit-cache")
+                if not (jit_version == version or jit_version.startswith(version + "+")):
+                    raise RuntimeError(f"JIT-cache repair left incompatible versions: Python={version}, cache={jit_version}")
+                for provider in providers:
+                    if metadata.version(provider) != jit_version:
+                        raise RuntimeError(f"JIT-cache provider {provider} does not match {jit_version} after repair")
 
             import flashinfer
             import flashinfer_cubin

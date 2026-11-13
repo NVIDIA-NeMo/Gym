@@ -350,6 +350,10 @@ def flashinfer_version_check(builder, tmp_path, monkeypatch):
         lambda: [SimpleNamespace(metadata={"Name": name}, version=value) for name, value in versions.items()],
     )
     monkeypatch.setenv("BUILD_DIR", str(tmp_path))
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if name == "pip" else original_find_spec(name)
+    )
     original_import = builtins.__import__
     imports = []
 
@@ -357,6 +361,15 @@ def flashinfer_version_check(builder, tmp_path, monkeypatch):
         if name in {"flashinfer", "flashinfer_cubin", "flashinfer.jit"}:
             # Model the import-time guard from the failing worker environment.
             assert versions["flashinfer-cubin"] == versions["flashinfer-python"], "Imported before aligning cubins"
+            if jit_version := versions.get("flashinfer-jit-cache"):
+                assert jit_version == versions["flashinfer-python"] or jit_version.startswith(
+                    versions["flashinfer-python"] + "+"
+                ), "Imported before aligning JIT cache"
+                assert all(
+                    value == jit_version
+                    for package, value in versions.items()
+                    if package.startswith("flashinfer-jit-cache-")
+                ), "Imported before aligning providers"
             imports.append(name)
             return SimpleNamespace(
                 __version__=versions["flashinfer-python"],
@@ -366,8 +379,14 @@ def flashinfer_version_check(builder, tmp_path, monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", checked_import)
 
-    def install(*args, **kwargs):
-        versions["flashinfer-cubin"] = versions["flashinfer-python"]
+    def install(command, **kwargs):
+        if "install-jit-cache-wheel" in command:
+            versions["flashinfer-jit-cache"] = "0.7.0.post1+cu130"
+            providers = [name for name in versions if name.startswith("flashinfer-jit-cache-")]
+            for name in providers or ["flashinfer-jit-cache-sm100a"]:
+                versions[name] = versions["flashinfer-jit-cache"]
+        elif any(arg.startswith("flashinfer-cubin===") for arg in command):
+            versions["flashinfer-cubin"] = versions["flashinfer-python"]
 
     installer = Mock(side_effect=install)
     monkeypatch.setattr(subprocess, "run", installer)
@@ -431,6 +450,95 @@ def test_flashinfer_cubin_install_failure_stops_before_import(flashinfer_version
     check = flashinfer_version_check
     check.installer.side_effect = subprocess.CalledProcessError(1, ["uv", "pip", "install"])
     with pytest.raises(subprocess.CalledProcessError):
+        check.run()
+    assert check.imports == []
+
+
+@pytest.mark.parametrize("pip_args", [["--system"], ["--python", "/opt/worker venv/bin/python"]])
+@pytest.mark.parametrize("has_providers", [False, True])
+def test_flashinfer_aligns_jit_cache_before_import(
+    flashinfer_version_check, tmp_path, monkeypatch, pip_args, has_providers
+):
+    check = flashinfer_version_check
+    check.versions["flashinfer-cubin"] = "0.7.0.post1"
+    check.versions["flashinfer-jit-cache"] = "0.7.0+g37b688d2e589.cu132"
+    if has_providers:
+        check.versions["flashinfer-jit-cache-sm100a"] = check.versions["flashinfer-jit-cache"]
+        check.versions["flashinfer-jit-cache-sm90a"] = check.versions["flashinfer-jit-cache"]
+    monkeypatch.setattr(sys, "argv", ["-", *pip_args])
+    monkeypatch.delenv("FLASHINFER_DISABLE_VERSION_CHECK", raising=False)
+    check.run()
+    command = [
+        sys.executable,
+        "-m",
+        "flashinfer",
+        "install-jit-cache-wheel",
+        "--flashinfer-version",
+        "0.7.0.post1",
+        "--mode",
+        "minimal",
+    ]
+    if has_providers:
+        command.extend(["--sm", "sm100a", "--sm", "sm90a"])
+    check.installer.assert_called_once_with(
+        command, check=True, env={**os.environ, "FLASHINFER_DISABLE_VERSION_CHECK": "1"}
+    )
+    assert "FLASHINFER_DISABLE_VERSION_CHECK" not in os.environ
+    assert check.imports == ["flashinfer", "flashinfer_cubin", "flashinfer.jit"]
+    packages = json.loads((tmp_path / "binary-packages.json").read_text())
+    assert packages == {name: version for name, version in check.versions.items() if name != "flashinfer-python"}
+    assert packages["flashinfer-jit-cache-sm100a"] == "0.7.0.post1+cu130"
+
+
+@pytest.mark.parametrize("provider_version", ["0.7.0.post1+cu130", "0.7.0+g37b688d2e589.cu132"])
+def test_flashinfer_matching_jit_shim_only_repairs_mismatched_providers(flashinfer_version_check, provider_version):
+    check = flashinfer_version_check
+    check.versions.update(
+        {
+            "flashinfer-cubin": "0.7.0.post1",
+            "flashinfer-jit-cache": "0.7.0.post1+cu130",
+            "flashinfer-jit-cache-sm100a": provider_version,
+        }
+    )
+    check.run()
+    assert check.versions["flashinfer-jit-cache-sm100a"] == "0.7.0.post1+cu130"
+    assert check.installer.call_count == (provider_version != "0.7.0.post1+cu130")
+
+
+def test_flashinfer_jit_repair_installs_pip_in_worker_only_if_missing(flashinfer_version_check, monkeypatch):
+    check = flashinfer_version_check
+    check.versions["flashinfer-cubin"] = "0.7.0.post1"
+    check.versions["flashinfer-jit-cache"] = "0.7.0+g37b688d2e589.cu132"
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(sys, "argv", ["-", "--python", "/opt/worker venv/bin/python"])
+    check.run()
+    assert check.installer.call_args_list[0].args[0] == [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "/opt/worker venv/bin/python",
+        "--no-deps",
+        "pip",
+    ]
+    assert check.installer.call_count == 2
+
+
+@pytest.mark.parametrize("failure", ["install", "unchanged-shim", "unchanged-provider"])
+def test_flashinfer_jit_repair_failure_stops_before_import(flashinfer_version_check, failure):
+    check = flashinfer_version_check
+    check.versions["flashinfer-cubin"] = "0.7.0.post1"
+    check.versions["flashinfer-jit-cache"] = "0.7.0+g37b688d2e589.cu132"
+    check.versions["flashinfer-jit-cache-sm100a"] = check.versions["flashinfer-jit-cache"]
+
+    def fail_install(command, **kwargs):
+        if failure == "install":
+            raise subprocess.CalledProcessError(1, command)
+        if failure == "unchanged-provider":
+            check.versions["flashinfer-jit-cache"] = "0.7.0.post1+cu130"
+
+    check.installer.side_effect = fail_install
+    with pytest.raises(subprocess.CalledProcessError if failure == "install" else RuntimeError):
         check.run()
     assert check.imports == []
 
