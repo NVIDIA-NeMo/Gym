@@ -620,7 +620,7 @@ async def test_disconnect_reports_incompatible_sdk_without_stopping_owner(backen
         sandbox._cleanup_channels = cleanup
     with pytest.raises(NgFailureEvent) as caught:
         await provider.aclose()
-    assert "Install cwsandbox==1.21.0" in str(caught.value.__cause__)
+    assert "supported range (>=1.19.1,<2)" in str(caught.value.__cause__)
     assert provider._attached == [sandbox]
     sandbox.stop.assert_not_awaited()
     sdk.Sandbox.delete.assert_not_awaited()
@@ -675,7 +675,7 @@ async def test_installed_sdk_readiness_cancellation_reaches_sdk_loop(monkeypatch
     ],
 )
 async def test_provider_failures_retain_sandbox_evidence_across_report_roundtrip(backend, tmp_path, operation):
-    from cwsandbox import CWSandboxAuthenticationError
+    CWSandboxAuthenticationError = pytest.importorskip("cwsandbox").CWSandboxAuthenticationError
 
     from nemo_gym.core.failure_transport import FailureHeader
     from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for, rebuild_failure
@@ -792,11 +792,50 @@ async def test_sdk_timeouts_only_report_command_deadline_when_confirmed(backend,
         error_type = sdk.SandboxTimeoutError
     cause = error_type("command timed out")
     sandbox.exec.side_effect = cause
-    with pytest.raises(NgFailureEvent) as caught:
-        await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), "side-effect", timeout_s=1)
-    assert caught.value.failure_kind == (
-        "provider_command_timeout" if confirmed_command_deadline else "provider_io_timeout"
-    )
-    assert caught.value.details.exit_code is None
-    assert caught.value.__cause__ is cause
+    from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+
+    with RequestFailureLog.capture() as log:
+        if confirmed_command_deadline:
+            result = await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), "side-effect", timeout_s=1)
+            assert result.return_code == 124 and result.error_type == "timeout"
+            assert result.stdout is None and "1s" in result.stderr
+            report = FailureHeader.decode(FailureHeader.encode(log.reply_report(None)))
+            assert report.failure_id is None
+            assert len(report.events) == 1
+            event = next(iter(report.events.values()))
+            assert event.failure_kind == "provider_command_timeout"
+            assert event.details.provider == "cwsandbox"
+            assert event.foreign_error.exception_type.endswith("SandboxCommandTimeoutError")
+        else:
+            with pytest.raises(NgFailureEvent) as caught:
+                await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), "side-effect", timeout_s=1)
+            assert caught.value.failure_kind == "provider_io_timeout"
+            assert caught.value.details.exit_code is None
+            assert caught.value.__cause__ is cause
     sandbox.exec.assert_awaited_once()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_sdk_distinguishes_structured_command_deadline_from_rpc_deadline(confirmed):
+    import importlib
+
+    sdk = pytest.importorskip("cwsandbox")
+    import grpc
+    from google.protobuf.any_pb2 import Any as ProtoAny
+    from google.rpc.error_details_pb2 import ErrorInfo
+    from google.rpc.status_pb2 import Status
+
+    rpc_status = Status(code=grpc.StatusCode.DEADLINE_EXCEEDED.value[0], message="deadline")
+    if confirmed:
+        detail = ProtoAny()
+        detail.Pack(ErrorInfo(domain="cwsandbox.com", reason="CWSANDBOX_COMMAND_TIMEOUT"))
+        rpc_status.details.append(detail)
+    rpc_error = SimpleNamespace(
+        code=lambda: grpc.StatusCode.DEADLINE_EXCEEDED,
+        details=lambda: "deadline",
+        trailing_metadata=lambda: [("grpc-status-details-bin", rpc_status.SerializeToString())],
+    )
+    sdk_module = importlib.import_module(sdk.Sandbox.__module__)
+    translated = sdk_module._translate_rpc_error(rpc_error, operation="exec", sandbox_id="cw-test")
+    assert isinstance(translated, sdk.SandboxTimeoutError)
+    assert isinstance(translated, sdk.SandboxCommandTimeoutError) is confirmed

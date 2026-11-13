@@ -27,6 +27,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_REQUEST_FAILED,
     PROVIDER_UNAVAILABLE,
 )
+from nemo_gym.core.failure_transport import observe_failure
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
@@ -344,7 +345,11 @@ class CWSandboxProvider:
                         raise ValueError(f"UID {user} not found in sandbox /etc/passwd")
                     username = lookup.stdout.split(":", 1)[0].strip()
                 command = f"su {shlex.quote(username)} -s /bin/bash -c {shlex.quote(command)}"
-            result = await sandbox.exec(["bash", "-c", command], cwd=cwd, timeout_seconds=timeout)
+            try:
+                result = await sandbox.exec(["bash", "-c", command], cwd=cwd, timeout_seconds=timeout)
+            except getattr(self._sdk, "SandboxCommandTimeoutError", ()) as exc:
+                observe_failure(self._failure("exec", exc, handle.sandbox_id))
+                return SandboxExecResult(None, f"Command timed out after {timeout:g}s", 124, error_type="timeout")
             return SandboxExecResult(result.stdout, result.stderr, result.returncode)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -480,7 +485,8 @@ class CWSandboxProvider:
         if not callable(cleanup):
             raise RuntimeError(
                 "The installed cwsandbox SDK lacks client-only cleanup (_cleanup_channels). "
-                "Install cwsandbox==1.21.0 to disconnect without stopping the owner's sandbox."
+                "Install a cwsandbox release in the supported range (>=1.19.1,<2) that provides "
+                "_cleanup_channels to disconnect without stopping the owner's sandbox."
             )
         await asyncio.to_thread(cleanup)
 
