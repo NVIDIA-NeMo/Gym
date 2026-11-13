@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""One isolated OpenCode episode; inference always targets the Gym model proxy."""
+"""One OpenCode episode; inference always targets the Gym model proxy."""
 
 import json
 import os
