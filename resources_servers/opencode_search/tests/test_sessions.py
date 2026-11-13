@@ -23,6 +23,7 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxResources, SandboxSpec, cpu_cap_env
 from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
@@ -50,6 +51,9 @@ PLUGINS = (
     "responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_web_guard.js",
 )
 SENTINEL = "[nemo-gym-plugin] loaded sentinel version=1 plugins=\n"
+TURN_CAP = "[nemo-gym-plugin] terminal=max_iteration session=s calls=401 cap=400\n"
+# What an Environment Server sends with an episode's verify: the session's close follows it.
+EPISODE_VERIFY = {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
 NODE = shutil.which("node")
 
 
@@ -666,7 +670,7 @@ def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stop
     execs = _record_execs(monkeypatch, stopped)
     _mock_judge(server, CORRECT)
 
-    verified = client.post("/verify", json=_verify_body())
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
 
     assert verified.status_code == 200, verified.text
     # As on the relay path: a budget ending keeps its judged reward, and the mask and kind name the ending.
@@ -677,7 +681,8 @@ def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stop
     # One read, while the sandbox still ran; then the sandbox stopped.
     assert [stops for _, stops in execs] == [0] and stopped == [started[0][0]]
     # An identical retry replays the reply, receipts included, without reading again.
-    assert client.post("/verify", json=_verify_body()).json() == verified.json() and len(execs) == 1
+    replayed = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+    assert replayed.json() == verified.json() and len(execs) == 1
 
 
 @pytest.mark.parametrize(
@@ -717,7 +722,7 @@ def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
     "failure",
     [
         SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
-        SandboxExecResult(stdout="", stderr="cat: permission denied", return_code=1),
+        SandboxExecResult(stdout="", stderr="base64: permission denied", return_code=1),
         RuntimeError("the provider is unavailable"),
     ],
     ids=["error_type", "exit_code", "raised"],
@@ -739,6 +744,55 @@ def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
     assert read.await_count == 1 and judge.await_count == 0 and stopped == [started[0][0]]
     # Nothing was kept from the attempt, so the same verify again is masked rather than graded without the log.
     assert _graded(client.post("/verify", json=_verify_body())) == (0.0, True, "session_lost", False)
+
+
+def test_a_plugin_log_returned_as_messages_joined_by_newlines_keeps_its_lines(workdir, tmp_path, monkeypatch) -> None:
+    """A provider may return a command's output as messages joined by newlines. A message boundary inside a plugin line
+    must not split it: the sentinel would read as missing, and the turn cap would go unmasked."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL + TURN_CAP)
+    real_exec = AsyncSandbox.exec
+
+    async def exec(self: AsyncSandbox, command: str, **kwargs: Any) -> SandboxExecResult:
+        result = await real_exec(self, command, **kwargs)
+        stdout = result.stdout or ""
+        return replace(result, stdout="\n".join(stdout[start : start + 7] for start in range(0, len(stdout), 7)))
+
+    monkeypatch.setattr(AsyncSandbox, "exec", exec)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0, True, "agent_limit", True)
+    assert verified.json()["opencode_plugin_log"] == SENTINEL + TURN_CAP
+
+
+@pytest.mark.parametrize(
+    ("headers", "graded", "judge_calls"),
+    [
+        # An Environment Server's verify: graded from its body, it would skip the plugin gate and the turn cap's mask.
+        (EPISODE_VERIFY, (0.0, True, "session_lost", False), 0),
+        # The relay agent's verify, or gym eval reverify: graded from its body, as without plugin_log_path.
+        ({}, (1.0, False, None, True), 1),
+    ],
+    ids=["episode", "relay_or_reverify"],
+)
+def test_a_verify_for_a_sandbox_this_server_no_longer_holds(workdir, tmp_path, headers, graded, judge_calls) -> None:
+    """As after a restart, which stops every sandbox: the verify of a run cut off by its turn cap reaches a server
+    that holds nothing for its session."""
+    log = tmp_path / "plugins.log"
+    log.write_text(SENTINEL + TURN_CAP)
+    server = _server(workdir, plugin_log_path=str(log))
+    client = TestClient(server.setup_webserver())
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=headers)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == graded
+    assert judge.await_count == judge_calls and "opencode_plugin_log" not in verified.json()
 
 
 @pytest.mark.parametrize(

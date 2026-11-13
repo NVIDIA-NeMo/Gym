@@ -61,9 +61,13 @@ Grading reads nothing from it but the plugin log of an episode session, when `pl
   identical retry replays the verdict, and a retry with another body gets 409. After an attempt that
   reached no verdict, an identical retry is graded again. A verify after the session's close is
   masked (`failure_kind: session_lost`). A verify with no seed, such as `gym eval reverify`, is
-  graded, since the grade reads only the request.
-* **Plugin log.** With `plugin_log_path` set, an episode's verify first reads that file from the sandbox:
-  the receipts plugin (`opencode_bundle/nemo_gym_receipts.js`) copies the OpenCode plugins' lines there.
+  graded, since the grade reads only the request. With `plugin_log_path` set, an Environment
+  Server's verify (it sends `x-ng-checkpoint-close-follows: 1`) for a session this server holds no
+  sandbox or earlier verify for, as after a restart, is masked as `session_lost` instead: its plugin
+  log went with the sandbox.
+* **Plugin log.** With `plugin_log_path` set, an episode's verify first reads that file from the sandbox,
+  base64-encoded so that no provider's output framing can split a line: the receipts plugin
+  (`opencode_bundle/nemo_gym_receipts.js`) copies the OpenCode plugins' lines there.
   Verify takes the run's ending from the turn-budget plugin's lines, as `opencode_sandboxed_agent` reads
   its run output, and returns the log with it (`opencode_terminal_reason`, `opencode_plugins_loaded`,
   `opencode_plugin_log`). A log without the sentinel plugin's line, or without a line of

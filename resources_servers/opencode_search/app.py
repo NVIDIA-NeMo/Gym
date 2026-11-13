@@ -35,6 +35,7 @@ from the judge rather than from a test harness.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -80,6 +81,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SHUTDOWN_STOP_CONCURRENCY,
     STOP_TIMEOUT_S,
     BaseResourcesServerConfig,
@@ -93,6 +95,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
+    ResourcesVerification,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
@@ -901,14 +904,15 @@ class SearchResourcesServer(SimpleResourcesServer):
         body gets 409. A verify after the session's close is masked as lost.
 
         With plugin_log_path set, an episode session's verify first reads the plugin log from its sandbox, and the
-        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts).
+        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts). An episode's
+        verify for a sandbox this server no longer holds is masked as lost too (_lost_session_reason).
         """
         session_id = request.session[SESSION_ID_KEY]
         digest = _body_digest(body)
         async with self.verifying(session_id, allow_missing=True) as verification:
-            if verification.is_lost:
-                lost = lost_session_verification("the session was closed, or its seed never finished")
-                return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost))
+            lost = self._lost_session_reason(request, verification)
+            if lost is not None:
+                return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost_session_verification(lost)))
             evidence = verification.retained
             if not isinstance(evidence, _VerifyEvidence):
                 # Read while the sandbox still runs: it is stopped before the judge. A read that fails retains nothing,
@@ -935,6 +939,26 @@ class SearchResourcesServer(SimpleResourcesServer):
                 verification.retain(replace(evidence, grade=grade))
             return SearchVerifyResponse(**(body.model_dump() | grade))
 
+    def _lost_session_reason(self, request: Request, verification: ResourcesVerification) -> Optional[str]:
+        """Why this verify cannot grade a session this server no longer holds, or None.
+
+        Besides a closed session: with plugin_log_path set, an episode's grade depends on the plugin log in its sandbox
+        (the plugin gate and the budget masks), so an episode's verify for a session this server holds neither the
+        sandbox nor a first attempt's evidence for, as after a restart, which stops every sandbox, cannot be graded
+        either. Only an Environment Server's episode verify sends CHECKPOINT_CLOSE_FOLLOWS_HEADER; a verify without it,
+        from the relay agent or gym eval reverify, reads only its body and is graded.
+        """
+        if verification.is_lost:
+            return "the session was closed, or its seed never finished"
+        if (
+            self.config.plugin_log_path is not None
+            and request.headers.get(CHECKPOINT_CLOSE_FOLLOWS_HEADER) == "1"
+            and not verification.is_live
+            and verification.retained is None
+        ):
+            return "this server no longer holds the episode's sandbox, so its plugin log cannot be read"
+        return None
+
     async def _read_plugin_log(self, session_id: str) -> Optional[str]:
         """The plugin log in an episode session's sandbox, "" when no plugin wrote one; None when there is none to read.
 
@@ -950,14 +974,16 @@ class SearchResourcesServer(SimpleResourcesServer):
         if self.config.plugin_log_path is None or sandbox is None:
             return None
         path = shlex.quote(self.config.plugin_log_path)
-        # From /, which exists whatever the harness did to its workdir.
-        result = await sandbox.exec(f"test ! -e {path} || cat -- {path}", cwd="/", timeout_s=60)
+        # From /, which exists whatever the harness did to its workdir. Base64, because a provider may return a
+        # command's output as messages joined by newlines, and a message boundary inside a plugin line would split it;
+        # decoding skips every newline.
+        result = await sandbox.exec(f"test ! -e {path} || base64 -- {path}", cwd="/", timeout_s=60)
         if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(
                 f"Cannot read the plugin log {self.config.plugin_log_path} in the lent sandbox "
                 f"(exit {result.return_code}, error {result.error_type}): {(result.stderr or '').strip()[-500:]}"
             )
-        return result.stdout or ""
+        return base64.b64decode(result.stdout or "").decode("utf-8", errors="replace")
 
     def _take_plugin_receipts(self, body: SearchVerifyRequest, plugin_log: str) -> None:
         """Put the ending and plugin receipts from an episode's plugin log on its verify body, where the relay agent puts
