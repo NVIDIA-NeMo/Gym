@@ -221,6 +221,7 @@ async def test_native_run_task_catch_all_preserves_failure_origin(tmp_path, monk
         ("not json", "stop", "model", "malformed_tool_call"),
         ("not json", "length", "model", "output_token_limit"),
         ("", "stop", "evaluation", "runtime_error"),
+        ("", "length", "model", "output_token_limit"),
     ],
 )
 async def test_raw_response_parsing_separates_model_text_from_missing_response(completion, finish, origin, kind):
@@ -252,9 +253,9 @@ async def test_raw_response_parsing_separates_model_text_from_missing_response(c
     )
     exec(compile(ast.Module(body=[owner], type_ignores=[]), str(source), "exec"), ns)
     client = ns["_CleanOutputChatOpenAI"]()
-    with pytest.raises(ValueError if completion else RuntimeError) as caught:
+    with pytest.raises(ValueError if completion or finish == "length" else RuntimeError) as caught:
         await client.ainvoke([], output_format=Output)
-    if completion:
+    if completion or finish == "length":
         assert isinstance(caught.value, ValidationError)  # Preserve browser-use's own JSON recovery branch.
     assert client.last_actor_failure == {"failure_origin": origin, "failure_kind": kind}
 

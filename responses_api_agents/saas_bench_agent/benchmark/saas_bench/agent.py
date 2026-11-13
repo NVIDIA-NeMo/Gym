@@ -1594,7 +1594,12 @@ class _CleanOutputChatOpenAI(ChatOpenAI):
         )
         raw_completion = raw_result.completion
         if not isinstance(raw_completion, str) or not raw_completion.strip():
-            raise RuntimeError("Model endpoint returned no completion text")
+            if raw_result.stop_reason != "length":
+                raise RuntimeError("Model endpoint returned no completion text")
+            # A reported output cap can exhaust hidden reasoning without any
+            # visible action text. Keep its original validation exception and
+            # classify the confirmed model limit, not an unavailable endpoint.
+            raw_completion = raw_completion if isinstance(raw_completion, str) else str(raw_completion)
 
         cleaned = _strip_tool_call_wrapper(raw_completion)
         cleaned = _rewrite_banned_actions(cleaned)

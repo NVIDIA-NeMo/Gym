@@ -100,7 +100,7 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
             "max_steps": 5,
             "context_tokens": 1000,
             "output_tokens": 100,
-            "agent_timeout": 0.5 if ending.startswith("timeout") else 10,
+            "agent_timeout": 3 if ending.startswith("timeout") else 10,
         }
     )
     slot.stop_apps.assert_called_once_with(["fixture"])
