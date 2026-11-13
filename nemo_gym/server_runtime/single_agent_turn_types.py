@@ -5,7 +5,7 @@
 
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_serializer, field_validator, model_validator
 
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.core.failure_records import EpisodeFailure
@@ -97,10 +97,21 @@ class SingleAgentTurnResult(BaseVerifyResponse):
 
     model_config = ConfigDict(extra="allow")
 
+    next_agent_request: NeMoGymResponseCreateParamsNonStreaming | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="An optional next activation requested by the trusted verifier; requires verifier_continuation.",
+    )
     ng_agent_observations: AgentObservationBundle | None = None
     # The harness's own turns from its session close. Rollout collection takes them over rebuilding turns from
     # the captured model calls; absent, the key stays out of the result as before.
     ng_trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_serializer("next_agent_request")
+    def _serialize_next_agent_request(self, value: NeMoGymResponseCreateParamsNonStreaming | None):
+        # Keep the typed request schema. A return annotation would replace it in the serialization schema.
+        # Omitted sampling/tool defaults must not become explicit actor parameters on a verifier round trip.
+        return value.model_dump(mode="json", exclude_none=True, exclude_unset=True) if value is not None else None
 
 
 class SingleAgentTurnFailure(EpisodeFailure):

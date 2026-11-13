@@ -29,7 +29,11 @@ or approval is simulated.
 
 ## Ordering-prefix boundary
 
-The Environment Server selects the ordering-prefix boundary declared by the task metadata. Shared verification runs after every new
+The existing `single_agent_turn` Environment Server uses its opt-in verifier continuation loop.
+The dispatcher materializes the flat registry row into the server's typed episode
+request and unwraps the typed result for collection.
+The `partner_if` Resources Server selects the ordering-prefix boundary declared by the task metadata.
+Shared verification runs after every new
 response/tool batch. Premature advice stops with reward 0; a verified same-version
 neighboring-namespace check with no premature advice stops with reward 1. No
 decisive event at the cutoff, unsupported calls and judge errors are excluded.
@@ -65,9 +69,15 @@ and returns its actual observations. There is no fallback to a host shell.
 Tool-call IDs are scoped to the parent or worker conversation, so reused IDs
 cannot attach a worker's result to a parent call.
 
-The Environment Server closes each step before invoking the shared verifier.
+The generic Environment Server closes each fresh agent session before invoking the shared verifier.
+An undecided prefix returns a standard Responses request through `next_agent_request`;
+its `metadata` carries `ngc_replay_parent_turn_limit`, `ngc_replay_saved_prefix` and
+`ngc_replay_saved_prefix_sha256`. The replay adapter removes these controls before
+checking the frozen actor input or making a policy request. The first activation
+defaults to one parent turn. No separate replay Environment Server is installed.
+The verifier checks receipt checksums inside `ordering_artifacts_dir` before grading.
 `ReplayConfig.first_answer` bounds each engine step; it does not change the
-Environment Server's prefix scoring boundary. The final episode response sums
+verifier's prefix scoring boundary. The final episode response sums
 only fresh known usage; missing counts stay unknown. Sampling and call limits
 come from `replay` config, not generic single-response CLI overrides.
 The pairing uses a separate Model Server configuration to preserve those settings

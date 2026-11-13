@@ -47,7 +47,11 @@ from nemo_gym.trajectory import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.ngc_recorded_context.app import response_from_output
 from responses_api_agents.ngc_recorded_context.replay import ReplayConfig, capture, execute, load_runtime, write_json
-from responses_api_agents.ngc_recorded_context.saved_prefix import SavedPolicyPrefix, prefix_digest
+from responses_api_agents.ngc_recorded_context.saved_prefix import (
+    SavedPolicyPrefix,
+    prefix_digest,
+    verification_digest,
+)
 from responses_api_agents.ngc_recorded_context.setup_ripgrep import ensure_ripgrep
 
 
@@ -60,9 +64,35 @@ class NativeReplayAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class ReplayActivation(NeMoGymResponseCreateParamsNonStreaming):
-    parent_turn_limit: int = Field(ge=1, le=32)
+    parent_turn_limit: int = Field(default=1, ge=1, le=32)
     saved_prefix: Path | None = None
     saved_prefix_sha256: str | None = None
+
+
+def replay_activation(body: ReplayActivation) -> ReplayActivation:
+    """Decode verifier-supplied controls without adding them to the frozen actor input."""
+    metadata = dict(body.metadata or {})
+    fields = {
+        "ngc_replay_parent_turn_limit": "parent_turn_limit",
+        "ngc_replay_saved_prefix": "saved_prefix",
+        "ngc_replay_saved_prefix_sha256": "saved_prefix_sha256",
+    }
+    selected = set(fields) & metadata.keys()
+    if not selected:
+        return body
+    if set(fields.values()) & body.model_fields_set:
+        raise HTTPException(422, "Replay controls cannot mix metadata and direct activation fields")
+    values = body.model_dump(exclude_none=True, exclude_unset=True)
+    for name in selected:
+        values[fields[name]] = metadata.pop(name)
+    if metadata:
+        values["metadata"] = metadata
+    else:
+        values.pop("metadata", None)
+    try:
+        return ReplayActivation.model_validate(values)
+    except ValueError as error:
+        raise HTTPException(422, "Invalid replay continuation metadata") from error
 
 
 @dataclass
@@ -127,7 +157,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
 
     async def run(self, request: Request, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        raise HTTPException(409, "Run this replay through its paired Environment Server and agent sessions")
+        raise HTTPException(409, "Run this replay through single_agent_turn and agent sessions")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ReplaySession:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", body.agent_session_id):
@@ -167,6 +197,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
             )
 
     async def responses(self, request: Request, body: ReplayActivation = Body()) -> NeMoGymResponse:
+        body = replay_activation(body)
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
             raise HTTPException(409, "Seed an agent session before activation")
@@ -401,6 +432,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
                     "reused_policy_calls": prefix.consumed if prefix else 0,
                     "parent_turn_limit": body.parent_turn_limit,
                     "invocation_id": root_id,
+                    "ordering_contract": load_runtime(config).ordering.model_dump(),
                 },
             )
             terminal = diagnostics["termination"]
@@ -442,6 +474,7 @@ class NativeReplayAgent(SimpleResponsesAPIAgent):
                     "verification_input": captured.model_dump(),
                     "replay_ordering_contract": load_runtime(config).ordering.model_dump(),
                     "replay_artifacts_dir": str(root),
+                    "replay_verification_sha256": verification_digest(root),
                     "replay_diagnostics": diagnostics,
                     "saved_prefix_sha256": prefix_digest(root)
                     if terminal in {"turn_limit", "policy_call_limit", "first_answer_draft", "final_response"}

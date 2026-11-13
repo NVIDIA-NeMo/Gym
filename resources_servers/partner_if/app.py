@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from fastapi import HTTPException
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, field_serializer, model_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -65,6 +65,9 @@ class PartnerIFResourcesServerConfig(PartnerIFGradingConfig):
     # Grade live_agent rows on the verification_input their agent sends. Rows never carry it, so such a
     # server reports reverify mode UNSUPPORTED.
     accept_verification_input: bool = False
+    # Explicit opt-in: only replay envelopes below this root can request verifier-controlled continuation.
+    ordering_artifacts_dir: Path | None = None
+    ordering_max_policy_calls: int = Field(default=8, ge=1, le=64)
 
 
 UNSIGNED = "Rubric audit unsigned; enable allow_provisional_rubrics for provisional development scoring"
@@ -72,6 +75,7 @@ UNSIGNED = "Rubric audit unsigned; enable allow_provisional_rubrics for provisio
 
 class VerifyRequest(BaseVerifyRequest):
     verifier_metadata: VerifierMetadata
+    task_name: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # Sent only for live_agent rows and graded with the response; rows never carry it.
     verification_input: LiveAgentCapture | None = Field(default=None, exclude=True)
 
@@ -86,6 +90,17 @@ class VerifyResponse(VerifyRequest, BaseVerifyResponse):
     grading_result: Evaluation | None = None
     # Whether grading ran to completion, as Gym's evidence gate reads it: a masked rollout's did not.
     evaluation_completed: bool | None = None
+    next_agent_request: NeMoGymResponseCreateParamsNonStreaming | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    replay_artifacts_dir: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    replay_diagnostics: dict[str, JsonValue] | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_serializer("next_agent_request")
+    def _serialize_next_agent_request(self, value: NeMoGymResponseCreateParamsNonStreaming | None):
+        """Preserve omitted actor parameters across the verifier-to-environment wire boundary."""
+        # Leave the return type unannotated so the serialization schema retains the typed request.
+        return value.model_dump(mode="json", exclude_unset=True, exclude_none=True) if value is not None else None
 
     @model_validator(mode="after")
     def completion_follows_masking(self) -> "VerifyResponse":
@@ -236,6 +251,23 @@ class PartnerIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
         contract = body.verifier_metadata.partner_if
         if contract.evidence_mode == "live_agent" and not self.config.accept_verification_input:
             raise HTTPException(422, "live_agent rows need a server with accept_verification_input: true")
+
+        if self.config.ordering_artifacts_dir is not None and contract.evidence_mode == "live_agent":
+            from resources_servers.partner_if.ordering import is_ordering_response, verify_ordering
+
+            if is_ordering_response(body.response):
+                fields = await verify_ordering(
+                    body,
+                    artifacts_dir=self.config.ordering_artifacts_dir,
+                    max_policy_calls=self.config.ordering_max_policy_calls,
+                    verify=self._verify_response,
+                )
+                return VerifyResponse.model_validate(body.model_dump() | fields)
+        return await self._verify_response(body)
+
+    async def _verify_response(self, body: VerifyRequest) -> VerifyResponse:
+        """The ordinary evidence adapter and shared grading path, unchanged by continuation opt-in."""
+        contract = body.verifier_metadata.partner_if
 
         def evidence() -> EvidenceBundle:
             params = body.responses_create_params.model_dump(exclude_none=True)

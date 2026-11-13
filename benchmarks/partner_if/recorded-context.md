@@ -5,11 +5,24 @@ The public runner contains no customer source, prompt, service address or creden
 The authenticated registry supplies actor inputs, recorded responses and a validated
 `runtime.json` declaring paths, aliases, asset hashes and probe identity.
 
-The Environment Server closes each agent step before shared verification. It stops
+The existing `single_agent_turn` Environment Server closes each fresh agent
+session before shared verification. Its optional `verifier_continuation` loop follows
+the shared verifier's next request and enforces a six-activation ceiling. The verifier stops
 on the first decisive ordering result. A failed ordering requirement scores zero;
 a returned identity-verified prerequisite check can establish a pass. A cutoff,
 unsupported operation or infrastructure/judge error is masked. Supplied history is
 context; no final answer or successful tool result is invented.
+
+There is no separate replay Environment Server. Dataset-specific ordering decisions,
+receipt checks and inconclusive-run exclusions remain in `partner_if`. The generic
+environment owns sessions, bounded iteration, usage and trajectory aggregation.
+Repeated-activation episodes restart after interruption; exported checkpoint restoration
+for the existing single-activation mode is unchanged.
+
+The dispatcher wraps the prepared flat row in a typed episode request for
+`single_agent_turn` and converts its typed reply back to the collector's result
+format. The published task rows, actor input and rubric remain the pinned data;
+the request conversion carries the same task and attempt identities.
 
 ## Assets and configuration
 

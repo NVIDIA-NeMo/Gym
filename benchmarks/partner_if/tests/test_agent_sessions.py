@@ -13,14 +13,10 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from benchmarks.partner_if.tests.test_ordering_prefix import fields
-from benchmarks.partner_if.tests.test_replay import PARAMS, SOURCE, TASK, call, draft, probe, response
-from environment_servers.ngc_recorded_context import app as environment
+from benchmarks.partner_if.tests.test_replay import PARAMS, SOURCE, call, probe, response
 from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.data import materialize_task
-from nemo_gym.server_runtime import CleanupContext, SingleAgentTurnRequest, SingleAgentTurnResult
 from responses_api_agents.ngc_recorded_context import native_agent as adapter
 from responses_api_agents.ngc_recorded_context.replay import ReplayConfig
 
@@ -311,127 +307,6 @@ async def test_close_cancels_inflight_call_and_keeps_failed_activation_from_retr
     )
     assert running.cancelled() and close.cleanup_confirmed
     assert close.agent_observations.records[0].status == "incomplete"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["pass", "fail", "same_batch", "safe_cutoff", "provider_fault"])
-@pytest.mark.parametrize("task_name", ["pif_029", "synthetic-ordering-example"])
-@pytest.mark.parametrize("positional_identity", [False, True])
-async def test_environment_closes_each_session_before_verify_and_grades_only_decisive_prefix(
-    tmp_path, monkeypatch, mode, task_name, positional_identity
-):
-    task = copy.deepcopy(TASK)
-    task["task_name"] = task_name
-    agent = make_agent(tmp_path)
-    seen = []
-    first = response(call("Read", {"file_path": "/opt/agent/skills/registry-access/SKILL.md"}))
-    queue = (
-        [first, response(probe())]
-        if mode == "pass"
-        else [response(draft())]
-        if mode == "fail"
-        else [response(probe(), draft())]
-        if mode == "same_batch"
-        else [TimeoutError("test provider fault")]
-        if mode == "provider_fault"
-        else [first]
-    )
-    provider(monkeypatch, queue, seen)
-    trace = []
-
-    async def decoded(result):
-        return result.payload
-
-    async def success(result):
-        pass
-
-    async def post(**kw):
-        path = kw["url_path"]
-        identity = (kw.get("cookies") or {}).get("agent_session_id")
-        if path == "/v1/agent_sessions":
-            value = AgentSeedSessionRequest.model_validate(kw["json"])
-            await agent.seed_agent_session(SimpleNamespace(session={}), value)
-            return SimpleNamespace(
-                payload={"agent_session_id": value.agent_session_id},
-                cookies=SimpleCookie("agent_session_id=" + value.agent_session_id),
-            )
-        if path.endswith("/v1/responses"):
-            value = await agent.responses(request_for(identity), adapter.ReplayActivation.model_validate(kw["json"]))
-            trace.append(("activation", identity))
-            return SimpleNamespace(payload=value.model_dump(mode="json"))
-        raise AssertionError(path)
-
-    async def seed_resources(self, request, handles):
-        trace.append(("resource_seed", None))
-
-    async def close_resources(self, request, handles):
-        trace.append(("resource_close", None))
-
-    async def close_agent(self, request, handles):
-        trace.append(("agent_close", handles.agent_session_id))
-        return await agent.close_agent_session(
-            request_for(handles.agent_session_id),
-            AgentCloseSessionRequest(agent_session_id=handles.agent_session_id, episode_id=request.episode_id),
-        )
-
-    async def verify(self, request, handles, reply, observations):
-        assert trace[-1][0] == "agent_close"
-        assert all(
-            record.state is None and record.close_response.cleanup_confirmed
-            for record in agent._session_records.values()
-        )
-        assert request.task.task_input.task_data["verification_input"] == reply.verification_input
-        trace.append(("verify", None))
-        return SingleAgentTurnResult.model_validate(
-            task | fields(mode not in {"fail", "same_batch"}) | {"response": reply.model_dump(mode="json")}
-        )
-
-    monkeypatch.setattr(environment, "get_response_json", decoded)
-    monkeypatch.setattr(environment, "raise_boundary_failure", success)
-    monkeypatch.setattr(environment.OrderingEnvironment, "_seed_resources", seed_resources)
-    monkeypatch.setattr(environment.OrderingEnvironment, "_close_resources", close_resources)
-    monkeypatch.setattr(environment.OrderingEnvironment, "_close_agent", close_agent)
-    monkeypatch.setattr(environment.OrderingEnvironment, "_verify", verify)
-    config = environment.OrderingEnvironmentConfig.model_construct(
-        agent_server=SimpleNamespace(name="agent"),
-        resources_server=SimpleNamespace(name="partner_if"),
-        tool_servers=[],
-        max_parent_turns=1 if mode == "safe_cutoff" else 6,
-        max_policy_calls=8,
-    )
-    env = environment.OrderingEnvironment.model_construct(config=config, server_client=SimpleNamespace(post=post))
-    materialized = (
-        materialize_task(task, taskset="test", task_index=27)
-        if positional_identity
-        else {"task_id": {"taskset": "test", "task_id": "pif_029"}, "task_input": task}
-    )
-    req = SingleAgentTurnRequest.model_validate(
-        {
-            "episode_id": {"rollout_id": "rollout", "attempt": 1},
-            "task": materialized,
-        }
-    )
-    cleanup = CleanupContext(episode_id=req.episode_id, cleanup_timeout_seconds=2)
-    try:
-        result = await env.run(req, cleanup)
-    finally:
-        await cleanup.aclose()
-    row = result.result.model_dump(mode="json")
-    assert result.task_id == req.task.task_id
-    assert row["ng_trajectory"]["task_id"] == req.task.task_id.task_id
-    assert row["verifier_metadata"]["partner_if"]["task_id"] == TASK["verifier_metadata"]["partner_if"]["task_id"]
-    assert trace[-1][0] == "resource_close"
-    assert row["mask_sample"] == (mode in {"safe_cutoff", "provider_fault"})
-    assert row["evaluation_completed"] == (mode in {"pass", "fail", "same_batch"})
-    if mode == "pass":
-        assert row["reward"] == 1 and len(seen) == 2
-        assert row["response"]["usage"]["total_tokens"] == 240
-        assert len(row["ng_trajectory"]["turns"]) == 2
-        assert row["replay_diagnostics"]["prefix_verifications"] == 2
-    if mode in {"fail", "same_batch"}:
-        assert row["reward"] == 0 and len(seen) == 1
-    if mode == "provider_fault":
-        assert not any(item[0] == "verify" for item in trace)
 
 
 def test_missing_usage_never_becomes_zero():

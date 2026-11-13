@@ -30,6 +30,26 @@ def prefix_digest(directory: Path) -> str:
     return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
 
 
+def verification_digest(directory: Path) -> str:
+    """Bind the grading capture and event receipts to the agent's returned response."""
+    manifest = {}
+    for name in (
+        "identity.json",
+        "events.json",
+        "drafts.json",
+        "terminal_reply.json",
+        "result.json",
+        "visible-output.json",
+        "ordering-verification-input.json",
+        "native-step.json",
+    ):
+        path = directory / name
+        if not path.resolve().is_relative_to(directory.resolve()):
+            raise ValueError("Verification receipt escapes capture")
+        manifest[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
 class SavedPolicyPrefix:
     def __init__(self, directory: Path, expected_sha256: str, model: str):
         self.directory = directory.resolve()

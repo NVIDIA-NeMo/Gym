@@ -173,7 +173,9 @@ judge's calls read them there.
 
 The private recorded-context replay belongs to `partner_if`. Its dedicated
 `config_ngc_replay.yaml` routes `pif_029` through `partner_if_dispatcher` to the
-bounded replay environment and the shared `partner_if` verifier. It stops at
+existing `single_agent_turn` environment and the shared `partner_if` verifier.
+The generic environment enables bounded verifier-directed activations; no separate
+replay Environment Server is added. It stops at
 the first decisive ordering event; no complete investigation is required.
 Preparation downloads the pinned JSONL and `partner_if_replay_assets.json` from the private registry.
 The data-only bundle holds the original history, tools and frozen results; registry runs do not need the source checkout.
