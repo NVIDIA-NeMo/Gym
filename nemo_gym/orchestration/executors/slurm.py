@@ -132,7 +132,6 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
-    allocation_cut_from_accounting,
     chain_accounting,
     decide_from_collected,
     effective_outcome_policy,
@@ -143,6 +142,7 @@ from nemo_gym.orchestration.recovery import (
     requeue_note,
     select_managed_evidence,
     stopped_followup,
+    store_writer_cut_from_accounting,
 )
 from nemo_gym.utils.gym_commit import installed_gym_commit
 from nemo_gym.utils.path_utils import attempt_extension_path_for
@@ -1171,6 +1171,7 @@ def _remote_managed_evidence(
         host_owned = (
             "accounting_snapshot",
             "coverage_allocation_id",
+            "coverage_writer_unrecorded",
             "accounting_unknown_reason",
             "counter_states",
             *READER_PLACEMENT_FIELDS,
@@ -1578,7 +1579,7 @@ class SlurmExecutor(BaseExecutor):
                 live_job_name = judge_live
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
-                    allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
+                    allocation_cut = store_writer_cut_from_accounting(rows, collected)
                     collected = reconcile_requeued_chain(collected, rows)
                 if resume.max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
