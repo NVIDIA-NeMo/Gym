@@ -1088,7 +1088,7 @@ def test_the_staged_plugins_report_to_verify_through_the_plugin_log(workdir, tmp
 # Agent-run seed, kept for an agent's own /run
 # ---------------------------------------------------------------------------
 
-# The relay preset runs this server with lending off (sandbox_workdir: null); turning it on must not change this arm.
+# The relay preset runs this server with lending off (sandbox_workdir unset); turning it on must not change this arm.
 LENDING = pytest.mark.parametrize("lending", [False, True], ids=["without_lending", "with_lending"])
 
 

@@ -66,8 +66,6 @@ opencode_search_resources_server:              # instance name — how agents/CL
       exa_cache_use_tavily: true
 
       sandbox_provider: sandbox
-      # Workdir of the sandbox an episode seed lends to a session harness; null turns lending off (agent /run unaffected).
-      sandbox_workdir: null
       sandbox_config:
         # Above sandbox_timeout (21600) so the pod is never reaped before the agent's own
         # budget expires -- otherwise the TTL silently becomes the real limit.
