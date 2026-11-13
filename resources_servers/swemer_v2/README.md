@@ -60,7 +60,7 @@ A row whose golden patch does not resolve cannot be used for evaluation or train
 
 ```bash
 gym env start \
-  --config resources_servers/swemer_v2/configs/swemer_v2.yaml \
+  --config resources_servers/swemer_v2/configs/swemer_v2_legacy_agent.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/swemer_v2/apply_golden_patch.py \
@@ -99,9 +99,18 @@ folders are served by `deepswe_external1` instead.
 
 ## Running an agent
 
+`configs/swemer_v2.yaml` is the default OpenCode session pairing for the example taskset.
+The resources-only configuration is now `configs/swemer_v2_legacy_agent.yaml`; use it for
+golden-patch validation. `configs/swemer_v2_opencode.yaml` retains the legacy relay pairing
+for the training dataset.
+
+```bash
+gym env start --config resources_servers/swemer_v2/configs/swemer_v2.yaml
+```
+
 `configs/swemer_v2_opencode.yaml` wires the opencode sandboxed agent to
 `swemer_v2_resources_server`, pointed at `data/swemer_v2_training.jsonl`. It lives in a separate
-file rather than folded into `swemer_v2.yaml` so golden-patch validation (which never touches an
+file rather than folded into `swemer_v2_legacy_agent.yaml` so golden-patch validation (which never touches an
 agent) doesn't need to pull in the agent's much larger sandbox/permission config.
 
 ```bash
