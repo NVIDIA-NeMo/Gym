@@ -38,7 +38,9 @@ from tests.session_harness_profiles import (
 @pytest.mark.parametrize("agent", HARNESSES)
 def test_profile_is_not_a_standalone_agent_variant(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(REPO_ROOT)
-    assert list(discover_agents()[agent].variants) == [agent]
+    # OpenCode also ships an explicit legacy episode entry point; profiles remain excluded.
+    expected = ["opencode_agent", "opencode_legacy_agent"] if agent == "opencode_agent" else [agent]
+    assert list(discover_agents()[agent].variants) == expected
 
 
 @pytest.mark.parametrize("agent", HARNESSES)
