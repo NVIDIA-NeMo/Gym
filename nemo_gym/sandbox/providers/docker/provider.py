@@ -24,6 +24,7 @@ import posixpath
 import shlex
 import shutil
 import signal
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -42,8 +43,15 @@ from nemo_gym.sandbox.providers.base import (
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SandboxUsageSample,
 )
 from nemo_gym.sandbox.providers.docker import pty as docker_pty
+from nemo_gym.sandbox.providers.usage import (
+    IN_SANDBOX_CGROUP_COMMAND,
+    cgroup_path,
+    cgroup_v2_sample,
+    parse_in_sandbox_cgroup,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -207,6 +215,9 @@ class _DockerContainer:
     shell: str = "sh"
     env: dict[str, str] = field(default_factory=dict)
     published_ports: tuple[int, ...] = ()
+    # Full container id and host PID of its init, resolved by the first usage sample.
+    container_id: str | None = None
+    init_pid: int | None = None
 
 
 def _normalize_image(image: str) -> str:
@@ -346,7 +357,7 @@ class DockerProvider:
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
     ) -> tuple[int, str, str]:
-        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
+        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout or cancellation."""
         async with self._semaphore:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -357,11 +368,14 @@ class DockerProvider:
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
-            except asyncio.TimeoutError as e:
+            except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+                # A cancelled caller (such as a usage read past its deadline) must not leave the CLI running.
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 with contextlib.suppress(Exception):
                     await proc.wait()
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 raise TimeoutError(f"docker command timed out after {timeout_s:g}s: {_redact_argv(argv)}") from e
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
@@ -941,6 +955,35 @@ class DockerProvider:
         )
         if code != 0 and not _is_missing_container(err):
             raise RuntimeError(f"docker rm -f failed (code={code}) for {inst.name!r}: {err.strip()}")
+
+    async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+        """The container's own cgroup v2 counters.
+
+        Read on this host when the daemon is local (the init's cgroup path names the container id), otherwise
+        from inside the container, which needs ``sh`` and ``cat`` in the image and cgroup v2 with a private
+        cgroup namespace (Docker's default on cgroup v2).
+        """
+        inst = handle.raw
+        if inst.container_id is None:
+            code, out, _err = await self._run(
+                [self._binary, "inspect", "-f", "{{.Id}} {{.State.Pid}}", inst.name], timeout_s=30
+            )
+            parts = out.split()
+            if code != 0 or len(parts) != 2 or not parts[1].isdigit():
+                return ()
+            inst.container_id, inst.init_pid = parts[0], int(parts[1])
+        path = cgroup_path(inst.init_pid) if inst.init_pid else None
+        if path is not None and inst.container_id in path:
+            sample = await asyncio.to_thread(
+                cgroup_v2_sample, Path("/sys/fs/cgroup") / path.lstrip("/"), scope="container"
+            )
+            if sample is not None:
+                return (sample,)
+        result = await self.exec(handle, IN_SANDBOX_CGROUP_COMMAND, timeout_s=10)
+        if result.return_code != 0 or result.error_type is not None:
+            return ()
+        sample = parse_in_sandbox_cgroup(result.stdout or "", sampled_at=time.time())
+        return (sample,) if sample is not None else ()
 
     async def aclose(self) -> None:
         """Close the PTY sessions still open; the containers themselves belong to their handles."""
