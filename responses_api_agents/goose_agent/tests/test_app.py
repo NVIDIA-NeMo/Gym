@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import ssl
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,10 +45,14 @@ system = next((a[len("--system="):] for a in sys.argv if a.startswith("--system=
 (root / "seen.json").write_text(json.dumps({
     "argv": sys.argv[1:], "prompt": prompt, "system": system, "cwd": os.getcwd(),
     "config": (root / "config" / "config.yaml").read_text(),
-    "env": {k: v for k, v in os.environ.items() if k.startswith(("GOOSE_", "OPENAI_"))},
+    "env": {k: v for k, v in os.environ.items() if k.startswith(("GOOSE_", "OPENAI_")) or k == "SSL_CERT_FILE"},
+    "ca_certificates": len(__import__("ssl").create_default_context(cafile=os.environ["SSL_CERT_FILE"]).get_ca_certs())
+    if "SSL_CERT_FILE" in os.environ else None,
 }))
 # A shell tool call inherits Goose's environment, which keeps the task's HOME.
-subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
+subprocess.run(
+    ["bash", "-c", 'printf "%s\n%s\n%s\n" "$HOME" "$TASK_TEST" "${SSL_CERT_FILE-unset}" > proof.txt'], check=True
+)
 db = root / "data" / "sessions" / "sessions.db"
 db.parent.mkdir(parents=True, exist_ok=True)
 con = sqlite3.connect(db)
@@ -311,9 +316,59 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
     return response, close, seen, state, sandbox
 
 
+def task_trust_store(monkeypatch, tmp_path: Path, *, present: bool) -> None:
+    """Point the trust-store check at a bundle file that exists only when ``present``."""
+    bundle = tmp_path / "system-ca.pem"
+    if present:
+        bundle.write_text("system roots")
+    monkeypatch.setattr("responses_api_agents.goose_agent.sandbox.SYSTEM_CA_BUNDLES", (str(bundle),))
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("store", "access_cert_file", "expected"),
+    [
+        ("none", None, "bundle"),
+        ("system_bundle", None, None),
+        ("image_env", None, None),
+        ("none", "/custom/ca.pem", "/custom/ca.pem"),
+    ],
+)
+async def test_ca_bundle_is_supplied_only_without_a_task_trust_store(
+    tmp_path, monkeypatch, store, access_cert_file, expected
+):
+    task_trust_store(monkeypatch, tmp_path, present=store == "system_bundle")
+    if store == "image_env":
+        monkeypatch.setenv("SSL_CERT_FILE", "/image/ca.pem")
+    state, _ = session(tmp_path, "normal")
+    if access_cert_file:
+        state.request.sandbox_access.env["SSL_CERT_FILE"] = access_cert_file
+    archive = tmp_path / "release.tar.gz"
+    archive.write_bytes(b"release")
+    with patch(
+        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=archive)
+    ):
+        await state.install(timeout=10)
+    endpoint = SimpleNamespace(base_url="http://model.invalid/v1")
+    with patch.object(GooseAgent, "model_endpoint", return_value=endpoint):
+        env = agent()._env(state, body())
+
+    uploaded = Path(state.root) / "ca-certificates.pem"
+    if store == "none":
+        assert state.ca_bundle == str(uploaded)
+        assert ssl.create_default_context(cafile=str(uploaded)).get_ca_certs()
+    else:
+        assert state.ca_bundle is None and not uploaded.exists()
+    assert env.get("SSL_CERT_FILE") == (str(uploaded) if expected == "bundle" else expected)
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
-async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_path):
+@pytest.mark.parametrize("trust_store", [True, False])
+async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_path, monkeypatch, trust_store):
+    task_trust_store(monkeypatch, tmp_path, present=trust_store)
     response, close, seen, state, sandbox = await activate(tmp_path, "normal")
     assert response.status == "completed"
     assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
@@ -335,10 +390,15 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
     assert seen["env"]["GOOSE_TEMPERATURE"] == "0.6"
     assert seen["env"]["GOOSE_CONTEXT_LIMIT"] == "262144"
     assert seen["env"]["GOOSE_PATH_ROOT"] == state.root
+    # Goose gets CA roots only when the image has none, so a task's own trust store reaches its tool shells.
+    cert_file = None if trust_store else f"{state.root}/ca-certificates.pem"
+    assert seen["env"].get("SSL_CERT_FILE") == cert_file
+    assert (seen["ca_certificates"] is None) if trust_store else seen["ca_certificates"] > 0
     # The tool shell kept the task's HOME and environment; Goose's own files stayed in the session directory.
     assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
         str(tmp_path / "task-home"),
         "task-value",
+        cert_file or "unset",
     ]
     assert sorted(path.name for path in Path(state.session.workdir).iterdir()) == ["proof.txt"]
     assert close.cleanup_confirmed
