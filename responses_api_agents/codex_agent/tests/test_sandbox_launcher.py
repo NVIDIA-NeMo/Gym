@@ -92,7 +92,7 @@ def test_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses
             assert response.status == statuses[-1]
             assert response.headers["Content-Type"] == "text/event-stream"
             assert response.read() == b"data: first\n\ndata: last\n\n"
-    assert requests == [("/v1/responses", "invocation", b'{"input":"task"}')] * len(statuses)
+    assert requests == [("/v1/responses", "invocation.unattributed", b'{"input":"task"}')] * len(statuses)
     assert [json.loads(line)["status"] for line in attempts_path.read_text().splitlines()] == statuses
 
 
@@ -281,7 +281,7 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
             ["node", str(LAUNCHER), str(tmp_path / "input.json")], capture_output=True, text=True, timeout=15
         )
     assert launched.returncode == 0, launched.stderr
-    assert requests == [("launcher-invocation", b"{}")] * 2
+    assert requests == [("launcher-invocation.unattributed", b"{}")] * 2
     assert [json.loads(line)["status"] for line in (tmp_path / "model_attempts.jsonl").read_text().splitlines()] == [
         429,
         200,
@@ -468,6 +468,7 @@ def test_snapshot_without_native_sessions_writes_nothing(tmp_path):
 
 
 def test_child_requests_keep_the_capture_route_but_have_separate_owners(tmp_path):
+    from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRecord, join_agent_model_calls
     from responses_api_agents.codex_agent.transport import _invocation_for_request
 
     requests = []
@@ -488,6 +489,7 @@ def test_child_requests_keep_the_capture_route_but_have_separate_owners(tmp_path
         json.dumps({"client_metadata": {"session_id": "root", "thread_id": thread}, "input": "Exact\n α"}).encode()
         for thread in ["root", "child", "grandchild", "child"]
     ]
+    bodies += [b"{}", *(json.dumps({"client_metadata": value}).encode() for value in [None, [], "child", 42])]
     with (
         upstream_server(Upstream) as upstream,
         rate_limit_proxy(f"{upstream}/ng-rollout/0-0/v1", tmp_path / "attempts", timeout=10) as proxy,
@@ -495,8 +497,37 @@ def test_child_requests_keep_the_capture_route_but_have_separate_owners(tmp_path
         for body in bodies:
             with urlopen(Request(f"{proxy}/responses", data=body)) as response:
                 assert response.read() == b"data: done\n\n"
-    expected = ["invocation", "invocation.child", "invocation.grandchild", "invocation.child"]
+    expected = ["invocation", "invocation.child", "invocation.grandchild", "invocation.child"] + [
+        "invocation.unattributed"
+    ] * 5
     assert [r[1] for r in requests] == expected
     assert [_invocation_for_request(body, "invocation") for body in bodies] == expected
     assert all(r[0] == "/ng-rollout/0-0/v1/responses" for r in requests)
     assert [r[2] for r in requests] == bodies
+
+    # Both forwarders must leave unsupported metadata unowned in the actual join,
+    # even when the native transcript has a complete parent/child hierarchy.
+    for owners in ([r[1] for r in requests], [_invocation_for_request(body, "invocation") for body in bodies]):
+        bundle = AgentObservationBundle(
+            source="codex",
+            records=[
+                AgentInvocation(invocation_id="invocation"),
+                AgentInvocation(invocation_id="invocation.child", parent_invocation_id="invocation"),
+                AgentInvocation(invocation_id="invocation.grandchild", parent_invocation_id="invocation.child"),
+            ],
+        )
+        calls = [
+            ModelCallRecord(model_call_id=f"call-{index}", client_session_id=owner, call_index=index)
+            for index, owner in enumerate(owners)
+        ]
+        joined = join_agent_model_calls(bundle, calls)
+        assert {
+            record.invocation_id: [call.model_call_id for call in record.model_calls] for record in joined.records
+        } == {
+            "invocation": ["call-0"],
+            "invocation.child": ["call-1", "call-3"],
+            "invocation.grandchild": ["call-2"],
+        }
+        assert {gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"} == {
+            f"capture:call-{index}:call_index={index}" for index in range(4, 9)
+        }

@@ -21,7 +21,7 @@ def _invocation_for_request(body: bytes, invocation_id: str) -> str:
         payload = json.loads(body)
         metadata = payload.get("client_metadata") if isinstance(payload, dict) else None
         if not isinstance(metadata, dict):
-            return invocation_id
+            return f"{invocation_id}.unattributed"
         thread, session = metadata.get("thread_id"), metadata.get("session_id")
         if not isinstance(thread, str) or not thread or not isinstance(session, str) or not session:
             return f"{invocation_id}.unattributed"

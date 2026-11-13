@@ -52,7 +52,7 @@ const parseJson = (bytes) => JSON.parse(new TextDecoder("utf-8", { fatal: true }
 export function invocationForRequest(body, invocationId) {
     try {
         const metadata = parseJson(body)?.client_metadata;
-        if (!isObject(metadata)) return invocationId;
+        if (!isObject(metadata)) return `${invocationId}.unattributed`;
         const thread = metadata.thread_id;
         const session = metadata.session_id;
         if (typeof thread !== "string" || !thread || typeof session !== "string" || !session) {
