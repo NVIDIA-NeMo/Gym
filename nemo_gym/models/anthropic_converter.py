@@ -85,6 +85,10 @@ _RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
 
 class AnthropicConverter:
+    def __init__(self, *, extract_pdf_text: bool = False) -> None:
+        """Enable lossy PDF text extraction only when explicitly requested."""
+        self._extract_pdf_text = extract_pdf_text
+
     ############################################################################
     # Egress: NeMo Gym Responses  ->  Anthropic Messages request
     ############################################################################
@@ -456,13 +460,11 @@ class AnthropicConverter:
             "detail": "auto",
         }
 
-    def _anthropic_document_to_text(self, block: Dict[str, Any]) -> str:
-        """Render an Anthropic `document` block (e.g. Claude Code reading a PDF) as text.
+    def _anthropic_document_to_text(self, block: Dict[str, Any]) -> str | None:
+        """Convert a tool-result document to text, or return None to omit a PDF.
 
-        Responses and Chat Completions inputs have no document part, so a PDF is passed as its extracted
-        text (pypdf ships with each model server, which serves this ingress) and a plain-text document as
-        its text. Anything else becomes a short note, so the tool result still reaches the model instead
-        of failing the request. A missing pypdf logs one warning per process.
+        PDFs are skipped unless text extraction is enabled and pypdf is installed. Plain-text
+        documents need no dependency. Other sources and unreadable PDFs become a short note.
         """
         source = block.get("source") or {}
         title = block.get("title")
@@ -470,14 +472,18 @@ class AnthropicConverter:
         if source.get("type") == "text":
             return source.get("data", "")
         if source.get("type") == "base64" and source.get("media_type") == "application/pdf":
+            if not self._extract_pdf_text:
+                return None
             try:
                 from pypdf import PdfReader
             except ImportError:
                 global _warned_missing_pypdf
                 if not _warned_missing_pypdf:
                     _warned_missing_pypdf = True
-                    logger.warning("pypdf is not installed, so PDF document blocks reach the model as a note")
-                return f"[{label}: PDF text extraction requires pypdf in the model server environment]"
+                    logger.warning(
+                        "pypdf is not installed in the model server environment; skipping PDF document blocks"
+                    )
+                return None
             try:
                 reader = PdfReader(io.BytesIO(base64.b64decode(source["data"])))
                 pages = [page.extract_text() or "" for page in reader.pages]
@@ -489,12 +495,15 @@ class AnthropicConverter:
     def _anthropic_tool_result_content(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
-        content = [
-            {"type": "text", "text": self._anthropic_document_to_text(block)}
-            if block.get("type") == "document"
-            else block
-            for block in content
-        ]
+        blocks = []
+        for block in content:
+            if block.get("type") == "document":
+                text = self._anthropic_document_to_text(block)
+                if text is None:
+                    continue
+                block = {"type": "text", "text": text}
+            blocks.append(block)
+        content = blocks
         if all(block.get("type") == "text" for block in content):
             return "\n".join(block.get("text", "") for block in content)
 

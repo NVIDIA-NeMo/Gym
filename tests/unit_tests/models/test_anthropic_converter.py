@@ -339,7 +339,9 @@ class TestAnthropicRequestToResponses:
             },
         }
 
-        params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+        params = AnthropicConverter(extract_pdf_text=True).anthropic_request_to_responses(
+            self._tool_result_request(block)
+        )
 
         assert "Hello PDF" in params.input[0].output
 
@@ -358,7 +360,9 @@ class TestAnthropicRequestToResponses:
             "source": {"type": "base64", "media_type": "application/pdf", "data": "bm90IGEgcGRm"},
         }
 
-        params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+        params = AnthropicConverter(extract_pdf_text=True).anthropic_request_to_responses(
+            self._tool_result_request(block)
+        )
 
         assert params.input[0].output.startswith("[document 'a.pdf': could not read PDF")
 
@@ -368,12 +372,51 @@ class TestAnthropicRequestToResponses:
         block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": ""}}
 
         with caplog.at_level(logging.WARNING, logger=anthropic_converter.__name__):
-            params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+            params = AnthropicConverter(extract_pdf_text=True).anthropic_request_to_responses(
+                self._tool_result_request(block)
+            )
 
-        assert (
-            params.input[0].output == "[document: PDF text extraction requires pypdf in the model server environment]"
-        )
+        assert params.input[0].output == ""
+        assert params.input[0].call_id == "toolu_1"
         assert "pypdf is not installed" in caplog.text
+
+    @pytest.mark.parametrize("pdf_available", [False, True])
+    def test_tool_result_pdf_is_skipped_by_default(self, monkeypatch: pytest.MonkeyPatch, pdf_available: bool) -> None:
+        if pdf_available:
+            pytest.importorskip("pypdf")
+        else:
+            monkeypatch.setitem(sys.modules, "pypdf", None)
+        block = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(_pdf("PDF")).decode(),
+            },
+        }
+
+        params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+
+        assert params.input[0].output == ""
+        assert params.input[0].call_id == "toolu_1"
+
+    def test_skipping_pdf_preserves_adjacent_text_and_images(self) -> None:
+        request = self._tool_result_request({"type": "text", "text": "before"})
+        request["messages"][0]["content"][0]["content"].extend(
+            [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": ""}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+                {"type": "text", "text": "after"},
+            ]
+        )
+
+        params = _converter().anthropic_request_to_responses(request)
+
+        assert params.input[0].output == [
+            {"type": "input_text", "text": "before"},
+            {"type": "input_image", "image_url": PNG_DATA_URL, "detail": "auto"},
+            {"type": "input_text", "text": "after"},
+        ]
 
 
 class TestResponsesToAnthropicResponse:

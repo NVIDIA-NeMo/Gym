@@ -155,7 +155,7 @@ def context_overflow_error_fields(error: BaseException) -> tuple[str, str | None
     return message, code, param
 
 
-# Stateless; shared by every model server's default /v1/messages handler.
+# Default converter skips PDFs; shared by model servers without PDF text extraction.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
@@ -280,6 +280,14 @@ class ModelCheckpointConfig(BaseModel):
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
+    anthropic_pdf_to_text: bool = Field(
+        default=False,
+        description=(
+            "Extract text from PDF document blocks inside Anthropic tool results. Requires pypdf "
+            "installed separately in the model server environment. Otherwise PDF blocks are skipped, "
+            "preserving the tool result and any accompanying text or images. Extraction loses visual content."
+        ),
+    )
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
     drop_hosted_tools: bool = Field(
@@ -924,7 +932,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        if self.config.anthropic_pdf_to_text:
+            # PDF parsing is synchronous and may be expensive; keep it off the serving event loop.
+            converter = AnthropicConverter(extract_pdf_text=True)
+            params = await asyncio.to_thread(converter.anthropic_request_to_responses, body)
+        else:
+            params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
