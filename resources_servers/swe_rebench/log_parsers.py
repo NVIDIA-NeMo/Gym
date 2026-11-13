@@ -77,8 +77,10 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
         if _parser_path(destination) is not None:
             return
         shutil.rmtree(destination, ignore_errors=True)
+        # The lock holder has exclusive access, so any staging tree found here belongs to a killed worker.
+        for orphan in destination.parent.glob(f".{destination.name}.tmp-*"):
+            shutil.rmtree(orphan, ignore_errors=True)
         staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
-        shutil.rmtree(staging, ignore_errors=True)
         try:
             subprocess.run(["git", "init", "-q", str(staging)], check=True, capture_output=True)
             subprocess.run(

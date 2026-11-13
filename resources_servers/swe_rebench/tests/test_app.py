@@ -604,7 +604,8 @@ class TestLogParserPin:
             if command == "init":
                 Path(args[-1]).mkdir(parents=True)
             elif command in ("clone", "checkout"):
-                # A clone checks out upstream main; only the checkout of the pin is the pinned tree.
+                # Nothing calls `git clone` now; a clone here lands main's parsers in place, so the
+                # visibility test fails for code that clones into the destination before the pin.
                 root = Path(args[-1]) if command == "clone" else Path(cwd)
                 parser = root / "lib" / "agent" / "log_parsers.py"
                 parser.parent.mkdir(parents=True, exist_ok=True)
@@ -644,6 +645,17 @@ class TestLogParserPin:
         log_parsers._clone_locked(destination)
         assert seen and all(path is None for _, path in seen), seen
         assert log_parsers._parser_path(destination) is not None
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    def test_staging_trees_from_killed_workers_are_removed(self, monkeypatch, tmp_path) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        orphan = tmp_path / f".{destination.name}.tmp-999999"
+        orphan.mkdir()
+        (orphan / "partial").write_text("left by a worker killed mid-fetch")
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([]))
+        log_parsers._clone_locked(destination)
         assert [p.name for p in tmp_path.iterdir()] == [destination.name]
 
     def test_a_failed_fetch_leaves_no_tree_behind(self, monkeypatch, tmp_path) -> None:
