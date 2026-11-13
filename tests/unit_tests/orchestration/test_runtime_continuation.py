@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
+from nemo_gym.orchestration.executors.resume_script import (
+    EXPORT_RECEIPT_MISSING_REASON,
+    INCOMPLETE_MARKER_NAME,
+    RECOVERY_RUNTIME_OUTDATED_REASON,
+)
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -334,6 +338,36 @@ def test_known_scheduler_event_preserves_untouched_work_semantics(tmp_path, stat
     result = _run_prologue(tmp_path, ResumeConfig(), state)
     assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
     assert (tmp_path / ".gym_infra_retries").exists() is debit
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "ModuleNotFoundError: No module named 'nemo_gym.orchestration.recovery'",
+        "ModuleNotFoundError: No module named 'nemo_gym.orchestration'",
+        "ImportError: cannot import name 'continuation_admission' from 'nemo_gym.orchestration.recovery' (/x/recovery.py)",
+    ],
+)
+def test_a_runtime_without_the_recovery_reader_stops_with_its_cause_and_remedy(tmp_path, error):
+    prepare_managed(tmp_path, "missing", n=2)
+    installer = tmp_path / "old_runtime.sh"
+    installer.write_text(
+        "#!/bin/bash\n"
+        "echo 'Traceback (most recent call last):' >&2\n"
+        "echo '  File \"<string>\", line 1, in <module>' >&2\n"
+        f'echo "{error}" >&2\n'
+        "exit 1\n"
+    )
+    installer.chmod(0o755)
+    result = _run_prologue(
+        tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0", admission_command=str(installer)
+    )
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / "sbatch_calls").exists()
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == RECOVERY_RUNTIME_OUTDATED_REASON + "\n"
+    assert "predates nemo_gym.orchestration.recovery" in RECOVERY_RUNTIME_OUTDATED_REASON
+    # The runtime's own error still reaches the job log.
+    assert error in result.stderr
 
 
 def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
