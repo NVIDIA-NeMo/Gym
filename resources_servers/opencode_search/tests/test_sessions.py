@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, FailureHeader, TaskId
+from nemo_gym.orchestration.recovery import REVERIFY_JUDGE, reverification_cause, saved_row_evidence
 from nemo_gym.sandbox import (
     AsyncSandbox,
     LocalProvider,
@@ -443,20 +444,6 @@ def test_an_agent_run_seed_cannot_replace_an_episode_session(workdir, started) -
     assert len(started) == 1 and server.has_session_state("session")
 
 
-def test_an_episode_seed_cannot_replace_an_agent_run_session(workdir, started) -> None:
-    server = _server(workdir)
-    client = TestClient(server.setup_webserver())
-    assert client.post("/seed_session", json=_row()).status_code == 200
-    (session_id,) = server._agent_run_sandboxes
-    client.cookies.clear()
-
-    # The rollout ID stays _seed()'s: one made from the cookie's random UUID can end in the reserved suffix "-a<N>".
-    refused = client.post("/seed_session", json=_seed() | {"resources_session_id": session_id})
-
-    assert refused.status_code == 409, refused.text
-    assert len(started) == 1 and server._lent_sandboxes.get(session_id) is None
-
-
 def test_an_episode_seed_after_its_verify_conflicts(workdir, started) -> None:
     server = _server(workdir)
     client = TestClient(server.setup_webserver())
@@ -619,7 +606,8 @@ def test_a_verify_after_the_close_is_masked_as_lost(workdir) -> None:
 
 @pytest.mark.parametrize("seed", ["episode", "agent_run"])
 def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(workdir, seed) -> None:
-    """No verdict is not a measured 0: the row is masked, and the verify is not replayed but graded again."""
+    """No verdict is not a measured 0: the row is masked, and the verify is not replayed but graded again. Gym judges
+    such a row again from its saved answer; while it scored 0, no re-judge picked it up."""
     server = _server(workdir if seed == "episode" else None)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
@@ -631,6 +619,7 @@ def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(wo
     assert _graded(inconclusive) == (0.0, True, "judge_unparseable", False)
     assert inconclusive.json()["judge_parsed"] is False
     assert judge.await_count == 2  # judge_max_attempts
+    assert reverification_cause(saved_row_evidence(inconclusive.json())) == REVERIFY_JUDGE
 
     _mock_judge(server, CORRECT)
     retried = client.post("/verify", json=_verify_body())
@@ -1639,6 +1628,24 @@ def test_a_think_block_is_stripped_before_the_judge(workdir) -> None:
     assert "Marseille" not in judge_request and "Exact Answer: Paris" in judge_request
 
 
+def test_the_judge_gets_the_grading_prompt_alone_at_temperature_zero(workdir) -> None:
+    """Without judge_responses_create_params, the judge request carries the grading prompt as its one user message, at
+    temperature 0.0, with judge_max_output_tokens for the reply, and no other setting."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    judge = _mock_judge(server, CORRECT)
+
+    assert _graded(client.post("/verify", json=_verify_body())) == (1.0, False, None, True)
+
+    params = judge.await_args.kwargs["json"]
+    assert params.model_dump(exclude_unset=True).keys() == {"input", "temperature", "max_output_tokens"}
+    assert (params.temperature, params.max_output_tokens) == (0.0, 10240)
+    prompt = SearchResourcesServer.JUDGE_PROMPT_TEMPLATE.format(
+        question="Which city?", correct_answer="Paris", response="Exact Answer: Paris"
+    )
+    assert [(message.role, message.content) for message in params.input] == [("user", prompt)]
+
+
 def test_an_empty_plugin_log_is_refused_as_one_without_the_sentinel(workdir, tmp_path, started, stopped) -> None:
     """A log that exists but holds nothing reads as "", which lacks the sentinel's line: the run is refused,
     terminally, as when no log was written."""
@@ -1970,6 +1977,7 @@ def test_an_episode_seed_cannot_take_over_an_agent_run_session(workdir, started,
 
     assert refused.status_code == 409, refused.text
     assert len(started) == 1 and stopped == [] and server.has_session_state(cookie_session)
+    assert server._lent_sandboxes.get(cookie_session) is None
 
 
 async def test_an_agent_run_stop_finishes_when_its_release_is_cancelled(workdir, monkeypatch) -> None:

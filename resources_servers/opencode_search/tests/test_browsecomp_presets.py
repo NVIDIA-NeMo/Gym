@@ -144,8 +144,10 @@ def test_the_agent_runs_opencode_as_the_relay_agent_does() -> None:
     assert theirs["opencode_model_call_timeout"] is None
     assert agent.opencode_config["compaction"] == theirs["opencode_config"]["compaction"] == {"reserved": 70144}
     assert agent.exclude_compaction_summaries is theirs["exclude_compaction_summaries"] is True
-    # OpenCode's stock system prompt and no step limit; a session accepts the rest of the configuration.
+    # OpenCode's stock system prompt and no step limit; a session accepts the rest of the configuration. A sandbox seed
+    # refuses env, extra_args and command overrides.
     assert agent.system_prompt is None and agent.env == {} and "agent" not in agent.opencode_config
+    assert (agent.extra_args, agent.command) == ([], "opencode")
     assert _session_opencode_config_error(agent.opencode_config) is None
     # A borrowed sandbox keeps the resources server's network, open to the web.
     assert agent.network_access == "inherit"
@@ -187,6 +189,16 @@ def test_the_readme_gives_the_judge_retry_limits_this_server_applies() -> None:
     applied = {name: getattr(resources, name) for name in retry_limits}
     assert {name: documented.get(name) for name in retry_limits} == applied
     assert applied == {name: SearchResourcesServerConfig.model_fields[name].default for name in retry_limits}
+
+
+def test_the_judge_grades_at_temperature_zero_with_its_output_cap() -> None:
+    """The judge settings the session preset composes, which the core suite checks are the relay preset's: no request
+    setting but temperature 0.0, since verify puts in the prompt and the output cap."""
+    _, config = sessions()
+    resources = SearchResourcesServerConfig.model_validate(settings(config, RESOURCES) | {"name": RESOURCES})
+
+    assert resources.judge_responses_create_params.model_dump(exclude_unset=True) == {"input": [], "temperature": 0.0}
+    assert resources.judge_max_output_tokens == 10240
 
 
 def test_the_core_timing_check_counts_the_export_copy_at_this_servers_bound() -> None:
