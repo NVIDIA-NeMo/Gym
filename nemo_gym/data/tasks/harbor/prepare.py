@@ -906,9 +906,11 @@ def declares_config_field(impl_name: str, impl_config: Any, field: str) -> bool:
 def harness_output_limit(overrides: list[str], agent: AgentSelection) -> int | None:
     """The ``--max-output-tokens`` value for the harness's own limit, or ``None`` when the command sets none.
 
-    Raises ``ValueError`` for a value that is not a positive integer, or for a harness with no such setting.
+    Raises ``ValueError`` for a value that is not a positive integer, or for a harness with no such setting. The
+    command line merges the last override of a key last, and puts a flag's translation before the raw overrides, so
+    the effective limit is the last one given.
     """
-    value = _override_value(overrides, MAX_OUTPUT_TOKENS_OVERRIDE)
+    value = _override_value(list(reversed(overrides)), MAX_OUTPUT_TOKENS_OVERRIDE)
     if value is None or agent.impl_name == ORACLE_AGENT:
         return None
     try:
@@ -1080,6 +1082,15 @@ def build_run(
         config_paths.append(resolve_sandbox_config(sandbox))
     # Later config files win: explicit user overlays must follow component/provider defaults.
     tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
+    if output_limit is not None:
+        # A config-file overlay loads after the generated YAML above and would replace the limit there; a command-line
+        # override is merged last, so the requested limit wins over an overlay's value. It comes before the raw
+        # overrides below, as every translated flag does, so an explicit override of the generated agent's own limit
+        # still wins over the flag.
+        tokens.append(
+            f"++{agent_instance(prepared.taskset)}.responses_api_agents.{agent.impl_name}."
+            f"{HARNESS_OUTPUT_LIMIT_FIELD}={output_limit}"
+        )
     tokens += [
         token
         for token in overrides
@@ -1087,13 +1098,6 @@ def build_run(
         # The harness got the limit above; the collector refuses request overrides for task rows.
         and token.lstrip("+").partition("=")[0] != MAX_OUTPUT_TOKENS_OVERRIDE
     ]
-    if output_limit is not None:
-        # A config-file overlay loads after the generated YAML above and would replace the limit there; a command-line
-        # override is merged last, so the requested limit wins over an overlay's value.
-        tokens.append(
-            f"++{agent_instance(prepared.taskset)}.responses_api_agents.{agent.impl_name}."
-            f"{HARNESS_OUTPUT_LIMIT_FIELD}={output_limit}"
-        )
     if not _has_override(tokens, "split"):
         tokens.append(f"+split={split}")
     return config_path, tokens

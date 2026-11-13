@@ -2545,6 +2545,32 @@ class TestCli:
         agent = resolve_agent("harbor_oracle")
         assert harness_output_limit(["+responses_create_params.max_output_tokens=16"], agent) is None
 
+    def test_max_output_tokens_takes_the_last_request_limit_given(self):
+        """The command line puts a flag's translation before the raw overrides and merges the last override of a key
+        last, so a raw request limit after the flag is the effective one."""
+        agent = resolve_agent("opencode_agent")
+        overrides = [
+            "+responses_create_params.max_output_tokens=32768",
+            "++responses_create_params.max_output_tokens=8192",
+        ]
+        assert harness_output_limit(overrides, agent) == 8192
+
+    def test_max_output_tokens_flag_comes_before_an_explicit_override_of_the_generated_agent(self, tmp_path):
+        """An explicit override of the generated agent's own limit is more specific than the flag, so it is merged
+        after the flag's translation."""
+        agent = resolve_agent("opencode_agent")
+        limit = "harbor_ds_agent.responses_api_agents.opencode_agent.max_output_tokens"
+        _, tokens = build_run(
+            self._prepared(tmp_path),
+            agent,
+            sandbox="docker",
+            overrides=["+responses_create_params.max_output_tokens=32768", f"++{limit}=8192"],
+        )
+        assert [token for token in tokens if token.startswith(f"++{limit}=")] == [
+            f"++{limit}=32768",
+            f"++{limit}=8192",
+        ]
+
     def test_build_run_merges_caller_overlays_after_component_defaults(self, tmp_path):
         """A later config_paths entry wins and replaces lists, so a run overlay must come after the
         component and provider defaults or `setup.commands: []` in opensandbox.yaml would erase it."""
@@ -3414,6 +3440,57 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     run = E2ERolloutCollectionConfig.model_validate(config)
     assert run.environment_routing_mode == "taskset"
     assert taskset in run.environment_server_routes
+
+
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
+@pytest.mark.parametrize(
+    ("raw_overrides", "expected"),
+    [
+        # The flag beats a config file that sets the generated agent's own limit.
+        ([], 32768),
+        # An explicit override of that limit is more specific than the flag, so it follows it.
+        (["++harbor_ds_agent.responses_api_agents.opencode_agent.max_output_tokens=8192"], 8192),
+        # A raw request limit given after the flag replaces it, as any later override of a key does.
+        (["++responses_create_params.max_output_tokens=8192"], 8192),
+    ],
+)
+def test_max_output_tokens_precedence_in_the_loaded_run_config(tmp_path, monkeypatch, raw_overrides, expected):
+    import sys
+
+    import nemo_gym.config.global_config as global_config
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.cli.main import _merge_config_paths
+    from nemo_gym.config.global_config import get_global_config_dict
+
+    write_task(tmp_path / "ds" / "a")
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        yaml.safe_dump(
+            {"harbor_ds_agent": {"responses_api_agents": {"opencode_agent": {"max_output_tokens": 131072}}}}
+        )
+    )
+    prepared = prepare_target(str(tmp_path / "ds"), output_root=tmp_path / "out")
+    # The command line puts the translated flags, here the overlay and the limit, before the raw overrides.
+    _, tokens = build_run(
+        prepared,
+        resolve_agent("opencode_agent"),
+        sandbox="opensandbox",
+        overrides=[
+            f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'}]",
+            f"+config_paths=[{overlay}]",
+            "+responses_create_params.max_output_tokens=32768",
+            *raw_overrides,
+            "+policy_model_name=test-model",
+            "+policy_base_url=http://127.0.0.1:1/v1",
+            "+policy_api_key=unused",
+        ],
+    )
+    monkeypatch.setattr(sys, "argv", ["e2e", *_merge_config_paths(tokens)])
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+    config = get_global_config_dict()
+    assert config["harbor_ds_agent"]["responses_api_agents"]["opencode_agent"]["max_output_tokens"] == expected
+    assert "responses_create_params" not in config or "max_output_tokens" not in config["responses_create_params"]
 
 
 def test_interrupted_cache_repair_preserves_pending_pins(tmp_path, registry_repo, monkeypatch):
