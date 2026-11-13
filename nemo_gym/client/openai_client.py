@@ -163,6 +163,7 @@ async def _server_queue(metrics_url: str) -> tuple[int, int] | None:
     The read goes through the shared HTTP client, so on a heavily loaded client it can itself wait for a connection
     and time out. The timeout then keeps its ordinary handling, and the missing reading is logged at debug level.
     """
+    response = None
     try:
         response = await request(
             "GET", metrics_url, _max_num_tries=1, timeout=ClientTimeout(total=_QUEUE_METRICS_TIMEOUT_S)
@@ -174,6 +175,11 @@ async def _server_queue(metrics_url: str) -> tuple[int, int] | None:
     except Exception as error:
         _LOG.debug("Server queue not read from %s: %s", metrics_url, type(error).__name__)
         return None
+    finally:
+        # An unread or partly read body would keep its connection acquired in the shared pool, so every exit
+        # (non-200, read error, timeout, cancellation) closes the response. After a full read this is a no-op.
+        if response is not None:
+            response.close()
 
 
 def _model_attempt_failure(

@@ -790,3 +790,24 @@ async def test_cancelling_a_call_cancels_its_pending_queue_reads(monkeypatch):
             await call
     await asyncio.sleep(0)
     assert len(cancelled) == 1
+
+
+async def test_a_failed_metrics_read_releases_its_pool_connection(monkeypatch):
+    """A non-200 /metrics reply with a body larger than the read buffer must not keep its connection."""
+    healthy = "vllm:num_requests_waiting 3\nvllm:num_requests_running 5\n"
+    replies = iter([web.Response(status=503, body=b"x" * (1 << 20)), web.Response(status=200, text=healthy)])
+
+    async def metrics(_request):
+        return next(replies)
+
+    app = web.Application()
+    app.router.add_get("/metrics", metrics)
+    async with TestServer(app) as server, aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=1, limit_per_host=1)
+    ) as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        url = str(server.make_url("/metrics"))
+        assert await openai_client._server_queue(url) is None
+        # With the only pool slot still held, this read would wait for a connection until its timeout.
+        assert await openai_client._server_queue(url) == (3, 5)
