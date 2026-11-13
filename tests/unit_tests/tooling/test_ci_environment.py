@@ -180,13 +180,24 @@ def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
 
 
 def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
-    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 4)]:
-        workflow = workflow_path.read_text()
-        assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
-        assert workflow.count("Reclaim runner disk") == expected_jobs
-        sections = workflow.split("- name: Reclaim runner disk")
-        for section in sections[1:]:
-            assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 5)]:
+        jobs = yaml.safe_load(workflow_path.read_text())["jobs"]
+        checked_jobs = 0
+        for job in jobs.values():
+            steps = job.get("steps", [])
+            cleanup = [i for i, step in enumerate(steps) if step.get("run") == "./scripts/ci/reclaim_runner_disk.sh"]
+            if not cleanup:
+                continue
+            assert len(cleanup) == 1
+            checked_jobs += 1
+            dependencies = [
+                i
+                for i, step in enumerate(steps)
+                if step.get("uses", "").startswith("actions/cache@") or step.get("name", "").startswith("Install ")
+            ]
+            assert dependencies
+            assert all(cleanup[0] < i for i in dependencies)
+        assert checked_jobs == expected_jobs
 
 
 def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
@@ -1260,3 +1271,18 @@ def test_longmt_scoring_is_in_ci_aggregate(required: str, result: str, success: 
     )
     completed = subprocess.run(["bash", "-c", step["run"]], env=env, timeout=10)
     assert (completed.returncode == 0) is success
+
+
+def test_longmt_scoring_installs_native_build_tools_before_uv_run() -> None:
+    steps = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())["jobs"]["longmt-scoring"]["steps"]
+    install_index = next(
+        i for i, step in enumerate(steps) if step.get("run") == "bash scripts/ci/install_test_dependencies.sh"
+    )
+    scoring_index = next(
+        i
+        for i, step in enumerate(steps)
+        if "uv run --locked --project resources_servers/longmt_eval/scoring" in step.get("run", "")
+    )
+    assert install_index < scoring_index
+    command = steps[scoring_index]["run"]
+    assert "--managed-python --python 3.12" in command

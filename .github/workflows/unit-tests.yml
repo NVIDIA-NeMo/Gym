@@ -438,8 +438,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
+      - name: Install system test dependencies
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh
       - name: Test scoring dependencies on Python 3.12
@@ -448,6 +453,6 @@ jobs:
           LONGMT_SCORER_TESTS_REQUIRED: '1'
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run --locked --project resources_servers/longmt_eval/scoring --python 3.12 --with pytest==9.0.3 \
+          uv run --locked --project resources_servers/longmt_eval/scoring --managed-python --python 3.12 --with pytest==9.0.3 \
             python -m pytest -c /dev/null -p no:cacheprovider --confcutdir=resources_servers/longmt_eval/tests \
             resources_servers/longmt_eval/tests/test_scorer.py -v -rs

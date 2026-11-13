@@ -225,6 +225,11 @@ COMETKiwi. GPU assignment is inherited from the actor; models stay loaded across
 documents. JSON-lines requests cross the process boundary, not Python objects
 or Ray tasks. No Python 3.12 process joins Gym's Ray cluster.
 
+Fresh installations require Git and a C/C++ compiler toolchain because Vecalign
+and other scoring dependencies build native extensions. On Debian/Ubuntu, install
+`build-essential` before provisioning. The dedicated scoring CI job uses the
+repository's shared system-dependency installer to provide these tools.
+
 During server startup, `setup_scoring.py` installs `scoring/uv.lock` using
 `uv sync --locked --managed-python --python 3.12` into a lock-specific directory
 under Gym's `cache_dir/longmt-scoring`. `UV_PYTHON_INSTALL_DIR` points to that
