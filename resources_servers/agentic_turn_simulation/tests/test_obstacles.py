@@ -653,7 +653,7 @@ class TestVerify:
             _out("call_0", BASH_OK),
             _msg("Done."),
         ]
-        with patch("resources_servers.agentic_turn_simulation.app.select_harness", return_value=harness):
+        with patch("resources_servers.agentic_turn_simulation.turns.select_harness", return_value=harness):
             await server.verify(req(), _verify_body(turn, _metadata("transient")))
         (seen, _), _ = shell_failures.call_args
         assert [x.get("output") for x in seen if x["type"] == "function_call_output"] == [BASH_OK]
