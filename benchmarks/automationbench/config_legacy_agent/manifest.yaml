@@ -3,7 +3,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
-domain: other
+domain: agent
 description: AutomationBench enterprise workflows scored by guardrail-gated objective
   completion.
 modality: text

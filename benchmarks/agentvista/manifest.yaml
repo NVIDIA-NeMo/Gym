@@ -5,7 +5,7 @@ version: 5.0.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: agent
 description: AgentVista visual search and Python tasks, using the pinned original tools and answer judge with separate original-loop and OpenCode evaluation protocols.
 modality: multimodal
 licensing: CC-BY-4.0
