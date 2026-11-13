@@ -837,8 +837,8 @@ def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest, co
 
     The name is the environment ID and stays the same when the folder moves, so it need not match the folder path.
     No other manifest in the tree may declare it. A name that differs from its folder path also may not be the path
-    of another config, because ``--benchmark`` and ``--environment`` read a name as a path before they look for a
-    manifest that declares it.
+    of another config: the manifest's name would hide that config from the catalog and from ``--benchmark`` and
+    ``--environment``.
     """
     catalog_directory = _catalog_directory(manifest_path)
     if catalog_directory is None:
@@ -858,8 +858,8 @@ def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest, co
     for path_config in path_configs:
         if path_config.is_file() and path_config.resolve() != config_path:
             raise EnvironmentValidationError(
-                f"Manifest name '{manifest.name}' is the path of another config, {path_config}, which "
-                "--benchmark and --environment would select instead. Choose another name."
+                f"Manifest name '{manifest.name}' is the path of another config, {path_config}, which this name "
+                "would hide from the catalog and from --benchmark and --environment. Choose another name."
             )
 
 
@@ -908,7 +908,9 @@ def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifes
     target_path = find_named_manifest(target_name, subdir=catalog_directory.name, roots=roots)
     if target_path is None:
         raise EnvironmentValidationError(
-            f"{field} '{target_name}' has no manifest under {catalog_directory.name}/ in any search root."
+            f"{field} '{target_name}' has no manifest declaring that name under {catalog_directory.name}/ in any "
+            "search root. A manifest that fails to load is skipped, so if the target exists, run "
+            "`gym env validate --manifest <its path>` to see its error."
         )
     target = load_manifest(target_path)
     if target.kind != manifest.kind:

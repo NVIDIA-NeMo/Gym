@@ -450,7 +450,7 @@ For named configs, put the manifest in the workload's catalog directory and set 
 A manifest's `name` is its ID. `gym list environments`, `setup_of`, and `protocol_of` refer to a manifest by its name. The scaffold sets the name to the folder path under `benchmarks/` or `environments/`, such as `aime24` or `deepsearchqa/configs/deepsearchqa_codex`. The name does not have to match the folder, so moving the folder does not change the ID.
 
 - Two manifests in the same `benchmarks/` or `environments/` tree cannot declare the same name. A manifest in an earlier search root (`--search-dir`) shadows one of the same name in a later root.
-- `--benchmark` and `--environment` read a name as a folder path first. When no config sits at that path, they use the manifest that declares the name. For that reason, a manifest whose name differs from its folder cannot take a name that is already another config's path.
+- `--benchmark` and `--environment` select what the catalog lists under a name: in the first search root that has it, the manifest that declares the name, or else a config at that folder path that no other manifest claims. A manifest whose name differs from its folder cannot take a name that is already another config's path, because it would hide that config.
 
 ### Setups and Protocols
 
