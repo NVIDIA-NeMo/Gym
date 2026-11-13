@@ -75,7 +75,7 @@ guard and its domain exclusion list, a 400-call turn cap, no subagents, and the 
 environment variables); compaction at 192,000 tokens of a 262,144-token window, with compaction summaries left out of
 the graded answer; no output cap; a 21,600-second run budget; and the same sandbox and grading. A run that reaches the
 turn cap and then answers, or that the context window ends, keeps its judged reward and is masked on both; a run that
-the turn-budget plugin aborts is not (see [Failure accounting](#failure-accounting)).
+the turn-budget plugin aborts is graded and masked only on the relay (see [Failure accounting](#failure-accounting)).
 
 The two presets' scores are separate measurements until a paired comparison of them, on the same questions with the
 same model and judge in the same time window, shows they agree. The session preset is for evaluation only, as
@@ -143,7 +143,7 @@ The session preset's limits, from admission to cleanup:
 | Run | `timeout: 21600`, from when the session's one activation holds a concurrency slot | `opencode_agent` | OpenCode is stopped; the `incomplete` response is graded on what the run produced, not masked |
 | Agent close | `session_close_timeout_seconds: 300` for each phase of the close, and `cleanup_timeout_seconds` for the whole close | `opencode_agent`; `single_agent_turn_legacy` for the whole close | The close fails, and the episode with it, before `/verify`: a non-terminal failure row |
 | Episode | `default_episode_timeout_seconds: 25200`, from the seed through `/verify` | `single_agent_turn_legacy` | A non-terminal failure row ("Episode timed out"); the cleanup then closes both sessions |
-| Judge | `judge_timeout_seconds: 300` for the first attempt and `judge_retry_timeout_seconds: 120` for each later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: masked, `judge_unparseable`. No reply at all: a `judge_failed` failures-sidecar row |
+| Judge | `judge_timeout_seconds: 300` for each request of the first attempt and `judge_retry_timeout_seconds: 120` for each request of a later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: masked, `judge_unparseable`. No reply at all: a `judge_failed` failures-sidecar row |
 | Cleanup | `cleanup_timeout_seconds: 600` for each step after the episode: the agent's close if it is still open, then the resources server's | `single_agent_turn_legacy` | Logged ("Episode cleanup timed out") and recorded in the row's failure report as `session_release_failed`; the row keeps its result, and a sandbox still running is stopped when the server shuts down or reclaimed after `ttl_s` |
 | Sandbox lifetime | `sandbox_config.ttl_s: 27000` | The sandbox provider | The provider reclaims the sandbox |
 
