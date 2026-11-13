@@ -27,8 +27,9 @@ Shape of the environment, and how it differs from resources_servers/swebench:
 Two kinds of seed reach it. An Environment Server's episode seed opens a session keyed by its
 resources_session_id and lends the sandbox to a session harness as sandbox_access (only with
 sandbox_workdir set); with plugin_log_path set, that episode's verify reads how the run ended
-from the plugin log in the sandbox. An agent's own /run seeds with the dataset row and its
-session cookie and gets the sandbox back as sandbox_handle: that is how the unmodified
+from the plugin log in the sandbox, and with episode_export_copy_dir set it copies the harness's
+session exports out of the sandbox to this host. An agent's own /run seeds with the dataset row
+and its session cookie and gets the sandbox back as sandbox_handle: that is how the unmodified
 responses_api_agents/opencode_sandboxed_agent runs the benchmark, through a legacy_agent relay.
 Either way the agent is told only the question, works inside the sandbox, and the reward comes
 from the judge rather than from a test harness.
@@ -41,12 +42,13 @@ import json
 import logging
 import re
 import shlex
+import shutil
 import sys
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Annotated, Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 import aiohttp
 import anyio
@@ -155,6 +157,11 @@ _PLUGIN_LOG_ROW_CHARS = 1 << 20
 # opencode_agent keeps its runtime and sessions in a sandbox under paths that start with this, and refuses a workdir
 # there.
 _OPENCODE_STORAGE_PREFIX = "/tmp/nemo-gym-opencode"
+# The longest an episode's export copy may keep its sandbox running at verify, from the listing to the last download.
+_EXPORT_COPY_TIMEOUT_S = 300
+# One file of the export listing: its size in bytes and its name. Only names of ASCII letters, digits, '.', '_' and '-'
+# that do not start with '.' are listed, as opencode_agent names every file it exports.
+_EXPORT_LISTING_ENTRY = re.compile(r"([0-9]+):([A-Za-z0-9_-][A-Za-z0-9._-]*)")
 
 
 def _last_assistant_text(response: NeMoGymResponse) -> str:
@@ -230,6 +237,24 @@ def _is_sandbox_path(path: str) -> bool:
 def _in_opencode_storage(path: str) -> bool:
     """Whether a sandbox path lies where opencode_agent keeps its runtime and sessions."""
     return str(PurePosixPath(path)).startswith(_OPENCODE_STORAGE_PREFIX)
+
+
+def _host_directory_name(text: str) -> str:
+    """text as the name of one directory on this host: '_' in place of each character other than an ASCII letter, a
+    digit, '.', '_' and '-', and of each dot of a name made only of dots."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", text)
+    return name if name.strip(".") else name.replace(".", "_")
+
+
+def _remove_directory(path: Path) -> None:
+    """Remove the directory at path, with everything in it, if there is one."""
+    with suppress(FileNotFoundError):
+        shutil.rmtree(path)
+
+
+def _file_sizes(directory: Path, names: List[str]) -> Dict[str, int]:
+    """The size in bytes of each named file in directory."""
+    return {name: (directory / name).stat().st_size for name in names}
 
 
 def _episode_file(source: str) -> bytes:
@@ -311,6 +336,18 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     plugin_log_path: Optional[str] = None
     # Lines the plugin log must also hold for a run to be graded, such as the tool surface the run must have had.
     required_plugin_markers: List[str] = Field(default_factory=list)
+    # Where the harness writes its session exports in the lent sandbox: opencode_agent's export_dir. opencode_agent's
+    # rules apply: an absolute directory other than /, outside its storage, and neither sandbox_workdir, inside it nor
+    # above it. Nothing is copied from it without episode_export_copy_dir.
+    episode_export_dir: Optional[str] = None
+    # An absolute directory on this host, one per run, which a run's overlay sets. An episode's verify then copies the
+    # regular files directly in episode_export_dir to <capture key>/<task id>/attempt-<attempt>/ under it, after the
+    # plugin log read and before the sandbox stops, and reports the copy in the row as opencode_export_copy. A copy
+    # that fails or is refused is logged and reported there, and never changes the reward, mask_sample or
+    # evaluation_completed. None copies nothing.
+    episode_export_copy_dir: Optional[str] = None
+    # The most that an episode's exports may hold in all for them to be copied, in bytes: 256 MiB.
+    episode_export_max_bytes: int = Field(default=256 << 20, gt=0)
 
     @field_validator("sandbox_workdir")
     @classmethod
@@ -355,6 +392,33 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError(f"plugin_log_path must be an absolute sandbox path: {path!r}")
         return path
 
+    @field_validator("episode_export_dir")
+    @classmethod
+    def _export_dir_in_sandbox(cls, path: Optional[str]) -> Optional[str]:
+        # opencode_agent refuses these for its export_dir.
+        if path is not None and (
+            not _is_sandbox_path(path) or PurePosixPath(path) == PurePosixPath("/") or _in_opencode_storage(path)
+        ):
+            raise ValueError(
+                f"episode_export_dir must be an absolute sandbox directory other than /, outside "
+                f"{_OPENCODE_STORAGE_PREFIX}*: {path!r}"
+            )
+        return path
+
+    @field_validator("episode_export_copy_dir")
+    @classmethod
+    def _export_copy_dir_on_this_host(cls, path: Optional[str]) -> Optional[str]:
+        # Never relative to the working directory of the process.
+        if path is not None and not Path(path).is_absolute():
+            raise ValueError(f"episode_export_copy_dir must be an absolute directory on this host: {path!r}")
+        return path
+
+    @model_validator(mode="after")
+    def _export_copy_has_a_source(self) -> "SearchResourcesServerConfig":
+        if self.episode_export_copy_dir is not None and self.episode_export_dir is None:
+            raise ValueError("episode_export_copy_dir needs episode_export_dir, the sandbox directory it copies from")
+        return self
+
     @model_validator(mode="after")
     def _plugin_log_settings_agree(self) -> "SearchResourcesServerConfig":
         # The plugin writes where NEMO_GYM_PLUGIN_LOG points and verify reads plugin_log_path: were they to differ,
@@ -380,6 +444,13 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
                 raise ValueError(f"episode_sandbox_files must lie outside sandbox_workdir: {inside!r}")
             if self.plugin_log_path is not None and PurePosixPath(self.plugin_log_path).is_relative_to(workdir):
                 raise ValueError(f"plugin_log_path must lie outside sandbox_workdir: {self.plugin_log_path!r}")
+            # As opencode_agent refuses for its export_dir.
+            export_dir = None if self.episode_export_dir is None else PurePosixPath(self.episode_export_dir)
+            if export_dir is not None and (export_dir.is_relative_to(workdir) or workdir.is_relative_to(export_dir)):
+                raise ValueError(
+                    f"episode_export_dir must be neither sandbox_workdir, inside it nor above it: "
+                    f"{self.episode_export_dir!r}"
+                )
         return self
 
     # Grading. The judge is the only grader; there is no exact-match fallback, because a
@@ -490,9 +561,29 @@ class _PluginLog:
 
 
 @dataclass(frozen=True)
+class _ExportCopy:
+    """How an episode's verify copied the session exports out of its sandbox, as its row carries it
+    (opencode_export_copy)."""
+
+    # "copied"; "absent" when the sandbox has no episode_export_dir; "oversize" when the files hold more than
+    # episode_export_max_bytes, and none is copied; "failed" when the listing or a download failed or ran out of time,
+    # and nothing is kept.
+    status: Literal["copied", "absent", "oversize", "failed"]
+    # The directory on this host the files are copied to. It exists only when they were.
+    dir: str
+    # The regular files listed in episode_export_dir, by name, with their sizes in bytes, and their total. A failed copy
+    # reports none.
+    files: Dict[str, int] = field(default_factory=dict)
+    bytes: int = 0
+    # Why the files were not copied; empty when they were.
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class _VerifyEvidence:
     """What a session's verify keeps for its retries: a digest of the body it graded, the plugin log it read from the
-    sandbox before stopping it and, once grading reached a result, the grading fields it answered with.
+    sandbox and how it copied the session exports, both before stopping the sandbox, and, once grading reached a
+    result, the grading fields it answered with.
 
     A retry must send the same body, so the grading fields and that body rebuild the first reply; a retry with
     another body gets 409 rather than a grade of a different answer.
@@ -501,6 +592,8 @@ class _VerifyEvidence:
     body_digest: str
     # None when no plugin log was read (see _read_plugin_log).
     plugin_log: Optional[_PluginLog] = None
+    # None when no copy was made (see _copy_exports).
+    export_copy: Optional[_ExportCopy] = None
     grade: Optional[Dict[str, Any]] = None
 
 
@@ -1011,8 +1104,10 @@ class SearchResourcesServer(SimpleResourcesServer):
         body gets 409. A verify after the session's close is masked as lost.
 
         With plugin_log_path set, an episode session's verify first reads the plugin log from its sandbox, and the
-        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts). An episode's
-        verify for a sandbox this server no longer holds is masked as lost too (_lost_session_reason).
+        ending and plugin receipts in it stand in for what the relay agent sends (_take_plugin_receipts). With
+        episode_export_copy_dir set, it then copies the harness's session exports to this host (_copy_exports), which
+        never changes the grade. An episode's verify for a sandbox this server no longer holds is masked as lost too
+        (_lost_session_reason).
         """
         session_id = request.session[SESSION_ID_KEY]
         digest = _body_digest(body)
@@ -1022,12 +1117,19 @@ class SearchResourcesServer(SimpleResourcesServer):
                 return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost_session_verification(lost)))
             evidence = verification.retained
             if not isinstance(evidence, _VerifyEvidence):
-                # Read while the sandbox still runs: it is stopped before the judge. A read that fails retains nothing,
-                # so a retry of this verify is masked as lost rather than graded without the log.
-                evidence = _VerifyEvidence(digest, plugin_log=await self._read_plugin_log(session_id))
+                # Read and copied while the sandbox still runs: it is stopped before the judge. A read that fails
+                # retains nothing, so a retry of this verify is masked as lost rather than graded without the log. The
+                # copy never fails the verify, and a retry replays it.
+                plugin_log = await self._read_plugin_log(session_id)
+                evidence = _VerifyEvidence(
+                    digest, plugin_log=plugin_log, export_copy=await self._copy_exports(session_id)
+                )
                 verification.retain(evidence)
             elif evidence.body_digest != digest:
                 raise ResourcesSessionConflictError("This session was already verified with another body")
+            if evidence.export_copy is not None:
+                # On the body, where the plugin receipts go, so every reply built from it carries the copy.
+                body.opencode_export_copy = asdict(evidence.export_copy)
             if evidence.plugin_log is not None:
                 self._take_plugin_receipts(body, evidence.plugin_log)
             if evidence.grade is not None:
@@ -1167,6 +1269,115 @@ class SearchResourcesServer(SimpleResourcesServer):
         body.opencode_terminal_reason = terminal_reason_from_plugin_log(text)
         body.opencode_plugins_loaded = True
         body.opencode_plugin_log = _plugin_log_on_the_row(text)
+
+    async def _copy_exports(self, session_id: str) -> Optional[_ExportCopy]:
+        """Copy the session exports out of an episode's sandbox to this host, and say how that went; None when there is
+        nothing to copy to: without episode_export_copy_dir, and for an agent's own /run, which has no lent sandbox.
+
+        The files go to <episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/, emptied first, so a
+        retried episode never finds an earlier attempt's files there. The copy is evidence about the run, not part of
+        its grade: one that fails, runs past _EXPORT_COPY_TIMEOUT_S or is refused is logged and reported, never raised,
+        and a copy that did not finish keeps no file.
+        """
+        sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
+        identity = self.session_identity(session_id)
+        if self.config.episode_export_copy_dir is None or sandbox is None or identity is None:
+            return None
+        episode, task = identity
+        target = Path(
+            self.config.episode_export_copy_dir,
+            episode.capture_key,
+            _host_directory_name(task.task_id),
+            f"attempt-{episode.attempt}",
+        )
+        deadline = asyncio.timeout(_EXPORT_COPY_TIMEOUT_S)
+        try:
+            async with deadline:
+                copy = await self._copy_exports_to(sandbox, target)
+        # Deliberate boundary: a failed copy is reported in the row and leaves the grade as it is.
+        except Exception as error:
+            await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
+            reason = (
+                f"The copy ran past {_EXPORT_COPY_TIMEOUT_S} s"
+                if deadline.expired()
+                else bounded_text(f"{type(error).__name__}: {error}", 2000)
+            )
+            copy = _ExportCopy("failed", str(target), detail=reason)
+        if copy.status != "copied":
+            LOGGER.warning(
+                "The session exports of %s were not copied from %s to %s (%s): %s",
+                session_id,
+                self.config.episode_export_dir,
+                target,
+                copy.status,
+                copy.detail,
+            )
+        return copy
+
+    async def _copy_exports_to(self, sandbox: AsyncSandbox, target: Path) -> _ExportCopy:
+        """Copy the regular files directly in episode_export_dir to target, unless they hold more than
+        episode_export_max_bytes. Raises when the listing or a download fails, or a copy's size differs from the
+        listed one."""
+        # The host's file operations run off the event loop: the directory may be on a shared filesystem.
+        await asyncio.to_thread(_remove_directory, target)
+        files = await self._list_exports(sandbox)
+        if files is None:
+            return _ExportCopy(
+                "absent", str(target), detail=f"The lent sandbox has no {self.config.episode_export_dir}"
+            )
+        total = sum(files.values())
+        if total > self.config.episode_export_max_bytes:
+            return _ExportCopy(
+                "oversize",
+                str(target),
+                files,
+                total,
+                f"{total} bytes exceed episode_export_max_bytes ({self.config.episode_export_max_bytes})",
+            )
+        await asyncio.to_thread(target.mkdir, parents=True, exist_ok=True)
+        source = PurePosixPath(self.config.episode_export_dir)
+        for name in files:
+            await sandbox.download(str(source / name), target / name)
+        copied = await asyncio.to_thread(_file_sizes, target, list(files))
+        if copied != files:
+            short = {name: f"{copied[name]} of {size}" for name, size in files.items() if copied[name] != size}
+            raise RuntimeError(f"Copies whose size differs from the listing, in bytes: {short}")
+        return _ExportCopy("copied", str(target), files, total)
+
+    async def _list_exports(self, sandbox: AsyncSandbox) -> Optional[Dict[str, int]]:
+        """The regular files directly in episode_export_dir, by name, with their sizes in bytes; None when the directory
+        does not exist. Raises when the listing fails.
+
+        One command, from / as the plugin log read. It lists no link, no directory and no name outside the plain names
+        of _EXPORT_LISTING_ENTRY, read in the C locale, so a file the model's tools left there with another name is not
+        copied and cannot break the listing. Its output ends with a marker, so a listing cut short is refused, and its
+        whitespace is dropped before it is parsed, as a provider may split a command's output with newlines (see
+        _read_plugin_log).
+        """
+        directory = shlex.quote(self.config.episode_export_dir)
+        result = await sandbox.exec(
+            f"export LC_ALL=C; test -e {directory} || {{ printf absent; exit 0; }}; cd {directory} || exit 1; "
+            "for name in *; do case $name in *[!A-Za-z0-9._-]*) continue ;; esac; "
+            'if test -f "$name" && ! test -L "$name"; then size=$(wc -c < "$name") || exit 1; '
+            'printf "%s:%s/" $size "$name"; fi; done; printf end',
+            cwd="/",
+            timeout_s=60,
+        )
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(
+                f"Cannot list {self.config.episode_export_dir} in the lent sandbox (exit {result.return_code}, error "
+                f"{result.error_type}): {(result.stderr or '').strip()[-500:]}"
+            )
+        output = "".join((result.stdout or "").split())
+        if output == "absent":
+            return None
+        entries = output.removesuffix("end").split("/")
+        listed = [_EXPORT_LISTING_ENTRY.fullmatch(entry) for entry in entries[:-1]]
+        if not output.endswith("end") or entries[-1] or not all(listed):
+            raise RuntimeError(
+                f"The listing of {self.config.episode_export_dir} was cut short or malformed: {output[-200:]!r}"
+            )
+        return {match[2]: int(match[1]) for match in listed}
 
     async def _grade(self, body: SearchVerifyRequest) -> Dict[str, Any]:
         """The grading fields of the verify response: reward, mask and failure fields, and the judge's diagnostics."""

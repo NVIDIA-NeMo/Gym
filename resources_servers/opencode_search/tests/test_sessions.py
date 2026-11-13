@@ -1093,6 +1093,258 @@ def test_the_staged_plugins_report_to_verify_through_the_plugin_log(workdir, tmp
 
 
 # ---------------------------------------------------------------------------
+# Export copy: the harness's session exports, copied to this host at verify
+# ---------------------------------------------------------------------------
+
+# What opencode_agent writes to its export_dir: the session inventory, each session's export and the run's event log.
+EXPORTS = {
+    "sessions.json": b'[{"id": "ses_root", "parent_id": null}]',
+    "ses_root.json": b'{"info": {"id": "ses_root"}, "messages": []}',
+    "ses_root.events.jsonl": b'{"type": "step_start"}\n',
+}
+EXPORT_BYTES = sum(len(data) for data in EXPORTS.values())
+
+
+def _export_copy_server(
+    workdir: Path, tmp_path: Path, **settings: Any
+) -> tuple[SearchResourcesServer, TestClient, Path]:
+    """A server that copies the exports in tmp_path/exports to tmp_path/copies, a client whose episode session it
+    seeded, with EXPORTS in that directory, and where the copy of that episode's exports goes."""
+    exports = tmp_path / "exports"
+    server = _server(
+        workdir, episode_export_dir=str(exports), episode_export_copy_dir=str(tmp_path / "copies"), **settings
+    )
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    exports.mkdir()
+    for name, data in EXPORTS.items():
+        (exports / name).write_bytes(data)
+    return server, client, tmp_path / "copies" / "rollout-session" / "t-1" / "attempt-0"
+
+
+def _record_downloads(monkeypatch: pytest.MonkeyPatch, stopped: list[AsyncSandbox]) -> list[int]:
+    """Record every download from a sandbox from now on, as the number of sandboxes stopped by then."""
+    downloads: list[int] = []
+    real_download = AsyncSandbox.download
+
+    async def download(self: AsyncSandbox, remote_path: str, local_path: Path | str) -> None:
+        downloads.append(len(stopped))
+        await real_download(self, remote_path, local_path)
+
+    monkeypatch.setattr(AsyncSandbox, "download", download)
+    return downloads
+
+
+def test_an_episode_verify_copies_the_session_exports_to_this_host_before_its_sandbox_stops(
+    workdir, tmp_path, started, stopped, monkeypatch
+) -> None:
+    log = tmp_path / "plugins.log"
+    log.write_text(SENTINEL)
+    # Exports that hold exactly the limit are copied.
+    server, client, copied_to = _export_copy_server(
+        workdir, tmp_path, plugin_log_path=str(log), episode_export_max_bytes=EXPORT_BYTES
+    )
+    exports = tmp_path / "exports"
+    # Not copied: a partial file opencode_agent renames into place, a link, a directory and a name that is not plain.
+    (exports / ".ses_root.json.7.tmp").write_bytes(b"{")
+    (exports / "ses_link.json").symlink_to(exports / "ses_root.json")
+    (exports / "ses_child").mkdir()
+    (exports / "ses root.json").write_bytes(b"{}")
+    # An earlier copy of the same episode, as a retried episode would find it.
+    copied_to.mkdir(parents=True)
+    (copied_to / "ses_earlier.json").write_bytes(b"{}")
+    execs = _record_execs(monkeypatch, stopped)
+    downloads = _record_downloads(monkeypatch, stopped)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0, False, None, True)
+    assert verified.json()["opencode_export_copy"] == {
+        "status": "copied",
+        "dir": str(copied_to),
+        "files": {name: len(data) for name, data in EXPORTS.items()},
+        "bytes": EXPORT_BYTES,
+        "detail": "",
+    }
+    # Byte for byte, and nothing else: the earlier copy is gone.
+    assert {path.name: path.read_bytes() for path in copied_to.iterdir()} == EXPORTS
+    # The plugin log read, then the listing and every download, while the sandbox ran; then it stopped.
+    assert [("base64" in command, stops) for command, stops in execs] == [(True, 0), (False, 0)]
+    assert downloads == [0] * len(EXPORTS) and stopped == [started[0][0]]
+    # An identical retry replays the reply, the copy's report included, without copying again.
+    replayed = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+    assert replayed.json() == verified.json()
+    assert len(execs) == 2 and len(downloads) == len(EXPORTS)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # One byte over the limit.
+        "oversize",
+        # The harness wrote no exports.
+        "absent",
+    ],
+)
+def test_exports_over_the_size_limit_or_absent_are_not_copied_and_change_no_grade(
+    workdir, tmp_path, started, stopped, monkeypatch, case
+) -> None:
+    server, client, copied_to = _export_copy_server(workdir, tmp_path, episode_export_max_bytes=EXPORT_BYTES - 1)
+    if case == "absent":
+        shutil.rmtree(tmp_path / "exports")
+    copied_to.mkdir(parents=True)
+    (copied_to / "ses_earlier.json").write_bytes(b"{}")
+    downloads = _record_downloads(monkeypatch, stopped)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0, False, None, True)
+    copy = verified.json()["opencode_export_copy"]
+    listed = {name: len(data) for name, data in EXPORTS.items()} if case == "oversize" else {}
+    expected = {"status": case, "dir": str(copied_to), "files": listed, "bytes": sum(listed.values())}
+    assert {key: copy[key] for key in expected} == expected
+    detail = f"exceed episode_export_max_bytes ({EXPORT_BYTES - 1})" if case == "oversize" else "has no"
+    assert detail in copy["detail"]
+    # Nothing was downloaded, and the earlier copy is gone too.
+    assert downloads == [] and not copied_to.exists()
+    assert stopped == [started[0][0]]
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        ("listing_exit_code", "exit 1"),
+        ("listing_error_type", "error timeout"),
+        # As a provider that caps a command's output could return it, without the listing's end.
+        ("listing_cut_short", "cut short"),
+        ("download_raises", "RuntimeError: the provider lost the file"),
+        ("download_cut_short", "size differs from the listing"),
+        ("download_hangs", "ran past"),
+    ],
+)
+def test_an_export_copy_that_fails_keeps_no_file_and_changes_no_grade(
+    workdir, tmp_path, started, stopped, monkeypatch, caplog, failure, detail
+) -> None:
+    server, client, copied_to = _export_copy_server(workdir, tmp_path)
+    copied_to.mkdir(parents=True)
+    (copied_to / "ses_earlier.json").write_bytes(b"{}")
+    listings = {
+        "listing_exit_code": SandboxExecResult(stdout="", stderr="cd: permission denied", return_code=1),
+        "listing_error_type": SandboxExecResult(
+            stdout=None, stderr="timed out", return_code=125, error_type="timeout"
+        ),
+        "listing_cut_short": SandboxExecResult(stdout="13:sessions.json/", stderr=None, return_code=0),
+    }
+    if failure in listings:
+        monkeypatch.setattr(AsyncSandbox, "exec", AsyncMock(return_value=listings[failure]))
+    else:
+        monkeypatch.setattr("resources_servers.opencode_search.app._EXPORT_COPY_TIMEOUT_S", 0.5)
+        real_download = AsyncSandbox.download
+        downloads: list[str] = []
+
+        async def download(self: AsyncSandbox, remote_path: str, local_path: Path | str) -> None:
+            downloads.append(remote_path)
+            if failure == "download_hangs":
+                # Far past the copy's time limit, which the test lowers.
+                await asyncio.sleep(30)
+            elif failure == "download_cut_short":
+                Path(local_path).write_bytes(b"{")
+            # The first file is copied, so a partial copy is left behind when the second fails.
+            elif len(downloads) > 1:
+                raise RuntimeError("the provider lost the file")
+            else:
+                await real_download(self, remote_path, local_path)
+
+        monkeypatch.setattr(AsyncSandbox, "download", download)
+    _mock_judge(server, CORRECT)
+
+    with caplog.at_level("WARNING"):
+        verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0, False, None, True)
+    copy = verified.json()["opencode_export_copy"]
+    assert (copy["status"], copy["dir"], copy["files"], copy["bytes"]) == ("failed", str(copied_to), {}, 0)
+    assert detail in copy["detail"]
+    assert "were not copied" in caplog.text
+    # Nothing is kept, neither a part of this copy nor the earlier one, and the sandbox stopped all the same.
+    assert not copied_to.exists()
+    assert stopped == [started[0][0]]
+
+
+@pytest.mark.parametrize(
+    ("episode", "task_id", "directory"),
+    [
+        (EpisodeId(rollout_id="rollout-session"), "t-1", "rollout-session/t-1/attempt-0"),
+        # Another attempt of the rollout: its capture key and its attempt directory are its own.
+        (EpisodeId(rollout_id="rollout-session", attempt=2), "t-1", "rollout-session-a2/t-1/attempt-2"),
+        # Task IDs that are not plain directory names.
+        (EpisodeId(rollout_id="rollout-session"), "../set/7", "rollout-session/.._set_7/attempt-0"),
+        (EpisodeId(rollout_id="rollout-session"), "..", "rollout-session/__/attempt-0"),
+    ],
+    ids=["first_attempt", "later_attempt", "task_id_with_slashes", "task_id_of_dots"],
+)
+def test_each_attempt_of_an_episode_copies_its_exports_to_a_directory_of_its_own(
+    workdir, tmp_path, episode, task_id, directory
+) -> None:
+    exports, copies = tmp_path / "exports", tmp_path / "copies"
+    exports.mkdir()
+    (exports / "sessions.json").write_bytes(EXPORTS["sessions.json"])
+    server = _server(workdir, episode_export_dir=str(exports), episode_export_copy_dir=str(copies))
+    client = TestClient(server.setup_webserver())
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="session",
+        episode_id=episode,
+        task_id=TaskId(taskset="browsecomp_opencode:benchmark", task_id=task_id),
+        task_data={"question": "Which city?", "ground_truth": "Paris"},
+    )
+    assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["opencode_export_copy"]["dir"] == str(copies / directory)
+    assert (copies / directory / "sessions.json").read_bytes() == EXPORTS["sessions.json"]
+
+
+@pytest.mark.parametrize(
+    ("seed", "copy_settings"),
+    [
+        ("episode", ()),
+        # Where the harness writes its exports, but nowhere on this host to copy them to.
+        ("episode", ("episode_export_dir",)),
+        # An agent's own /run borrows no sandbox from this server, so the relay arm copies nothing.
+        ("agent_run", ("episode_export_dir", "episode_export_copy_dir")),
+    ],
+    ids=["default", "without_a_copy_dir", "agent_run"],
+)
+def test_without_an_export_copy_dir_or_a_lent_sandbox_nothing_is_copied(
+    workdir, tmp_path, stopped, monkeypatch, seed, copy_settings
+) -> None:
+    paths = {"episode_export_dir": str(tmp_path / "exports"), "episode_export_copy_dir": str(tmp_path / "copies")}
+    server = _server(workdir, **{name: paths[name] for name in copy_settings})
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
+    (tmp_path / "exports").mkdir()
+    (tmp_path / "exports" / "sessions.json").write_bytes(EXPORTS["sessions.json"])
+    execs = _record_execs(monkeypatch, stopped)
+    downloads = _record_downloads(monkeypatch, stopped)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body())
+
+    assert verified.status_code == 200, verified.text
+    assert _graded(verified) == (1.0, False, None, True)
+    assert execs == [] and downloads == [] and "opencode_export_copy" not in verified.json()
+    assert not (tmp_path / "copies").exists()
+
+
+# ---------------------------------------------------------------------------
 # Agent-run seed, kept for an agent's own /run
 # ---------------------------------------------------------------------------
 
@@ -1212,6 +1464,21 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
         ({"plugin_log_path": "plugins.log"}, "plugin_log_path must be an absolute sandbox path"),
         # The model's tools could change what lies in its working directory.
         ({"plugin_log_path": "/workspace/plugins.log"}, "plugin_log_path must lie outside sandbox_workdir"),
+        # opencode_agent's rules for its export_dir.
+        ({"episode_export_dir": "exports"}, "episode_export_dir must be an absolute sandbox directory"),
+        ({"episode_export_dir": "/"}, "episode_export_dir must be an absolute sandbox directory"),
+        (
+            {"episode_export_dir": "/tmp/nemo-gym-opencode-sessions/exports"},
+            "episode_export_dir must be an absolute sandbox directory",
+        ),
+        ({"episode_export_dir": "/workspace"}, "must be neither sandbox_workdir, inside it nor above it"),
+        ({"episode_export_dir": "/workspace/exports"}, "must be neither sandbox_workdir, inside it nor above it"),
+        (
+            {"episode_export_dir": "/tmp/exports", "episode_export_copy_dir": "copies"},
+            "episode_export_copy_dir must be an absolute directory on this host",
+        ),
+        ({"episode_export_copy_dir": "/copies"}, "episode_export_copy_dir needs episode_export_dir"),
+        ({"episode_export_max_bytes": 0}, "greater than 0"),
         ({"episode_sandbox_files": {"nemo-gym-plugin.js": PLUGINS[0]}}, "must map absolute sandbox paths"),
         ({"episode_sandbox_files": {"/workspace/p.js": PLUGINS[0]}}, "must lie outside sandbox_workdir"),
         (
@@ -1232,6 +1499,14 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
         "markers_without_plugin_log",
         "relative_plugin_log",
         "plugin_log_inside_workdir",
+        "relative_export_dir",
+        "root_export_dir",
+        "export_dir_in_opencode_storage",
+        "export_dir_is_workdir",
+        "export_dir_inside_workdir",
+        "relative_export_copy_dir",
+        "export_copy_dir_without_export_dir",
+        "no_export_size",
         "relative_episode_file",
         "episode_file_inside_workdir",
         "episode_file_in_opencode_storage",
@@ -1246,6 +1521,12 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
 def test_episode_settings_that_cannot_work_are_refused_at_startup(settings, error) -> None:
     with pytest.raises(ValueError, match=error):
         _server("/workspace", **settings)
+
+
+def test_an_export_dir_above_the_workdir_is_refused_at_startup() -> None:
+    """opencode_agent refuses an export_dir that holds its workdir, as it refuses one inside it."""
+    with pytest.raises(ValueError, match="must be neither sandbox_workdir, inside it nor above it"):
+        _server("/workspace/task", episode_export_dir="/workspace")
 
 
 @pytest.mark.parametrize("named", ["/tmp/plugins.log", ""])
