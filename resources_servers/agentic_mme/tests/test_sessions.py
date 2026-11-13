@@ -3,6 +3,7 @@
 """The lent sandbox: typed seed and close, run on the local sandbox provider in a temporary directory."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -239,6 +240,56 @@ def test_seed_refuses_bad_image_files_without_a_retry(root, image_root, stopped,
     assert refused.status_code == 422
     assert message in refused.json()["detail"]
     assert stopped == []
+
+
+def test_seed_refuses_an_unreadable_image_without_a_retry(root, image_root, stopped, monkeypatch) -> None:
+    """A task image that exists but cannot be read fails the same way on every retry, so the seed gets 422."""
+    read_bytes = Path.read_bytes
+
+    def unreadable(path: Path) -> bytes:
+        if path.name == "0.png":
+            raise PermissionError(13, "Permission denied", str(path))
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    server = _server(image_root)
+    client = TestClient(server.setup_webserver())
+
+    refused = client.post("/seed_session", json=_seed().model_dump(mode="json"))
+
+    assert refused.status_code == 422
+    assert "'task-1/0.png' cannot be read" in refused.json()["detail"]
+    assert server._sessions == {}
+    assert server._lent_sandboxes.get("session") is None
+    assert stopped == []
+
+
+async def test_retire_releases_the_lent_sandbox_without_close_s_fence(root, image_root, stopped, monkeypatch) -> None:
+    """A checkpoint retire frees what close frees. A failed stop keeps both for a retry, and no fence is left."""
+    server = _server(image_root)
+    await server.seed_session(SimpleNamespace(session={}), _seed())
+    assert server._lent_sandboxes.get("session") is not None
+    recorded_stop = AsyncSandbox.stop
+    failures = [RuntimeError("stop failed")]
+
+    async def stop_failing_once(self: AsyncSandbox) -> None:
+        if failures:
+            raise failures.pop()
+        await recorded_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop_failing_once)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await server.retire_session_state("session")
+    assert "session" in server._sessions
+    assert server._lent_sandboxes.get("session") is not None
+
+    await server.retire_session_state("session")
+    assert server._sessions == {}
+    assert server._lent_sandboxes.get("session") is None
+    assert len(stopped) == 1
+    # The checkpoint participant refuses the retired attempt; a fence would also refuse a later restore of the ID.
+    assert server._fences.get("session") is None
 
 
 # A malformed typed seed: it names a resources session but has no episode, task or task_data.

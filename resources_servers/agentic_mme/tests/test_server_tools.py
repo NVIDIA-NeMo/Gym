@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """The image tools on the resources server: the typed seed loads the task images, and each tool returns its image."""
 
+import asyncio
 import base64
+import threading
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -16,6 +20,7 @@ from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    ResourcesSessionLostError,
     check_resources_session_contract,
 )
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer
@@ -143,6 +148,106 @@ def test_a_tool_call_needs_a_seeded_workspace_and_answers_404_after_close(image_
     assert late.status_code == 404
     assert late.json()["detail"]["failure_kind"] == "session_lost"
     assert server._sessions == {}
+
+
+class _GatedApply:
+    """Hold each image operation's worker thread until ``release`` is set, and count overlapping workers."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+        self.running = 0
+        self.most_running = 0
+        self._count = threading.Lock()
+        self._apply = ImageWorkspace.apply
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replace ImageWorkspace.apply with this gate, as a function so that it binds to each workspace."""
+
+        def apply(workspace: ImageWorkspace, name: str, args: dict) -> dict:
+            return self(workspace, name, args)
+
+        monkeypatch.setattr(ImageWorkspace, "apply", apply)
+
+    def __call__(self, workspace: ImageWorkspace, name: str, args: dict) -> dict:
+        with self._count:
+            self.calls += 1
+            self.running += 1
+            self.most_running = max(self.most_running, self.running)
+        self.started.set()
+        try:
+            assert self.release.wait(5)
+            return self._apply(workspace, name, args)
+        finally:
+            with self._count:
+                self.running -= 1
+
+
+def _invert(server: AgenticMMEServer):
+    """The /invert handler, called in the test's event loop, and a request seeded for "session"."""
+    route = next(route for route in server.setup_webserver().routes if getattr(route, "path", None) == "/invert")
+    return route.endpoint, IMAGE_TOOLS["invert"][0](image_index=0)
+
+
+async def test_close_waits_for_a_running_tool_call_and_a_call_queued_behind_it_sees_the_fence(
+    image_root, monkeypatch
+) -> None:
+    server = _server(image_root)
+    invert, args = _invert(server)
+    request = SimpleNamespace(session={})
+    await server.seed_session(request, _seed())
+    gate = _GatedApply()
+    gate.install(monkeypatch)
+
+    running = asyncio.create_task(invert(request, args))
+    assert await asyncio.to_thread(gate.started.wait, 5)
+    close = asyncio.create_task(
+        server.close_resources_session(
+            ResourcesCloseSessionRequest(resources_session_id="session", episode_id=_seed().episode_id)
+        )
+    )
+    queued = asyncio.create_task(invert(request, args))
+    await asyncio.sleep(0.1)
+    assert not close.done()
+
+    gate.release.set()
+    assert (await running)["new_image_index"] == 2
+    await close
+    with pytest.raises(ResourcesSessionLostError):
+        await queued
+    # The queued call never reached the workspace that close dropped.
+    assert gate.calls == 1
+
+
+async def test_a_disconnected_tool_call_keeps_the_session_until_its_worker_finishes(image_root, monkeypatch) -> None:
+    """A disconnect cancels the handler (an anyio cancel scope, as the disconnect middleware uses), not its thread."""
+    server = _server(image_root)
+    invert, args = _invert(server)
+    request = SimpleNamespace(session={})
+    await server.seed_session(request, _seed())
+    gate = _GatedApply()
+    gate.install(monkeypatch)
+
+    async def disconnected_call() -> None:
+        async with anyio.create_task_group() as group:
+            group.start_soon(invert, request, args)
+            assert await anyio.to_thread.run_sync(gate.started.wait, 5)
+            group.cancel_scope.cancel()
+
+    disconnected = asyncio.create_task(disconnected_call())
+    assert await asyncio.to_thread(gate.started.wait, 5)
+    await asyncio.sleep(0.05)
+    following = asyncio.create_task(invert(request, args))
+    await asyncio.sleep(0.1)
+    assert not following.done()
+    assert gate.calls == 1
+
+    gate.release.set()
+    await disconnected
+    # The next call ran after the first worker finished, on the image list that worker extended.
+    assert (await following)["new_image_index"] == 3
+    assert gate.most_running == 1
 
 
 def test_seed_refuses_an_image_it_cannot_load(image_root) -> None:

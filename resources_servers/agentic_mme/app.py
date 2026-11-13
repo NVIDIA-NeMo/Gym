@@ -17,11 +17,12 @@ import math
 import re
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, ClassVar, Literal, Optional
 
+import anyio
 import cv2
 from fastapi import FastAPI, HTTPException, Request
 from PIL import Image
@@ -261,8 +262,6 @@ class _Episode:
     episode_id: EpisodeId
     task_id: TaskId
     workspace: ImageWorkspace | None
-    # Tool calls of one episode change its workspace one at a time.
-    tool_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class AgenticMMEServer(SimpleResourcesServer):
@@ -384,6 +383,17 @@ class AgenticMMEServer(SimpleResourcesServer):
             self._fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
+    async def retire_session_state(self, session_id: str) -> None:
+        """Stop a retired attempt's sandbox and drop its workspace, as close does, but without close's fence.
+
+        The checkpoint participant refuses the retired attempt's requests itself. A failed stop raises before the
+        session is dropped, so a later retire or close can release it again.
+        """
+        async with self._locks.locked(session_id):
+            if self._lent_sandboxes is not None:
+                await self._lent_sandboxes.release(session_id)
+            self._sessions.pop(session_id, None)
+
     def _task_images(self, task_data: Mapping[str, Any]) -> list[tuple[PurePosixPath, bytes]]:
         """Read the task images that task_data.image_files names, in prompt order, with their sandbox targets."""
         try:
@@ -403,7 +413,12 @@ class AgenticMMEServer(SimpleResourcesServer):
                 raise ResourcesSeedRejectedError(f"image target {image.target!r} must stay in the working directory")
             if not source.is_file():
                 raise ResourcesSeedRejectedError(f"image file {image.source!r} is not under image_root")
-            images.append((target, source.read_bytes()))
+            try:
+                data = source.read_bytes()
+            except OSError as error:
+                # The same input fails again on any retry, so the seed is refused rather than failed.
+                raise ResourcesSeedRejectedError(f"image file {image.source!r} cannot be read: {error}") from error
+            images.append((target, data))
         return images
 
     def _workspace(self, images: list[tuple[PurePosixPath, bytes]]) -> ImageWorkspace:
@@ -422,18 +437,22 @@ class AgenticMMEServer(SimpleResourcesServer):
     def _image_tool_route(self, name: str, args_model: type[ImageArgs]):
         async def image_tool(request: Request, body: args_model) -> dict[str, Any]:
             session_id = request.session.get(SESSION_ID_KEY, "")
-            if self._fences.get(session_id) is not None:
-                # A late call must not reach a workspace that close dropped.
-                raise ResourcesSessionLostError(f"Resources session {session_id} is closed")
-            session = self._sessions.get(session_id)
-            if session is None or session.workspace is None:
-                raise HTTPException(409, "No image workspace for this session; seed it with serve_image_tools set")
-            async with session.tool_lock:
-                try:
-                    result = await asyncio.to_thread(session.workspace.apply, name, body.model_dump())
-                except (ValueError, TypeError, KeyError, OSError, cv2.error) as error:
-                    # The same model-visible error the Agentic-MME agent returns for a failed image tool.
-                    return {"ok": False, "error": str(error)}
+            # The session's lock orders tool calls with each other and with close, so a call queued behind close
+            # sees its fence instead of changing a workspace that close dropped.
+            async with self._locks.locked(session_id):
+                if self._fences.get(session_id) is not None:
+                    raise ResourcesSessionLostError(f"Resources session {session_id} is closed")
+                session = self._sessions.get(session_id)
+                if session is None or session.workspace is None:
+                    raise HTTPException(409, "No image workspace for this session; seed it with serve_image_tools set")
+                # A client that disconnects cancels this handler, but not the worker thread, which keeps changing the
+                # workspace. The shield keeps the lock held until the worker finishes, so no other call overlaps it.
+                with anyio.CancelScope(shield=True):
+                    try:
+                        result = await asyncio.to_thread(session.workspace.apply, name, body.model_dump())
+                    except (ValueError, TypeError, KeyError, OSError, cv2.error) as error:
+                        # The same model-visible error the Agentic-MME agent returns for a failed image tool.
+                        return {"ok": False, "error": str(error)}
             image_url = result.pop("image_url")
             label = f"Image {result['new_image_index']}"
             return {**result, TOOL_OUTPUT_IMAGES_KEY: [{"image_url": image_url, "label": label}]}
