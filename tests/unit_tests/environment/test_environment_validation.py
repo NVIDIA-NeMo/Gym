@@ -1065,7 +1065,15 @@ def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("setup_answer", "main_answer", "valid"),
-    [(False, False, True), ("unknown", "unknown", True), (True, False, False), ("unknown", True, False)],
+    [
+        (False, False, True),
+        ("unknown", "unknown", True),
+        # The fields stay optional, so a manifest that leaves the answer out is not compared.
+        (None, False, True),
+        (False, None, True),
+        (True, False, False),
+        ("unknown", True, False),
+    ],
 )
 def test_a_setup_gives_the_same_training_answer_as_its_target(
     setup_answer: object, main_answer: object, valid: bool, tmp_path: Path
