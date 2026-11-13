@@ -1168,6 +1168,23 @@ def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
     assert validate_environment(protocol).name == "demo/as_protocol"
 
 
+@pytest.mark.parametrize(
+    ("setup_answer", "main_answer", "valid"),
+    [(False, False, True), ("unknown", "unknown", True), (True, False, False), ("unknown", True, False)],
+)
+def test_a_setup_gives_the_same_training_answer_as_its_target(
+    setup_answer: object, main_answer: object, valid: bool, tmp_path: Path
+) -> None:
+    setup_path = _linked_manifest(tmp_path, setup_of="demo", training_allowed=setup_answer)
+    _replace_manifest(tmp_path / "benchmarks/demo/manifest.yaml", training_allowed=main_answer)
+
+    if valid:
+        assert validate_environment(setup_path).name == "demo/variant"
+    else:
+        with pytest.raises(EnvironmentValidationError, match="training_allowed must match"):
+            validate_environment(setup_path)
+
+
 @pytest.mark.parametrize("absolute", [False, True], ids=["dot-relative", "absolute"])
 def test_a_link_is_written_as_the_targets_declared_name(absolute: bool, tmp_path: Path) -> None:
     _asset(tmp_path, kind="benchmark")
