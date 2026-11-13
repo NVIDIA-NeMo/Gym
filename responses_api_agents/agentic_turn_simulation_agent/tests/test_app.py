@@ -405,7 +405,8 @@ class TestToolCalls:
         server = env.make_server()
         out = await server.verify(env.req(), _verify_request(response))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
-        assert out.failure_kind == "agentic_turn_simulation:simulator_failed" and out.reward == 0.0
+        assert out.failure_kind == "environment_episode_failed" and out.reward == 0
+        assert out.failure_detail == "agentic_turn_simulation:simulator_failed"
         server.server_client.post.assert_not_called()
 
     async def test_a_tool_error_in_a_successful_reply_is_ordinary_output_and_judged(self, sleep: AsyncMock) -> None:

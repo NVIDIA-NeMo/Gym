@@ -47,6 +47,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     AGENT_TIMEOUT,
     COLLECTION_RESUME_REFUSED,
+    EPISODE_FAILED,
     JUDGE_FAILED,
     JUDGE_FAILURE_KINDS,
     JUDGE_UNPARSEABLE,
@@ -420,6 +421,15 @@ def is_infrastructure_agent_timeout(
 _MASKED_REGRADE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE, AGENT_ROUTE_FAILED})
 
 
+# Kinds an Environment-side producer saved before it used a registered one, and the registered kind they stand for.
+# agentic_turn_simulation masked a wall-clock cap and a failed simulation under its own namespaced names, which are
+# outside the shared vocabulary, so recovery kept those rows as final. Rows saved since carry the registered kind.
+_LEGACY_ENVIRONMENT_MASK_KINDS: dict[str, str] = {
+    "agentic_turn_simulation:time_cap": EPISODE_FAILED,
+    "agentic_turn_simulation:simulator_failed": EPISODE_FAILED,
+}
+
+
 def _masked_evaluation_side_kind(
     row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
 ) -> str | None:
@@ -439,6 +449,7 @@ def _masked_evaluation_side_kind(
     ):
         return None
     kind = row.get("failure_kind")
+    kind = _LEGACY_ENVIRONMENT_MASK_KINDS.get(kind, kind) if isinstance(kind, str) else kind
     selected_class = applied_failure_class(row)
     if selected_class is None:
         events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")

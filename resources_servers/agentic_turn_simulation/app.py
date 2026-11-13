@@ -321,7 +321,21 @@ def _row_system_prompt(body: AgenticTurnSimulationRunRequest, prefix: list[dict[
     return "\n\n".join(parts + ([text] if text else []))
 
 
+# Masks that are the environment's failure, not a property of the row or the policy: the wall-clock cap counts serving
+# and simulator waits (README "Reference evaluation settings"), and a failed simulation is the simulator's. They carry
+# the registered evaluation-side kind, so recovery can plan them like any other environment failure, and the
+# server-specific name stays in failure_detail. A kind outside the shared vocabulary is final to recovery.
+_ENVIRONMENT_MASKS = frozenset({f"{FAILURE_KIND_PREFIX}:time_cap", f"{FAILURE_KIND_PREFIX}:simulator_failed"})
+
+
 def _masked(failure_kind: str, reason: str) -> dict[str, Any]:
+    if failure_kind in _ENVIRONMENT_MASKS:
+        return {
+            MASK_SAMPLE_FIELD: True,
+            "failure_kind": failure_kinds.EPISODE_FAILED,
+            "failure_detail": failure_kind,
+            "failure_reason": reason,
+        }
     return {MASK_SAMPLE_FIELD: True, "failure_kind": failure_kind, "failure_reason": reason}
 
 

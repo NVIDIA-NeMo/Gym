@@ -563,7 +563,8 @@ class TestVerifyMasks:
         server = make_server()
         out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
-        assert out.failure_kind == f"{SERVER}:time_cap" and "time_cap" in out.failure_reason
+        assert out.failure_kind == "environment_episode_failed" and out.failure_detail == f"{SERVER}:time_cap"
+        assert "time_cap" in out.failure_reason
         assert (out.reward, out.stop_reason, out.steps) == (0.0, "time_cap", 12)
         assert out.correct is None and out.judge_verdicts == []
         server.server_client.post.assert_not_called()
@@ -681,7 +682,12 @@ class TestVerifyMasks:
         server = make_server(masked_stop_reasons=old_default)
         for reason in old_default:
             out = await server.verify(req(), _verify_body(stop_reason=reason, steps="9"))
-            assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_kind == f"{SERVER}:{reason}"
+            assert getattr(out, MASK_SAMPLE_FIELD) is True
+            # The wall-clock cap is the environment's and carries the registered kind; the others are operator choices.
+            if reason == "time_cap":
+                assert (out.failure_kind, out.failure_detail) == ("environment_episode_failed", f"{SERVER}:{reason}")
+            else:
+                assert out.failure_kind == f"{SERVER}:{reason}"
             assert out.failure_reason == f"the turn was cut off ({reason})"
         server.server_client.post.assert_not_called()
 
@@ -699,7 +705,51 @@ class TestVerifyMasks:
         items = [_call_item("bash", '{"command": "ls"}'), _output_item("p1", failed), _message_item("It failed.")]
         out = await server.verify(req(), _verify_body(items))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
-        assert out.failure_kind == f"{SERVER}:simulator_failed" and out.failure_reason == failed
+        assert out.failure_kind == "environment_episode_failed" and out.failure_reason == failed
+        assert out.failure_detail == f"{SERVER}:simulator_failed"
+        server.server_client.post.assert_not_called()
+
+    async def test_a_time_cap_is_masked_as_a_registered_environment_failure_with_its_detail(self) -> None:
+        """The cap counts serving and simulator waits (the README's reference settings), so it is the environment's:
+        masked, never scored, and typed with the registered evaluation-side kind that recovery plans. No default
+        classifier reads the turn's wall time to call it the policy's."""
+        server = make_server()
+        body = _verify_body(
+            response_metadata={"stop_reason": "time_cap", "steps": "12", "elapsed_seconds": "1307"},
+        )
+        out = await server.verify(req(), body)
+        assert getattr(out, MASK_SAMPLE_FIELD) is True and out.reward == 0.0 and out.code_gate is None
+        assert out.failure_kind == "environment_episode_failed"
+        assert out.failure_detail == f"{SERVER}:time_cap"
+        server.server_client.post.assert_not_called()
+
+    async def test_a_failed_simulation_is_masked_as_a_registered_environment_failure_with_its_detail(self) -> None:
+        server = make_server()
+        failed = simulator_failure("unparseable (finish=stop): 'no tool output'")
+        items = [_call_item("bash", '{"command": "ls"}'), _output_item("p1", failed), _message_item("It failed.")]
+        out = await server.verify(req(), _verify_body(items))
+        assert getattr(out, MASK_SAMPLE_FIELD) is True
+        assert (out.failure_kind, out.failure_detail) == ("environment_episode_failed", f"{SERVER}:simulator_failed")
+
+    async def test_a_row_that_does_not_fit_the_context_stays_a_row_property_not_an_environment_failure(self) -> None:
+        server = make_server()
+        out = await server.verify(req(), _verify_body([], stop_reason="context_overflow", steps="0"))
+        assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_kind == f"{SERVER}:context_overflow"
+        assert getattr(out, "failure_detail", None) is None
+
+    async def test_a_policy_context_overflow_after_the_first_step_scores_zero_unmasked(self) -> None:
+        """The shape of saved HTTP 400 rows from an evaluation run: the policy server refused a later call as
+        over its context window (the agent ends the turn as context_overflow at step 3 or more). The benchmark's
+        documented outcome is a code-gated 0 that stays counted: a model outcome, not an environment failure."""
+        server = make_server()
+        out = await server.verify(req(), _verify_body(stop_reason="context_overflow", steps="3"))
+        assert not getattr(out, MASK_SAMPLE_FIELD) and out.failure_kind is None
+        assert (out.reward, out.code_gate, out.stop_reason, out.steps) == (
+            0.0,
+            "unfinished_turn",
+            "context_overflow",
+            3,
+        )
         server.server_client.post.assert_not_called()
 
     async def test_a_tool_result_that_only_mentions_the_failure_phrase_is_judged(self) -> None:

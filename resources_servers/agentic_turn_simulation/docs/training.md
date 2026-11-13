@@ -97,7 +97,8 @@ gym env start \
 - **Keep caps comparable.** Use the same caps for reward profiling and training where possible, and compare runs at
   the same training stage: masking and reward both drift as the policy changes.
 - **Filtering by reason.** Trainers that filter masked rollouts by reason can match `failure_kind` values that start
-  with `agentic_turn_simulation:` plus `judge_failed`; `mask_sample` alone covers all of them.
+  with `agentic_turn_simulation:`, `environment_episode_failed` (its `failure_detail` names the time cap or the failed
+  simulation) and `judge_failed`; `mask_sample` alone covers all of them.
 - **Masking or rescoring caps in the trainer.** To keep scored cap hits out of the gradient, or to give them a
   different reward, match their `stop_reason` in the trainer. To mask them in the environment for every consumer, list
   them in `masked_stop_reasons`.

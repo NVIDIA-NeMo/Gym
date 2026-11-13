@@ -637,4 +637,5 @@ class TestGenericVerify:
         )
         out = await make_server().verify(req(), body)
         assert getattr(out, MASK_SAMPLE_FIELD) is True
-        assert out.failure_kind == "agentic_turn_simulation:time_cap"
+        assert out.failure_kind == "environment_episode_failed"
+        assert out.failure_detail == "agentic_turn_simulation:time_cap"

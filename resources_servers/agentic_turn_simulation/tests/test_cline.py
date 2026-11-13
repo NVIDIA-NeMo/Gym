@@ -334,7 +334,7 @@ class TestServer:
                 responses_create_params=_rcp(), response=_response(items, "final_message"), verifier_metadata=METADATA
             ),
         )
-        assert getattr(verified, MASK_SAMPLE_FIELD) is True and verified.failure_kind.endswith("simulator_failed")
+        assert getattr(verified, MASK_SAMPLE_FIELD) is True and verified.failure_detail.endswith("simulator_failed")
 
     async def test_an_unframed_simulator_failure_masks_the_rollout(self) -> None:
         # A lost session's failure comes back unframed, so the scored turn keeps it as a user message.
@@ -354,7 +354,7 @@ class TestServer:
                 verifier_metadata=METADATA,
             ),
         )
-        assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_kind.endswith("simulator_failed")
+        assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_detail.endswith("simulator_failed")
         assert out.failure_reason == lost.output
         server.server_client.post.assert_not_called()
 
