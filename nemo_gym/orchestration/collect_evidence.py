@@ -19,6 +19,7 @@ Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the scr
 """
 
 from nemo_gym.core.failure_kinds import (
+    DRIVER_INSTALL_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     JUDGE_SKIPPED,
     PROVIDER_CREDENTIALS_REJECTED,
@@ -70,6 +71,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "GUARDED_DRIVER_FAILURE_KINDS = "
     + repr(GUARDED_DRIVER_FAILURE_KINDS)
+    + "\n"
+    + "DRIVER_INSTALL_FAILED = "
+    + repr(DRIVER_INSTALL_FAILED)
     + "\n"
     + "ENVIRONMENT_PROTOCOL_VIOLATION = "
     + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
@@ -932,6 +936,13 @@ def chain_continuation_note():
         or any(kind in line for kind in GUARDED_DRIVER_FAILURE_KINDS)
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
+    if named and DRIVER_INSTALL_FAILED + ": " in line:
+        # The install's own error text is the one free-form excerpt the guard copies from the driver log, and an installer
+        # can print a credentialed URL: keep the typed failure and the log reference, and leave the excerpt in the
+        # private driver log on the run host.
+        head, _, rest = line.partition(DRIVER_INSTALL_FAILED + ": ")
+        _, sep, tail = rest.rpartition("; the chain does not retry it")
+        line = head + DRIVER_INSTALL_FAILED + ": (error text omitted)" + (sep + tail if sep else "")
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
 collected["unreadable_files"] = sorted(unreadable)
