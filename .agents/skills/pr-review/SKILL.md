@@ -116,7 +116,7 @@ Apply the checks for the areas the diff touches.
   `training_allowed`, `primary_metric` for benchmarks, and `requirements`).
   Follow the [field reference](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#field-reference);
   the literal `unknown` is supported by `training_allowed`, `requirements.gpu`
-  and `requirements.internet`. New or modified metadata must not leave scaffold
+  and `requirements.network`. New or modified metadata must not leave scaffold
   `TODO` values. For an existing manifest, review the affected declarations
   without requiring unrelated metadata backfilling. A setup or protocol
   declares its own selection fields. Check new or changed
