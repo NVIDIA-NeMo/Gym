@@ -443,3 +443,20 @@ def test_the_relay_preset_keeps_its_explicit_legacy_agent_relay() -> None:
     assert settings(relay, RELAY_ENVIRONMENT)["agent_server"]["name"] == RELAY_AGENT
     assert list(relay[RELAY_AGENT].responses_api_agents) == ["opencode_sandboxed_agent"]
     assert settings(relay, RELAY_AGENT)["resources_server"]["name"] == RESOURCES
+
+
+def test_the_relay_preset_resolves_no_episode_setting() -> None:
+    """gym eval run refuses to resume across a semantic setting, so a relay run saved before episode sessions existed
+    resumes only if the relay preset names none of them, not even as null."""
+    _, relay = resolve(RELAY)
+
+    assert {
+        "sandbox_workdir",
+        "episode_sandbox_files",
+        "episode_sandbox_env",
+        "plugin_log_path",
+        "required_plugin_markers",
+        "episode_export_dir",
+        "episode_export_copy_dir",
+        "episode_export_max_bytes",
+    }.isdisjoint(settings(relay, RESOURCES))
