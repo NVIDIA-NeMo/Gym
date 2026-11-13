@@ -290,9 +290,13 @@ def test_a_lent_sandbox_is_the_agent_run_sandbox_in_the_workdir(workdir, started
     assert lent.env == (cpu_cap_env(2) if derive_cpu_env else {}) | {"EXTRA": "1"}
 
 
-def test_an_episode_seed_stages_the_episode_files_and_env_in_its_sandbox(workdir, tmp_path, started) -> None:
+def test_an_episode_seed_stages_the_episode_files_and_env_in_its_sandbox(
+    workdir, tmp_path, started, monkeypatch
+) -> None:
     files = _staged(tmp_path / "stage")
     log = tmp_path / "stage" / "plugins.log"
+    # The sources name files relative to the Gym root, wherever the server starts.
+    monkeypatch.chdir(tmp_path)
     server = _server(
         workdir,
         episode_sandbox_files=files,
@@ -989,7 +993,11 @@ def test_shutdown_stops_every_sandbox_still_running(workdir, started, stopped) -
     assert server._sandbox_access == {} and server._agent_run_sandboxes == {}
 
 
-@pytest.mark.parametrize("sandbox_workdir", ["workspace", "/", "/tmp", "/tmp/", "/workspace/../tmp"])
+@pytest.mark.parametrize(
+    "sandbox_workdir",
+    # The last two are refused by opencode_agent: a path with a NUL, and one in its own storage.
+    ["workspace", "/", "/tmp", "/tmp/", "/workspace/../tmp", "/work\x00space", "/tmp/nemo-gym-opencode-sessions/x"],
+)
 def test_a_workdir_a_harness_cannot_use_is_refused_at_startup(sandbox_workdir) -> None:
     with pytest.raises(ValueError, match="sandbox_workdir must be an absolute directory"):
         _server(sandbox_workdir)
@@ -1010,7 +1018,16 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
         ({"episode_sandbox_env": {"NEMO_GYM_PLUGIN_LOG": "/tmp/plugins.log"}}, "must equal plugin_log_path"),
         ({"required_plugin_markers": ["tool_surface task=off bash=off"]}, "set plugin_log_path"),
         ({"plugin_log_path": "plugins.log"}, "plugin_log_path must be an absolute sandbox path"),
+        # The model's tools could change what lies in its working directory.
+        ({"plugin_log_path": "/workspace/plugins.log"}, "plugin_log_path must lie outside sandbox_workdir"),
         ({"episode_sandbox_files": {"nemo-gym-plugin.js": PLUGINS[0]}}, "must map absolute sandbox paths"),
+        ({"episode_sandbox_files": {"/workspace/p.js": PLUGINS[0]}}, "must lie outside sandbox_workdir"),
+        (
+            {"episode_sandbox_files": {"/tmp/nemo-gym-opencode-runtime-1.17.11/p.js": PLUGINS[0]}},
+            "where opencode_agent keeps its runtime",
+        ),
+        ({"episode_sandbox_files": {"/tmp/p.js": str(REPOSITORY / PLUGINS[0])}}, "relative to the Gym root"),
+        ({"episode_sandbox_files": {"/tmp/p.js": "../p.js"}}, "relative to the Gym root"),
         ({"exa_cache_root": "/search-cache", "host": "127.0.0.1"}, "cannot reach the search cache proxy"),
         ({"exa_cache_root": "/search-cache", "host": "0.0.0.0"}, "cannot reach the search cache proxy"),
     ],
@@ -1019,7 +1036,12 @@ def test_a_sandbox_config_a_lent_sandbox_cannot_take_is_refused_at_startup() -> 
         "plugin_log_path_unset",
         "markers_without_plugin_log",
         "relative_plugin_log",
+        "plugin_log_inside_workdir",
         "relative_episode_file",
+        "episode_file_inside_workdir",
+        "episode_file_in_opencode_storage",
+        "absolute_episode_file_source",
+        "parent_episode_file_source",
         "search_cache_on_loopback",
         "search_cache_on_any_address",
     ],
@@ -1047,10 +1069,17 @@ def test_without_lending_the_search_cache_needs_no_sandbox_reachable_address() -
     assert server._lent_sandboxes is None
 
 
-def test_an_episode_file_that_cannot_be_read_is_refused_at_startup() -> None:
-    missing = "resources_servers/opencode_search/opencode_bundle/nemo_gym_missing.js"
-    with pytest.raises(FileNotFoundError, match="nemo_gym_missing.js"):
-        _server("/workspace", episode_sandbox_files={"/tmp/nemo-gym-plugin-missing.js": missing})
+@pytest.mark.parametrize(
+    "source",
+    [
+        "resources_servers/opencode_search/opencode_bundle/nemo_gym_missing.js",
+        "resources_servers/opencode_search/opencode_bundle",
+    ],
+    ids=["missing", "directory"],
+)
+def test_an_episode_file_that_cannot_be_read_is_refused_at_startup(source) -> None:
+    with pytest.raises(FileNotFoundError, match=f"source '{source}' is not a file"):
+        _server("/workspace", episode_sandbox_files={"/tmp/nemo-gym-plugin-missing.js": source})
 
 
 def test_only_a_lending_server_needs_one_worker() -> None:

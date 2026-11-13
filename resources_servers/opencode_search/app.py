@@ -44,7 +44,7 @@ import shlex
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from time import time
 from typing import Annotated, Any, ClassVar, Dict, List, Optional, Tuple
 
@@ -138,6 +138,9 @@ _PLUGIN_MARKER = "[nemo-gym-plugin] "
 _PLUGIN_SENTINEL = "[nemo-gym-plugin] loaded sentinel"
 # The variable the receipts plugin (opencode_bundle/nemo_gym_receipts.js) takes the plugin log's path from.
 _PLUGIN_LOG_ENV = "NEMO_GYM_PLUGIN_LOG"
+# opencode_agent keeps its runtime and sessions in a sandbox under paths that start with this, and refuses a workdir
+# there.
+_OPENCODE_STORAGE_PREFIX = "/tmp/nemo-gym-opencode"
 
 
 def _last_assistant_text(response: NeMoGymResponse) -> str:
@@ -210,6 +213,20 @@ def _is_sandbox_path(path: str) -> bool:
     return PurePosixPath(path).is_absolute() and ".." not in PurePosixPath(path).parts and "\x00" not in path
 
 
+def _in_opencode_storage(path: str) -> bool:
+    """Whether a sandbox path lies where opencode_agent keeps its runtime and sessions."""
+    return str(PurePosixPath(path)).startswith(_OPENCODE_STORAGE_PREFIX)
+
+
+def _episode_file(source: str) -> bytes:
+    """The contents of an episode file's source: a regular file named relative to the Gym root, never to the working
+    directory of the process."""
+    path = PARENT_DIR / source
+    if not path.is_file():
+        raise FileNotFoundError(f"episode_sandbox_files source {source!r} is not a file in the Gym root ({path})")
+    return path.read_bytes()
+
+
 class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # ---- Exa response cache -------------------------------------------------------------------
     # Shared by every shard and every sandbox: the store is a directory on Lustre, so it outlives
@@ -246,11 +263,13 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_image: str
     # Working directory of the sandbox an episode seed lends to a session harness; the seed creates it. None turns
     # lending off, so an episode seed is refused (422). An agent's own /run gets the image's working directory.
+    # opencode_agent's rules apply: an absolute directory other than / and /tmp, outside its storage.
     sandbox_workdir: Optional[str] = None
 
     # What an episode seed gives the harness in the lent sandbox, besides the workdir. Each file maps an absolute sandbox
-    # path to its source, relative to the Gym root, and is read once at startup. Its directory must already exist in
-    # the image, since a provider need not create it: stage under /tmp.
+    # path, outside sandbox_workdir and opencode_agent's storage, to its source: a file in the Gym root, named relative
+    # to it and read once at startup. Its directory must already exist in the image, since a provider need not create
+    # it: stage under /tmp.
     episode_sandbox_files: Dict[str, str] = Field(default_factory=dict)
     # Environment of the lent sandbox, over sandbox_config.env. An empty value sets nothing, so a config can name a
     # setting it leaves off. Secrets come from an overlay, never from a config file. With exa_cache_root set,
@@ -259,8 +278,9 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     episode_sandbox_env: Dict[str, str] = Field(default_factory=dict)
     # Where the receipts plugin (opencode_bundle/nemo_gym_receipts.js) copies the OpenCode plugins' lines in the lent
     # sandbox; it also sets NEMO_GYM_PLUGIN_LOG there. An episode's verify reads it before the sandbox stops, masks a run
-    # that ended on its budget as the relay does, and refuses one whose plugins did not load. None reads nothing and
-    # refuses nothing, for a harness that brings no such plugins.
+    # that ended on its budget as the relay does, and refuses one whose plugins did not load. It lies outside
+    # sandbox_workdir, where the model's tools could change it. None reads nothing and refuses nothing, for a harness
+    # that brings no such plugins.
     plugin_log_path: Optional[str] = None
     # Lines the plugin log must also hold for a run to be graded, such as the tool surface the run must have had.
     required_plugin_markers: List[str] = Field(default_factory=list)
@@ -268,11 +288,17 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     @field_validator("sandbox_workdir")
     @classmethod
     def _harness_workdir(cls, workdir: Optional[str]) -> Optional[str]:
-        # A harness works in this directory as its task root, so it is never the filesystem root or the shared /tmp.
-        if workdir is not None:
-            path = PurePosixPath(workdir)
-            if not path.is_absolute() or ".." in path.parts or path in (PurePosixPath("/"), PurePosixPath("/tmp")):
-                raise ValueError(f"sandbox_workdir must be an absolute directory other than / and /tmp: {workdir!r}")
+        # A harness works in this directory as its task root, so it is never the filesystem root or the shared /tmp,
+        # and opencode_agent refuses one in its own storage.
+        if workdir is not None and (
+            not _is_sandbox_path(workdir)
+            or PurePosixPath(workdir) in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or _in_opencode_storage(workdir)
+        ):
+            raise ValueError(
+                f"sandbox_workdir must be an absolute directory other than / and /tmp, outside "
+                f"{_OPENCODE_STORAGE_PREFIX}*: {workdir!r}"
+            )
         return workdir
 
     @field_validator("episode_sandbox_files")
@@ -281,6 +307,18 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
         outside = [path for path in files if not _is_sandbox_path(path)]
         if outside:
             raise ValueError(f"episode_sandbox_files must map absolute sandbox paths: {outside!r}")
+        stored = [path for path in files if _in_opencode_storage(path)]
+        if stored:
+            raise ValueError(
+                f"episode_sandbox_files must stay out of {_OPENCODE_STORAGE_PREFIX}*, where opencode_agent keeps its "
+                f"runtime and sessions: {stored!r}"
+            )
+        # Relative to the Gym root, so a source is the same file wherever the server starts, and never outside it.
+        sources = [source for source in files.values() if Path(source).is_absolute() or ".." in Path(source).parts]
+        if sources:
+            raise ValueError(
+                f"episode_sandbox_files sources must be relative to the Gym root, without '..': {sources!r}"
+            )
         return files
 
     @field_validator("plugin_log_path")
@@ -302,6 +340,19 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
             )
         if self.required_plugin_markers and self.plugin_log_path is None:
             raise ValueError("required_plugin_markers are read from the plugin log: set plugin_log_path")
+        return self
+
+    @model_validator(mode="after")
+    def _episode_paths_outside_the_workdir(self) -> "SearchResourcesServerConfig":
+        # The model works in sandbox_workdir, where its tools list and change files, so what this server stages and
+        # reads in the lent sandbox stays out of it.
+        if self.sandbox_workdir is not None:
+            workdir = PurePosixPath(self.sandbox_workdir)
+            inside = [path for path in self.episode_sandbox_files if PurePosixPath(path).is_relative_to(workdir)]
+            if inside:
+                raise ValueError(f"episode_sandbox_files must lie outside sandbox_workdir: {inside!r}")
+            if self.plugin_log_path is not None and PurePosixPath(self.plugin_log_path).is_relative_to(workdir):
+                raise ValueError(f"plugin_log_path must lie outside sandbox_workdir: {self.plugin_log_path!r}")
         return self
 
     # Grading. The judge is the only grader; there is no exact-match fallback, because a
@@ -461,7 +512,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         if self.config.sandbox_workdir is not None:
             self._episode_files = {
-                path: (PARENT_DIR / source).read_bytes() for path, source in self.config.episode_sandbox_files.items()
+                path: _episode_file(source) for path, source in self.config.episode_sandbox_files.items()
             }
             self._lent_sandboxes = LentSandboxes(
                 self.config.sandbox_provider,
