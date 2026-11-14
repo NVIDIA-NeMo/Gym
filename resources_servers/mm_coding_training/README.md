@@ -43,9 +43,7 @@ Programmatic invalid-artifact/execution zeros are observed separately.
 
 A successfully rendered candidate must fit within 32 MiB and 32 million pixels.
 Exceeding either render limit is a measured execution zero, not a masked provider
-failure. References that fail validation still mask the measurement. Compact
-SVG path commands are allowed; long encoded runs are rejected as embedded raster
-assets only when their decoded prefix identifies a supported image format.
+failure. References that fail validation still mask the measurement.
 
 For session answers, an empty `source_artifact` with the SHA256 of empty bytes
 and its task/response binding records a measured absent or invalid final file.
@@ -197,8 +195,9 @@ substitute, and grades that source in a fresh isolated verifier sandbox.
 The source must be self-contained. A source with 1024 or more characters of
 base64 or hex data, as an embedded image has, scores as an invalid artifact.
 Pieces of 32 or more characters split over lines or string literals count as
-one block. This check blocks the usual ways to embed the reference image, not
-every way. Missing/invalid artifacts are measured zeros; inconclusive capture,
+one block. SVG path data written without spaces (`M0 0h1v1h1v1...`) has only
+command letters, digits, `+` and `e`, so it does not count. This check blocks the
+usual ways to embed the reference image, not every way. Missing/invalid artifacts are measured zeros; inconclusive capture,
 renderer or judge failures are masked with `evaluation_completed=false`.
 Completed grades and model zeros explicitly set `evaluation_completed=true`.
 

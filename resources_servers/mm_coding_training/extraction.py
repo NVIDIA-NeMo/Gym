@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from extract_answer in mmrl/artifacts.py in NVIDIA's visual-coding RL research code.
-import base64
-import binascii
 import re
 
 
@@ -37,49 +35,22 @@ def extract_answer(text: str, language: str) -> str:
 # The grading sandbox has no copy of the input image, so an answer that shows it must carry its bytes in the source.
 # Runs of 32+ base64 or hex characters that only up to 16 quotes, whitespace, commas, plus signs or backslashes
 # separate (how long literals are wrapped) are chained. 1024 characters hold 768 bytes of base64 or 512 of hex: less
-# than the smallest example reference (958 bytes). Length alone is not evidence of an image: compact SVG paths can
-# contain arbitrarily long alphanumeric runs. Check a decoded image header before rejecting such a chain.
+# than the smallest example reference (958 bytes), and more than drawing code writes in such a chain.
 ENCODED_RUN = re.compile(r"[A-Za-z0-9+/]{32,}")
 WRAP_GAP = re.compile(r"""[\s"'+,\\]{0,16}""")
+# SVG path data written without spaces ("M0 0h1v1h1v1...") forms the same runs, but it uses only the command letters,
+# digits, "+" and the exponent "e". The base64 or hex of 1024 characters of image data has other characters as well.
+PATH_DATA = re.compile(r"[MmZzLlHhVvCcSsQqTtAaEe0-9+]+")
 
 
 def embeds_image_data(source: str) -> bool:
     """Whether the source carries base64 or hex data long enough to hold an image."""
-    chain, end, prefix = 0, None, ""
+    chain, encoded, end = 0, False, None
     for run in ENCODED_RUN.finditer(source):
         wrapped = end is not None and WRAP_GAP.fullmatch(source, end, run.start()) is not None
         chain = chain + len(run[0]) if wrapped else len(run[0])
-        prefix = (prefix + run[0])[:64] if wrapped else run[0][:64]
-        if chain >= 1024 and _encoded_image_header(prefix):
+        encoded = (wrapped and encoded) or PATH_DATA.fullmatch(run[0]) is None
+        if encoded and chain >= 1024:
             return True
         end = run.end()
     return False
-
-
-def _encoded_image_header(prefix: str) -> bool:
-    """Inspect only a bounded prefix; never decode or decompress an untrusted image here."""
-    candidates = []
-    try:
-        candidates.append(base64.b64decode(prefix[: len(prefix) // 4 * 4], validate=True))
-    except binascii.Error:
-        pass
-    try:
-        candidates.append(bytes.fromhex(prefix[: len(prefix) // 2 * 2]))
-    except ValueError:
-        pass
-    return any(
-        data.startswith(
-            (
-                b"\x89PNG\r\n\x1a\n",
-                b"\xff\xd8\xff",
-                b"GIF87a",
-                b"GIF89a",
-                b"BM",
-                b"II*\x00",
-                b"MM\x00*",
-                b"\x00\x00\x01\x00",
-            )
-        )
-        or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
-        for data in candidates
-    )
