@@ -64,7 +64,7 @@ The agent sandbox has no internet access, so the pinned OpenCode runtime cannot 
 and `sandbox_executable_sha256` to its digest; session setup refuses any other file.
 `benchmarks/nemotron_3.5_super/sandbox_utils.yaml` does this for its mounted copy. The benchmark stages ripgrep
 itself: `prepare.py` downloads ripgrep 15.1.0 (x86_64 musl) and checks its digest, the resources server copies it into
-each agent sandbox (`agent_runtime_files`), and the agent pins that copy (`sandbox_ripgrep_*`) and puts its directory
+each agent sandbox (`agent_ripgrep_path`), and the agent pins that copy (`sandbox_ripgrep_*`) and puts its directory
 on the PATH of its tool subprocesses (`sandbox_path_prefix`), so OpenCode's `glob` and `grep` tools and `rg` in the
 shell work without network, as on the previous recipe. Pin OpenCode's plugin dependencies the same way
 (`sandbox_plugin_dependencies_*`, see the `opencode_agent` README): without them each start waits for a plugin

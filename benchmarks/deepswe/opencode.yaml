@@ -17,8 +17,7 @@ deepswe_opencode_resources_server:
         name: policy_model
       # The agent sandbox has no network: stage the ripgrep that prepare.py downloads and checks, for OpenCode's
       # grep and glob tools (pinned on the agent below).
-      agent_runtime_files:
-        - resources_servers/deepswe/data/cache/opencode-runtime/rg
+      agent_ripgrep_path: resources_servers/deepswe/data/cache/opencode-runtime/rg
 
 deepswe_opencode_agent:
   _inherit_from: opencode_agent
