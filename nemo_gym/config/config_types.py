@@ -846,10 +846,27 @@ def maybe_get_server_instance_config(
     if not isinstance(server_type_config_dict, DictConfig):
         return None, None
 
+    from nemo_gym.config.global_config import SERVER_TYPE_KEYS
+
+    server_values = OmegaConf.to_container(server_type_config_dict)
+    # Benchmark metadata uses Path fields. Resolve those in their original rooted
+    # context before Pydantic turns an interpolation into a literal Path filename.
+    # Keep other server fields unresolved: composition may still supply their values.
+    for server_kind, instances in server_type_config_dict.items_ex(resolve=False):
+        if server_kind not in SERVER_TYPE_KEYS or not isinstance(instances, DictConfig):
+            continue
+        for instance_name, instance in instances.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            for index, dataset in enumerate(instance.get("datasets") or []):
+                if isinstance(dataset, DictConfig) and dataset.get("type") == "benchmark":
+                    for field in ("jsonl_fpath", "prepare_script", "prompt_config", "prepare_project"):
+                        if field in dataset:
+                            server_values[server_kind][instance_name]["datasets"][index][field] = dataset[field]
     maybe_server_instance_config_dict = {
         "name": name,
         "server_type_config_dict": server_type_config_dict,
-        **OmegaConf.to_container(server_type_config_dict),
+        **server_values,
     }
     try:
         config = ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)

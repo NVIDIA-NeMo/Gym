@@ -1,0 +1,72 @@
+wildclaw_dataset_path: ${oc.env:WILDCLAW_DATASET_PATH}
+num_samples_in_parallel: 1
+wildclaw_output_root: ${oc.env:WILDCLAW_OUTPUT_ROOT}
+
+wildclaw_execution:
+  source_root: ${oc.env:WILDCLAW_ROOT}
+  worker_python: ${oc.env:WILDCLAW_PYTHON}
+  output_root: ${wildclaw_output_root}
+  model_server:
+    type: responses_api_models
+    name: policy_model
+  model_name: ${policy_model_name}
+  context_window: ${oc.select:wildclaw_context_window,131072}
+  max_tokens: ${oc.select:wildclaw_max_tokens,8192}
+  thinking: ${oc.select:wildclaw_thinking,high}
+  judge_model: ${oc.env:JUDGE_MODEL,openai/gpt-5.4}
+  sandbox_runtime: ${oc.env:WILDCLAW_SANDBOX_RUNTIME,docker}
+
+wildclaw_agent:
+  responses_api_agents:
+    wildclawbench_agent:
+      entrypoint: app.py
+      domain: agent
+      description: WildClawBench original OpenClaw agent sessions
+      value: Evaluate end-to-end multimodal, coding, productivity, search, social and safety tasks.
+      source_root: ${wildclaw_execution.source_root}
+      worker_python: ${wildclaw_execution.worker_python}
+      output_root: ${wildclaw_execution.output_root}
+      model_server: ${wildclaw_execution.model_server}
+      model_name: ${wildclaw_execution.model_name}
+      context_window: ${wildclaw_execution.context_window}
+      max_tokens: ${wildclaw_execution.max_tokens}
+      thinking: ${wildclaw_execution.thinking}
+      judge_model: ${wildclaw_execution.judge_model}
+      sandbox_runtime: ${wildclaw_execution.sandbox_runtime}
+      datasets:
+        - name: wildclawbench
+          type: benchmark
+          jsonl_fpath: ${wildclaw_dataset_path}
+          prompt_config: null
+          prepare_script: benchmarks/wildclawbench/prepare.py
+          num_repeats: 1
+          license: MIT
+
+wildclaw_resources:
+  resources_servers:
+    wildclawbench:
+      entrypoint: app.py
+      domain: agent
+      description: Original WildClawBench task state and native verifier
+      value: Preserve native tasks, sandbox state and grading independently of agent activation.
+      verified: false
+      execution: ${wildclaw_execution}
+
+wildclaw_environment_server:
+  environment_servers:
+    wildclawbench_environment:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: wildclaw_agent
+      resources_server:
+        type: resources_servers
+        name: wildclaw_resources
+      resources_tool_transports: []
+      tool_servers: []
+      forward_agent_evidence: true
+      output_root: ${wildclaw_output_root}
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 2400
+      default_episode_timeout_seconds: 2400
+      cleanup_timeout_seconds: 180

@@ -110,6 +110,7 @@ if TYPE_CHECKING:
         maybe_auto_expose,
     )
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
+    from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
@@ -164,6 +165,7 @@ _PUBLIC_API = {
     "CheckpointRequest": "_checkpoint.control",
     "CleanupContext": "base_environment_server",
     "CleanupHandle": "base_environment_server",
+    "ClientDisconnectCancellationMiddleware": "request_handling.disconnect",
     "CommitRequest": "_checkpoint.control",
     "DirectHTTPToolAccess": "tool_access",
     "EnvironmentParticipant": "_checkpoint.environment",

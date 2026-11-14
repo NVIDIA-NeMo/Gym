@@ -11,6 +11,14 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## WildClawBench instruction prefix
+
+`responses_api_agents/wildclawbench_agent/worker.py` retains the actor instruction
+prefix from `eval/run_batch.py` in [internlm/WildClawBench](https://github.com/internlm/WildClawBench),
+revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
+The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
+Native task execution is an external dependency, not vendored here.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and

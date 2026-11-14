@@ -444,12 +444,8 @@ def test_a_preparation_stop_survives_pickling_across_a_worker_boundary() -> None
 
 
 def test_a_failing_worker_in_the_parallel_pool_stops_with_76_instead_of_hanging(tmp_path, monkeypatch) -> None:
-    import threading
+    import signal
 
-    from nemo_gym.cli.utils import exit_cleanly_on_config_error
-    from nemo_gym.config.config_types import BenchmarkDatasetConfig
-
-    benchmarks = []
     for name in ("first", "second"):
         script = tmp_path / f"{name}_prepare.py"
         script.write_text(
@@ -458,27 +454,54 @@ def prepare(**kwargs):
     raise ValueError("bad row")
 """
         )
-        dataset = BenchmarkDatasetConfig(
-            name=name, type="benchmark", jsonl_fpath=tmp_path / f"{name}.jsonl", prepare_script=script
-        )
-        benchmarks.append(SimpleNamespace(name=name, dataset=dataset))
-    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(tmp_path / "driver_failure"))
-    settings = benchmark_preparation.PrepareBenchmarkConfig(uv_venv_dir=tmp_path, num_prepare_benchmark_processes=2)
-    outcome: dict = {}
+    failure_file = tmp_path / "driver_failure"
+    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(failure_file))
+    # Fork from a standalone driver, as the CLI does, rather than a pytest
+    # thread that can inherit locks held by the test runner's other threads.
+    driver = tmp_path / "prepare_driver.py"
+    driver.write_text(
+        """from pathlib import Path
+from types import SimpleNamespace
+import sys
 
-    @exit_cleanly_on_config_error
-    def prepare() -> None:
-        benchmark_preparation.prepare_datasets(benchmarks, settings)
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.config.config_types import BenchmarkDatasetConfig
+from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, prepare_datasets
 
-    def run() -> None:
+
+@exit_cleanly_on_config_error
+def prepare():
+    root = Path(sys.argv[1])
+    benchmarks = [
+        SimpleNamespace(name=name, dataset=BenchmarkDatasetConfig(
+            name=name, type="benchmark", jsonl_fpath=root / f"{name}.jsonl",
+            prepare_script=root / f"{name}_prepare.py",
+        ))
+        for name in ("first", "second")
+    ]
+    prepare_datasets(benchmarks, PrepareBenchmarkConfig(uv_venv_dir=root, num_prepare_benchmark_processes=2))
+
+
+if __name__ == "__main__":
+    prepare()
+"""
+    )
+    with subprocess.Popen(
+        [sys.executable, str(driver), str(tmp_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    ) as worker:
         try:
-            prepare()
-        except SystemExit as exited:
-            outcome["code"] = exited.code
-
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(timeout=60)
-
-    assert not worker.is_alive(), "the parent waits forever for a result the pool could not deliver"
-    assert outcome["code"] == 76
+            stdout, stderr = worker.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            if hasattr(os, "killpg"):
+                os.killpg(worker.pid, signal.SIGKILL)
+            else:
+                worker.kill()
+            worker.communicate()
+            pytest.fail("the preparation driver did not exit within 60 seconds")
+    assert worker.returncode == 76, stdout + stderr
+    assert failure_file.read_text() == "environment_prepare_failed\n"
