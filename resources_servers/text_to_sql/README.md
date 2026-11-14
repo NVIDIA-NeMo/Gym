@@ -71,8 +71,10 @@ Each data sample should include:
 gym env start \
   --resources-server text_to_sql \
   --model-type openai_model \
-  +text_to_sql_resources_server.resources_servers.text_to_sql.judge_responses_create_params.max_output_tokens=512
+  +text_to_sql_resources_server.resources_servers.text_to_sql.judge_responses_create_params.max_output_tokens=8192
 ```
+
+The judge is the policy model (`configs/text_to_sql.yaml` sets `judge_model_server.name: policy_model`). The command gives the judge 8192 output tokens because a reasoning model can spend several thousand tokens reasoning before it writes the `[[A=B]]`/`[[A!=B]]` verdict, and a judge reply with no verdict scores 0.
 
 ### Collecting Rollouts
 
