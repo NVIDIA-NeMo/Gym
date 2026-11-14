@@ -78,22 +78,28 @@ The suite files define which benchmarks run together and how many evaluation att
 
 The core recipe also matches the reference HLE answer-extraction rule, Omniscience's 2,048-token judge output budget, and LMArena's 1% tolerated failure rate. HLE answers longer than 8,192 characters become empty answers in the judge prompt; they are not truncated.
 
-Some runtime settings still differ from standalone recipes. HLE and Omniscience each allow 32 concurrent judge requests, compared with 64 and 16 in the reference. Omniscience uses 10 dataset repeats and IFBench uses eight, compared with eight and five in their base benchmark configs. Both batch commands also load [benchmarks/nemotron_3.5_super/policy_model_override.yaml](policy_model_override.yaml), which clears model-level output-token limits. Matched standalone comparisons must use the same repeat, seed, sampling, and output-limit settings; matching the auxiliary models alone is not enough.
+Some runtime settings still differ from standalone recipes. HLE and Omniscience each allow 32 concurrent judge requests, compared with 64 and 16 in the reference. Omniscience uses 10 repeats and IFBench uses eight, compared with eight and five in their base benchmark configs. Both batch commands also load [benchmarks/nemotron_3.5_super/policy_model_override.yaml](policy_model_override.yaml), which clears model-level output-token limits. Matched standalone comparisons must use the same repeat, seed, sampling, and output-limit settings; matching the auxiliary models alone is not enough.
 
-The prepared SWE inputs already include three copies of each task. Use `num_repeats=1` and `num_repeats_add_seed=false` during collection so Gym doesn’t add more repeats or sampling seeds.
+The SWE datasets set three attempts per task, and the SWE recipe sets `num_repeats_add_seed=false`. Preparation writes the three copies of each task, and collection runs each copy once.
 
 Submit either full batch with [benchmarks/nemotron_3.5_super/submit_batch.sh](submit_batch.sh). It checks the configuration, then calls [benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh](sbatch_external_vllm.sh) to submit the job. Serving allocation settings and Gym configuration are separate:
 
 - Launcher environment variables `NUM_PREFILL_NODES` and `NUM_DECODE_NODES` default to `2` each, matching the tested four-node allocation. Each node has four GPUs.
-- In Gym YAML configuration or Hydra overrides, `num_samples_in_parallel` sets one shared limit on active evaluation attempts. Use a positive value; `0` is invalid, and an absent setting or `null` means no global limit. Since the suites set a default, pass `++num_samples_in_parallel=null` to remove it. `num_repeats` and `num_repeats_add_seed` accept per-agent mappings with an `_default` value, preserving each benchmark's repeat and seed policy. For example:
+- In Gym YAML configuration or Hydra overrides, `num_samples_in_parallel` sets one shared limit on active evaluation attempts. Use a positive value; `0` is invalid, and an absent setting or `null` means no global limit. Since the suites set a default, pass `++num_samples_in_parallel=null` to remove it. Each member's attempts per task come from its own dataset's `num_repeats`. The batch recipes set no run-level `num_repeats`, because one replaces every dataset's own count. APEX and LMArena repeat only in the batch, so `core.yaml` sets their datasets' counts (16 and 3). `num_repeats_add_seed` accepts a per-agent mapping with an `_default` value. A shortened example:
 
   ```yaml
   num_samples_in_parallel: 512
-  num_repeats: {_default: 1, lmarena_v2_benchmark_agent: 3}
   num_repeats_add_seed: {_default: false, lmarena_v2_benchmark_agent: true}
+  lmarena_v2_benchmark_agent:
+    responses_api_agents:
+      simple_agent:
+        datasets:
+          - name: lmarena_v2
+            # ...the dataset's other fields
+            num_repeats: 3
   ```
 
-  All agents share the 512 slots. LMArena gets three collection attempts per prepared row, with added seeds; other agents use the repeat and seed defaults. Collection repeats multiply any repeats already in the prepared inputs.
+  All agents share the 512 slots. LMArena gets three attempts per task, each with its own seed; an agent not in `num_repeats_add_seed` gets no added seed. `tests/unit_tests/benchmarks/test_super35_batch_launcher.py` checks that neither recipe sets a run-level `num_repeats`. Setting one, for example with `+num_repeats=`, replaces every member's count with that value.
 
 - When `batch_manifest_fpath` is supplied, Gym validates the declared members and input fingerprints before dispatch, then writes per-agent progress and aggregation state to `batch_status.json` beside the manifest. Tracking currently requires legacy agent-style rows with `agent_ref.name` and `task_source`, plus non-negative integer `_ng_task_index` and `_ng_rollout_index`; leave `batch_manifest_fpath` unset for native rows (`task_id.taskset` plus `task_input`) or mixed-format batches. A shared metrics file alone does not prove every member is complete; inspect each member's counts and aggregation state. Successful collection also does not replace a review of infrastructure failures and score validity.
 

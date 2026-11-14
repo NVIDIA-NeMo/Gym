@@ -8,10 +8,6 @@ config_paths:
   - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
 
 num_samples_in_parallel: 512
-num_repeats:
-  apex_shortlist_math_with_judge_simple_agent: 16
-  lmarena_v2_benchmark_agent: 3
-  _default: 1
 num_repeats_add_seed:
   apex_shortlist_math_with_judge_simple_agent: true
   lmarena_v2_benchmark_agent: true
@@ -95,6 +91,29 @@ omniscience_omniscience_simple_agent:
           prompt_config: benchmarks/omniscience/prompts/generation.yaml
           prepare_script: benchmarks/omniscience/prepare.py
           num_repeats: 10
+
+# Each member's attempts per task come from its own dataset. A run-level num_repeats would replace them all (#5042).
+# APEX and LMArena repeat only in this batch, so their counts are set here.
+apex_shortlist_math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: apex_shortlist
+          type: benchmark
+          jsonl_fpath: benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl
+          prompt_config: benchmarks/prompts/generic/math.yaml
+          prepare_script: benchmarks/apex_shortlist/prepare.py
+          num_repeats: 16
+lmarena_v2_benchmark_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: lmarena_v2
+          type: benchmark
+          jsonl_fpath: benchmarks/lmarena_v2/data/lmarena_v2_validation.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/lmarena_v2/prepare.py
+          num_repeats: 3
 
 judge_api_key: ${nv_inference_api_key}
 
