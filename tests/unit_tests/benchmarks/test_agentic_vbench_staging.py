@@ -485,9 +485,13 @@ def _drop_before_status_line(conn) -> None:
 def _truncate_body(conn) -> None:
     conn.recv(65536)
     conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{"content": [')
-    # An orderly EOF after a short body, so the client reads IncompleteRead rather than a reset.
+    # An orderly EOF after the short body: half-close, then drain what the client still sends until it hangs up,
+    # so the close carries no unread data (which the kernel would turn into a reset) and the next connection is
+    # served as soon as this client gives up.
     conn.shutdown(socket.SHUT_WR)
-    threading.Event().wait(0.5)
+    conn.settimeout(2.0)
+    while conn.recv(65536):
+        pass
 
 
 def _stall(conn) -> None:
