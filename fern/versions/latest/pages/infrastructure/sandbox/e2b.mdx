@@ -80,6 +80,7 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+      new_sandbox_grace_s: 15.0
     attribution:
       enabled: true
       key_prefix: nemo-gym.nvidia.com/
@@ -182,6 +183,17 @@ sandbox that is already gone as closed, and clears the local handle only after c
 carry the E2B sandbox ID for reconnection through another configured provider instance. E2B's
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
+
+For `operations.new_sandbox_grace_s` seconds after create, the provider retries calls that a
+sandbox answers as if it were gone. An AgentEnv gateway can briefly answer 404 "sandbox
+assignment not found" for a running sandbox, and a new VM can briefly refuse connections (502)
+during a create wave. File reads, file writes and close retry both errors. Command starts retry
+only the 404, because a 502 can come after the sandbox received the command. Command-start retries
+also stay inside the command's `timeout_s`: a retry gets only the time that is left, and none is
+sent after the deadline. Create also waits inside the grace period until the sandbox answers a
+health check, so the first command does not meet a sandbox that is still starting. This costs
+one extra request for each create. During the grace period, `status()` reports a sandbox that
+the control plane does not find as `UNKNOWN`, not `STOPPED`. Set it to `0` to turn this off.
 
 `status()` reads the sandbox record from E2B's control plane (`GET /sandboxes/{id}`): `RUNNING`
 means the service reports the sandbox as running, not that the guest passed a health check.

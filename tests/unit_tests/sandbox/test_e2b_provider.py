@@ -462,6 +462,7 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     assert inspect.signature(e2b.AsyncSandbox.pause).parameters["keep_memory"].default is True
     assert e2b.ConnectionConfig(request_timeout=7).request_timeout == 7
     inspect.signature(e2b.AsyncSandbox.get_info).bind(object(), request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.is_running).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
@@ -732,7 +733,7 @@ class TestBackgroundExec:
         assert result.return_code == 0
 
     async def test_lost_stream_is_reattached_by_pid(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monotonic_values = iter([100.0, 105.0])
+        monotonic_values = iter([0.0, 0.0, 100.0, 105.0])  # create, health wait, command start, reattach
         monkeypatch.setattr(e2b_provider, "monotonic", monotonic_values.__next__)
         provider = self._provider(request_timeout_s=75.0)
         handle = await provider.create(_spec())
@@ -765,7 +766,7 @@ class TestBackgroundExec:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monotonic_values = iter([100.0, 161.0])
+        monotonic_values = iter([0.0, 0.0, 100.0, 161.0])  # create, health wait, command start, reattach
         monkeypatch.setattr(e2b_provider, "monotonic", monotonic_values.__next__)
         provider = self._provider()
         handle = await provider.create(_spec())
@@ -1010,7 +1011,7 @@ class TestCreateAndLifecycle:
         assert killed == ["sbx-rest"]
 
     async def test_status_and_close(self) -> None:
-        provider = E2BProvider(create={"template": "base"})
+        provider = E2BProvider(create={"template": "base"}, operations={"new_sandbox_grace_s": 0})
         handle = await provider.create(_spec())
         assert await provider.status(handle) == SandboxStatus.RUNNING
         handle.raw.running = False
@@ -1075,7 +1076,7 @@ class TestCreateAndLifecycle:
         assert handle.raw is sandbox
 
     async def test_close_false_result_clears_handle(self) -> None:
-        provider = E2BProvider(create={"template": "base"})
+        provider = E2BProvider(create={"template": "base"}, operations={"new_sandbox_grace_s": 0})
         handle = await provider.create(_spec())
         sandbox = handle.raw
         sandbox.kill_outcomes = [False]
@@ -1086,7 +1087,7 @@ class TestCreateAndLifecycle:
         assert handle.raw is None
 
     async def test_close_tolerates_already_gone_sandbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        provider = E2BProvider(create={"template": "base"})
+        provider = E2BProvider(create={"template": "base"}, operations={"new_sandbox_grace_s": 0})
         handle = await provider.create(_spec())
 
         async def gone(**kwargs):
@@ -1201,6 +1202,225 @@ class TestFiles:
         handle = await provider.create(_spec())
         with pytest.raises(FileNotFoundError):
             await provider.upload_file(handle, tmp_path / "nope.txt", "/remote/nope.txt")
+
+
+# --------------------------------------------------------------------------
+# New-sandbox grace period
+# --------------------------------------------------------------------------
+
+_UNROUTED = "sandbox assignment not found"
+_UNREACHABLE = "HTTP 502: This error is likely due to sandbox timeout."
+
+
+def _fail_first(monkeypatch: pytest.MonkeyPatch, owner: object, name: str, errors: list[Exception]) -> None:
+    """Make ``owner.name`` raise each of ``errors`` once, then behave normally."""
+    original = getattr(owner, name)
+
+    async def flaky(*args, **kwargs):
+        if errors:
+            raise errors.pop(0)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, flaky)
+
+
+class TestNewSandboxGrace:
+    """Right after create, an e2b gateway can briefly answer for a running sandbox as if it were gone."""
+
+    @pytest.fixture(autouse=True)
+    def no_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(e2b_provider, "_NEW_SANDBOX_RETRY_INTERVAL_S", 0)
+
+    @pytest.mark.parametrize("error", [FakeSandboxNotFound(_UNROUTED), FakeTimeout(_UNREACHABLE)])
+    async def test_file_calls_are_retried(self, monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        _fail_first(monkeypatch, handle.raw.files, "write", [error, error])
+        _fail_first(monkeypatch, handle.raw.files, "read", [error])
+
+        await provider.write_file(handle, "/remote/a.txt", "payload")
+
+        assert await provider.read_file(handle, "/remote/a.txt") == b"payload"
+
+    async def test_errors_are_final_after_the_grace_period(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(create={"template": "base"}, operations={"new_sandbox_grace_s": 0})
+        handle = await provider.create(_spec())
+        _fail_first(monkeypatch, handle.raw.files, "write", [FakeSandboxNotFound(_UNROUTED)])
+
+        with pytest.raises(FakeSandboxNotFound, match=_UNROUTED):
+            await provider.write_file(handle, "/remote/a.txt", "payload")
+
+    async def test_other_not_found_errors_are_not_retried(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+
+        with pytest.raises(FakeSandboxNotFound, match="/missing"):
+            await provider.read_file(handle, "/missing")
+
+    @pytest.mark.parametrize("background", [True, False])
+    async def test_unrouted_command_start_is_retried(self, monkeypatch: pytest.MonkeyPatch, background: bool) -> None:
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        _fail_first(monkeypatch, handle.raw.commands, "run", [FakeSandboxNotFound(_UNROUTED)])
+
+        result = await provider.exec(handle, "echo hi")
+
+        assert result.return_code == 0
+        assert len(handle.raw.exec_calls) == 1
+
+    async def test_unreachable_command_start_is_not_repeated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A 502 can arrive after the sandbox received the start, so a retry could run the command twice.
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        _fail_first(monkeypatch, handle.raw.commands, "run", [FakeTimeout(_UNREACHABLE)])
+
+        with pytest.raises(TimeoutError, match="likely due to sandbox timeout"):
+            await provider.exec(handle, "echo hi")
+
+        assert handle.raw.exec_calls == []
+
+    @pytest.mark.parametrize("background", [True, False])
+    async def test_command_start_retries_stop_at_the_exec_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: clock[0])
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        dispatched: list[float] = []
+
+        async def unrouted(**kwargs):
+            dispatched.append(clock[0])
+            clock[0] += 0.6
+            raise FakeSandboxNotFound(_UNROUTED)
+
+        monkeypatch.setattr(handle.raw.commands, "run", unrouted)
+
+        with pytest.raises(TimeoutError, match=r"not started within 1\.0s"):
+            await provider.exec(handle, "echo hi", timeout_s=1)
+
+        # Still inside the 15 s grace period, but nothing is sent at or after the 1 s deadline.
+        assert dispatched == [0.0, 0.6]
+
+    @pytest.mark.parametrize("background", [True, False])
+    async def test_retried_command_start_gets_only_the_remaining_budget(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: clock[0])
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        run = handle.raw.commands.run
+
+        async def unrouted_for_a_second(**kwargs):
+            monkeypatch.setattr(handle.raw.commands, "run", run)
+            clock[0] += 1.0
+            raise FakeSandboxNotFound(_UNROUTED)
+
+        monkeypatch.setattr(handle.raw.commands, "run", unrouted_for_a_second)
+        handle.raw.wait_outcomes = [ConnectionError("stream lost"), FakeCommandResult(stdout="finished")]
+
+        result = await provider.exec(handle, "make -j8", timeout_s=10)
+
+        assert result.return_code == 0
+        assert handle.raw.exec_calls[0]["timeout"] == 9.0
+        assert handle.raw.exec_calls[0]["request_timeout"] == 9.0
+        # A reattach after the retried start draws on the same deadline.
+        expected_reattaches = [{"pid": 4242, "timeout": 9.0, "request_timeout": 9.0}] if background else []
+        assert handle.raw.connect_calls == expected_reattaches
+
+    async def test_close_retries_until_the_sandbox_is_found(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        sandbox = handle.raw
+        sandbox.kill_outcomes = [False, False]
+
+        await provider.close(handle)
+
+        assert len(sandbox.kill_calls) == 3
+        assert sandbox.killed is True
+        assert handle.raw is None
+
+    async def test_status_of_a_new_unreachable_sandbox_is_unknown(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        handle.raw.running = False
+
+        assert await provider.status(handle) == SandboxStatus.UNKNOWN
+
+    @staticmethod
+    def _health_checks(monkeypatch: pytest.MonkeyPatch, outcomes: list[object]) -> list[dict]:
+        """Make the health check of every sandbox answer ``outcomes`` in turn, then True; return its calls."""
+        calls: list[dict] = []
+
+        async def is_running(self, **kwargs):
+            calls.append(kwargs)
+            outcome = outcomes.pop(0) if outcomes else True
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(FakeSandbox, "is_running", is_running)
+        return calls
+
+    @pytest.mark.parametrize("not_ready", [False, FakeSandboxNotFound(_UNROUTED), FakeTimeout(_UNREACHABLE)])
+    async def test_create_waits_until_the_sandbox_answers_a_health_check(
+        self, monkeypatch: pytest.MonkeyPatch, not_ready: object
+    ) -> None:
+        # The SDK reports a 502 from the health check as False, and other gateway errors as exceptions.
+        calls = self._health_checks(monkeypatch, [not_ready, not_ready])
+        provider = E2BProvider(connection={"request_timeout_s": 12}, create={"template": "base"})
+
+        handle = await provider.create(_spec())
+
+        assert calls == [{"request_timeout": 12}] * 3
+        assert handle.raw.killed is False
+
+    async def test_create_stops_waiting_when_the_grace_period_ends(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: clock[0])
+        calls: list[float] = []
+
+        async def never_reachable(self, **kwargs):
+            calls.append(clock[0])
+            clock[0] += 5.0  # Each health check runs into the gateway's 5 s connect timeout.
+            return False
+
+        monkeypatch.setattr(FakeSandbox, "is_running", never_reachable)
+        provider = E2BProvider(create={"template": "base"})
+
+        handle = await provider.create(_spec())
+
+        # The default 15 s grace period allows three checks; create then returns the sandbox anyway.
+        assert calls == [0.0, 5.0, 10.0]
+        assert handle.raw.killed is False
+
+    async def test_create_does_not_wait_on_other_health_check_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._health_checks(monkeypatch, [ConnectionError("connection reset")])
+        provider = E2BProvider(create={"template": "base"})
+
+        handle = await provider.create(_spec())
+
+        assert len(calls) == 1
+        assert handle.raw.killed is False
+
+    async def test_create_skips_the_health_check_without_a_grace_period(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._health_checks(monkeypatch, [])
+        provider = E2BProvider(create={"template": "base"}, operations={"new_sandbox_grace_s": 0})
+
+        await provider.create(_spec())
+
+        assert calls == []
+
+    async def test_create_cancelled_during_the_wait_kills_the_sandbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._health_checks(monkeypatch, [asyncio.CancelledError()])
+        provider = E2BProvider(create={"template": "base"})
+
+        with pytest.raises(asyncio.CancelledError):
+            await provider.create(_spec())
+
+        # No handle reached the caller, so the provider itself must stop the sandbox.
+        assert [sandbox.killed for sandbox in FakeSandbox.instances] == [True]
 
 
 # --------------------------------------------------------------------------
@@ -1374,6 +1594,7 @@ def test_invalid_network_config_is_rejected(create: dict[str, object], message: 
         ("operations", {"retry_delay_s": None}, "operations.retry_delay_s must be >= 0"),
         ("operations", {"retry_max_delay_s": -1}, "operations.retry_max_delay_s must be >= 0"),
         ("operations", {"retry_max_delay_s": float("nan")}, "operations.retry_max_delay_s must be >= 0"),
+        ("operations", {"new_sandbox_grace_s": -1}, "operations.new_sandbox_grace_s must be >= 0"),
     ],
 )
 def test_invalid_config_values_are_rejected(section: str, config: dict[str, object], message: str) -> None:
@@ -1642,7 +1863,11 @@ async def test_real_sdk_status_only_reads_control_plane(
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
     monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", fake_api)
-    provider = E2BProvider(connection={"api_key": "test-key", "validate_api_key": False}, create={"template": "base"})
+    provider = E2BProvider(
+        connection={"api_key": "test-key", "validate_api_key": False},
+        create={"template": "base"},
+        operations={"new_sandbox_grace_s": 0},
+    )
     handle = await provider.create(_spec())
     requests.clear()
 
