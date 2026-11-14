@@ -200,6 +200,28 @@ def test_a_fresh_restart_from_a_launcher_of_another_revision_is_refused(tmp_path
     assert not (job_dir / ".gym_chain_incomplete").exists()
 
 
+def test_a_driver_run_cut_before_its_inventory_resumes_instead_of_restarting_fresh(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _cut_before_inventory(tmp_path, slurm_bin)
+    # The driver's own passes hold the saved rollouts; only the top-level inventory is absent.
+    (job_dir / "artifacts" / "rollouts_resolved_config.yaml").write_text(
+        "rollout_collection_driver: benchmarks.demo.collection:collect\n"
+    )
+    attempt = job_dir / "artifacts" / "rollouts_recovery" / "attempt-0"
+    attempt.mkdir(parents=True)
+    (attempt / "rollouts.jsonl").write_text('{"_ng_task_index": 0}\n')
+    before = _saved(job_dir)
+
+    out = recover(*_handle(job_dir))
+
+    assert (out.decision.action.value, out.ok, out.dispatched) == ("resubmit", True, "resubmit")
+    assert "benchmarks.demo.collection:collect" in out.decision.reason
+    env = _sbatch_env(slurm_bin)
+    assert env["GYM_RESUBMIT"] == "1" and env["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    assert all(before[path] == digest for path, digest in _saved(job_dir).items() if path in before)
+
+
 def test_the_verdict_of_a_fresh_restart_is_its_own_resubmit_command_not_a_new_submission(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery, recover
 

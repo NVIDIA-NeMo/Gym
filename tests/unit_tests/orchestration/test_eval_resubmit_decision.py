@@ -215,6 +215,40 @@ def test_missing_inventory_is_a_fresh_restart(tmp_path) -> None:
     assert d.action == RecoveryAction.FRESH_RESTART and "inventory" in d.reason
 
 
+def _driver_run_cut_before_its_inventory(tmp_path) -> Path:
+    # A custom driver runs its passes under its own directory and writes the top-level Store when they end.
+    job = tmp_path / "job"
+    art = job / "artifacts"
+    attempt = art / "rollouts_recovery" / "attempt-0"
+    attempt.mkdir(parents=True)
+    (attempt / "rollouts.jsonl").write_text(json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n")
+    (art / "rollouts_resolved_config.yaml").write_text(
+        "rollout_collection_driver: benchmarks.demo.collection:collect\n"
+    )
+    return job
+
+
+def test_a_driver_run_cut_before_its_inventory_resumes_its_saved_attempts(tmp_path) -> None:
+    job = _driver_run_cut_before_its_inventory(tmp_path)
+
+    collected = collect(job)
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.collection_driver == "benchmarks.demo.collection:collect"
+    assert d.action == RecoveryAction.RESUBMIT
+    assert "benchmarks.demo.collection:collect" in d.reason and "fresh" not in d.reason
+
+
+def test_a_run_without_a_driver_or_inventory_is_still_a_fresh_restart(tmp_path) -> None:
+    job = _driver_run_cut_before_its_inventory(tmp_path)
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text("rollout_collection_driver: null\n")
+
+    collected = collect(job)
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.collection_driver is None and d.action == RecoveryAction.FRESH_RESTART
+
+
 class FakeExecutor:
     """Records every dispatch; ``supports_reverify`` stands for an executor with a saved-answer re-judgment path."""
 

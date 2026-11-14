@@ -358,6 +358,19 @@ def test_the_guard_ends_the_chain_after_a_timeout_before_the_task_inventory(tmp_
     # After the inventory a timeout still continues: test_the_guard_continues_a_cut_allocation_from_its_saved_rows.
 
 
+def test_the_guard_continues_a_driver_run_that_timed_out_before_the_task_inventory(tmp_path):
+    # A collection driver keeps its saved attempts under its own directory and writes the inventory when its passes
+    # end, so the missing inventory says nothing about saved work: the next segment resumes it.
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "artifacts" / "rollouts_recovery" / "attempt-0").mkdir(parents=True)
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text(
+        "rollout_collection_driver: benchmarks.demo.collection:collect\n"
+    )
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", elapsed="14400")
+    assert (result.returncode, "REACHED_WORK" in result.stdout) == (0, True), result.stdout + result.stderr
+    assert not (job / ".gym_chain_incomplete").exists()
+
+
 def test_a_preemption_before_the_task_inventory_still_spends_an_infra_retry(tmp_path):
     job = tmp_path / "gym-job-x" / "gsm8k"
     (job / "artifacts").mkdir(parents=True)

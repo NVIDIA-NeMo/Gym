@@ -772,6 +772,16 @@ try:
     mlflow["config_tracking_uri"] = uri if uri and "${" not in uri and uri.lower() not in ("null", "~") else None
 except OSError:
     pass
+# A benchmark that names its own rollout_collection_driver keeps its resumable work where the driver puts it, so the
+# top-level inventory can be absent while hours of saved work exist; an absent, null or interpolated value names none.
+collection_driver = None
+try:
+    driver_match = re.search(r"^rollout_collection_driver:[ \t]*['\"]?([^\s'\"#]+)",
+                             open(os.path.join(a, "rollouts_resolved_config.yaml")).read(), re.MULTILINE)
+    driver_name = driver_match.group(1) if driver_match is not None else None
+    collection_driver = driver_name if driver_name and "${" not in driver_name and driver_name.lower() not in ("null", "~") else None
+except OSError:
+    pass
 quality = None
 try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
@@ -882,6 +892,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
+                  "collection_driver": collection_driver,
                   "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
                   "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.

@@ -214,6 +214,10 @@ class RecoveryAction(StrEnum):
 
 # Gym writes the task inventory before any rollout runs: a run that ended before it saved nothing a resume keeps.
 NO_INVENTORY = "the run ended before the task inventory was written"
+DRIVER_RESUME_REASON = (
+    "the run's collection driver {driver} had not written the top-level task inventory when the run ended; it keeps "
+    "its own saved attempts, so resubmit resumes them"
+)
 FRESH_RESTART_REASON = f"nothing to recover: {NO_INVENTORY}; resubmit it as a fresh run with a longer walltime"
 
 
@@ -1745,6 +1749,9 @@ class CollectedEvidence(BaseModel):
     score: float | None = None
     mlflow: dict[str, Any] | None = None
     managed_store: bool = False
+    # The ``rollout_collection_driver`` the saved config names, or None. A driver keeps its resumable work where it
+    # chooses, so the absence of the top-level inventory is no proof that nothing was saved.
+    collection_driver: str | None = None
     source_digests: dict[str, str | None] | None = None
     # Job-dir accounting file -> sha256 (None when absent) at collection, plus the saved resume_config.
     accounting_snapshot: dict[str, str | None] | None = None
@@ -2335,6 +2342,18 @@ def _decide_from_collected(
             **unread,
         )
     if collected.materialized is None:
+        if live_job is False and collected.collection_driver and not collected.results and not collected.failures:
+            # The driver runs its own passes and writes the top-level Store when they end, so a run it did not finish
+            # has no inventory here while its attempts hold the saved work. Its resume (``resume_from_cache``) is
+            # what continues them; a fresh restart would resume the same way under a fresh budget and a false reason.
+            return RecoveryDecision(
+                action=RecoveryAction.RESUBMIT,
+                reason=DRIVER_RESUME_REASON.format(driver=collected.collection_driver),
+                expected=0,
+                counts={},
+                identities={},
+                evidence=[],
+            )
         if live_job is False and not collected.results and not collected.failures:
             return RecoveryDecision(
                 action=RecoveryAction.FRESH_RESTART,
