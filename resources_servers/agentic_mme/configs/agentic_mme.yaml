@@ -30,10 +30,29 @@ agentic_mme_agent:
         jsonl_fpath: resources_servers/agentic_mme/data/example.jsonl
         num_repeats: 1
 
-agentic_mme_agent_environment_server:
+# Each episode runs through the single-agent-turn Environment Server: it seeds the resources and agent sessions,
+# runs one agent turn, verifies, and closes both sessions. The Environment Server names its resources server itself;
+# every pairing in benchmarks/agentic_mme/ inherits this binding. The agent runs its image tools itself, so it
+# receives no resources tools. Under an agent session, retrieval.mode=replay is refused, because the replay list is a
+# field of the task row that the session does not receive.
+agentic_mme_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agentic_mme
       agent_server:
         type: responses_api_agents
         name: agentic_mme_agent
+      # A model call refused for its context or request size is the model's own result and scores 0, as on the agent's
+      # /run. A call the deployment refuses for another reason, such as vLLM's per-prompt image limit or an unsupported
+      # parameter, is not: the rollout fails ungraded instead of scoring 0. OpenCode and the Agentic-MME agent report a
+      # context limit as model_context_limit; simple_agent reports it as a plain 400, which this also fails ungraded.
+      agent_outcome_policy:
+        by_failure_kind:
+          model_context_limit: verify
+        by_status_code:
+          400: fail
+          413: fail
+          422: fail

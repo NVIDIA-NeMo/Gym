@@ -4,6 +4,11 @@
       "pyarrow>=25.0.1,<26"
     ]
   },
+  "resources_servers/agentic_mme": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "resources_servers/code_fim": {
     "override-dependencies": [
       "pathspec"
@@ -84,7 +89,7 @@
   },
   "responses_api_agents/agentic_mme_agent": {
     "override-dependencies": [
-      "opencv-python-headless>=4.10"
+      "opencv-python-headless==5.0.0.93"
     ]
   },
   "responses_api_agents/harbor_agent": {

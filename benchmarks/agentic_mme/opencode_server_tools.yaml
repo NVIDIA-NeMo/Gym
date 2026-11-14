@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic-MME with OpenCode and the 14 image tools on the resources server. The resources server lends OpenCode an
+# empty sandbox, with no task images in it, and serves the tools over MCP. Each tool reply returns its new image as
+# MCP image content, which OpenCode passes on to the model. OpenCode's own shell, file and web tools are off, so the
+# model works only through the 14 tools, with the same prompt as config.yaml. Its scores should compare with that
+# track. Web search is off.
+#
+# Needs what opencode.yaml needs. The sandbox must also reach the resources server's /mcp route, so a run with a
+# remote sandbox provider sets ++use_absolute_ip=true and
+# '++absolute_ip_server_types=[responses_api_models,resources_servers]'.
+config_paths:
+  - benchmarks/agentic_mme/opencode.yaml
+
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      # OpenCode calls this server's /mcp from the sandbox, so it takes the reachable address (absolute_ip_server_types
+      # or a launcher's default_host) instead of opencode.yaml's 127.0.0.1.
+      host: null
+      serve_image_tools: true
+      task_images_in_sandbox: false
+      expose_tools_over_mcp: true
+      # OpenCode in the lent sandbox calls the image tools on this server's /mcp, so the sandbox reaches this server's
+      # host as well as the policy model's.
+      sandbox_network_access: model_and_tools
+
+agentic_mme_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      description: Agentic-MME with OpenCode and the 14 image tools served over MCP
+      # Repeated from opencode.yaml: the dataset schema check reads each file's own agent block.
+      resources_server:
+        type: resources_servers
+        name: agentic_mme
+      # OpenCode connects to the resources server's /mcp at session start and gives up after its default 30 s.
+      # With 32 sessions starting at once, 33 of 836 rollouts timed out there and
+      # failed unscored. The same limit applies to each tool call; the image tools answer in well under a second.
+      mcp_tool_timeout_seconds: 120
+      opencode_config:
+        # OpenCode's built-in tools in 1.17.11; edit also covers write and apply_patch. The MCP tools stay on.
+        tools:
+          bash: false
+          read: false
+          glob: false
+          grep: false
+          edit: false
+          todowrite: false
+          skill: false
+          question: false
+          lsp: false
+          plan_exit: false
+      datasets:
+        - name: agentic_mme_opencode_server_tools
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_opencode_server_tools_benchmark.jsonl
+          prepare_script: benchmarks/agentic_mme/prepare_opencode_server_tools.py
+          prepare_project: resources_servers/agentic_mme
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/agentic_mme/data/example_opencode_server_tools.jsonl
+          num_repeats: 1
+
+agentic_mme_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports:
+        - mcp

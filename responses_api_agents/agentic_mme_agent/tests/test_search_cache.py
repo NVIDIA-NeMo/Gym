@@ -7,11 +7,11 @@ import os
 import pytest
 from PIL import Image
 
+from resources_servers.agentic_mme.image_tools import ImageWorkspace
 from responses_api_agents.agentic_mme_agent import retrieval
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval, RetrievalConfig
 from responses_api_agents.agentic_mme_agent.search_cache import SearchCache, normalize_query, shared_cache
 from responses_api_agents.agentic_mme_agent.sqlite_fuzzy_index import build_master_db, master_db_path
-from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace
 
 
 def _seed(root, query, results):

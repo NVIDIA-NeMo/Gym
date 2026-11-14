@@ -54,10 +54,23 @@ retrieval).
   error, timeout, lost connection, unreadable reply) raises out of `/run`, and a failed judge call is masked by
   `judge_failsafe`. Both go to the failures sidecar (`agent_run_error` / `judge_failed`) and are retried or regraded
   on resume. To keep a fixed denominator, count what still fails as 0 in the metrics with
-  `count_failure_classes_as_zero`.
+  `count_failure_classes_as_zero`. Under an agent session, which every config here uses, the harness reports the
+  failed call and the Environment Server's `agent_outcome_policy` (in
+  `resources_servers/agentic_mme/configs/agentic_mme.yaml`) applies the same rule: a context-limit refusal
+  (`model_context_limit`) scores 0, another refused request (400, 413, 422) fails the rollout ungraded, and a
+  retryable status or a lost connection is retried. `simple_agent` reports a context limit as a plain 400, so in
+  `server_tools.yaml` that rollout fails ungraded too.
 - **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the
   episode ends when the model answers without a tool call or when a model call is refused. Set both to restore the
   component default of 15.
+- **Harness step limits:** a harness with its own step limit, such as OpenCode's `agent.build.steps`, marks a
+  response whose prompt reached that limit (`harness_step_limit_reached`). OpenCode then asks for a final answer but
+  still offers the tools. The resources server's `score_step_limit_answer` decides whether that answer counts. Its
+  default, `false`, scores it 0, the same as the Agentic-MME agent's 0 for an episode that runs out of tool rounds;
+  the share of marked rollouts shows as `step_limit_reached`. To match the Agentic-MME agent's 15 rounds plus one
+  answer call, set `agent.build.steps: 17`, so the answer must come by call 16. In a GRPO test that scored the answer
+  at the limit, the share of rollouts that reached the limit grew from under 1% to about half within 22 steps. With
+  the default, almost no rollout reached it in the first 10 steps.
 - **Images per request:** every image stays in every later model request. `max_images_per_request` is off by
   default; with a serving engine that limits images per prompt (vLLM `limit_mm_per_prompt.image`), set it to that
   limit, or serve with a limit of at least the input images plus `max_tool_calls`. An image tool call past the limit

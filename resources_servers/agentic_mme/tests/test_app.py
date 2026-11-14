@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import Request
+from fastapi.testclient import TestClient
 
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime.base_server import ServerClient
@@ -40,6 +41,11 @@ def response(text: str = "", output: list | None = None) -> NeMoGymResponse:
             ],
         }
     )
+
+
+def no_session() -> Request:
+    """A verify request that carries no session cookie, as from an agent's /run."""
+    return Request({"type": "http", "session": {}})
 
 
 @pytest.fixture
@@ -90,10 +96,15 @@ async def test_grading(server, text, golden, reward) -> None:
         response=response(text),
         verifier_metadata={"golden_answer": golden},
     )
-    result = await server.verify(body)
+    result = await server.verify(no_session(), body)
     assert result.reward == reward
     assert result.evaluation_track == "task_only"
     assert bool(result.failure_reason) == (reward == 0)
+    # A task without a usable gold answer is not graded: its row is masked instead of counted as wrong.
+    ungraded = result.failure_reason == "invalid_golden_answer"
+    assert result.mask_sample == ungraded
+    assert result.evaluation_completed == (not ungraded)
+    assert result.failure_kind == ("verifier_error" if ungraded else None)
 
 
 @pytest.mark.asyncio
@@ -105,11 +116,48 @@ async def test_terminal_tool_and_incomplete_do_not_score(server) -> None:
         response=response(output=output),
         verifier_metadata={"golden_answer": {"value": "blue"}},
     )
-    assert (await server.verify(body)).reward == 0
+    assert (await server.verify(no_session(), body)).reward == 0
     body.response = NeMoGymResponse.model_validate(
         response("blue").model_dump() | {"incomplete_details": {"reason": "max_output_tokens"}}
     )
-    assert (await server.verify(body)).failure_reason == "incomplete_response"
+    assert (await server.verify(no_session(), body)).failure_reason == "incomplete_response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("score_step_limit_answer", "marked", "reward", "reason"),
+    [
+        (True, True, 1.0, None),
+        (False, True, 0.0, "step_limit_reached"),
+        (False, False, 1.0, None),
+    ],
+)
+async def test_step_limit_answer(judged_server, monkeypatch, score_step_limit_answer, marked, reward, reason) -> None:
+    """An answer at or after the harness's step limit scores 0, unjudged and unmasked, unless configured to count."""
+    judge_calls = []
+
+    async def fake_call_judge(client, *, server_name, url_path, json, response_model):
+        judge_calls.append(server_name)
+        return completion('{"verdict": "equivalent", "reason": "same"}')
+
+    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
+    judged_server.config.score_step_limit_answer = score_step_limit_answer
+    body = judged_request("<answer>44.6 million</answer>")
+    if marked:
+        body.response = body.response.model_copy(update={"metadata": {"harness_step_limit_reached": "true"}})
+    result = await judged_server.verify(no_session(), body)
+    assert result.reward == reward
+    assert result.failure_reason == reason
+    assert result.mask_sample is False
+    assert result.step_limit_reached == (1.0 if marked else 0.0)
+    assert bool(judge_calls) == (reward == 1.0)
+
+
+def test_step_limit_answer_scores_zero_by_default() -> None:
+    """Agentic-MME's own agent scores an episode that runs out of rounds as 0, so the default matches it."""
+    from resources_servers.agentic_mme.app import AgenticMMEConfig
+
+    assert AgenticMMEConfig.model_fields["score_step_limit_answer"].default is False
 
 
 def completion(content: str):
@@ -169,44 +217,64 @@ def judged_request(
         ('{"verdict": "equivalent", "confidence": 0.9, "reason": "same amount"}', 1.0),
         ('```json\n{"verdict": "different", "reason": "other number"}\n```', 0.0),
         ('{"verdict": "unsure"}', 0.0),
-        ("not json", 0.0),
+        # A brace ahead of the verdict object, as a reasoning judge that quotes the model's answer writes.
+        ('<think>It wrote {44.6M}.</think>{"verdict": "equivalent", "reason": "same amount"}', 1.0),
     ],
 )
 async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward) -> None:
     seen = {}
 
     async def fake_call_judge(client, *, server_name, url_path, json, response_model):
-        seen.update(server_name=server_name, url_path=url_path, messages=json["messages"])
+        seen.update(server_name=server_name, url_path=url_path, messages=json["messages"], model=json.get("model"))
         return completion(verdict)
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
     # String match fails (exact), so any reward comes from the judge.
-    result = await judged_server.verify(judged_request("<answer>$44.6M</answer>"))
+    result = await judged_server.verify(no_session(), judged_request("<answer>$44.6M</answer>"))
     assert result.reward == reward
     assert result.string_match_reward == 0.0
     assert seen["server_name"] == "judge" and seen["url_path"] == "/v1/chat/completions"
+    # The judge's model server picks the model.
+    assert seen["model"] is None
     user = seen["messages"][1]["content"]
     assert "How much was it sold for?" in user and "44.6 million" in user and "$44.6M" in user
     assert "base64" not in user
     assert result.failure_reason == (None if reward else "incorrect_answer")
 
 
-@pytest.mark.asyncio
-async def test_judge_error_goes_to_failures_sidecar(judged_server, monkeypatch) -> None:
-    from nemo_gym.verification import JudgeError, judge_failsafe
+@pytest.mark.parametrize(
+    "judge_reply",
+    [
+        "judge down",
+        "no choices",
+        "not json",
+        '{"verdict": "maybe"}',
+        '{"reason": "no verdict"}',
+        # Verdict objects that disagree: taking the first would score a quoted "equivalent" as correct.
+        '<think>It says {"verdict": "equivalent"}, but 44 is not 45.</think>{"verdict": "different"}',
+    ],
+)
+def test_a_judge_failure_masks_the_row_instead_of_scoring_zero(judged_server, monkeypatch, judge_reply) -> None:
+    from nemo_gym.verification import JudgeError
 
-    async def failing_call_judge(*args, **kwargs):
-        raise JudgeError("judge down")
+    async def call_judge(*args, **kwargs):
+        if judge_reply == "judge down":
+            raise JudgeError("judge down")
+        if judge_reply == "no choices":
+            return completion("").model_copy(update={"choices": []})
+        return completion(judge_reply)
 
-    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", failing_call_judge)
-    request = judged_request("<answer>44.6 million</answer>")
-    with pytest.raises(JudgeError):
-        await judged_server.verify(request)
-    # The base server wraps /verify in judge_failsafe: the row is masked and kept for regrading.
-    routed = json.loads((await judge_failsafe(judged_server.verify)(body=request)).body)
-    assert routed["reward"] == 0.0 and routed["mask_sample"] is True
-    assert routed["failure_kind"] == "judge_failed" and routed["_ng_failure_class"] == "judge_failed"
-    assert routed["response"]["output"][0]["content"][0]["text"] == "<answer>44.6 million</answer>"
+    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", call_judge)
+    client = TestClient(judged_server.setup_webserver())
+
+    reply = client.post("/verify", json=judged_request("<answer>44.6 million</answer>").model_dump(mode="json"))
+
+    assert reply.status_code == 200, reply.text
+    row = reply.json()
+    # The base class's judge_failsafe masks the row and sends it to the failures sidecar.
+    assert row["mask_sample"] is True and row["reward"] == 0.0
+    assert row["failure_kind"] == "judge_failed"
+    assert row["_ng_failure_class"] == "judge_failed"
 
 
 @pytest.mark.asyncio
@@ -215,7 +283,7 @@ async def test_judge_skipped_without_answer(judged_server, monkeypatch) -> None:
         raise AssertionError("judge must not be called without an answer")
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", unexpected_call)
-    result = await judged_server.verify(judged_request("<answer></answer>"))
+    result = await judged_server.verify(no_session(), judged_request("<answer></answer>"))
     assert result.reward == 0.0 and result.failure_reason == "missing_answer"
 
 
@@ -239,7 +307,9 @@ async def test_judge_sees_numeric_tolerance(judged_server, monkeypatch, golden, 
         return completion('{"verdict": "equivalent"}')
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
-    result = await judged_server.verify(judged_request("<answer>7600 km</answer>", golden=golden, metadata=metadata))
+    result = await judged_server.verify(
+        no_session(), judged_request("<answer>7600 km</answer>", golden=golden, metadata=metadata)
+    )
     assert result.reward == 1.0
     if shown:
         assert shown in seen["user"]

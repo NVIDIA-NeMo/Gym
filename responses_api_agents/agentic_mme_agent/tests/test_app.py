@@ -11,7 +11,8 @@ from PIL import Image
 
 from nemo_gym.server_runtime.base_server import ServerClient
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
-from resources_servers.agentic_mme.tests.test_app import response
+from resources_servers.agentic_mme.image_tools import image_data_url
+from resources_servers.agentic_mme.tests.test_app import no_session, response
 from responses_api_agents.agentic_mme_agent.app import (
     AgenticMMEAgent,
     AgenticMMEAgentConfig,
@@ -19,7 +20,6 @@ from responses_api_agents.agentic_mme_agent.app import (
     PolicyRequestError,
 )
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
-from responses_api_agents.agentic_mme_agent.tools import image_data_url
 
 
 class FakeResponse:
@@ -54,7 +54,7 @@ def make_agent(outputs, **config):
 
     async def post(**kwargs):
         if kwargs["url_path"] == "/verify":
-            result = await grader.verify(AgenticMMEVerifyRequest.model_validate(kwargs["json"]))
+            result = await grader.verify(no_session(), AgenticMMEVerifyRequest.model_validate(kwargs["json"]))
             return FakeResponse(result.model_dump())
         seen.append(kwargs["json"].model_dump())
         return FakeResponse(pending.pop(0).model_dump(), {"model-session": "test"})

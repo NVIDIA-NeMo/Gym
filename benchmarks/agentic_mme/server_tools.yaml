@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic-MME with the 14 image tools on the resources server, run by simple_agent in place of the Agentic-MME agent.
+# Each episode's seed loads the task images into a workspace on the resources server. simple_agent calls the tools
+# over HTTP, and each tool reply carries its new image under tool_output_images, which simple_agent shows the model in
+# a user message after the turn's tool outputs, as the Agentic-MME agent does. The prompt and tools are the same as in
+# config.yaml, so its scores should match that track. Web search is off.
+#
+# prepare.py writes the images under benchmarks/agentic_mme/data/images; for the example rows set
+# AGENTIC_MME_IMAGE_ROOT=resources_servers/agentic_mme/data/example_images.
+config_paths:
+  - benchmarks/agentic_mme/config.yaml
+
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      allowed_agents: [simple_agent]
+      serve_image_tools: true
+      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}
+
+# Drop the Agentic-MME agent; the environment server below runs simple_agent instead.
+agentic_mme_agent: null
+
+agentic_mme_server_tools_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agentic_mme
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: agentic_mme_server_tools
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_server_tools_benchmark.jsonl
+          prepare_script: benchmarks/agentic_mme/prepare_server_tools.py
+          prepare_project: resources_servers/agentic_mme
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/agentic_mme/data/example_server_tools.jsonl
+          num_repeats: 1
+
+agentic_mme_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: agentic_mme_server_tools_agent
+      resources_tool_transports:
+        - direct_http

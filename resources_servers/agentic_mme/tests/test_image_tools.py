@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFilter, ImageOps
 
-from responses_api_agents.agentic_mme_agent.tools import (
+from resources_servers.agentic_mme.image_tools import (
     IMAGE_TOOLS,
     MAX_MODEL_IMAGE_PIXELS,
     ImageWorkspace,
