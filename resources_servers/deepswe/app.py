@@ -188,6 +188,8 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    # Set when the tests did not finish within this limit (seconds) on the model's patch, which scores 0.
+    verifier_timeout_s: float | None = None
 
     f2p_total: int = 0
     f2p_passed: int = 0
@@ -218,6 +220,8 @@ class VerifierResult(BaseModel):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    # The test command's limit in seconds when the tests did not finish within it on the model's patch (scored 0).
+    verifier_timeout_s: float | None = None
     test_output: str | None = None
     f2p_total: int = 0
     f2p_passed: int = 0
@@ -467,6 +471,17 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         log_dir.mkdir(parents=True, exist_ok=True)
         combined_output = (command_result.stdout or "") + (command_result.stderr or "")
 
+        if command_result.error_type == "timeout" and not self.config.is_verifying_golden_patch:
+            # The tests did not finish on the model's patch within the task's limit, so the task is not resolved: a
+            # patch that hangs the tests scores 0 like one that fails them. Only a sandbox-confirmed deadline counts.
+            # A golden patch that cannot finish means the task itself is broken, so that case below stays ungraded.
+            return VerifierResult(
+                evaluation_completed=True,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_timeout_s=task.config.verifier.timeout_sec,
+                test_output=combined_output,
+            )
         if command_result.error_type == "timeout":
             return VerifierResult(
                 evaluation_completed=False,

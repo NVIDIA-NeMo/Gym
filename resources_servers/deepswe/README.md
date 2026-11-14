@@ -30,6 +30,11 @@ run) is run again on a fresh sandbox with the same collected patch, at most `inc
 malformed verdict, a timeout and a conclusive result are not run again, and a patch that breaks the test script stays
 an inconclusive, masked result after the bound as before.
 
+Tests that do not finish within the task's verifier limit (`verifier.timeout_sec`, a deadline the sandbox provider
+confirms) leave the task unresolved: the model's patch scores 0, and `verifier_timeout_s` records the limit it hit. In
+golden-patch mode the same timeout stays an inconclusive, masked result, because the reference patch should always
+finish.
+
 ## Oracle checkpoint
 
 Start the resources server with golden-patch mode enabled:
