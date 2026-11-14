@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Dict, List
@@ -24,17 +25,23 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from aiohttp import ClientResponseError, RequestInfo
+from fastapi.testclient import TestClient
 from frontier_finance.metrics import MetricsReport
 from frontier_finance.models import ItemResult, Rubric
 from frontier_finance.prompts import RubricPrompt
+from multidict import CIMultiDict
 from pydantic import ValidationError
+from yarl import URL
 
+from benchmarks.frontier_finance import prepare as frontier_finance_prepare
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import JUDGE_FAILED, VERIFIER_ERROR, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2ResourcesServer,
     FinanceAgentV2ResourcesServerConfig,
+    FinanceAgentV2RunRequest,
     FinanceAgentV2SeedSessionRequest,
     FinanceAgentV2VerifyRequest,
     cap_tool_dates,
@@ -157,6 +164,29 @@ def _batch_rubric_texts(user_prompt: str) -> List[str]:
     return [m.group(1) for m in re.finditer(r"^\d+\. (.*)$", block, flags=re.MULTILINE)]
 
 
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+def _http_error_response(status: int):
+    url = URL("http://judge/v1/responses")
+    error = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDict(), url), (), status=status, message="error", headers=CIMultiDict()
+    )
+
+    async def read() -> bytes:
+        return b""
+
+    class _Response:
+        ok = False
+        content = SimpleNamespace(read=read)
+
+        def raise_for_status(self) -> None:
+            raise error
+
+    return _Response()
+
+
 def _labels_reply(labels: List[bool]) -> str:
     return json.dumps({str(i): {"reason": "r", "label": label} for i, label in enumerate(labels)})
 
@@ -268,9 +298,76 @@ class TestDateCap:
         await server._dispatch_tool("calculator", _request("b"), {"expression": "1+1"})
         assert calls == ["calculator", "calculator", "submit_final_result", "calculator"]
 
+        server._end_session("a")
         await server.seed_session(_request("a"), FinanceAgentV2SeedSessionRequest())
         await server._dispatch_tool("calculator", _request("a"), {"expression": "1+1"})
         assert calls[-1] == "calculator" and len(calls) == 5
+
+    async def test_reseeding_a_live_session_keeps_cap_and_budgets(self) -> None:
+        server = _make_server(max_tool_calls=1)
+        seen: List[dict] = []
+
+        async def execute(args, state, logger):
+            seen.append(args)
+            return SimpleNamespace(output="ok")
+
+        server._tools["web_search"] = SimpleNamespace(execute=execute)
+        await server.seed_session(_request("a"), FinanceAgentV2SeedSessionRequest(as_of_date="2025-06-23"))
+        await server._dispatch_tool("web_search", _request("a"), {"query": "x", "end_date": "2026-01-01"})
+
+        for reseed in (FinanceAgentV2SeedSessionRequest(), FinanceAgentV2SeedSessionRequest(as_of_date="2099-01-01")):
+            await server.seed_session(_request("a"), reseed)
+            assert server._as_of_dates["a"] == "2025-06-23"
+            blocked = await server._dispatch_tool("web_search", _request("a"), {"query": "x"})
+            assert "Tool call limit reached (1 / 1)" in blocked["results"]
+        assert seen == [{"query": "x", "end_date": "2025-06-23"}]
+        assert server._tool_usage("a")["tool_limit_hit"] == "max_tool_calls"
+
+    async def test_tool_finishing_after_session_end_leaves_no_state(self) -> None:
+        server = _make_server()
+        release = asyncio.Event()
+
+        async def execute(args, state, logger):
+            await release.wait()
+            return SimpleNamespace(output="ok")
+
+        server._tools["web_search"] = SimpleNamespace(execute=execute)
+        await server.seed_session(_request("a"), FinanceAgentV2SeedSessionRequest())
+        pending = asyncio.create_task(server._dispatch_tool("web_search", _request("a"), {"query": "x"}))
+        await asyncio.sleep(0)
+        server._end_session("a")
+        release.set()
+        await pending
+        for state in (
+            server._tool_seconds,
+            server._tool_call_counts,
+            server._tools_running,
+            server._tools_busy_since,
+            server._data_storage,
+        ):
+            assert "a" not in state
+
+    async def test_overlapping_tool_calls_count_wall_clock_time_once(self, monkeypatch) -> None:
+        server = _make_server(max_tool_time_seconds=10)
+        clock = {"now": 0.0}
+        monkeypatch.setattr("resources_servers.finance_agent_v2.app.time.monotonic", lambda: clock["now"])
+        release = asyncio.Event()
+
+        async def execute(args, state, logger):
+            await release.wait()
+            return SimpleNamespace(output="ok")
+
+        server._tools["web_search"] = SimpleNamespace(execute=execute)
+        await server.seed_session(_request("a"), FinanceAgentV2SeedSessionRequest())
+        calls = [
+            asyncio.create_task(server._dispatch_tool("web_search", _request("a"), {"query": "x"})) for _ in range(3)
+        ]
+        await asyncio.sleep(0)
+        clock["now"] += 4
+        assert server._tool_time_used("a") == 4
+        release.set()
+        await asyncio.gather(*calls)
+        assert server._tool_seconds["a"] == 4
 
     async def test_tool_time_limit_counts_only_tool_time(self, monkeypatch) -> None:
         server = _make_server(max_tool_time_seconds=10)
@@ -286,7 +383,7 @@ class TestDateCap:
 
             return SimpleNamespace(execute=execute)
 
-        server._tools["web_search"] = fake_tool("web_search", 6)
+        server._tools["web_search"] = fake_tool("web_search", 5)
         server._tools["submit_final_result"] = fake_tool("submit_final_result", 0)
         await server.seed_session(_request("a"), FinanceAgentV2SeedSessionRequest())
 
@@ -294,14 +391,14 @@ class TestDateCap:
         clock["now"] += 1000
         await server._dispatch_tool("web_search", _request("a"), {"query": "x"})
         blocked = await server._dispatch_tool("web_search", _request("a"), {"query": "x"})
-        assert "Tool time limit reached (12s / 10s)" in blocked["results"]
+        assert "Tool time limit reached (10s / 10s)" in blocked["results"]
         await server._dispatch_tool("submit_final_result", _request("a"), {"final_result": "x"})
         assert calls == ["web_search", "web_search", "submit_final_result"]
 
-    async def test_seed_rejects_malformed_date(self) -> None:
-        server = _make_server()
-        with pytest.raises(ValueError):
-            await server.seed_session(_request(), FinanceAgentV2SeedSessionRequest(as_of_date="06/23/2025"))
+    @pytest.mark.parametrize("as_of_date", ["06/23/2025", "20250623", "2025-02-30", ""])
+    def test_seed_rejects_malformed_date(self, as_of_date) -> None:
+        with pytest.raises(ValidationError):
+            FinanceAgentV2SeedSessionRequest(as_of_date=as_of_date)
 
 
 class TestVerify:
@@ -326,6 +423,58 @@ class TestVerify:
         assert result.judge_labels["claude"] is None
         assert result.failed_checks_by_judge == {"claude": 2}
         assert not result.mask_sample
+
+    async def test_tie_goes_to_first_surviving_judge_when_it_says_true(self, judges) -> None:
+        judges(claude=_raise, gemini=_all(True), gpt=_all(False))
+        result = await _make_server().verify(_request(), _verify_request(_rubrics(2)))
+        assert result.rubric_labels == [True, True]
+
+    @pytest.mark.parametrize(
+        ("error_cause", "failure_kind"),
+        [("model_call_failed", "model_request_error"), ("tool_aborted", "environment_server_failed")],
+    )
+    async def test_policy_or_tool_outage_masks_the_sample(self, judges, error_cause, failure_kind) -> None:
+        fake = judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
+        request = _verify_request(_rubrics(1))
+        request.response = _response("A", stop_reason="error")
+        request.response.metadata["error_cause"] = error_cause
+        result = await _make_server().verify(_request(), request)
+        assert (result.mask_sample, result.failure_kind) == (True, failure_kind)
+        assert all(not prompts for prompts in fake.prompts.values())
+
+    async def test_context_overflow_is_a_scored_failure(self, judges) -> None:
+        judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
+        request = _verify_request(_rubrics(1))
+        request.response = _response("A", stop_reason="error")
+        request.response.metadata["error_cause"] = "context_overflow"
+        result = await _make_server().verify(_request(), request)
+        assert not result.mask_sample
+        assert (result.reward, result.grading_failure) == (0.0, "no_response")
+
+    def test_seed_tool_call_and_verify_over_http(self, judges) -> None:
+        judges(claude=_all(True), gemini=_all(True), gpt=_all(False))
+        server = _make_server(max_tool_calls=5)
+        seen: List[dict] = []
+
+        async def execute(args, state, logger):
+            seen.append(args)
+            return SimpleNamespace(output="ok")
+
+        server._tools["web_search"] = SimpleNamespace(execute=execute)
+        row = _verify_request(_rubrics(2)).model_dump(mode="json")
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json={**row, "as_of_date": "20250623"}).status_code == 422
+            assert client.post("/seed_session", json=row).status_code == 200
+            assert client.post("/web_search", json={"query": "x", "end_date": "2026-01-01"}).status_code == 200
+            reply = client.post("/verify", json=row)
+
+        assert reply.status_code == 200
+        assert seen == [{"query": "x", "end_date": "2025-06-23"}]
+        body = reply.json()
+        assert body["rubric_labels"] == [True, True]
+        assert body["judge_labels"]["gpt"] == [False, False]
+        assert (body["tool_calls_used"], body["tool_limit_hit"]) == (1, None)
+        assert body["reward"] == 1.0
 
     async def test_all_judges_failing_masks_the_sample(self, judges) -> None:
         judges(claude=_raise, gemini=_raise, gpt=_raise)
@@ -418,6 +567,8 @@ class TestVerify:
         server = _make_server(judge_call_timeout=0.05)
 
         class _StalledResponse:
+            ok = True
+
             async def read(self):
                 await asyncio.sleep(3600)
 
@@ -427,14 +578,50 @@ class TestVerify:
         server.server_client.post = post
         judge = server.config.frontier_finance_grader.judge_panel[0]
         params = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1)
+        start = time.monotonic()
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(server._frontier_finance_grader._judge_call(judge, params), timeout=5)
+        assert time.monotonic() - start < 1
+
+    @pytest.mark.parametrize(("status", "attempts"), [(401, 1), (404, 1), (429, 3), (503, 3)])
+    async def test_judge_retries_only_transient_http_errors(self, monkeypatch, status, attempts) -> None:
+        server = _make_server(judge_max_retries=2)
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        posts = []
+
+        async def post(**kwargs):
+            posts.append(kwargs)
+            return _http_error_response(status)
+
+        server.server_client.post = post
+        judge = server.config.frontier_finance_grader.judge_panel[0]
+        with pytest.raises(Exception) as excinfo:
+            await server._frontier_finance_grader._judge_complete(judge, "system", "user")
+        assert getattr(excinfo.value, "http_status", None) == status
+        assert len(posts) == attempts
 
     async def test_no_rubrics_masks_the_sample(self, judges) -> None:
         judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
         result = await _make_server().verify(_request(), _verify_request([]))
         assert result.mask_sample is True
         assert result.failure_kind == VERIFIER_ERROR
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"max_rubrics_per_call": 0},
+            {"judge_call_timeout": 0},
+            {"judge_max_output_tokens": 0},
+            {"judge_thread_pool_size": 0},
+            {"judge_max_retries": -1},
+            {"max_json_parse_retries": -1},
+            {"max_tool_calls": 0},
+            {"max_tool_time_seconds": 0},
+        ],
+    )
+    def test_rejects_non_positive_settings(self, override) -> None:
+        with pytest.raises(ValidationError):
+            _make_server(**override)
 
     def test_rejects_empty_or_duplicate_panel(self) -> None:
         with pytest.raises(ValueError):
@@ -498,6 +685,37 @@ class TestMetrics:
         assert result.failed and result.failure_reason == "judge_error"
         assert result.labels == [] and result.num_rubrics == 4
 
+    def test_rollout_that_never_reached_verify_is_a_failed_query(self) -> None:
+        bare_row = {"reward": 0.0, "response": {"metadata": {"stop_reason": "error"}}}
+        result = item_result_from_rollout(bare_row)
+        assert result.failed and result.failure_reason == "no_response"
+        metrics = frontier_finance_metrics([_row("a", [True, True]), bare_row])
+        assert metrics["frontier_finance/num_failed_queries"] == 1
+        assert metrics["frontier_finance/macro_avg_qualification_rate_on_success_queries"] == pytest.approx(1.0)
+
+    def test_tool_limit_and_stop_reason_shares(self) -> None:
+        rows = [
+            {
+                **_row("a", [True]),
+                "tool_limit_hit": "max_tool_time_seconds",
+                "response": {"metadata": {"stop_reason": "done_tool"}},
+            },
+            {**_row("b", [False]), "response": {"metadata": {"stop_reason": "max_turns"}}},
+        ]
+        metrics = frontier_finance_metrics(rows)
+        assert metrics["frontier_finance/tool_limit_hit_rate/max_tool_time_seconds"] == 0.5
+        assert metrics["frontier_finance/tool_limit_hit_rate/max_tool_calls"] == 0.0
+        assert metrics["frontier_finance/stop_reason/done_tool"] == 0.5
+        assert metrics["frontier_finance/stop_reason/max_turns"] == 0.5
+
+    def test_key_metrics_report_failed_checks_per_judge(self) -> None:
+        server = _make_server()
+        row = {**_row("a", [True, True]), "failed_checks_by_judge": {"gpt": 2}}
+        key = server.get_key_metrics(server.compute_metrics([[row]]))
+        assert key["frontier_finance/failed_checks/gpt"] == 2
+        assert key["frontier_finance/macro_avg_qualification_rate_on_all_queries"] == pytest.approx(1.0)
+        assert key["frontier_finance/num_failed_queries"] == 0
+
     def test_repeat_metrics_are_the_headline_rates(self) -> None:
         server = _make_server()
         repeat = server.compute_repeat_metrics([[_row("a", [True, False])], [_row("b", [True, True])]])
@@ -545,6 +763,30 @@ class TestTaskData:
                 field.is_required(),
                 field.get_default(call_default_factory=True),
             ), name
+
+    def test_prepared_row_parses_as_every_server_request(self) -> None:
+        source = {
+            "query_id": "q1",
+            "query": "What did ACME report?",
+            "query_date": "20250623",
+            "use_cases": ["company_research"],
+            "capabilities": ["fact_lookup"],
+            "rubrics": [{"rubric_id": 1, "rubric_text": "A.", "must_have": True, "rubric_type": "Factual"}],
+        }
+        row = frontier_finance_prepare.convert_row(source, frontier_finance_prepare.build_tools())
+        run = FinanceAgentV2RunRequest.model_validate(row)
+        verify = FinanceAgentV2VerifyRequest.model_validate({**row, "response": _response("x").model_dump()})
+        seed = FinanceAgentV2SeedSessionRequest.model_validate(row)
+        TaskData.model_validate({k: v for k, v in row.items() if k != "responses_create_params"})
+        for request in (run, verify):
+            assert (request.query_id, request.question, request.as_of_date) == (
+                "q1",
+                "What did ACME report?",
+                "2025-06-23",
+            )
+            assert request.use_cases == ["company_research"]
+            assert [(r.rubric_id, r.must_have, r.rubric_type) for r in request.rubrics] == [(1, True, "Factual")]
+        assert seed.as_of_date == "2025-06-23"
 
     def test_rejects_malformed_rubric(self) -> None:
         with pytest.raises(ValidationError):

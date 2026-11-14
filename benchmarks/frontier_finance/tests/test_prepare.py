@@ -84,6 +84,10 @@ class TestConvert:
         _, rows = _convert(tmp_path, [_row(rubrics=rubrics)])
         assert rows[0]["rubrics"] == rubrics
 
+    def test_compact_query_date_is_written_dashed(self, tmp_path) -> None:
+        _, rows = _convert(tmp_path, [_row(query_date="20250623")])
+        assert rows[0]["as_of_date"] == "2025-06-23"
+
     def test_prompt_uses_query_date(self, tmp_path) -> None:
         _, rows = _convert(tmp_path, [_row(query_date="2024-10-31")])
         system, user = rows[0]["responses_create_params"]["input"]
@@ -125,6 +129,7 @@ class TestConvert:
             _row(rubrics=[{"rubric_id": 1, "rubric_text": ""}]),
             _row(rubrics=[{"rubric_text": "A."}]),
             _row(query_date="23/06/2025"),
+            _row(query_date="2025-02-30"),
         ],
     )
     def test_unusable_rows_fail(self, tmp_path, row) -> None:

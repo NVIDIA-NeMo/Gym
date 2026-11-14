@@ -40,7 +40,7 @@ README), then:
 
 ```bash
 gym eval run --benchmark frontier_finance \
-  -c responses_api_models/openai_model/configs/openai_model.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
   --output results/frontier_finance.jsonl --num-repeats 3 --concurrency 32
 ```
 

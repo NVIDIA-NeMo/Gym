@@ -20,8 +20,10 @@ judge transport differs: judges are Gym model servers instead of provider SDKs.
 """
 
 import asyncio
+import contextvars
 import json
 import logging
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
@@ -31,16 +33,18 @@ from frontier_finance.metrics import MetricsReport
 from frontier_finance.models import EvalItem, ItemResult, Rubric
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
     JUDGE_FAILED,
+    MODEL_REQUEST_ERROR,
     VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import BaseVerifyResponse
+from nemo_gym.verification import call_judge
 from resources_servers.finance_agent_v2.task_data import FrontierFinanceTaskFields
 
 
@@ -53,6 +57,10 @@ logger = logging.getLogger(__name__)
 SUBMIT_TOOL = "submit_final_result"
 METRIC_PREFIX = "frontier_finance/"
 _MAX_RECORDED_REPLY_CHARS = 20_000
+TOOL_LIMITS = ("max_tool_calls", "max_tool_time_seconds")
+
+# Agent ``error_cause`` values caused by an unavailable policy endpoint or tool upstream, not by the model.
+_MASKED_ERROR_CAUSES = {"model_call_failed": MODEL_REQUEST_ERROR, "tool_aborted": ENVIRONMENT_SERVER_FAILED}
 
 HEADLINE_METRICS = (
     "macro_avg_qualification_rate_on_all_queries",
@@ -79,17 +87,23 @@ class FrontierFinanceGraderConfig(BaseModel):
         description="Ordered judge panel. Each rubric is decided by majority vote of the judges that "
         "succeeded on the query; on a tie the earliest of them wins.",
     )
-    max_rubrics_per_call: int = Field(default=30, description="Rubrics graded per judge call.")
+    max_rubrics_per_call: int = Field(default=30, gt=0, description="Rubrics graded per judge call.")
     max_json_parse_retries: int = Field(
-        default=1, description="Re-prompts with a format reminder after an unparseable judge reply."
+        default=1, ge=0, description="Re-prompts with a format reminder after an unparseable judge reply."
     )
-    judge_max_output_tokens: int = Field(default=32000, description="Output budget per judge call.")
+    judge_max_output_tokens: int = Field(default=32000, gt=0, description="Output budget per judge call.")
     judge_call_timeout: Optional[float] = Field(
-        default=600.0, description="Seconds allowed per judge call, including reading the reply. None disables."
+        default=600.0,
+        gt=0,
+        description="Seconds allowed per judge call, including reading the reply. None disables.",
     )
-    judge_max_retries: int = Field(default=2, description="Retries of a judge call that errored.")
+    judge_max_retries: int = Field(
+        default=2,
+        ge=0,
+        description="Retries of a judge call that timed out, lost its connection or got a 408, 429 or 5xx reply.",
+    )
     judge_thread_pool_size: int = Field(
-        default=256, description="Threads that run the blocking official grader across concurrent verifies."
+        default=256, gt=0, description="Threads that run the blocking official grader across concurrent verifies."
     )
 
     @model_validator(mode="after")
@@ -116,6 +130,10 @@ class FrontierFinanceVerifyResponse(FrontierFinanceTaskFields, BaseVerifyRespons
     num_must_have_qualified: int = 0
     # The official grader's failure_reason: "no_response" or "judge_error".
     grading_failure: Optional[str] = None
+    tool_calls_used: Optional[int] = None
+    tool_seconds_used: Optional[float] = None
+    # The first limit the rollout ran into: "max_tool_calls" or "max_tool_time_seconds".
+    tool_limit_hit: Optional[str] = None
 
 
 def extract_final_answer(response: NeMoGymResponse) -> str:
@@ -142,6 +160,8 @@ def item_result_from_rollout(row: Dict[str, Any]) -> ItemResult:
     """Rebuild the official grader's per-query result from a verify response."""
     rubrics = [Rubric.from_dict(r) for r in row.get("rubrics") or []]
     failure = row.get("grading_failure")
+    if failure is None and row.get("rubric_labels") is None:
+        failure = "no_response"
     return ItemResult(
         query_id=str(row.get("query_id") or ""),
         rubrics=rubrics,
@@ -187,7 +207,20 @@ def frontier_finance_metrics(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 metrics[f"{METRIC_PREFIX}failed_checks/{judge}"] = count
         else:
             metrics[f"{METRIC_PREFIX}{name}"] = value
+
+    if rows:
+        for limit in TOOL_LIMITS:
+            hits = sum(1 for row in rows if row.get("tool_limit_hit") == limit)
+            metrics[f"{METRIC_PREFIX}tool_limit_hit_rate/{limit}"] = hits / len(rows)
+        stop_reasons = Counter(_stop_reason(row) for row in rows)
+        for reason, count in sorted(stop_reasons.items()):
+            metrics[f"{METRIC_PREFIX}stop_reason/{reason}"] = count / len(rows)
     return metrics
+
+
+def _stop_reason(row: Dict[str, Any]) -> str:
+    metadata = (row.get("response") or {}).get("metadata") or {}
+    return metadata.get("stop_reason") or "unknown"
 
 
 def frontier_finance_repeat_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -196,11 +229,17 @@ def frontier_finance_repeat_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def frontier_finance_key_metrics(agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-    key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
-    for name in (*HEADLINE_METRICS, "num_records", "num_failed_queries", "num_judge_errors"):
+    key_prefixes = ("mean/", f"{METRIC_PREFIX}failed_checks/", f"{METRIC_PREFIX}tool_limit_hit_rate/")
+    key = {k: v for k, v in agent_metrics.items() if k.startswith(key_prefixes)}
+    for name in (*HEADLINE_METRICS, "num_records", "num_failed_queries"):
         if f"{METRIC_PREFIX}{name}" in agent_metrics:
             key[f"{METRIC_PREFIX}{name}"] = agent_metrics[f"{METRIC_PREFIX}{name}"]
     return key
+
+
+def _is_retryable_judge_failure(error: BaseException) -> bool:
+    status = getattr(error, "http_status", None)
+    return not (isinstance(status, int) and 400 <= status < 500 and status not in (408, 429))
 
 
 class _GymJudge(Judge):
@@ -250,10 +289,12 @@ class FrontierFinanceGrader:
             params["temperature"] = judge.temperature
         create_params = NeMoGymResponseCreateParamsNonStreaming(**params)
 
-        for attempt in range(max(0, self.config.judge_max_retries)):
+        for attempt in range(self.config.judge_max_retries):
             try:
                 return await self._judge_call(judge, create_params)
             except Exception as e:  # noqa: BLE001
+                if not _is_retryable_judge_failure(e):
+                    raise
                 logger.warning("Judge %s call failed (%s: %s); retrying", judge.name, type(e).__name__, e)
                 await asyncio.sleep(min(2**attempt, 8))
         return await self._judge_call(judge, create_params)
@@ -261,14 +302,16 @@ class FrontierFinanceGrader:
     async def _judge_call(
         self, judge: FrontierFinanceJudgeConfig, create_params: NeMoGymResponseCreateParamsNonStreaming
     ) -> str:
-        async def call() -> str:
-            response = await self.server.server_client.post(
-                server_name=judge.model_server.name, url_path="/v1/responses", json=create_params
-            )
-            judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            return self.server._judge_reply_text(judge_response)
-
-        return await asyncio.wait_for(call(), timeout=self.config.judge_call_timeout)
+        call = call_judge(
+            self.server.server_client,
+            server_name=judge.model_server.name,
+            url_path="/v1/responses",
+            json=create_params,
+            response_model=NeMoGymResponse,
+            max_attempts=1,
+        )
+        judge_response = await asyncio.wait_for(call, timeout=self.config.judge_call_timeout)
+        return self.server._judge_reply_text(judge_response)
 
     async def _grade_with_judge(
         self, judge: FrontierFinanceJudgeConfig, item: EvalItem
@@ -279,13 +322,16 @@ class FrontierFinanceGrader:
             max_rubrics_per_call=self.config.max_rubrics_per_call,
             max_json_parse_retries=self.config.max_json_parse_retries,
         )
-        result = await asyncio.get_running_loop().run_in_executor(self._executor, grader.grade, item)
+        ctx = contextvars.copy_context()
+        result = await asyncio.get_running_loop().run_in_executor(self._executor, ctx.run, grader.grade, item)
         return result, adapter.replies
 
-    async def verify(self, body: "FinanceAgentV2VerifyRequest") -> FrontierFinanceVerifyResponse:
+    async def verify(
+        self, body: "FinanceAgentV2VerifyRequest", tool_usage: Optional[Dict[str, Any]] = None
+    ) -> FrontierFinanceVerifyResponse:
         rubrics = [Rubric.from_dict(r.model_dump()) for r in body.rubrics]
         num_must_have = sum(1 for r in rubrics if r.must_have)
-        base = {**body.model_dump(), "num_rubrics": len(rubrics), "num_must_have": num_must_have}
+        base = {**body.model_dump(), **(tool_usage or {}), "num_rubrics": len(rubrics), "num_must_have": num_must_have}
 
         if not rubrics:
             return FrontierFinanceVerifyResponse(
@@ -294,6 +340,17 @@ class FrontierFinanceGrader:
                 mask_sample=True,
                 failure_kind=VERIFIER_ERROR,
                 failure_reason="sample has no rubrics",
+            )
+
+        metadata = body.response.metadata or {}
+        error_cause = metadata.get("error_cause")
+        if metadata.get("stop_reason") == "error" and error_cause in _MASKED_ERROR_CAUSES:
+            return FrontierFinanceVerifyResponse(
+                **base,
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=_MASKED_ERROR_CAUSES[error_cause],
+                failure_reason=f"rollout stopped early: {error_cause}",
             )
 
         answer = extract_final_answer(body.response)

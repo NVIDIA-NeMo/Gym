@@ -41,7 +41,6 @@ import json
 import logging
 import os
 import time
-from datetime import date
 from types import SimpleNamespace
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence, Union
 
@@ -89,7 +88,7 @@ from resources_servers.finance_agent_v2.frontier_finance_grading import (
     frontier_finance_repeat_metrics,
 )
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
-from resources_servers.finance_agent_v2.task_data import FrontierFinanceTaskFields
+from resources_servers.finance_agent_v2.task_data import AsOfDateField, FrontierFinanceTaskFields
 from resources_servers.sec_local_index.cache import ToolCache
 from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
 
@@ -252,13 +251,15 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     )
     max_tool_calls: Optional[int] = Field(
         default=None,
+        gt=0,
         description="Tool calls allowed per rollout, or null for no limit. Past it, every tool except "
         "submit_final_result returns an error asking the model to submit.",
     )
     max_tool_time_seconds: Optional[float] = Field(
         default=None,
-        description="Seconds spent inside tool calls allowed per rollout, or null for no limit. Model "
-        "generation time does not count. Past it, every tool except submit_final_result returns an error "
+        gt=0,
+        description="Wall-clock seconds of tool calling allowed per rollout (time during which at least one "
+        "tool call is running), or null for no limit. Model generation time does not count. Past it, every tool except submit_final_result returns an error "
         "asking the model to submit.",
     )
     max_end_date: Optional[str] = Field(
@@ -281,8 +282,8 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
 # ============================================================================
 
 
-class FinanceAgentV2SeedSessionRequest(BaseSeedSessionRequest):
-    as_of_date: Optional[str] = None
+class FinanceAgentV2SeedSessionRequest(AsOfDateField, BaseSeedSessionRequest):
+    pass
 
 
 class FinanceAgentV2RunRequest(FrontierFinanceTaskFields, BaseRunRequest):
@@ -480,6 +481,9 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         self._as_of_dates: Dict[str, str] = {}
         self._tool_call_counts: Dict[str, int] = {}
         self._tool_seconds: Dict[str, float] = {}
+        self._tools_running: Dict[str, int] = {}
+        self._tools_busy_since: Dict[str, float] = {}
+        self._tool_limits_hit: Dict[str, str] = {}
         self._frontier_finance_grader: Optional[FrontierFinanceGrader] = (
             FrontierFinanceGrader(self, self.config.frontier_finance_grader)
             if self.config.frontier_finance_grader
@@ -659,13 +663,17 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         used_calls = self._tool_call_counts.get(session_id, 0)
         max_calls = self.config.max_tool_calls
         if max_calls is not None and used_calls >= max_calls:
+            limit = "max_tool_calls"
             reason = f"Tool call limit reached ({used_calls} / {max_calls})"
         else:
-            used_seconds = self._tool_seconds.get(session_id, 0.0)
+            used_seconds = self._tool_time_used(session_id)
             max_seconds = self.config.max_tool_time_seconds
             if max_seconds is None or used_seconds < max_seconds:
                 return None
+            limit = "max_tool_time_seconds"
             reason = f"Tool time limit reached ({used_seconds:.0f}s / {max_seconds:.0f}s)"
+        if session_id in self._tool_call_counts:
+            self._tool_limits_hit.setdefault(session_id, limit)
         return json.dumps(
             {
                 "error": f"{reason}. No further tool calls will be executed. Call submit_final_result "
@@ -680,16 +688,32 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             self._as_of_dates,
             self._tool_call_counts,
             self._tool_seconds,
+            self._tools_running,
+            self._tools_busy_since,
+            self._tool_limits_hit,
         ):
             state.pop(session_id, None)
 
+    def _tool_usage(self, session_id: str) -> Dict[str, Any]:
+        if session_id not in self._tool_call_counts:
+            return {}
+        return {
+            "tool_calls_used": self._tool_call_counts[session_id],
+            "tool_seconds_used": self._tool_time_used(session_id),
+            "tool_limit_hit": self._tool_limits_hit.get(session_id),
+        }
+
     async def seed_session(self, request: Request, body: FinanceAgentV2SeedSessionRequest) -> BaseSeedSessionResponse:
-        """Reset per-question data storage for this session."""
+        """Start per-question state for this session. A repeat seed of a live session changes nothing.
+
+        The agent forwards any tool name the model emits, so the model can reach this endpoint mid-rollout.
+        """
         session_id = request.session[SESSION_ID_KEY]
-        as_of_date = getattr(body, "as_of_date", None)
-        if isinstance(as_of_date, str) and as_of_date:
-            date.fromisoformat(as_of_date)
-            self._as_of_dates[session_id] = as_of_date
+        if session_id in self._tool_call_counts:
+            logger.warning("seed_session: session %s is already seeded; keeping its state", session_id)
+            return await super().seed_session(body)
+        if body.as_of_date:
+            self._as_of_dates[session_id] = body.as_of_date
         else:
             self._as_of_dates.pop(session_id, None)
         self._tool_call_counts[session_id] = 0
@@ -739,15 +763,40 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             return await self._run_tool(tool_name, session_id, args)
         if limit_error := self._tool_limit_error(session_id):
             return {"results": limit_error}
-        self._tool_call_counts[session_id] = self._tool_call_counts.get(session_id, 0) + 1
+        if session_id in self._tool_call_counts:
+            self._tool_call_counts[session_id] += 1
         as_of_date = self._as_of_dates.get(session_id)
         if as_of_date and tool_name in _DATE_CAPPED_TOOLS and isinstance(args, dict):
             args = cap_tool_dates(args, as_of_date)
-        start = time.monotonic()
+        self._tool_started(session_id)
         try:
             return await self._run_tool(tool_name, session_id, args)
         finally:
-            self._tool_seconds[session_id] = self._tool_seconds.get(session_id, 0.0) + time.monotonic() - start
+            self._tool_finished(session_id)
+
+    def _tool_started(self, session_id: str) -> None:
+        if session_id not in self._tool_seconds:
+            return
+        if not self._tools_running.get(session_id):
+            self._tools_busy_since[session_id] = time.monotonic()
+        self._tools_running[session_id] = self._tools_running.get(session_id, 0) + 1
+
+    def _tool_finished(self, session_id: str) -> None:
+        running = self._tools_running.get(session_id)
+        if not running or session_id not in self._tool_seconds:
+            return
+        if running > 1:
+            self._tools_running[session_id] = running - 1
+            return
+        del self._tools_running[session_id]
+        self._tool_seconds[session_id] += time.monotonic() - self._tools_busy_since.pop(session_id)
+
+    def _tool_time_used(self, session_id: str) -> float:
+        """Wall-clock seconds during which at least one of the session's tool calls was running."""
+        used = self._tool_seconds.get(session_id, 0.0)
+        if self._tools_running.get(session_id):
+            used += time.monotonic() - self._tools_busy_since[session_id]
+        return used
 
     async def _run_tool(self, tool_name: str, session_id: str, args: Any) -> Dict[str, str]:
         tool = self._tools.get(tool_name)
@@ -1122,11 +1171,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         FrontierFinance grader scores ``rubrics`` instead.
         """
         session_id = request.session.get(SESSION_ID_KEY)
+        tool_usage = self._tool_usage(session_id) if session_id else {}
         if session_id:
             self._end_session(session_id)
 
         if self._frontier_finance_grader is not None:
-            return await self._frontier_finance_grader.verify(body)
+            return await self._frontier_finance_grader.verify(body, tool_usage)
 
         question = ""
         for msg in body.responses_create_params.input or []:

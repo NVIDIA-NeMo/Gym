@@ -283,7 +283,7 @@ gym eval prepare --benchmark finance_agent_v2
 
 # End-to-end (prepare + start servers + collect rollouts) on the benchmark set
 gym eval run --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  --config responses_api_models/openai_model/configs/openai_model.yaml
 ```
 
 Add `--limit 3 --concurrency 3` for a smoke run. `gym eval run` writes the scored
@@ -426,7 +426,7 @@ The config turns on three server options, all off by default:
 | Option | Effect |
 |---|---|
 | a row's `as_of_date` | Caps `end_date` (and `start_date`) on every `web_search`, `edgar_search` and `price_history` call at that date. A call without an `end_date` gets `as_of_date`. The tool schemas the model sees are unchanged. |
-| `max_tool_calls`, `max_tool_time_seconds` | Past either limit, every tool except `submit_final_result` returns an error telling the model to submit. Tool time counts only time spent inside tool calls, so a slow model endpoint does not shrink the budget. |
+| `max_tool_calls`, `max_tool_time_seconds` | Past either limit, every tool except `submit_final_result` returns an error telling the model to submit. Tool time is the wall-clock time during which at least one tool call is running. It includes `retrieve_information`'s call to the policy model, upstream retry backoff and cache misses, so a slow policy endpoint or a cold cache uses the budget faster. |
 | `frontier_finance_grader` | `/verify` grades the row's `rubrics` with the official grader and judge panel instead of grading `rubric` with `judge_model_server`. |
 
 ### The "as of" date
@@ -435,7 +435,8 @@ The system prompt tells the model that `as_of_date` is the current date. Two sou
 can still return later information:
 
 - `parse_html_page` fetches the live version of a page. SEC filings do not change,
-  but company websites and news pages may have been updated since the date.
+  but company websites and news pages may have been updated since the date, and SEC
+  search and quote pages list filings and prices published after it.
 - Tavily filters by its own publish date for each page, which can be earlier than the
   page's latest edit.
 
@@ -453,7 +454,7 @@ them there and in the config together.
 ### Grading
 
 The `frontier-finance` package is installed from a pinned commit (see
-`requirements.txt`) and used directly: its judge prompt, reply parser, batching,
+`pyproject.toml`) and used directly: its judge prompt, reply parser, batching,
 majority vote and metrics. Only the transport differs: each judge is a Gym model
 server instead of a provider SDK.
 
@@ -469,9 +470,19 @@ reminder; a rubric the reply omits counts as not met.
   of labels, is left out of that query's vote and counted in
   `failed_checks_by_judge`. If every judge fails, the sample is masked
   (`mask_sample: true`, `failure_kind: judge_failed`) and left out of all scores.
+  A judge call is retried on a timeout, a lost connection or a 408, 429 or 5xx
+  reply; any other error reply (a rejected API key, say) drops the judge at once.
+  Watch `frontier_finance/failed_checks/<judge>` in the key metrics: a judge that
+  fails on every query leaves the rest of the panel to grade without it.
 - **No answer:** if the agent stops without executing `submit_final_result`, the
   query scores 0 (`grading_failure: no_response`) and counts against the "all
-  queries" metrics. Only the first submission the agent executed is graded.
+  queries" metrics. Only the first submission the agent executed is graded. The
+  same holds for context overflow, `max_steps`, `max_time_seconds` and
+  `max_output_tokens`.
+- **Outages:** if the agent stopped because the policy model call failed
+  (`error_cause: model_call_failed`) or a tool exhausted its retries
+  (`error_cause: tool_aborted`), the sample is masked (`failure_kind:
+  model_request_error` or `environment_server_failed`) rather than scored 0.
 
 The default panel is the one the FrontierFinance authors recommend for comparable
 results: Claude Sonnet 4.6, Gemini 3.1 Pro (low thinking) and GPT-5.4, at
@@ -485,13 +496,17 @@ temperature 0 with a 32k output budget.
 | `judge_replies` | Raw judge replies, for auditing |
 | `num_must_have`, `num_must_have_qualified` | The essential-rubric subset |
 | `grading_failure` | `no_response`, `judge_error`, or `null` |
+| `tool_calls_used`, `tool_seconds_used` | Tool calls and wall-clock tool seconds the rollout used |
+| `tool_limit_hit` | `max_tool_calls`, `max_tool_time_seconds`, or `null` |
 
 Aggregate metrics are computed by the package's own `MetricsReport` and reported
 under `frontier_finance/`: macro (mean of per-query rates) and micro (total met /
 total rubrics) qualification rates over graded queries (`_on_success_queries`) and
 over all queries (`_on_all_queries`), the same four for `must_have` rubrics only,
 micro rates by `rubric_type`, `data_source_type` and `use_case`, and
-`num_records`, `num_failed_queries` and failed checks per judge. With
+`num_records`, `num_failed_queries` and failed checks per judge. The server adds
+the share of queries that hit each tool limit (`tool_limit_hit_rate/<limit>`) and
+the share that ended with each agent stop reason (`stop_reason/<reason>`). With
 `--num-repeats`, the headline rates are also reported per repeat.
 
 ### Setup
@@ -535,7 +550,7 @@ with NeMo Gym and the SPDX headers in each source file.
 | `frontier-finance` (`frontier_finance.*`, the FrontierFinance grader) | [samaya-ai/frontier-finance](https://github.com/samaya-ai/frontier-finance) | Apache-2.0 |
 
 We import these packages at install time and do not copy their source into this
-repo, so their MIT terms apply to that code as distributed upstream.
+repo, so their upstream licenses listed above apply to that code as distributed upstream.
 
 **Dataset.** The `example.jsonl` fixtures here and the prepared benchmark JSONL
 derive from the **public** Vals Finance Agent Benchmark v2 release; use is subject

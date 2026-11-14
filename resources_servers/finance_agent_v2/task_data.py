@@ -16,9 +16,10 @@ FrontierFinance rows carry ``rubrics`` (a list) and ``as_of_date`` instead of ``
 fields are in ``FrontierFinanceTaskFields``.
 """
 
+from datetime import date
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FrontierFinanceRubric(BaseModel):
@@ -32,16 +33,30 @@ class FrontierFinanceRubric(BaseModel):
     data_source_detailed: List[str] = Field(default_factory=list)
 
 
-class FrontierFinanceTaskFields(BaseModel):
-    """FrontierFinance row fields. Also a base of the server's run request, so both share one definition."""
+class AsOfDateField(BaseModel):
+    """Also a base of the server's seed request, so the seed validates the date the same way."""
 
-    query_id: str = Field(default="", json_schema_extra={"consumed_by": ["verify", "metrics"]})
+    # Tool date caps compare strings, so only the dashed form orders correctly.
     as_of_date: Optional[str] = Field(
         default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="YYYY-MM-DD date the query is answered as of. Caps dated tool calls and, with the "
         "FrontierFinance grader, is passed to the judges. Null leaves tool dates uncapped.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
+
+    @field_validator("as_of_date")
+    @classmethod
+    def _check_calendar_date(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            date.fromisoformat(value)
+        return value
+
+
+class FrontierFinanceTaskFields(AsOfDateField):
+    """FrontierFinance row fields. Also a base of the server's run request, so both share one definition."""
+
+    query_id: str = Field(default="", json_schema_extra={"consumed_by": ["verify", "metrics"]})
     use_cases: List[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["metrics"]})
     capabilities: List[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["provenance"]})
     rubrics: List[FrontierFinanceRubric] = Field(

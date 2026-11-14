@@ -115,6 +115,10 @@ def convert_row(row: dict, tools: list[dict]) -> dict:
     as_of_date = str(row.get("query_date") or "").strip()
     if not query_id or not query or not as_of_date:
         raise ValueError(f"row is missing query_id, query or query_date: {str(row)[:200]}")
+    try:
+        as_of_date = date.fromisoformat(as_of_date).isoformat()
+    except ValueError as e:
+        raise ValueError(f"query {query_id}: query_date is not a date: {as_of_date!r}") from e
     rubrics = row.get("rubrics") or []
     if not rubrics:
         raise ValueError(f"query {query_id}: no rubrics, so it cannot be scored")

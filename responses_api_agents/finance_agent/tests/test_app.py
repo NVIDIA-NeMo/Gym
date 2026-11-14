@@ -1227,6 +1227,8 @@ class TestResponses:
         assert res.status_code == 200
         model_calls = [c for c in agent.server_client.post.call_args_list if c.kwargs["server_name"] == _MODEL_SERVER]
         assert len(model_calls) == 1, "rollout should abort instead of starting a second turn"
+        metadata = res.json()["metadata"]
+        assert (metadata["stop_reason"], metadata["error_cause"]) == ("error", "tool_aborted")
 
     def test_ordinary_tool_error_does_not_abort(self) -> None:
         agent, client = _make_agent_and_client(_v2_config(max_steps=2))
@@ -1268,6 +1270,7 @@ class TestResponses:
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         assert res.json()["id"] == "error"
+        assert res.json()["metadata"]["error_cause"] == "model_call_failed"
 
     def test_tool_call_timeout_returns_error(self) -> None:
         """Tool call timeout → error JSON fed back to model, loop continues."""
@@ -1448,6 +1451,19 @@ class TestResponses:
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         assert res.json()["id"] == "error"
+        assert res.json()["metadata"]["error_cause"] == "context_overflow"
+
+    def test_failed_model_call_records_its_cause(self) -> None:
+        agent, client = _make_agent_and_client(_make_config())
+
+        def fail_post(**kwargs):
+            raise Exception("503 Service Unavailable")
+
+        agent.server_client.post = AsyncMock(side_effect=fail_post)
+
+        res = client.post("/v1/responses", json=_INPUT)
+        metadata = res.json()["metadata"]
+        assert (metadata["stop_reason"], metadata["error_cause"]) == ("error", "model_call_failed")
 
     def test_usage_accumulation(self) -> None:
         """Usage tokens accumulate across multiple model calls."""
