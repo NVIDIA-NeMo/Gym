@@ -6,10 +6,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import shutil
 import subprocess
+import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 from resources_servers.deepswe.task_store import (
@@ -29,6 +33,15 @@ DEFAULT_TASKS_DIR = PACKAGE_DIR / "data" / "cache" / "tasks"
 DEFAULT_JSONL = NEMO_GYM_ROOT / "benchmarks" / "deepswe" / "data" / "deepswe_benchmark.jsonl"
 DEFAULT_EXAMPLE_JSONL = PACKAGE_DIR / "data" / "example.jsonl"
 CACHE_MARKER = ".nemo_gym_deepswe.json"
+# OpenCode's grep and glob tools run rg, and the agent sandbox has no network to download one. ripgrep 15.1.0 is the
+# build OpenCode 1.17.11 would download; the resources server stages this copy into each agent sandbox.
+RIPGREP_URL = (
+    "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz"
+)
+RIPGREP_ARCHIVE_SHA256 = "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599"  # pragma: allowlist secret
+RIPGREP_MEMBER = "ripgrep-15.1.0-x86_64-unknown-linux-musl/rg"
+RIPGREP_SHA256 = "ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2"  # pragma: allowlist secret
+DEFAULT_RIPGREP_PATH = PACKAGE_DIR / "data" / "cache" / "opencode-runtime" / "rg"
 
 
 def _git_output(*args: str, cwd: Path | None = None) -> str:
@@ -58,6 +71,33 @@ def ensure_source(source_dir: str | Path, *, allow_download: bool = True) -> Pat
     revision = _git_output("rev-parse", "HEAD", cwd=path)
     if revision != DEEPSWE_SOURCE_REVISION:
         raise ValueError(f"DeepSWE source {path} is at {revision}; expected pinned revision {DEEPSWE_SOURCE_REVISION}")
+    return path
+
+
+def ensure_ripgrep(path: str | Path = DEFAULT_RIPGREP_PATH, *, allow_download: bool = True) -> Path:
+    """Return the pinned ripgrep executable, downloading and checking it first if needed."""
+
+    path = Path(path).expanduser().resolve()
+    if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == RIPGREP_SHA256:
+        return path
+    if not allow_download:
+        raise FileNotFoundError(f"Pinned ripgrep is missing or differs from {RIPGREP_SHA256}: {path}")
+    with urllib.request.urlopen(RIPGREP_URL, timeout=300) as response:
+        archive = response.read()
+    if (actual := hashlib.sha256(archive).hexdigest()) != RIPGREP_ARCHIVE_SHA256:
+        raise ValueError(f"ripgrep archive {RIPGREP_URL} has SHA-256 {actual}; expected {RIPGREP_ARCHIVE_SHA256}")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        member = tar.extractfile(RIPGREP_MEMBER)
+        if member is None:
+            raise ValueError(f"ripgrep archive {RIPGREP_URL} has no file {RIPGREP_MEMBER}")
+        executable = member.read()
+    if (actual := hashlib.sha256(executable).hexdigest()) != RIPGREP_SHA256:
+        raise ValueError(f"{RIPGREP_MEMBER} has SHA-256 {actual}; expected {RIPGREP_SHA256}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(executable)
+    temporary.chmod(0o755)
+    temporary.replace(path)
     return path
 
 
@@ -137,6 +177,7 @@ def prepare(
     example_output_path = Path(example_jsonl_path).expanduser().resolve()
     _write_jsonl(store, output_path)
     _write_jsonl(store, example_output_path, limit=5)
+    ensure_ripgrep(allow_download=allow_download)
     return prepared_tasks_dir, output_path
 
 
