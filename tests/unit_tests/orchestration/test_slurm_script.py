@@ -85,6 +85,43 @@ def test_list_value():
     ]
 
 
+def test_list_of_mappings_is_written_in_hydra_syntax():
+    stages = [{"num_tasks": 4}, {"num_tasks": 24, "name": "full run"}]
+    (arg,) = _flatten_run_args({"run": stages})
+    (token,) = shlex.split(arg)
+    assert token.startswith("+run=[{num_tasks: 4},{num_tasks: 24")
+    assert OverridesParser.create().parse_overrides([token])[0].value() == stages
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [{"num_tasks": 4, "name": "1"}, {"num_tasks": 24, "name": "a,b"}],
+        [{"waivable": [None, True], "limits": {"max": 2}}],
+        [[1, None], ["a b"]],
+        [["", "a"], ["C:\\dir\\"]],
+        [{"suffix": ""}],
+    ],
+    ids=[
+        "strings-hydra-would-retype",
+        "nested-list-and-mapping",
+        "list-of-lists",
+        "empty-and-backslash",
+        "empty-value",
+    ],
+)
+def test_nested_run_values_reach_hydra_unchanged(stages):
+    (arg,) = _flatten_run_args({"run": stages})
+    (token,) = shlex.split(arg)
+    assert OverridesParser.create().parse_overrides([token])[0].value() == stages
+
+
+@pytest.mark.parametrize("key", ["a=b", "null", "true", "1"])
+def test_a_mapping_key_hydra_would_change_is_rejected(key):
+    with pytest.raises(ValueError, match="cannot be written as a Hydra override value"):
+        _flatten_run_args({"run": [{key: 1}]})
+
+
 def test_empty():
     assert _flatten_run_args({}) == []
 
@@ -1113,6 +1150,28 @@ def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_d
     assert render_resume_epilogue() not in script
     # Only a resubmit (see test_eval_resubmit.py) turns resume on for a run that is not resumable.
     assert "\n    +resume_from_cache=True" not in script
+
+
+def test_build_sbatch_script_nested_list_of_mappings_reaches_hydra_intact(bench_dir):
+    stages = [{"num_tasks": 4}, {"num_tasks": 24}]
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gdpval": {"run": {"stages": stages}}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gdpval"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gdpval", benchmark, compute, bench_dir)
+    # Let bash split the rendered GYM_CMD array, so what is parsed is what the driver receives.
+    array = script[script.index("GYM_CMD=(") :].split("\n)\n", 1)[0] + "\n)"
+    words = subprocess.run(
+        ["bash", "-c", array + '\nprintf "%s\\n" "${GYM_CMD[@]}"'], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    (override,) = [w for w in words if w.startswith("+stages=")]
+    assert OverridesParser.create().parse_overrides([override])[0].value() == stages
 
 
 def test_build_sbatch_script_auto_default_capture_dir(bench_dir):

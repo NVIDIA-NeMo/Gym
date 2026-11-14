@@ -68,7 +68,7 @@ def test_numbers_booleans_and_null_are_written_in_their_own_syntax() -> None:
     assert [hydra_literal(v) for v in (3, 2.5, True, False, None)] == ["3", "2.5", "true", "false", "null"]
 
 
-@pytest.mark.parametrize("value", [{"a": 1}, [{"a": 1}], object()])
+@pytest.mark.parametrize("value", [{"null": 1}, [{"1": "x"}], object()])
 def test_a_value_hydra_cannot_carry_is_refused(value) -> None:
     with pytest.raises(ValueError, match="cannot be written as a Hydra override value"):
         hydra_literal(value)
