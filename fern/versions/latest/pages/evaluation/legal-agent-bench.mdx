@@ -1,0 +1,77 @@
+---
+title: Legal Agent Bench
+description: Run Harvey LAB legal-document tasks with the Harbor Environment Server.
+position: 6
+---
+
+LAB Native runs the tools from the pinned [Harvey LAB](https://github.com/harveyai/harvey-labs)
+harness through Gym's model server. The Harbor Environment Server prepares each sandbox,
+collects outputs, grades in a separate sandbox, and cleans up. `config.yaml` and
+`config_native.yaml` select the same LAB Native agent.
+
+This integration retains source revision `f46ef86e4788545622db25dcffa3aebb7a139929`
+and its single-judge scoring. Task documents and generated indexes stay out of Git.
+
+## Configure the judge
+
+Add these settings to your local `env.yaml` alongside your policy-model settings:
+
+```yaml
+judge_model_name: your-judge-model
+judge_base_url: https://your-judge-endpoint/v1
+judge_api_key: your-judge-key
+lab:
+  reward_mode: full_task
+```
+
+`full_task` scores 1 only when every criterion passes. `criteria_pass_rate` returns the
+fraction of criteria passed. Judge credentials and rubrics reach only the verifier sandbox.
+
+## Prepare and run
+
+Prepare a small selection from the examples:
+
+```bash
+head -n 2 resources_servers/legal_agent_bench/data/example.jsonl > /tmp/lab-examples.jsonl
+gym eval prepare --config benchmarks/legal_agent_bench/config.yaml \
+  +prepare_script_args.input=/tmp/lab-examples.jsonl \
+  +prepare_script_args.output=/tmp/lab-prepared.jsonl
+```
+
+Preparation converts legacy `instance_id` rows to canonical Environment Server rows, preserving
+task identity and supplied model parameters. It also writes `/tmp/lab-prepared.jsonl.tasksets.json`.
+Keep the two files together. As with shared Harbor preparation, these outputs are not
+published together as one transaction. Finish preparation before starting the servers,
+and use separate output paths for concurrent runs with different task selections.
+Use the same output setting when starting the servers:
+
+```bash
+gym env start --config benchmarks/legal_agent_bench/config.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
+  +prepare_script_args.output=/tmp/lab-prepared.jsonl
+gym eval run --no-serve --config benchmarks/legal_agent_bench/config.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
+  +prepare_script_args.output=/tmp/lab-prepared.jsonl \
+  --input /tmp/lab-prepared.jsonl --output results/lab/rollout.jsonl
+```
+
+The native agent defaults to 60 turns and a 65,536-token output limit. Turn and context limits
+are scoreable incomplete outcomes. Provider, model transport, and cleanup failures remain
+operational failures. Outputs and verifier reports are retained under the run's artifact directory.
+
+## Sandboxes and preparation storage
+
+Select the provider through Gym's `sandbox` configuration. The integration uses borrowed agent
+sessions and a separate verifier; it respects the [Harbor Environment Server's provider restrictions](/main/agent-interactions/harbor#sandbox-providers).
+
+OpenShell policies must allow writes to `/workspace`, `/tmp`, `/home/sandbox`, `/tests`, and `/logs`.
+The LAB image creates the Harbor directories with ownership assigned to the restricted sandbox user.
+Rubrics and judge credentials are still injected only into the separate verifier sandbox.
+
+Automatic tools-image building requires a supported local image builder. You can supply a prebuilt
+image with `+prepare_script_args.image=registry.example/lab:tag` to avoid building locally. An image
+built with Docker can still run on another compatible provider.
+
+Preparation requires a filesystem with hardlinks and cross-process `flock`. Shared cluster storage
+must provide cluster-wide locks; `noflock` and `localflock` mounts are unsupported. Shared documents
+are hardlinked within the preparation cache, and only public documents and skills reach the agent.

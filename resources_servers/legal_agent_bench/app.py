@@ -1,35 +1,43 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Resource server lifecycle for Legal Agent Bench."""
+"""LAB-specific preparation and grading policy for the Harbor Environment Server."""
 
 from __future__ import annotations
 
-from typing import Literal
+import json
+import tomllib
+from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import FastAPI
-from pydantic import ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt
+from fastapi import HTTPException
+from pydantic import (
+    ConfigDict,
+    Field,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    PrivateAttr,
+)
 
-from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
+from environment_servers.harbor.app import (
+    HarborEnvironmentServer,
+    HarborEnvironmentServerConfig,
+    HarborEpisodeRequest,
+    HarborTasksetConfig,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
-from resources_servers.legal_agent_bench.prepare import (
-    DEFAULT_RUNTIME_TASKS_DIR,
-    DEFAULT_SKILLS_DIR,
-    DEFAULT_TASKS_DIR,
-    ensure_assets,
-    hydrate_runtime_tasks,
-)
+from environment_servers.harbor.session import HarborSession
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.data.tasks.harbor import HarborTask, HarborTurn
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, upload_dir
+from nemo_gym.utils import installed_gym_commit, is_nemo_gym_fastapi_entrypoint
 
 
 RewardMode = Literal["full_task", "criteria_pass_rate"]
 JUDGE_CONFIG_TO_ENV = {
+    "judge_model_name": "LAB_JUDGE_MODEL",
     "judge_base_url": "LAB_JUDGE_BASE_URL",
     "judge_api_key": "LAB_JUDGE_API_KEY",  # pragma: allowlist secret
-    "judge_model_name": "LAB_JUDGE_MODEL",
     "judge_temperature": "LAB_JUDGE_TEMPERATURE",
     "judge_request_timeout_seconds": "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS",
     "judge_max_retries": "LAB_JUDGE_MAX_RETRIES",
@@ -41,17 +49,14 @@ JUDGE_CONFIG_TO_ENV = {
 }
 
 
-class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
-    model_config = ConfigDict(extra="allow")
+class LegalAgentBenchEnvironmentConfig(HarborEnvironmentServerConfig):
+    model_config = ConfigDict(extra="forbid")
 
-    harbor_tasks_cache_dir: str = str(DEFAULT_TASKS_DIR)
-    harbor_tasks_dir: str = str(DEFAULT_RUNTIME_TASKS_DIR)
-    harness_skills_dir: str = str(DEFAULT_SKILLS_DIR)
-    auto_prepare_assets: bool = True
+    prepared_tasksets_file: str = "resources_servers/legal_agent_bench/data/environment/tasksets.json"
     reward_mode: RewardMode = "full_task"
+    judge_model_name: str | None = None
     judge_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL for the LAB judge.")
     judge_api_key: str | None = Field(default=None, description="API key for the LAB judge endpoint.")
-    judge_model_name: str | None = Field(default=None, description="Model identifier sent to the LAB judge endpoint.")
     judge_temperature: float | None = Field(
         default=None,
         ge=0,
@@ -78,39 +83,102 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     judge_parallelism: PositiveInt = Field(default=6, description="Maximum concurrent LAB judge requests per task.")
 
 
-class LegalAgentBenchResourcesServer(SimpleResourcesServer):
-    """Prepare immutable source assets and a credential-isolated runtime tree."""
+class LegalAgentBenchEnvironmentServer(HarborEnvironmentServer):
+    """Harbor owns execution; LAB adds verifier settings and judge-failure routing."""
 
-    config: LegalAgentBenchResourcesServerConfig
+    config: LegalAgentBenchEnvironmentConfig
+    _gym_commit: str | None = PrivateAttr(default=None)
 
-    def setup_webserver(self) -> FastAPI:
-        # With num_workers > 1, the main process runs setup_webserver before uvicorn starts the workers,
-        # and each worker then runs it again.
-        # Rebuilding the runtime tree replaces one shared directory through one backup path,
-        # so concurrent rebuilds in several workers could remove each other's tree.
-        # The main process has already prepared everything the workers need.
-        if not is_nemo_gym_fastapi_worker():
-            assets = ensure_assets(
-                tasks_dir=self.config.harbor_tasks_cache_dir,
-                skills_dir=self.config.harness_skills_dir,
-                allow_download=self.config.auto_prepare_assets,
+    def model_post_init(self, context: object, /) -> None:
+        if (
+            not self.config.tasksets
+            or not self.config.tasksets.get("legal_agent_bench", HarborTasksetConfig(folder=".", tasks={})).tasks
+        ):
+            mapping = Path(self.config.prepared_tasksets_file)
+            if not mapping.is_file():
+                raise ValueError(
+                    "Prepare LAB tasks with `gym eval prepare --config benchmarks/legal_agent_bench/config.yaml` first"
+                )
+            self.config.tasksets = {
+                name: HarborTasksetConfig.model_validate(value)
+                for name, value in json.loads(mapping.read_text()).items()
+            }
+        self._gym_commit = installed_gym_commit()
+        values = {name: "" for name in JUDGE_CONFIG_TO_ENV.values()}
+        values.update(_build_verifier_env(self.config))
+        values["LEGAL_AGENT_BENCH_REWARD_MODE"] = self.config.reward_mode
+        self.config.secrets = {**self.config.secrets, **values}
+        super().model_post_init(context)
+
+    async def _upload_task_skills(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
+        """Stage LAB's public inputs before Harbor starts the agent session."""
+        await super()._upload_task_skills(sandbox, task, workdir)
+        # Task folders contain private verifier files too; only this prepared input tree reaches the agent.
+        for name in ("vdr", "skills"):
+            await upload_dir(sandbox, task.path / "environment" / name, f"{workdir}/{name}")
+
+    async def _verified_outcome(
+        self,
+        session: HarborSession,
+        request: HarborEpisodeRequest,
+        agent_response: NeMoGymResponse,
+        turn: tuple[HarborTurn, Any] | None = None,
+    ) -> dict[str, Any]:
+        outcome = await super()._verified_outcome(session, request, agent_response, turn=turn)
+        if outcome.get("mask_sample"):
+            # Use the failure boundary for sidecar routing and retries, not just mask_sample.
+            raise HTTPException(503, f"{outcome.get('failure_reason')}; reports: {outcome.get('verifier_logs_dir')}")
+        return outcome
+
+    async def _run_verifier(
+        self,
+        session: HarborSession,
+        trajectory: bytes,
+        *,
+        response: NeMoGymResponse | None = None,
+    ) -> dict[str, Any]:
+        if response is not None:
+            entry = get_global_config_dict()[self.config.agent_server.name]["responses_api_agents"]
+            kind = next(iter(entry))
+            settings = entry[kind]
+            pins = {
+                key: settings[key] for key in ("codex_version", "claude_code_version", "max_turns") if key in settings
+            }
+            if kind == "hermes_agent":
+                project = Path(__file__).resolve().parents[2] / "responses_api_agents/hermes_agent/pyproject.toml"
+                dependencies = tomllib.loads(project.read_text())["project"]["dependencies"]
+                pins["runtime_pin"] = next(item for item in dependencies if item.startswith("hermes-agent@"))
+            metadata = dict(response.metadata or {})
+            metadata["lab_harness_provenance"] = json.dumps(
+                {"agent_id": kind, "harness_pin": pins, "gym_commit": self._gym_commit}
             )
-            verifier_env = _build_verifier_env(self.config)
-            hydrate_runtime_tasks(
-                assets["tasks"],
-                self.config.harbor_tasks_dir,
-                verifier_env=verifier_env,
-                reward_mode=self.config.reward_mode,
-                cache_is_validated=True,
-            )
-        return super().setup_webserver()
+            response = response.model_copy(update={"metadata": metadata})
+        return await super()._run_verifier(session, trajectory, response=response)
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        # Harbor executes the task-local verifier and the agent bridge returns its reward.
-        return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+    def _score(
+        self,
+        task: HarborTask,
+        settings: Any,
+        result: SandboxExecResult,
+        logs_dir: Path,
+        started: float,
+        *,
+        timed_out: bool,
+        rewards: dict[str, float] | None,
+        problem: str | None,
+    ) -> dict[str, Any]:
+        result = super()._score(
+            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+        )
+        missing_aggregate = rewards is None and not timed_out or rewards is not None and "reward" not in rewards
+        failed_grading = bool(rewards and (rewards.get("verifier_error") or rewards.get("judge_error_count")))
+        if missing_aggregate or failed_grading:
+            # Missing judge results are operational failures; measured verifier timeouts retain Harbor's policy.
+            result.update(self._masked("lab_judge_failed", "LAB grading did not complete; inspect verifier reports"))
+        return result
 
 
-def _build_verifier_env(config: LegalAgentBenchResourcesServerConfig) -> dict[str, str]:
+def _build_verifier_env(config: LegalAgentBenchEnvironmentConfig) -> dict[str, str]:
     env: dict[str, str] = {}
     for config_key, env_key in JUDGE_CONFIG_TO_ENV.items():
         value = getattr(config, config_key)
@@ -123,7 +191,6 @@ def _build_verifier_env(config: LegalAgentBenchResourcesServerConfig) -> dict[st
 
 
 if __name__ == "__main__":
-    LegalAgentBenchResourcesServer.run_webserver()
+    LegalAgentBenchEnvironmentServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
-    app = LegalAgentBenchResourcesServer.run_webserver()  # noqa: F401
+    app = LegalAgentBenchEnvironmentServer.run_webserver()

@@ -3544,6 +3544,7 @@ class TestComposeUnboundAgent:
             ("hermes_agent", ["mcp"]),
             ("opencode_agent", ["mcp"]),
             ("pool_agent", ["mcp"]),
+            ("legal_agent_bench_native", ["mcp"]),
             ("langchain_deepagents_agent", ["direct_http"]),
         ],
     )
