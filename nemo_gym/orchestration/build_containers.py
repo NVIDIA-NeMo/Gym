@@ -598,6 +598,9 @@ class VLLMBuilder(BaseBuilder):
                     raise RuntimeError(f"Dependency override not satisfied: {req}; installed={installed}")
 
             if any(req.name.lower().replace("_", "-") == "nvidia-nccl-cu13" for req in requirements):
+                import ctypes
+                from pathlib import Path
+
                 import torch
                 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 
@@ -605,8 +608,19 @@ class VLLMBuilder(BaseBuilder):
                 expected_parts = tuple(int(part) for part in expected.split("."))
                 major, minor, patch = expected_parts
                 expected_code = major * 10000 + minor * 100 + patch
+                # torch.cuda.nccl.version() reports compile-time header constants.
+                # Resolve the runtime symbol through libtorch_cuda's dependencies,
+                # rather than loading a separate NCCL library by package path.
+                torch_cuda = ctypes.CDLL(str(Path(torch.__file__).parent / "lib/libtorch_cuda.so"))
+                get_version = torch_cuda.ncclGetVersion
+                get_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
+                get_version.restype = ctypes.c_int
+                torch_runtime = ctypes.c_int()
+                status = get_version(ctypes.byref(torch_runtime))
+                if status != 0:
+                    raise RuntimeError(f"PyTorch NCCL runtime version query failed: status={status}")
                 versions = {
-                    "torch": torch.cuda.nccl.version(),
+                    "torch": torch_runtime.value,
                     "vllm": NCCLLibrary().ncclGetRawVersion(),
                 }
                 try:
@@ -616,12 +630,15 @@ class VLLMBuilder(BaseBuilder):
                 else:
                     from nccl.bindings import nccl
                     versions["nccl4py"] = nccl.get_version()
-                print(f"NCCL runtime: expected={expected}; loaded={versions}; torch={torch.__version__}", flush=True)
+                print(
+                    f"NCCL runtime: expected={expected}; loaded={versions}; torch={torch.__version__}; "
+                    f"torch_build_nccl={torch.cuda.nccl.version()}",
+                    flush=True,
+                )
                 for consumer, actual in versions.items():
-                    target = expected_parts if consumer == "torch" else expected_code
-                    if actual != target:
+                    if actual != expected_code:
                         raise RuntimeError(
-                            f"{consumer} loaded NCCL {actual}, expected {target}; "
+                            f"{consumer} loaded NCCL {actual}, expected {expected_code}; "
                             "check LD_LIBRARY_PATH and VLLM_NCCL_SO_PATH"
                         )
             VERIFY_DEPENDENCIES

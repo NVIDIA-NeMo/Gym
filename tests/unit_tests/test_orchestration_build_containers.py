@@ -4,6 +4,7 @@
 import ast
 import asyncio
 import builtins
+import ctypes
 import fnmatch
 import importlib.metadata
 import json
@@ -694,7 +695,7 @@ def test_vllm_dependency_overrides_reach_resolver(vllm_builder, tmp_path, overri
     assert call["overrides"] == ("\n".join(overrides) + "\n" if overrides else None)
 
 
-@pytest.mark.parametrize("mismatch", [None, "distribution", "torch", "vllm", "nccl4py"])
+@pytest.mark.parametrize("mismatch", [None, "distribution", "torch", "vllm", "nccl4py", "query_error"])
 def test_vllm_dependency_verification_checks_loaded_nccl(vllm_builder, monkeypatch, capsys, mismatch):
     vllm_builder._head_sha = "a" * 40
     script = shlex.split(vllm_builder.get_srun_command_str())[2]
@@ -707,11 +708,19 @@ def test_vllm_dependency_verification_checks_loaded_nccl(vllm_builder, monkeypat
         "torch",
         SimpleNamespace(
             __version__="2.13.0",
-            cuda=SimpleNamespace(
-                nccl=SimpleNamespace(version=lambda: (2, 29, 7) if mismatch == "torch" else (2, 32, 3))
-            ),
+            __file__="/opt/worker/lib/python3.13/site-packages/torch/__init__.py",
+            # The wheel's build-time NCCL version stays old even after a runtime upgrade.
+            cuda=SimpleNamespace(nccl=SimpleNamespace(version=lambda: (2, 29, 7))),
         ),
     )
+
+    def nccl_get_version(pointer):
+        ctypes.cast(pointer, ctypes.POINTER(ctypes.c_int)).contents.value = 22907 if mismatch == "torch" else 23203
+        return 3 if mismatch == "query_error" else 0
+
+    get_version = Mock(side_effect=nccl_get_version)
+    load_library = Mock(return_value=SimpleNamespace(ncclGetVersion=get_version))
+    monkeypatch.setattr(ctypes, "CDLL", load_library)
     monkeypatch.setitem(
         sys.modules,
         "vllm.distributed.device_communicators.pynccl_wrapper",
@@ -726,11 +735,19 @@ def test_vllm_dependency_verification_checks_loaded_nccl(vllm_builder, monkeypat
     )
     if mismatch:
         message = "override not satisfied" if mismatch == "distribution" else f"{mismatch} loaded NCCL"
+        if mismatch == "query_error":
+            message = "runtime version query failed: status=3"
         with pytest.raises(RuntimeError, match=message):
             exec(compile(validator, "<dependency verification>", "exec"), {})
     else:
         exec(compile(validator, "<dependency verification>", "exec"), {})
-        assert "NCCL runtime: expected=2.32.3" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "NCCL runtime: expected=2.32.3; loaded={'torch': 23203, 'vllm': 23203, 'nccl4py': 23203}" in output
+        assert "torch_build_nccl=(2, 29, 7)" in output
+    if mismatch != "distribution":
+        load_library.assert_called_once_with("/opt/worker/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so")
+        assert get_version.argtypes == [ctypes.POINTER(ctypes.c_int)]
+        assert get_version.restype == ctypes.c_int
 
 
 def test_nemo_rl_build_pins_refit_dependencies(monkeypatch, tmp_path):
