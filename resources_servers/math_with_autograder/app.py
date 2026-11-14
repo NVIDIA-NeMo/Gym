@@ -161,16 +161,11 @@ class MathWithAutograderResourcesServer(LibraryJudgeMathResourcesServer):
         if last_content.type != "output_text":
             return False, judge_evaluation
 
+        # The prompt asks for the grade last; an earlier label may be quoted from the answer.
         output_text = last_content.text
-        equal_pos = output_text.find(self.JUDGE_EQUAL_LABEL)
-        not_equal_pos = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
-        if equal_pos < 0 and not_equal_pos < 0:
-            return False, judge_evaluation
-        if not_equal_pos < 0:
-            return True, judge_evaluation
-        if equal_pos < 0:
-            return False, judge_evaluation
-        return equal_pos < not_equal_pos, judge_evaluation
+        equal_pos = output_text.rfind(self.JUDGE_EQUAL_LABEL)
+        not_equal_pos = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
+        return equal_pos > not_equal_pos, judge_evaluation
 
     @staticmethod
     def _search_boxed(text: str) -> Optional[str]:
