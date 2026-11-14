@@ -1,0 +1,21 @@
+# Run the real upstream GeoBenchX tools instead of the simulator.
+#
+# Pair with geobenchx.yaml (list this file after it). Requires the upstream
+# GeoBenchX source, its data snapshot, and the geospatial Python environment
+# from tools_env/ (see README "Real tools"). Set in env.yaml:
+#   geobenchx_upstream_python: /path/to/envs/geobenchx/bin/python
+#   geobenchx_upstream_src: /path/to/GeoBenchX            # contains geobenchx/tools.py
+#   geobenchx_data_root: /path/to/GeoBenchX/Data          # contains StatData/ and GeoData/
+#   geobenchx_scratch: /path/to/scratch
+geobenchx_resources_server:
+  resources_servers:
+    geobenchx:
+      tool_backend: upstream
+      upstream_python: ${geobenchx_upstream_python}
+      upstream_src: ${geobenchx_upstream_src}
+      stat_data_path: ${geobenchx_data_root}/StatData
+      geo_data_path: ${geobenchx_data_root}/GeoData
+      scratch_path: ${geobenchx_scratch}
+      num_tool_workers: 16
+      tool_timeout_s: 300
+      verified: false

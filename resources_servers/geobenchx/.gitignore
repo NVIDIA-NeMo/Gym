@@ -1,0 +1,10 @@
+# Local run outputs: model generations and, in real-tools mode, data derived from
+# the non-redistributable snapshot (see DATA-ATTESTATION.md).
+data/*rollouts*
+data/rollout_verdicts.jsonl
+data/quality_summary.json
+# Task records are downloaded from the pinned upstream commit and materialized
+# locally; they are not committed (see DATA-ATTESTATION.md).
+upstream/*.json
+upstream/*.partial
+data/*.jsonl
