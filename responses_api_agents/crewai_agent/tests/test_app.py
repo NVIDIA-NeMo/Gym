@@ -35,7 +35,7 @@ from nemo_gym.sandbox import (
     SandboxAccess,
     SandboxSpec,
 )
-from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess
 from responses_api_agents.crewai_agent import app
 from responses_api_agents.crewai_agent.app import CrewAIAgent, CrewAIAgentConfig
 from responses_api_agents.crewai_agent.sandbox_runner import configure_crewai
@@ -215,9 +215,11 @@ async def test_an_activation_outside_the_seeded_session_is_refused():
     with pytest.raises(HTTPException) as unseeded:
         await agent.responses(_request(), _body())
     with pytest.raises(HTTPException) as legacy:
-        await agent.run(_request(), SimpleNamespace())
+        await agent.run(BaseRunRequest(responses_create_params=_body()))
 
-    assert unseeded.value.status_code == legacy.value.status_code == 409
+    assert unseeded.value.status_code == 409
+    assert legacy.value.status_code == 422
+    assert "does not implement /run" in legacy.value.detail
 
 
 # --- episodes on the local provider -----------------------------------------------------------------------
