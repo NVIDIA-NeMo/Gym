@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_052/verify.py
 # Original license: CC-BY-4.0; Copyright: SaaS-Bench Authors; see bundled licenses.
-# NVIDIA modifications: Require exactly 24 percent voucher discount (instead of upstream approximate 10.04 or 24); use SALES_ESTIMATES and search matching estimates.
+# NVIDIA modifications: Require exactly 24 percent voucher discount (instead of upstream approximate 10.04 or 24); use SALES_ESTIMATES and search matching estimates. Check 15 requires exact line items and a total within 0.01 (upstream: 3 or more lines and total within 1.0).
 """
 Verifier for Business-052-I5: Leadership Development Training Series
 across Pretix, Twenty CRM, and BigCapital.

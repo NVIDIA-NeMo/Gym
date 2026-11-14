@@ -11,6 +11,7 @@ from nemo_gym.core import NeMoGymResponse
 
 def actor_response(body, result, *, harness, model_name):
     from saas_bench.opencode.core import response_items
+    from saas_bench.opencode.protocol import has_model_turn
 
     # Earlier episodes may have a projected trajectory plus native events.
     # Always expose the original OpenCode events, without browser-use fields.
@@ -44,7 +45,10 @@ def actor_response(body, result, *, harness, model_name):
                 ],
             }
         ]
-    if result.get("mask_sample", True) and not native and not result.get("agent_output"):
+    model_turn = (
+        result.get("model_turn_observed") is True or has_model_turn(native) if harness == "opencode" else bool(native)
+    )
+    if result.get("mask_sample", True) and not model_turn and not result.get("agent_output"):
         items = []
     response = NeMoGymResponse.model_validate(
         {

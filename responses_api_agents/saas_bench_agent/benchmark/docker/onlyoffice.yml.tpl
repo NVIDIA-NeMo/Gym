@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/onlyoffice.yml.tpl
 # Original license: Apache-2.0; Copyright: SaaS-Bench Authors.
 version: "3.8"

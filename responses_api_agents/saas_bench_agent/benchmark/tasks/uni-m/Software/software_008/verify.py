@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_008/verify.py
 # Original license: CC-BY-4.0; Copyright: SaaS-Bench Authors; see bundled licenses.
-# NVIDIA modifications: Correct literal f-string construction in the title-check diagnostic (no check-weight change).
+# NVIDIA modifications: Use JWT instead of Token in the Baserow Authorization header.
 """
 Verifier for Software-008-I2: Engineering OKR Tracker across Baserow, Metabase, OpenProject
 

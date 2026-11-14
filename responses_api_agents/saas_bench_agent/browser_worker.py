@@ -21,6 +21,47 @@ from saas_bench.opencode.worker import claim_slot
 from responses_api_agents.saas_bench_agent.runtime import configure_cache
 
 
+class _ActorDeadlineExpired(TimeoutError):
+    """The outer actor budget expired, rather than an inner runtime operation."""
+
+
+async def _run_actor_with_deadline(awaitable, seconds):
+    deadline = asyncio.timeout(seconds)
+    try:
+        async with deadline:
+            return await awaitable
+    except TimeoutError as exc:
+        if deadline.expired():
+            raise _ActorDeadlineExpired("Browser actor deadline expired") from exc
+        raise
+
+
+def _deadline_checkpoint(output: Path, task_id: str) -> dict:
+    # Only durable model steps justify treating the outer deadline as an actor
+    # ending. Initial navigation is harness work; corrupt/missing checkpoints
+    # and inner CDP/screenshot/provider timeouts remain retryable faults.
+    actor = json.loads((output / f"{task_id}_r0.json").read_text())
+    steps = actor.get("trajectory", [])
+    if (
+        actor.get("task_id") != task_id
+        or not isinstance(steps, list)
+        or not any(
+            isinstance(step, dict)
+            and step.get("action_origin") != "harness_initial_action"
+            and (step.get("actions") or step.get("action") or step.get("thought") or step.get("llm_call"))
+            for step in steps
+        )
+    ):
+        raise RuntimeError("Browser deadline expired without a saved model turn")
+    return {
+        **actor,
+        "status": "error",
+        "failure_origin": "model",
+        "failure_kind": "timeout",
+        "model_turn_observed": True,
+    }
+
+
 def _trace_counts(trajectory: list[dict]) -> tuple[int, int]:
     actions = errors = 0
     for step in trajectory:
@@ -109,7 +150,7 @@ def execute(config: dict) -> dict:
 
                 try:
                     actor = asyncio.run(
-                        asyncio.wait_for(
+                        _run_actor_with_deadline(
                             run_task(
                                 task,
                                 config["model_name"],
@@ -122,9 +163,11 @@ def execute(config: dict) -> dict:
                                 input_files=inputs,
                                 allowed_local_origins=[f"http://{hostname}:{port}" for port in ports.values()],
                             ),
-                            timeout=config["agent_timeout"],
+                            seconds=config["agent_timeout"],
                         )
                     )
+                except _ActorDeadlineExpired:
+                    actor = _deadline_checkpoint(output, config["task_id"])
                 finally:
                     for key, value in judge_env.items():
                         if value is None:
@@ -137,7 +180,8 @@ def execute(config: dict) -> dict:
                 result.update(actor, native_trajectory=native)
                 if actor_failed and (
                     actor.get("failure_origin") != "model"
-                    or actor_error not in {"context_limit", "malformed_tool_call", "output_token_limit", "agent_error"}
+                    or actor_error
+                    not in {"context_limit", "malformed_tool_call", "output_token_limit", "agent_error", "timeout"}
                 ):
                     raise RuntimeError("Browser actor/runtime failed without a model-attributed ending")
                 # Only confirmed model endings reach final-state grading;

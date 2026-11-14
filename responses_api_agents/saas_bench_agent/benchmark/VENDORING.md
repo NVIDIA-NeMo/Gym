@@ -23,14 +23,15 @@ These changes existed before this review correction. They are retained and discl
 | `business_031` | Use deployed contact DISPLAY_NAME and journal PUBLISHED_AT schema for offboarding checks. |
 | `business_032` | Normalize NULL debit/credit database values before numeric comparisons. |
 | `business_051` | Use deployed journal schema; require postings in one published journal; report database faults as verifier errors. |
-| `business_052` | Require exactly 24 percent voucher discount (instead of upstream approximate 10.04 or 24); use SALES_ESTIMATES and search matching estimates. |
+| `business_052` | Require exactly 24 percent voucher discount (instead of upstream approximate 10.04 or 24); use SALES_ESTIMATES and search matching estimates. Check 15 requires exact line items and a total within 0.01 (upstream: 3 or more lines and total within 1.0). |
 | `business_143` | Use MANUAL_JOURNALS_ENTRIES and PUBLISHED_AT schema instead of upstream singular table and STATUS. |
-| `software_008` | Correct literal f-string construction in the title-check diagnostic (no check-weight change). |
-| `software_025` | Use JWT authorization for the deployed Taiga API instead of Token authorization. |
+| `software_008` | Use JWT instead of Token in the Baserow Authorization header. |
+| `software_025` | Use JWT instead of Token in the Baserow Authorization header of baserow_api_get. |
 
 ## Runtime and harness adaptations
 
 - Native browser driver: provider configuration, screenshot evidence, and explicit actor versus runtime fault tracking.
+- Pretix template: new events enable the built-in manual payment provider by default. Upstream new events start with no payment provider enabled. This can make go-live checks easier; scores are not claimed equivalent to the public upstream release.
 - Native slot driver: rootless Enroot support, service readiness and deployment network/UID handling.
 - Verifier runner: bounded retries while live apps remain available, completion SCORE requirement, readiness checks and judge fault channel.
 - NVIDIA extensions: rootless app/network/UID helpers, OpenCode integration and deployment scripts listed as nvidia-authored in provenance.

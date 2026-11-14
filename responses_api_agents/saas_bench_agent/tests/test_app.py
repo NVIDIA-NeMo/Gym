@@ -289,14 +289,25 @@ def test_browser_model_ending_requires_explicit_origin_even_for_cached_results(g
     assert response.failure_outcome_attribution == ("evaluation" if masked else "model")
 
 
-def test_start_failure_is_recoverable_without_a_saved_generation(grader):
+@pytest.mark.parametrize(
+    "events",
+    [
+        [],
+        [{"type": "step_start", "timestamp": 1, "part": {"messageID": "m1"}}],
+        [
+            {"type": "step_start", "timestamp": 1, "part": {"messageID": "m1"}},
+            {"type": "error", "error": {"name": "provider_error", "data": {"message": "503 unavailable"}}},
+        ],
+    ],
+)
+def test_start_failure_is_recoverable_without_a_saved_generation(grader, events):
     from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
 
     native = {
         "status": "error",
         "artifacts": "fixture",
         "trajectory": [],
-        "native_trajectory": [],
+        "native_trajectory": events,
         "agent_output": "",
         "mask_sample": True,
         "failure_kind": "saas_bench:infrastructure",

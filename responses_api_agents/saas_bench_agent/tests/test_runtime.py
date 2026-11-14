@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Admission of external task data and native lifecycle ownership."""
 
+import asyncio
 import hashlib
 import json
 import sys
@@ -60,6 +61,11 @@ def test_forbidden_cache_roots(tmp_path, monkeypatch, root):
         ("FAIL", False, "context_limit", False),
         ("FAIL", False, "runtime_after_turn", True),
         ("FAIL", False, "timeout", True),
+        ("FAIL", False, "deadline_saved", False),
+        ("FAIL", False, "deadline_empty", True),
+        ("FAIL", False, "deadline_initial_only", True),
+        ("FAIL", False, "deadline_corrupt", True),
+        ("FAIL", False, "runtime_timeout_saved", True),
         ("FAIL", False, "exception", True),
     ],
 )
@@ -99,8 +105,29 @@ def test_browser_worker_grades_live_state_and_always_stops(
     actor = types.ModuleType("saas_bench.agent")
 
     async def run_task(*args, **kw):
+        if actor_status.startswith("deadline_") or actor_status == "runtime_timeout_saved":
+            steps = [
+                {
+                    "actions": [{"click": {"index": 1}}, {"input_text": {"text": "fixture"}}],
+                    "results": [{"extracted_content": "clicked"}, {"error": "field unavailable"}],
+                    "screenshot": "original.png",
+                }
+            ]
+            if actor_status == "deadline_empty":
+                steps = []
+            if actor_status == "deadline_initial_only":
+                steps[0]["action_origin"] = "harness_initial_action"
+            checkpoint = Path(args[3]) / "fixture_r0.json"
+            checkpoint.write_text(
+                "{invalid"
+                if actor_status == "deadline_corrupt"
+                else json.dumps({"task_id": "fixture", "trajectory": steps})
+            )
+            if actor_status == "runtime_timeout_saved":
+                raise TimeoutError("CDP transport timeout after a completed model step")
+            await asyncio.Event().wait()
         if actor_status == "timeout":
-            raise TimeoutError("actor deadline")
+            raise TimeoutError("internal actor timeout")
         if actor_status == "exception":
             raise RuntimeError("actor exception")
         assert __import__("os").environ["LLM_API_KEY"] == "EMPTY"
@@ -142,20 +169,33 @@ def test_browser_worker_grades_live_state_and_always_stops(
             "output_tokens": 100,
             "context_tokens": 1000,
             "max_steps": 5,
-            "agent_timeout": 10,
+            "agent_timeout": 0.01 if actor_status.startswith("deadline_") else 10,
         }
     )
     assert result["mask_sample"] is masked, result
-    if actor_status in {"timeout", "exception", "error", "runtime_after_turn"}:
+    if actor_status in {
+        "timeout",
+        "exception",
+        "error",
+        "runtime_after_turn",
+        "deadline_empty",
+        "deadline_initial_only",
+        "deadline_corrupt",
+        "runtime_timeout_saved",
+    }:
         verifier.run_verify.assert_not_called()
         assert result["status"] == "error" and result["failure_kind"] == "saas_bench:infrastructure"
         slot.stop_apps.assert_called_once_with(["fixture"])
         return
     assert result["verify"]["status"] == status
-    if actor_status in {"model_error", "context_limit"}:
+    if actor_status in {"model_error", "context_limit", "deadline_saved"}:
         assert result["reward"] == 0.25 and not result["mask_sample"]
         assert result["execution_health"]["termination"] == (
-            "context_limit" if actor_status == "context_limit" else "malformed_tool_call"
+            "context_limit"
+            if actor_status == "context_limit"
+            else "timeout"
+            if actor_status == "deadline_saved"
+            else "malformed_tool_call"
         )
     assert result["native_trajectory"][0]["screenshot"] == "original.png"
     assert result["execution_health"]["tool_calls"] == 2

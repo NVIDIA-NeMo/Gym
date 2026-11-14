@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_025/verify.py
 # Original license: CC-BY-4.0; Copyright: SaaS-Bench Authors; see bundled licenses.
-# NVIDIA modifications: Use JWT authorization for the deployed Taiga API instead of Token authorization.
+# NVIDIA modifications: Use JWT instead of Token in the Baserow Authorization header of baserow_api_get.
 """
 Verifier for Software-025-I1: Cross-project lint audit with Baserow import,
 Metabase dashboard, and OpenProject remediation tasks.

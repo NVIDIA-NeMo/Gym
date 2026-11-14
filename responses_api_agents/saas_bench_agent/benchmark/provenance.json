@@ -70,7 +70,7 @@
     },
     {
       "source_path": "saas_bench/apps.yaml",
-      "vendored_sha256": "2eb0d133eacc84453548b9d68fb5800feb65a6e9c650846389b62b8370f7351b",
+      "vendored_sha256": "2ba506d02fdcbfcabdc3f71879bd8c3b537dabfc18829f2d9b110282452a3139",
       "license": "Apache-2.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/apps.yaml",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -232,7 +232,7 @@
     },
     {
       "source_path": "docker/onlyoffice.yml.tpl",
-      "vendored_sha256": "c33811a5093df5a83b5a2541f47c4d635932b65586fc6dc1130e8423d73611b6",
+      "vendored_sha256": "23c58764d02c89577a829dd7f23ab05a6988e96913bf795bd5128ba89b57e047",
       "license": "Apache-2.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/onlyoffice.yml.tpl",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -250,7 +250,7 @@
     },
     {
       "source_path": "docker/pretix.yml.tpl",
-      "vendored_sha256": "64e1fe7c519f94e2adf433ceb88f83cf731c1229964f7204c686314344fe24ca",
+      "vendored_sha256": "6916a414305a0c4c698b2bc787c10d93bc043bc1b17df693b89b35aa63157908",
       "license": "Apache-2.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/pretix.yml.tpl",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -348,7 +348,7 @@
     },
     {
       "source_path": "tasks/uni-m/Business/business_052/verify.py",
-      "vendored_sha256": "208798331226e351584f90ab1ca6c7fe771fe9a8d60863e5bb1b5f7e381b2b51",
+      "vendored_sha256": "cf2fbe3007100cb61376feaa342ca065ed5052733b7b1d270c7a5a613fbc7f0b",
       "license": "CC-BY-4.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_052/verify.py",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -370,7 +370,7 @@
     },
     {
       "source_path": "tasks/uni-m/Software/software_008/verify.py",
-      "vendored_sha256": "ff564e6d8ccd0116c7d1c0f8b271635a0a8c6d2183e4ed2ef513379d4259b581",
+      "vendored_sha256": "e2d9acd166e57be70fa8e10cbd2e2945e732002c614d271f80b45dfd08939214",
       "license": "CC-BY-4.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_008/verify.py",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -381,7 +381,7 @@
     },
     {
       "source_path": "tasks/uni-m/Software/software_025/verify.py",
-      "vendored_sha256": "443b3692a8d7a9920000dd6b5ea7b77e65e82f09349bb528a266500d716f4414",
+      "vendored_sha256": "b1fd2fa82be753377a99fc4240a7a751be03dbcb6030629284491a5bdc4d2a0c",
       "license": "CC-BY-4.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_025/verify.py",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
