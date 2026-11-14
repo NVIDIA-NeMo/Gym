@@ -2,11 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import traceback
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import quote, quote_plus
 
 import pytest
+from aiohttp import ClientPayloadError, ClientResponseError, RequestInfo
+from multidict import CIMultiDict, CIMultiDictProxy
 from PIL import Image
 from pydantic import ValidationError
+from yarl import URL
 
 from responses_api_agents.agentic_mme_agent import retrieval
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval, RetrievalConfig, http_payload, public_url
@@ -182,7 +187,9 @@ async def test_http_bounds_and_release(monkeypatch, status, chunks, limit, error
 
     response = MagicMock(status=status)
     response.content.iter_chunked = stream
-    monkeypatch.setattr(retrieval, "request", AsyncMock(return_value=response))
+    client = MagicMock()
+    client.request = AsyncMock(return_value=response)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
     config = RetrievalConfig(max_response_bytes=limit)
     if error:
         with pytest.raises(ValueError, match=error):
@@ -190,7 +197,99 @@ async def test_http_bounds_and_release(monkeypatch, status, chunks, limit, error
     else:
         assert await http_payload(config, "GET", "https://example.com") == b"abcdef"
     response.release.assert_called_once()
-    assert retrieval.request.call_args.kwargs["allow_redirects"] is False
+    client.request.assert_awaited_once()
+    assert client.request.call_args.kwargs["allow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_body_read_failure_redacts_its_cause_and_releases_response(monkeypatch) -> None:
+    canary = "synthetic-stream-canary"
+    url = "https://serpapi.com/search.json"
+    info = RequestInfo(URL(url).with_query({"api_key": canary}), "GET", CIMultiDictProxy(CIMultiDict()))
+    cause = ClientResponseError(info, (), status=503, message=f"upstream closed {canary}")
+
+    async def stream(_):
+        yield b"partial"
+        raise ClientPayloadError(f"stream ended {canary}") from cause
+
+    response = MagicMock(status=200, headers={})
+    response.content.iter_chunked = stream
+    client = MagicMock()
+    client.request = AsyncMock(return_value=response)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
+    with pytest.raises(ClientPayloadError) as raised:
+        await http_payload(RetrievalConfig(serpapi_api_key=canary), "GET", url, params={"api_key": canary})
+    assert raised.value.__cause__ is cause and cause.status == 503
+    assert "stream ended" in str(raised.value)
+    assert canary not in "".join(traceback.format_exception(raised.value)) + repr(cause)
+    response.release.assert_called_once()
+    client.request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_transport_retries_redact_credentials_before_logging(monkeypatch, capsys, debug, recovers) -> None:
+    canary = "synthetic-canary+%/not-a-credential"
+    encoded = {canary, quote(canary, safe=""), quote_plus(canary)}
+    url = "https://serpapi.com/search.json"
+    errors = []
+    calls = []
+    response = MagicMock(status=200, headers={})
+
+    async def chunks(_):
+        yield b"recovered"
+
+    response.content.iter_chunked = chunks
+
+    async def send(**kwargs):
+        calls.append(kwargs)
+        if recovers and len(calls) > 1:
+            return response
+        headers = CIMultiDictProxy(CIMultiDict({"Authorization": f"Bearer {canary}"}))
+        info = RequestInfo(URL(url).with_query({"api_key": canary}), "GET", headers)
+        error = ClientResponseError(
+            info,
+            (MagicMock(name=f"redirect-{canary}"),),
+            status=429,
+            message=f"upstream rejected {quote_plus(canary)}",
+            headers=headers,
+        )
+        error.add_note(f"request credential {quote(canary, safe='')}")
+        errors.append(error)
+        try:
+            raise OSError(71, f"upstream connection failed {canary}")
+        except OSError as cause:
+            raise error from cause
+
+    client = MagicMock()
+    client.request = AsyncMock(side_effect=send)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug)
+    config = RetrievalConfig(serpapi_api_key=canary)
+    if recovers:
+        assert await http_payload(config, "GET", url, params={"api_key": canary}) == b"recovered"
+        response.release.assert_called_once()
+        assert len(calls) == 2
+    else:
+        with pytest.raises(ClientResponseError) as raised:
+            await http_payload(config, "GET", url, params={"api_key": canary})
+        assert raised.value is errors[-1]
+        assert len(calls) == 3  # Gym's documented external-request retry limit.
+    # Authentication and the shared retry policy stay intact; only exception diagnostics change.
+    assert all(call["params"]["api_key"] == canary and call["allow_redirects"] is False for call in calls)
+    captured = capsys.readouterr()
+    diagnostics = captured.out + captured.err
+    for error in errors:
+        assert error.status == 429
+        assert isinstance(error.__cause__, OSError) and error.__cause__.errno == 71
+        assert "upstream connection failed" in str(error.__cause__)
+        assert error.history == ()
+        assert not error.headers and not error.request_info.headers
+        diagnostics += repr(error) + repr(error.args) + repr(vars(error))
+        diagnostics += "".join(traceback.format_exception(error))
+    assert "429" in diagnostics and "upstream rejected" in diagnostics
+    assert all(secret not in diagnostics for secret in encoded)
 
 
 def _fake_request(payload):

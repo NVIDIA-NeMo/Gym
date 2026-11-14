@@ -4,6 +4,8 @@ agentic_mme:
   resources_servers:
     agentic_mme:
       entrypoint: app.py
+      allowed_agents:
+      - agentic_mme_agent
       domain: other
       verified: false
       description: Agentic-MME atomic visual tools and optional web retrieval, task-only scoring.

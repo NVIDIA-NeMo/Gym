@@ -869,7 +869,12 @@ async def test_service_resources_environment_and_workdir(tmp_path, user):
                     "working_dir": str(tmp_path),
                     "cpus": "1.5",
                     "mem_limit": 1048577,
-                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {output}"], "interval": "1ms"},
+                    "healthcheck": {
+                        "test": ["CMD-SHELL", f"test -f {output}"],
+                        "interval": "1ms",
+                        "start_period": "2s",
+                        "start_interval": "1ms",
+                    },
                 }
             }
         },
@@ -1380,7 +1385,7 @@ async def test_a_working_directory_the_image_lacks_is_created_before_the_first_e
         }
     }
     async with make_compose(provider, document, poll_interval_s=0.01) as group:
-        await group._wait("main", "service_started")
+        await group._wait("main", "service_completed_successfully")
         assert workdir.is_dir()
         assert seen.read_text().strip() == str(workdir)
     assert provider.calls[0] == (f"mkdir -p {workdir}", "/", "root")
