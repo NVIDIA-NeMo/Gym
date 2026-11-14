@@ -212,10 +212,13 @@ class WildClawAgent(SimpleResponsesAPIAgent):
                 except (asyncio.CancelledError, Exception):
                     pass
             await state.process.stop()
-        # SIGKILL without the native runner's finally receipt is inconclusive. Keep the state so close can retry;
-        # the environment still closes its Resources session and reports the failed episode.
+        # A killed worker without its native finally receipt is inconclusive until the Resources owner confirms
+        # container cleanup. Keep state on failure so a later close can consume that owner's cleanup receipt.
         if (state.output / "agent_started.json").exists():
-            receipt = json.loads((state.output / "harness_stopped.json").read_text())
+            receipt_path = state.output / "resources_closed.json"
+            if not receipt_path.exists():
+                receipt_path = state.output / "harness_stopped.json"
+            receipt = json.loads(receipt_path.read_text())
             if receipt.get("cleanup_confirmed") is not True:
                 raise RuntimeError("Native harness termination is unconfirmed")
         observations = state.observations or AgentObservationBundle(

@@ -135,7 +135,10 @@ async def test_activation_rejects_unbound_or_modified_inputs(seeded, mode):
     assert agent._require_agent_session(seed.agent_session_id).task is None
 
 
-async def test_close_cancels_activation_and_retains_state_when_termination_unconfirmed(seeded, monkeypatch):
+@pytest.mark.parametrize("receipt_name", ["harness_stopped.json", "resources_closed.json"])
+async def test_close_cancels_activation_and_retains_state_when_termination_unconfirmed(
+    seeded, monkeypatch, receipt_name
+):
     agent, seed, req, output = seeded
     entered = asyncio.Event()
 
@@ -157,7 +160,7 @@ async def test_close_cancels_activation_and_retains_state_when_termination_uncon
     assert agent._session_records[seed.agent_session_id].state is not None
     with pytest.raises(asyncio.CancelledError):
         await activation
-    (output / "harness_stopped.json").write_text('{"cleanup_confirmed":true}')
+    (output / receipt_name).write_text('{"cleanup_confirmed":true}')
     assert (await agent.close_agent_session(req, close)).cleanup_confirmed
 
 
@@ -179,3 +182,58 @@ def test_borrowed_sandbox_is_refused_through_real_route_without_image_setup(tmp_
 
     monkeypatch.setattr("responses_api_agents.wildclawbench_agent.app.image_identity", unexpected)
     assert "does not support sandbox access" in check_agent_seed_rejected(agent.setup_webserver(), seed)
+
+
+@pytest.mark.parametrize("previous_stage", [False, True])
+async def test_cancel_during_spawn_acquires_and_reaps_the_real_child(tmp_path, monkeypatch, previous_stage):
+    import contextlib
+    import os
+
+    from responses_api_agents.wildclawbench_agent.execution import NativeProcess
+
+    script = tmp_path / "worker-python"
+    script.write_text(f"#!{sys.executable}\nimport time;time.sleep(120)\n")
+    script.chmod(0o700)
+    agent = make_agent(tmp_path, str(script))
+    output = tmp_path / "native"
+    output.mkdir()
+    (output / "worker.json").write_text("{}")
+    native = NativeProcess(ExecutionConfig.model_validate(agent.config.model_dump()), output, "sha256:" + "a" * 64)
+    if previous_stage:
+        native.process = await asyncio.create_subprocess_exec(sys.executable, "-c", "pass")
+        await native.process.wait()
+    entered, release = asyncio.Event(), asyncio.Event()
+    children = []
+    original = asyncio.create_subprocess_exec
+
+    async def delayed_handle(*args, **kwargs):
+        child = await original(*args, **kwargs)
+        children.append(child)
+        entered.set()
+        await release.wait()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_handle)
+    task = asyncio.create_task(native.invoke("agent", 300))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert not task.done(), "Cancellation returned before acquiring the already spawned worker"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 10)
+        assert native.process is children[0] and native.process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(children[0].pid, 0)
+    finally:
+        release.set()
+        for child in children:
+            if child.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, 9)
+                await child.wait()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task

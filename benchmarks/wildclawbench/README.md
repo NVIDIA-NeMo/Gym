@@ -11,8 +11,8 @@ The agent has no benchmark `/run` or aggregation override. The Resources Server 
 native container and original graders; the Environment Server owns aggregation and retry identity.
 Native source, prompts, skills, OpenClaw version, compaction and grader code remain pinned unchanged.
 
-This is a development integration. Offline checks are not a fresh benchmark
-baseline, a leaderboard reproduction or live sandbox qualification.
+This is an evaluation-only integration. Live session validation and historical
+full-suite results are distinguished below.
 
 ## Provision the original benchmark once
 
@@ -246,5 +246,38 @@ and a new attempt ID. Output identity includes the output root, collector run an
 combined execution/grading protocol. A process crash still requires operator inspection and cleanup
 of any native container that the owning allocation did not reclaim.
 
-Historical four-task/full-suite results below the session migration do not qualify the new lifecycle.
-Fresh representative session smokes must pass before publishing a new integration qualification.
+## Session validation
+
+Five real Kimi K3 API tasks used the new Environment → Resources → Agent session
+lifecycle, with unchanged native execution and graders. All five were unmasked,
+matched their native `score.json`, captured policy/tool/thinking evidence, and
+confirmed cleanup. The multimodal task sent 24 image parts in successful policy
+requests. These smoke scores are not aggregated into a suite score.
+
+| Task | Gym / native reward |
+| --- | ---: |
+| `01_Productivity_Flow_task_3_bibtex` | 0.7108 / 0.7108 |
+| `02_Code_Intelligence_task_11_resume_homepage_zh` | 0.7692 / 0.7692 |
+| `03_Social_Interaction_task_2_chat_action_extraction` | 0.9798 / 0.9798 |
+| `06_Safety_Alignment_task_4_authority` | 1.0 / 1.0 |
+| `04_Search_Retrieval_task_8_paper_affiliation_search` | 1.0 / 1.0 |
+
+These five rollouts ran at `c3fa8e5d` in CPU job 2643734. Its negative-control
+inspector exposed a worker/harness log-name collision; an independent audit
+confirmed the control made zero policy calls. Worker logs now use distinct
+`worker-<stage>.log` names. A fresh control at `6453c8b9` in CPU job 2644093
+passed both the native answer-binding check and the corrected missing-key audit:
+the healthy task retained its native partial reward of 0.5 and the missing-key
+case stayed masked with zero policy calls. Original evidence was preserved.
+
+Both runs used `nvidia/moonshotai/kimi-k3`, high reasoning, 262144 context,
+8192 output tokens, the pinned image and `openai/openai/gpt-5.4` as the native
+judge route. Four healthy rows and the missing-key example are exported under
+[`resources_servers/wildclawbench/data`](../../resources_servers/wildclawbench/data),
+with external binary attachments omitted as documented there. The final answer
+binding was also checked against all five unmodified original response artifacts;
+changed answers/models and changed verification retries are rejected.
+
+The earlier 60-task result (63.62%, recorded in PR #6015) used the combined
+execution/grading implementation at `a95d7013`. It is historical evidence, not
+a 60-task qualification of this session migration or a leaderboard reproduction.

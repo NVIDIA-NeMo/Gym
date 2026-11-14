@@ -140,13 +140,21 @@ class NativeProcess:
             "--" + stage,
         ]
         with (self.output / ("worker-" + stage + ".log")).open("a") as log:
-            self.process = await asyncio.create_subprocess_exec(
-                *command, env=env, stdout=log, stderr=log, start_new_session=True
+            if self.process is not None and self.process.returncode is None:
+                raise RuntimeError("Another native stage is still running")
+            self.process = None
+            launch = asyncio.create_task(
+                asyncio.create_subprocess_exec(*command, env=env, stdout=log, stderr=log, start_new_session=True)
             )
             try:
+                self.process = await asyncio.shield(launch)
                 await asyncio.wait_for(self.process.wait(), timeout=timeout)
             finally:
                 with anyio.CancelScope(shield=True):
+                    # Cancellation can arrive after the OS child starts but before asyncio returns its handle.
+                    # Finish acquiring that handle before stop; otherwise close could leave an unowned worker.
+                    if self.process is None:
+                        self.process = await asyncio.shield(launch)
                     await self.stop()
         if self.process.returncode:
             raise RuntimeError(f"Native {stage} stage failed; inspect {self.output}")
