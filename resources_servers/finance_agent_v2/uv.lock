@@ -997,6 +997,15 @@ wheels = [
 ]
 
 [[package]]
+name = "frontier-finance"
+version = "0.1.0"
+source = { git = "https://github.com/samaya-ai/frontier-finance.git?rev=3c1134e68b69528cf1afa64839493a9ce1b29fe3#3c1134e68b69528cf1afa64839493a9ce1b29fe3" }
+dependencies = [
+    { name = "pyyaml" },
+    { name = "tqdm" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1268,6 +1277,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "finance-agent" },
+    { name = "frontier-finance" },
     { name = "model-library" },
     { name = "nemo-gym", extra = ["dev"] },
 ]
@@ -1280,6 +1290,7 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "finance-agent", git = "https://github.com/vals-ai/finance-agent-v2.git?rev=bb460b524472ae0955abdf243bbbac06958dc8c9" },
+    { name = "frontier-finance", git = "https://github.com/samaya-ai/frontier-finance.git?rev=3c1134e68b69528cf1afa64839493a9ce1b29fe3" },
     { name = "model-library", specifier = "==0.1.25" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
