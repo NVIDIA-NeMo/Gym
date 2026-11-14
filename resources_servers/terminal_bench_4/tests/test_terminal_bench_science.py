@@ -865,6 +865,41 @@ def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_miss
     assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
 
 
+def test_codex_rows_hand_off_with_the_callers_environment_settings(tmp_path, monkeypatch):
+    from benchmarks.terminal_bench_science import prepare_codex
+    from nemo_gym.server_runtime.supervisor import server_venv as setup_command
+
+    monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
+    caller = {
+        global_config.COMPONENT_EXTRAS_KEY_NAME: {"resources_servers/terminal_bench_4": ["telemetry"]},
+        global_config.UV_VENV_DIR_KEY_NAME: str(tmp_path / "venvs"),
+        global_config.UV_CACHE_DIR_KEY_NAME: str(tmp_path / "uv-cache"),
+        global_config.SKIP_VENV_IF_PRESENT_KEY_NAME: False,
+        "policy_model_name": "not a setup setting",
+    }
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create(caller))
+    runs = []
+
+    def run_command(command, working_dir_path, **kwargs):
+        runs.append((command, kwargs))
+        return SimpleNamespace(wait=lambda: 0)
+
+    monkeypatch.setattr(setup_command, "run_command", run_command)
+    prepare_codex.prepare(task_names=["mri-harmonization"])
+
+    [(command, kwargs)] = runs
+    # The environment `gym env start` would use for this caller: its venv directory and uv cache.
+    python = tmp_path / "venvs" / "resources_servers" / "terminal_bench_4" / ".venv" / "bin" / "python"
+    assert f" && {python} -m benchmarks.terminal_bench_science.prepare_codex " in command
+    setup = kwargs["global_config_dict"]
+    assert setup[global_config.UV_CACHE_DIR_KEY_NAME] == str(tmp_path / "uv-cache")
+    assert setup.get("policy_model_name") != "not a setup setting"  # only the environment settings are taken
+    _, environment_command, _ = command.split(" && ", 2)
+    setup_args = shlex.split(environment_command)
+    install_args = shlex.split(setup_args[setup_args.index("--command") + 1])
+    assert install_args[install_args.index("--extra") + 1] == "telemetry"
+
+
 def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
     from nemo_gym.server_runtime.supervisor import server_venv as setup_command

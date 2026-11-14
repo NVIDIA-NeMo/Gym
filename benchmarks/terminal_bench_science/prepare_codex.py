@@ -35,6 +35,20 @@ MODULE = "benchmarks.terminal_bench_science.prepare_codex"
 SERVER_DIR = PARENT_DIR / "resources_servers" / "terminal_bench_4"
 # Set for the run in the server's environment, which must not hand off again.
 IN_SERVER_ENVIRONMENT_ENV_VAR = "NEMO_GYM_TBSCI_PREPARE_IN_SERVER_ENVIRONMENT"
+# The settings that place and build a server's environment, which the hand-off takes from the caller's config.
+ENVIRONMENT_SETUP_KEYS = (
+    global_config.COMPONENT_EXTRAS_KEY_NAME,
+    global_config.HEAD_SERVER_CONSTRAINTS_KEY_NAME,
+    global_config.HEAD_SERVER_DEPS_KEY_NAME,
+    global_config.NEMO_GYM_LOG_DIR_KEY_NAME,
+    global_config.PIP_INSTALL_VERBOSE_KEY_NAME,
+    global_config.PYTHON_VERSION_KEY_NAME,
+    global_config.SKIP_VENV_IF_PRESENT_KEY_NAME,
+    global_config.UV_CACHE_DIR_KEY_NAME,
+    global_config.UV_LOCK_TIMEOUT_KEY_NAME,
+    global_config.UV_PIP_SET_PYTHON_KEY_NAME,
+    global_config.UV_VENV_DIR_KEY_NAME,
+)
 
 
 def _needs_server_environment() -> bool:
@@ -43,6 +57,8 @@ def _needs_server_environment() -> bool:
 
 def _prepare_in_server_environment(arguments: list[str]) -> Path:
     """Run this module with the terminal_bench_4 server's Python, setting up its environment first."""
+    from omegaconf import open_dict
+
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
     from nemo_gym.server_runtime.supervisor import get_venv_path, run_command, setup_env_command
 
@@ -54,6 +70,14 @@ def _prepare_in_server_environment(arguments: list[str]) -> Path:
             offline=True,
         )
     )
+    # `gym eval prepare` runs with the caller's resolved config: build or reuse the environment where, and how, the
+    # caller's own servers would (venv directory, uv cache, Python version, ...). A direct run has none of these keys.
+    caller = global_config._GLOBAL_CONFIG_DICT
+    if caller is not None:
+        with open_dict(setup_config):
+            for key in ENVIRONMENT_SETUP_KEYS:
+                if key in caller:
+                    setup_config[key] = caller[key]
     python = get_venv_path(SERVER_DIR, setup_config) / "bin" / "python"
     prefix = "resources_servers/terminal_bench_4".replace("/", "\\/")
     command = shlex.join([str(python), "-m", MODULE, *arguments])
