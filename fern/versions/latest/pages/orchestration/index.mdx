@@ -52,6 +52,7 @@ gym eval submit --config path/to/submit.yaml [overrides...]
 | --- | --- |
 | `--config`, `-c` (required) | Path to the submit config YAML. The file must exist; a missing path or a directory is reported before anything else runs. |
 | `--dry-run` | Render every job script and print it, then stop. Nothing is copied or queued, and no record is written. |
+| `--skip-credential-preflight` | Skip the check that each judge or grader endpoint (a `<prefix>_base_url` with a `<prefix>_api_key` in a benchmark's `prepare` or `run` settings) accepts its key. By default a missing or empty key, or a 401/403 from `GET <base_url>/models`, fails the submit before anything is staged or queued; a network error only warns. |
 | `--resolve-only` | Compose, resolve, and validate the config, print it as YAML (JSON with `--json`), and stop before any script is rendered. |
 | `--json` | Print the submission record as JSON instead of the human-readable summary. With `--resolve-only`, print the resolved config as JSON. |
 

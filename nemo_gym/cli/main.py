@@ -565,7 +565,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
             print(yaml.safe_dump(config.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False))
         return
 
-    record = submit(config, dry_run=args.dry_run)
+    record = submit(config, dry_run=args.dry_run, credential_preflight=not args.skip_credential_preflight)
     if record is None:
         return
 
@@ -1828,6 +1828,13 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--skip-credential-preflight",
+                    action="store_true",
+                    help="Do not check judge and grader API keys against their endpoints before submitting.",
                 ),
             ),
             Flag(

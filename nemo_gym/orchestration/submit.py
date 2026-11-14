@@ -24,7 +24,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.credential_preflight import check_credentials
 from nemo_gym.orchestration.executors.base import SchedulerRefusedError
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
@@ -57,8 +59,19 @@ _EXECUTORS = {
 _EXECUTORS_BY_NAME = {executor.name: executor for executor in _EXECUTORS.values()}
 
 
+def _config_paths_missing_at_installed(paths: list[str] | None) -> list[str]:
+    """The relative ``config_paths`` entries the installed Gym does not contain; an absolute entry resolves unchanged.
+
+    A job `cd`s into its Gym checkout, so a relative entry such as ``benchmarks/<benchmark>/config.yaml`` is read from
+    the commit the job runs. The launcher's install root is that commit's tree when a recovery repins to it.
+    """
+    return [path for path in paths or [] if not Path(path).is_absolute() and not (PARENT_DIR / path).exists()]
+
+
 @experimental
-def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
+def submit(
+    config: SubmitConfig, *, dry_run: bool = False, credential_preflight: bool = True
+) -> SubmissionRecord | None:
     compute = next(iter(config.compute.values()))
     executor_cls = _EXECUTORS[type(compute)]
 
@@ -69,6 +82,10 @@ def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord |
                 f"Benchmark(s) {', '.join(unsupported)} set `resumable`, but {executor_cls.__name__} "
                 "does not support resumable runs."
             )
+
+    # Before the executor stages or queues anything, so a rejected judge key costs no allocation.
+    if credential_preflight:
+        check_credentials(config)
 
     return executor_cls().run(config, dry_run=dry_run)
 
@@ -121,6 +138,8 @@ def recover(
     needs the installed revision to run (a re-judge, whose job runs the installed recovery source, or a resubmit the
     pinned revision plans differently), the run moves to the installed commit, journaled as an automatic repin with
     the reason; otherwise its pin stays. ``auto_repin=False`` refuses that case instead, naming ``repin``.
+    A repin is also refused, whatever ``auto_repin`` says, when the installed commit lacks a relative ``config_paths``
+    entry the run was launched with: its job would die at start. The reason names the missing entries.
 
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's; a
     judge-only job of the run runs at it too.
@@ -529,12 +548,27 @@ def _recover(
                     f"the pinned revision plans {at_pin.action.value} {at_pin.counts}, the installed one "
                     f"{decision.action.value} {decision.counts}"
                 )
+        # A repin runs the job on the installed commit, which must still hold every config file the run launched with.
+        missing = (
+            _config_paths_missing_at_installed(executor.config_paths(record, benchmark)) if needs is not None else []
+        )
         if needs is None:
             pin_plan = {
                 "installed": installed,
                 "pinned": pinned,
                 "repin": False,
                 "reason": f"{planned}; the pin stays",
+            }
+        elif missing:
+            pin_plan = {
+                "installed": installed,
+                "pinned": pinned,
+                "repin": False,
+                "refused": True,
+                "missing_config_paths": missing,
+                "reason": f"{planned}: {needs}, but the installed commit lacks config_paths "
+                f"{', '.join(repr(path) for path in missing)} that the run was launched with, so the job would fail at "
+                "start; the pin was kept: recover from a launcher whose Gym contains them",
             }
         elif not auto_repin:
             pin_plan = {

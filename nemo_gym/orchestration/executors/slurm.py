@@ -2878,6 +2878,22 @@ class SlurmExecutor(BaseExecutor):
         ref = install.ref if install is not None else None
         return ref if ref is not None and re.fullmatch(r"[0-9a-f]{40}", ref) else None
 
+    def config_paths(self, record: SubmissionRecord, benchmark: str) -> list[str] | None:
+        """The ``config_paths`` entries the benchmark's saved ``prepare`` and ``run`` were launched with, in order;
+        None when the saved config is unreadable."""
+        try:
+            with get_connection(record.hostname) as conn:
+                job = self._saved_config(conn, Path(record.run_dir)).driver.benchmarks[benchmark]
+        except (OSError, RuntimeError, ValueError, KeyError):
+            return None
+        paths: list[str] = []
+        for section in (job.prepare, job.run):
+            value = section.get("config_paths", [])
+            for entry in [value] if isinstance(value, str) else value:
+                if str(entry) not in paths:
+                    paths.append(str(entry))
+        return paths
+
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
         """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""

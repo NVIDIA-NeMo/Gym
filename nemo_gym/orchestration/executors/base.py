@@ -79,6 +79,11 @@ class BaseExecutor(ABC):
         """The full Gym commit the run's saved config pins its driver to; None when there is none or it is unknown."""
         return None
 
+    def config_paths(self, record: SubmissionRecord, benchmark: str) -> list[str] | None:
+        """The ``config_paths`` entries the benchmark's saved ``prepare`` and ``run`` were launched with, in order;
+        None when the run's saved config cannot be read."""
+        return None
+
     def recovery_evidence(
         self,
         record: SubmissionRecord,

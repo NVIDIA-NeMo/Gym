@@ -19,6 +19,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from nemo_gym.cli import eval as eval_cli
 from nemo_gym.cli import main as cli_main
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.orchestration import submit as submit_module
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
@@ -536,6 +537,11 @@ def test_an_old_pin_model_served_run_is_rejudged_headless_on_the_installed_revis
     """No flags: the plan is made on the installed Gym and its judge-only job runs there, journaled as a repin."""
     monkeypatch.setenv("NEMO_GYM_SUBMIT_NO_REF_CHECK", "true")
     monkeypatch.setattr(sm, "installed_gym_commit", lambda: "b" * 40)
+    # The installed Gym holds the config file the run was launched with, so the repin is not refused.
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    (installed / "fixture.yaml").write_text("{}\n")
+    monkeypatch.setattr(submit_module, "PARENT_DIR", installed)
     job_dir = _model_served_run(tmp_path)
 
     out = recover(*_handle(job_dir), judge_partition="cpu")
