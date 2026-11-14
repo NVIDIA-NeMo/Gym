@@ -24,8 +24,8 @@ codex_agent:
       codex_version: 0.144.4  # required: npm version pinned on auto-install for reproducibility
       cwd: null  # working root for `codex exec --cd`; null -> fresh temp dir per request
       stream_idle_timeout_ms: null  # provider stream idle budget; null -> timeout * 1000
-      request_max_retries: null  # provider retries before a stream starts; null -> Codex's default
-      stream_max_retries: null  # provider reconnects after a stream drops; null -> Codex's default
+      request_max_retries: null  # provider retries before a stream starts; null -> 0 behind Gym's forwarder
+      stream_max_retries: null  # provider reconnects after a stream drops; null -> 0 behind Gym's forwarder
       extra_config: {}  # extra config.toml content deep-merged over the generated base config
       features:  # config.toml [features]; null leaves a feature at the CLI default
         multi_agent: false

@@ -727,6 +727,8 @@ class TestRolloutCorrelation:
         async def fake_exec(*cmd, **kwargs):
             config = tomllib.loads((Path(kwargs["env"]["CODEX_HOME"]) / "config.toml").read_text())
             captured["base_url"] = config["model_providers"]["gym"]["base_url"]
+            provider = config["model_providers"]["gym"]
+            captured["retries"] = (provider.get("request_max_retries"), provider.get("stream_max_retries"))
             if run_kwargs.get("rollout_id"):
                 assert "--ephemeral" not in cmd
                 assert config["model_providers"]["gym"]["http_headers"]["x-session-id"] == run_kwargs["rollout_id"]
@@ -740,10 +742,11 @@ class TestRolloutCorrelation:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch.object(type(agent), "resolve_model_base_url", side_effect=fake_resolve),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
-            patch("responses_api_agents.codex_agent.app.rate_limit_proxy", proxy),
+            patch("responses_api_agents.codex_agent.app.model_retry_proxy", proxy),
         ):
             asyncio.run(agent._run_codex("hi", **run_kwargs))
         assert captured["upstream"] == captured["base_url"]
+        self.retries = captured["retries"]
         return captured["base_url"]
 
     def test_base_url_correlation(self, tmp_path: Path) -> None:
@@ -751,6 +754,15 @@ class TestRolloutCorrelation:
         base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
         # Codex appends /responses -> server strips /ng-rollout/<id> and keys capture by it.
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/v1"
+        # Behind Gym's retry forwarder Codex sends each request once: it would resend a 401 or 409 like a 5xx.
+        assert self.retries == (0, 0)
+        configured = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            request_max_retries=1,
+            stream_max_retries=2,
+        )
+        self._run_and_capture_base_url(configured, tmp_path, rollout_id="task3-roll1")
+        assert self.retries == (1, 2)
 
         # Direct endpoint (no model server): never prefixed -- it has no stripping middleware,
         # so a prefix would 404 every /v1/responses call.

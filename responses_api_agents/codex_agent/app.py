@@ -97,7 +97,7 @@ from responses_api_agents.codex_agent.observability import (
 )
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
-from responses_api_agents.codex_agent.transport import rate_limit_proxy
+from responses_api_agents.codex_agent.transport import model_retry_proxy
 
 
 LOG = logging.getLogger(__name__)
@@ -599,6 +599,12 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+def _leave_retries_to_forwarder(provider: dict[str, Any]) -> None:
+    """Turn off Codex's own model-request retries unless configured; Gym's forwarder resends only what may clear."""
+    provider.setdefault("request_max_retries", 0)
+    provider.setdefault("stream_max_retries", 0)
+
+
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
@@ -650,8 +656,10 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # response is computed, so the idle budget must cover an entire generation; None -> timeout * 1000.
     stream_idle_timeout_ms: Optional[int] = None
     # The provider's request_max_retries (resends of a request that fails before its stream starts)
-    # and stream_max_retries (reconnects after a stream drops). None leaves Codex's own defaults.
-    # Unlike extra_config, these also apply to sandbox sessions.
+    # and stream_max_retries (reconnects after a stream drops). Unlike extra_config, these also apply
+    # to sandbox sessions. None is 0 behind Gym's model retry forwarder (every sandbox session, and a
+    # host run with a rollout and a model server), else Codex's own defaults. Codex resends a 401, 404
+    # or 409 like a 5xx, so a value above 0 behind the forwarder resends rejected requests again.
     request_max_retries: Optional[int] = Field(default=None, ge=0, strict=True)
     stream_max_retries: Optional[int] = Field(default=None, ge=0, strict=True)
     # Extra config.toml content deep-merged over the generated base config (mcp_servers, features,
@@ -1071,6 +1079,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
+        # The sandbox launcher puts its model retry forwarder in front of every run.
+        _leave_retries_to_forwarder(config["model_providers"]["gym"])
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
         command.remove("--ephemeral")
@@ -1632,8 +1642,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         try:
             if rollout_id is not None and self.config.model_server is not None:
                 config["model_providers"]["gym"]["base_url"] = await stack.enter_async_context(
-                    rate_limit_proxy(base_url, rollout_id)
+                    model_retry_proxy(base_url, rollout_id)
                 )
+                _leave_retries_to_forwarder(config["model_providers"]["gym"])
             # Inside the try so a bad skills_path (raising in stage_skills) still cleans up the
             # partially-created home in the finally rather than leaking it per failing request.
             codex_home = self._setup_codex_home(config, skills_path=skills_path)

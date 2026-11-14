@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Optional offline boundary check using the actual pinned CLI and a localhost fake API."""
 
+import asyncio
 import json
 import os
 import socket
@@ -20,10 +21,10 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.agents import AgentSeedSessionRequest
-from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient, get_global_aiohttp_client
 from nemo_gym.models import flatten_namespace_tools, synthesize_responses_sse
 from nemo_gym.server_runtime import BaseResourcesServerConfig, SimpleResourcesServer, install_auto_exposure
-from responses_api_agents.codex_agent.app import parse_exec_jsonl, toml_dumps
+from responses_api_agents.codex_agent.app import _leave_retries_to_forwarder, parse_exec_jsonl, toml_dumps
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import close_body, seed
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import setup as setup
 
@@ -403,6 +404,76 @@ def test_pinned_cli_calls_a_granted_gym_mcp_tool(tmp_path: Path, setup) -> None:
     assert list(resources.calls.values()) == [["hello"]]
     outputs = [item for item in requests[1]["input"] if item.get("type") == "function_call_output"]
     assert outputs and "recorded hello" in json.dumps(outputs)
+
+
+@pytest.mark.parametrize(("status", "sends"), [(401, 1), (409, 1), (422, 1), (503, 3)])
+async def test_pinned_cli_behind_the_retry_forwarder_resends_only_what_may_clear(
+    tmp_path: Path, setup, monkeypatch: pytest.MonkeyPatch, status: int, sends: int
+) -> None:
+    """Codex alone would send each of these six times; behind Gym's forwarder only a 5xx is sent again."""
+    from responses_api_agents.codex_agent.transport import model_retry_proxy
+
+    binary = pinned_cli()
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_config_dict", lambda **kwargs: {})
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+            body = json.dumps({"error": {"message": "controlled failure"}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    model_server = HTTPServer(("127.0.0.1", 0), Handler)
+    model_thread = threading.Thread(target=model_server.serve_forever, daemon=True)
+    model_thread.start()
+    home = tmp_path / "home"
+    home.mkdir()
+    agent, _ = setup
+    try:
+        async with model_retry_proxy(f"http://127.0.0.1:{model_server.server_port}/v1", "invocation") as url:
+            config = agent._build_config(url)
+            _leave_retries_to_forwarder(config["model_providers"]["gym"])
+            (home / "config.toml").write_text(toml_dumps(config))
+            started = time.monotonic()
+            process = await asyncio.create_subprocess_exec(
+                *[
+                    binary,
+                    "exec",
+                    "--json",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "--cd",
+                    str(tmp_path),
+                    "--",
+                    "Hi.",
+                ],
+                env={"PATH": os.environ["PATH"], "HOME": str(home), "CODEX_HOME": str(home), "OPENAI_API_KEY": "x"},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 120)
+            elapsed = time.monotonic() - started
+    finally:
+        model_server.shutdown()
+        model_server.server_close()
+        model_thread.join(timeout=2)
+        await get_global_aiohttp_client().close()
+    output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+    assert len(requests) == sends, output
+    events = [json.loads(line) for line in stdout.decode(errors="replace").splitlines() if line.startswith("{")]
+    failed = [event for event in events if event.get("type") == "turn.failed"]
+    assert failed and str(status) in failed[-1]["error"]["message"], output
+    assert elapsed < 30, output
 
 
 @pytest.mark.parametrize("required", [True, False])

@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Runs Codex in the task sandbox behind a local forwarder for its disabled native HTTP 429 retries,
-// on the Node that the Codex runtime installs. harness_runner.sh gives this process the prompt as
+// Runs Codex in the task sandbox behind a local forwarder that owns its model-request retries (Codex's own are
+// off: it never retries a 429, and resends a 401, 404 or 409 like a 5xx), on the Node that the Codex runtime
+// installs. harness_runner.sh gives this process the prompt as
 // stdin, stamps its stdout as events, keeps its stderr, and passes TERM on to it.
 //
 // usage: node sandbox_launcher.mjs INPUT_JSON
@@ -17,7 +18,9 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-const MAX_RATE_LIMIT_RETRIES = 2;
+// Resends of one model request, for 408, 425, 429, 5xx and a connection that was refused or dropped.
+const MAX_MODEL_RETRIES = 2;
+const MAX_RETRY_DELAY_S = 10;
 // Adapter-chosen memory cap for helper evidence, not a Codex protocol limit.
 // Larger responses still forward in full; only the buffered evidence is dropped.
 const MAX_COMPACTION_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -37,10 +40,15 @@ const INHERITED = [
 const DROPPED_REQUEST_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "x-session-id"]);
 const DROPPED_RESPONSE_HEADERS = new Set(["content-length", "transfer-encoding", "connection"]);
 
-/** Seconds to wait before retrying a 429: a numeric Retry-After within [0, 30], else 2**attempt. */
+/** Seconds to wait before a resend: a numeric Retry-After within [0, 10], else 2**attempt. */
 export function retryDelay(retryAfter, attempt) {
     const delay = /^\s*[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?\s*$/i.test(retryAfter ?? "") ? Number(retryAfter) : NaN;
-    return Number.isFinite(delay) ? Math.min(Math.max(delay, 0), 30) : 2 ** attempt;
+    return Number.isFinite(delay) ? Math.min(Math.max(delay, 0), MAX_RETRY_DELAY_S) : 2 ** attempt;
+}
+
+/** Whether another attempt may clear this status: 408, 425, 429 and every 5xx. */
+export function retryableStatus(status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -180,11 +188,16 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
             upstream = await post(url, headers, body, timeoutMs);
         } catch (error) {
             record({ status: null, error: error.message });
+            // A refused or dropped connection carries a system error code; a timed-out request has used its time.
+            if (error.code && attempt < MAX_MODEL_RETRIES) {
+                await sleep(retryDelay(undefined, attempt) * 1000);
+                continue;
+            }
             outgoing.writeHead(502, "Upstream model connection failed", { Connection: "close" }).end();
             return;
         }
         const attemptRecord = { status: upstream.statusCode };
-        if (upstream.statusCode === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        if (retryableStatus(upstream.statusCode) && attempt < MAX_MODEL_RETRIES) {
             // A cut-short or stalled body must not escape this request, and its attempt is still recorded.
             let error = null;
             await new Promise((resolve) => {
@@ -228,7 +241,7 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
 }
 
 /** Listen on a loopback port that forwards Responses requests, recording every upstream attempt. */
-export async function rateLimitProxy(baseUrl, invocationId, attemptsPath, { timeoutMs }) {
+export async function modelRetryProxy(baseUrl, invocationId, attemptsPath, { timeoutMs }) {
     const url = new URL(`${baseUrl}/responses`);
     const record = (attempt) => appendFileSync(attemptsPath, `${JSON.stringify(attempt)}\n`);
     const server = http.createServer((incoming, outgoing) => {
@@ -250,7 +263,7 @@ async function run(inputPath) {
     const params = JSON.parse(readFileSync(inputPath, "utf8"));
     const command = [...params.command];
     if (params.model_base_url) {
-        const server = await rateLimitProxy(
+        const server = await modelRetryProxy(
             params.model_base_url,
             params.invocation_id,
             join(params.directory, "model_attempts.jsonl"),
