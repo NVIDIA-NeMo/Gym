@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+jeebench:
+  resources_servers:
+    jeebench:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: JEEBench partial-credit scoring with provisional automatic answer extraction.
+      value: Evaluate advanced physics, chemistry, and mathematics reasoning.
+jeebench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: jeebench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/jeebench/data/example.jsonl
+
+jeebench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: jeebench_simple_agent

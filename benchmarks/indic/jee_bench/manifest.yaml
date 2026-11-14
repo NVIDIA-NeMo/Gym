@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: indic/jee_bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: JEEBench in 14 Indic languages with the authors' zero-shot CoT prompt and partial-credit score.
+modality: text
+licensing: MIT
+authors:
+  - anushak
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: seeded
+resources_server: jeebench
+agent_server: simple_agent
+datasets:
+  - name: indic_jee_bench
+    type: benchmark
+    jsonl_fpath: benchmarks/indic/jee_bench/data/jee_bench_benchmark.jsonl
+    prepare_script: benchmarks/indic/jee_bench/prepare.py
+    prompt_config: benchmarks/indic/jee_bench/prompts/default.yaml
+    num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/indic/jee_bench/prompts/default.yaml
+lifecycle: active
