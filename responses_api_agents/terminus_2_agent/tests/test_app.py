@@ -6,23 +6,25 @@ import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 from harbor.agents.terminus_2.terminus_2 import Terminus2
+from harbor.llms.chat import Chat
 from harbor.models.agent.context import AgentContext
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.terminus_2_agent.app import (
-    LocalEnvironment,
-    LocalTmuxSession,
-    StandaloneTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _extract_instruction,
 )
+from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
+from responses_api_agents.terminus_2_agent.terminus import LocalEnvironment, LocalTmuxSession, StandaloneTerminus2
 
 
 def _config(**kwargs) -> Terminus2AgentConfig:
@@ -42,6 +44,10 @@ def _make_agent(**kwargs) -> Terminus2Agent:
         agent = Terminus2Agent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent
+
+
+# The model-usage accounting of a host run in which every model response reported its usage.
+_ACCOUNTED = {"calls_without_usage": 0, "cached_usage_known": True}
 
 
 class TestInstructionExtraction:
@@ -83,6 +89,20 @@ class TestLocalEnvironment:
         assert result.return_code == 124
         assert "timed out" in (result.stderr or "")
 
+    @pytest.mark.asyncio
+    async def test_a_removed_workspace_moves_default_commands_to_the_root(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "task"
+        workspace.mkdir()
+        environment = LocalEnvironment(workspace, command_timeout_sec=5)
+        # A command typed in the terminal can move the workspace away; Terminus's own tmux commands must still run.
+        workspace.rename(tmp_path / "task.bak")
+
+        result = await environment.exec("pwd")
+
+        assert (result.return_code, result.stdout.strip()) == (0, "/")
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            await environment.exec("pwd", cwd=str(workspace))
+
 
 class TestLocalTmuxSession:
     def test_macos_launcher_does_not_use_linux_script_flags(self, tmp_path: Path) -> None:
@@ -93,7 +113,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "darwin"):
+        with patch("responses_api_agents.terminus_2_agent.terminus.sys.platform", "darwin"):
             command = session._tmux_start_session
         assert "script -qc" not in command
         assert "tmux new-session" in command
@@ -106,7 +126,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "linux"):
+        with patch("responses_api_agents.terminus_2_agent.terminus.sys.platform", "linux"):
             command = session._tmux_start_session
         assert "script -qc" in command
 
@@ -128,6 +148,42 @@ class TestStandaloneTerminus2:
         with patch.object(Terminus2, "_handle_llm_interaction", new=AsyncMock(return_value=non_completion)):
             await agent._handle_llm_interaction()
         assert agent.finished_naturally is False
+
+    @pytest.mark.asyncio
+    async def test_an_unparseable_reply_keeps_a_pending_completion_claim(self) -> None:
+        # Harbor skips a reply it cannot parse without clearing its pending claim, so the next claim completes.
+        agent = object.__new__(StandaloneTerminus2)
+        completion = ([], True, "", "analysis", "plan", MagicMock())
+        unparseable = ([], False, "ERROR: No valid JSON found in response", "", "", MagicMock())
+
+        with patch.object(
+            Terminus2, "_handle_llm_interaction", new=AsyncMock(side_effect=[completion, unparseable, completion])
+        ):
+            for _ in range(3):
+                await agent._handle_llm_interaction()
+        assert agent.finished_naturally is True
+
+    @pytest.mark.parametrize(("status_code", "requests"), [(401, 1), (503, 3)])
+    async def test_a_turn_sends_the_model_call_through_one_retry_layer(
+        self, tmp_path: Path, status_code: int, requests: int
+    ) -> None:
+        llm = NemoGymLLM(model_name="m", api_base="http://model/v1")
+        agent = StandaloneTerminus2(logs_dir=tmp_path, model_name="m", llm=llm)
+        client = AsyncMock()
+        client.post = AsyncMock(
+            return_value=httpx.Response(
+                status_code=status_code, request=httpx.Request("POST", "http://model/v1/chat/completions")
+            )
+        )
+
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch.object(NemoGymLLM.call.retry, "sleep", AsyncMock()),
+        ):
+            with pytest.raises(httpx.HTTPStatusError):
+                await agent._query_llm(Chat(llm), "prompt", (None, None, None))
+
+        assert client.post.await_count == requests
 
 
 class TestTrajectoryOutput:
@@ -205,7 +261,9 @@ class TestResponses:
             "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4},
         }
         context = AgentContext(n_input_tokens=10, n_output_tokens=4, n_cache_tokens=0)
-        agent._run_terminus = AsyncMock(return_value=(trajectory, context, {}, False, True, "chatcmpl-terminal"))
+        agent._run_terminus = AsyncMock(
+            return_value=(trajectory, context, {}, False, True, "chatcmpl-terminal", _ACCOUNTED)
+        )
 
         body = NeMoGymResponseCreateParamsNonStreaming(
             model="ignored-request-model",
@@ -215,21 +273,66 @@ class TestResponses:
             ],
         )
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
-            response = await agent.responses(request=None, body=body)
+            # On the host, max_output_tokens stays each model call's cap, as Terminal-Bench rows set it.
+            response = await agent.responses(request=None, body=body.model_copy(update={"max_output_tokens": 32}))
 
         assert response.model == "test-model"
         assert response.id == "chatcmpl-terminal"
         assert response.temperature == 0.7
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
+        assert response.usage.output_tokens_details.reasoning_tokens is None
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
         called_instruction = agent._run_terminus.await_args.args[1]
         assert called_instruction == "system config\n\ninput system\n\nsolve it"
+        assert agent._run_terminus.await_args.args[0].max_output_tokens == 32
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("accounting", "usage", "cached"),
+        [
+            (_ACCOUNTED, 14, 0),
+            ({"calls_without_usage": 0, "cached_usage_known": False}, 14, None),
+            # A response without usage, or a call the timeout cancelled, leaves the total unknown.
+            ({"calls_without_usage": 1, "cached_usage_known": True}, None, None),
+        ],
+    )
+    async def test_host_usage_is_reported_only_when_every_call_had_it(
+        self, accounting: dict, usage: int | None, cached: int | None
+    ) -> None:
+        agent = _make_agent()
+        trajectory = {"steps": [], "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4}}
+        agent._run_terminus = AsyncMock(return_value=(trajectory, AgentContext(), {}, False, True, None, accounting))
+        body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
+
+        with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
+            response = await agent.responses(request=None, body=body)
+
+        assert (response.usage.total_tokens if response.usage else None) == usage
+        assert (response.usage.input_tokens_details.cached_tokens if response.usage else None) == cached
+
+    @pytest.mark.asyncio
+    async def test_host_run_reports_the_model_usage_accounting(self) -> None:
+        agent = _make_agent()
+        llm = object.__new__(NemoGymLLM)
+        llm.calls_without_usage, llm.cached_usage_known, llm.last_response_id = 1, True, None
+        terminus = MagicMock(finished_naturally=False, context_length_exceeded=False, _llm=llm)
+        terminus.setup = AsyncMock()
+        terminus.close = AsyncMock()
+        terminus.run = AsyncMock()
+        agent._build_agent = MagicMock(return_value=terminus)
+        body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
+
+        *_, accounting = await agent._run_terminus(body, "task", "http://model/v1")
+
+        assert accounting == {"calls_without_usage": 1, "cached_usage_known": True}
 
     @pytest.mark.asyncio
     async def test_empty_trajectory_gets_assistant_message(self) -> None:
         agent = _make_agent()
-        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False, None))
+        agent._run_terminus = AsyncMock(
+            return_value=({"steps": []}, AgentContext(), {}, False, False, None, _ACCOUNTED)
+        )
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
@@ -242,7 +345,9 @@ class TestResponses:
     async def test_direct_response_waits_for_concurrency_slot(self) -> None:
         agent = _make_agent()
         agent.sem = asyncio.Semaphore(0)
-        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False, None))
+        agent._run_terminus = AsyncMock(
+            return_value=({"steps": []}, AgentContext(), {}, False, False, None, _ACCOUNTED)
+        )
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
@@ -265,6 +370,20 @@ class TestConfig:
         assert config.concurrency == 1
         assert config.record_terminal_session is False
         assert config.trajectory_config == {"raw_content": False}
+
+    @pytest.mark.parametrize(("field", "value"), [("reasoning_effort", "high"), ("max_thinking_tokens", 1024)])
+    def test_settings_harbor_applies_only_to_its_own_client_are_refused(self, field: str, value: object) -> None:
+        # Harbor passes these to the LiteLLM client it builds itself; Gym's Model Server client never sees them.
+        with pytest.raises(ValidationError, match=f"cannot apply {field}"):
+            _config(**{field: value})
+        assert getattr(_config(**{field: None}), field) is None
+
+    @pytest.mark.parametrize("field", ["timeout", "model_timeout_sec", "command_timeout_sec"])
+    @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+    def test_timeouts_must_be_positive_and_finite(self, field: str, value: float) -> None:
+        # The run timeout sets the supervisor's deadline and an owned sandbox's TTL.
+        with pytest.raises(ValidationError, match=field):
+            _config(**{field: value})
 
     @pytest.mark.parametrize(
         "relative_path,config_name",

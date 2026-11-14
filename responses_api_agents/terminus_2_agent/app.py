@@ -13,35 +13,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run Harbor's Terminus-2 loop as a NeMo Gym agent server."""
+"""Run Harbor's Terminus-2 loop as a NeMo Gym agent server.
+
+Agent sessions run Terminus-2 inside the task sandbox; requests without a session run it on this host.
+"""
 
 import asyncio
 import json
 import logging
-import os
-import shlex
 import shutil
-import signal
-import sys
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
-from time import time
-from typing import Any, Literal, Optional
+from time import monotonic, time
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
-from fastapi import Request
-from harbor.agents.terminus_2.terminus_2 import Terminus2
-from harbor.agents.terminus_2.tmux_session import TmuxSession
-from harbor.environments.base import ExecResult
+from fastapi import HTTPException, Request
 from harbor.models.agent.context import AgentContext
-from pydantic import ConfigDict, Field
+from openai.types.responses import ResponseError
+from pydantic import ConfigDict, Field, field_validator
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionSetupError,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SandboxSession,
+    SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
+    resolve_agent_timeout,
+)
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -50,14 +64,49 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    observe_failure,
+    sdk_error_details,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ModelCallRef,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
+from responses_api_agents.terminus_2_agent.llm import NemoGymLLM, chat_completion_params
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
+from responses_api_agents.terminus_2_agent.sandbox import Terminus2SandboxSession
+from responses_api_agents.terminus_2_agent.terminus import LocalEnvironment, StandaloneTerminus2
 
 
 LOG = logging.getLogger(__name__)
+
+# How the sandbox runner's stop reasons end the response and the invocation; any other ending is a failure.
+_STATUS_BY_STOP_REASON: dict[str, Literal["completed", "incomplete"]] = {
+    "completed": "completed",
+    "max_turns": "incomplete",
+    "wall_time": "incomplete",
+    "cancelled": "incomplete",
+    "terminal_exited": "incomplete",
+    # A SIGTERM from inside the task, such as `pkill python3`, ended the runner; like an exited terminal, the task's
+    # own commands ended the run.
+    "terminated": "incomplete",
+}
+_SANDBOX_OUTCOME_BY_STOP_REASON = {"wall_time": "timeout", "cancelled": "cancelled"}
 
 
 def _message_text(item: Any) -> str:
@@ -89,182 +138,10 @@ def _extract_instruction(body_input: Any) -> tuple[str, Optional[str]]:
     return "\n\n".join(f"{role.title()}: {text}" for role, text in messages), None
 
 
-class LocalEnvironment:
-    """Execute Harbor environment commands in one local workspace."""
-
-    def __init__(self, cwd: Path, command_timeout_sec: float) -> None:
-        self.cwd = cwd.resolve()
-        self.command_timeout_sec = command_timeout_sec
-
-    async def exec(
-        self,
-        command: str,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        timeout_sec: int | float | None = None,
-    ) -> ExecResult:
-        run_cwd = Path(cwd).resolve() if cwd else self.cwd
-        if not run_cwd.is_dir():
-            raise FileNotFoundError(f"Terminus-2 working directory does not exist: {run_cwd}")
-
-        process_env = os.environ.copy()
-        if env:
-            process_env.update({str(key): str(value) for key, value in env.items()})
-
-        proc = await asyncio.create_subprocess_exec(
-            "bash",
-            "-lc",
-            command,
-            cwd=str(run_cwd),
-            env=process_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        timeout = self.command_timeout_sec if timeout_sec is None else float(timeout_sec)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.CancelledError:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            await proc.communicate()
-            raise
-        except asyncio.TimeoutError:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = await proc.communicate()
-            message = stderr.decode(errors="replace")
-            message += f"\nCommand timed out after {timeout:g} seconds"
-            return ExecResult(stdout=stdout.decode(errors="replace"), stderr=message.strip(), return_code=124)
-
-        return ExecResult(
-            stdout=stdout.decode(errors="replace"),
-            stderr=stderr.decode(errors="replace"),
-            return_code=int(proc.returncode or 0),
-        )
-
-    async def upload_file(self, source_path: Path | str, target_path: str) -> None:
-        source = Path(source_path).resolve()
-        target = Path(target_path).resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source != target:
-            await asyncio.to_thread(shutil.copy2, source, target)
-
-    async def download_file(self, source_path: str, target_path: Path | str) -> None:
-        await self.upload_file(source_path, str(target_path))
-
-
-class LocalTmuxSession(TmuxSession):
-    """Use Harbor's Linux launcher and a BSD-compatible macOS launcher."""
-
-    @property
-    def _tmux_start_session(self) -> str:
-        if sys.platform != "darwin":
-            return super()._tmux_start_session
-
-        session_name = shlex.quote(self._session_name)
-        login_shell = shlex.quote("bash --login")
-        pipe_command = shlex.quote(f"cat > {shlex.quote(str(self._logging_path))}")
-        return (
-            "export TERM=xterm-256color && "
-            "export SHELL=/bin/bash && "
-            f"tmux new-session -x {self._pane_width} -y {self._pane_height} -d "
-            f"-s {session_name} {login_shell} \\; pipe-pane -t {session_name} {pipe_command}"
-        )
-
-
-class StandaloneTerminus2(Terminus2):
-    """Run Terminus-2 in a unique tmux session."""
-
-    async def _handle_llm_interaction(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
-        """Track Terminus-2's consecutive two-response completion handshake."""
-        result = await super()._handle_llm_interaction(*args, **kwargs)
-        if result[1]:
-            self._consecutive_completion_claims = getattr(self, "_consecutive_completion_claims", 0) + 1
-        else:
-            self._consecutive_completion_claims = 0
-        return result
-
-    @property
-    def finished_naturally(self) -> bool:
-        return getattr(self, "_consecutive_completion_claims", 0) >= 2
-
-    async def run(self, instruction: str, environment: LocalEnvironment, context: AgentContext) -> None:
-        """Keep completed turns when Terminus fails so Gym can score the partial trajectory."""
-        self.context_length_exceeded = False
-        try:
-            await super().run(instruction, environment, context)
-        except Exception as exc:
-            self.logger.info("Agent error: %s: %s. Returning completed turns.", type(exc).__name__, exc)
-        finally:
-            self._attach_routed_experts_to_trajectory()
-            llm = getattr(self, "_llm", None)
-            if isinstance(llm, NemoGymLLM):
-                self.context_length_exceeded = llm.context_length_exceeded
-                try:
-                    await llm.aclose()
-                except Exception:
-                    pass
-
-    def _attach_routed_experts_to_trajectory(self) -> None:
-        llm = getattr(self, "_llm", None)
-        if not isinstance(llm, NemoGymLLM):
-            return
-
-        modified = False
-        for step in getattr(self, "_trajectory_steps", []):
-            if getattr(step, "source", None) != "agent" or step.metrics is None:
-                continue
-            routed_experts = llm.pop_routed_experts_for_rollout_details(
-                step.metrics.prompt_token_ids,
-                step.metrics.completion_token_ids,
-                step.metrics.logprobs,
-            )
-            if routed_experts is None:
-                continue
-            extra = step.metrics.extra or {}
-            extra["routed_experts"] = routed_experts
-            step.metrics.extra = extra
-            modified = True
-
-        if modified:
-            self._dump_trajectory()
-
-    async def setup(self, environment: LocalEnvironment) -> None:
-        self._consecutive_completion_claims = 0
-        self._standalone_session_name = f"terminus-2-{uuid4().hex[:12]}"
-        recording_path = self.logs_dir / "recording.cast" if self._record_terminal_session else None
-        self._session = LocalTmuxSession(
-            session_name=self._standalone_session_name,
-            environment=environment,
-            logging_path=self.logs_dir / "terminus_2.pane",
-            local_asciinema_recording_path=recording_path,
-            remote_asciinema_recording_path=recording_path,
-            pane_width=self._tmux_pane_width,
-            pane_height=self._tmux_pane_height,
-        )
-        await self._session.start()
-
-    async def close(self, environment: LocalEnvironment) -> None:
-        if self._session is not None:
-            try:
-                await self._session.stop()
-            except Exception as exc:
-                self.logger.warning("Could not stop Terminus-2 recording cleanly: %s", exc)
-        session_name = getattr(self, "_standalone_session_name", None)
-        if session_name:
-            await environment.exec(
-                f"tmux kill-session -t {shlex.quote(session_name)}",
-                timeout_sec=30,
-            )
-
-
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    # Only the /run path seeds and verifies through a resources server; agent sessions get their task, and
+    # usually their sandbox, from the environment server that drives them.
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     concurrency: int = 1
     model: Optional[str] = None
@@ -292,11 +169,28 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     store_all_messages: bool = False
     record_terminal_session: bool = False
     interleaved_thinking: bool = False
-    model_timeout_sec: float = 2400
-    command_timeout_sec: float = 1800
-    timeout: float = 10800
+    model_timeout_sec: float = Field(default=2400, gt=0, allow_inf_nan=False)
+    command_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    # The run's wall-clock budget; a task's own agent timeout lowers it for an agent session.
+    timeout: float = Field(default=10800, gt=0, allow_inf_nan=False)
     keep_logs: bool = False
     logs_root: str = "outputs/terminus_2_agent/runs"
+    # Agent sessions without sandbox_access start a sandbox from this provider block and SandboxSpec fields.
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+
+    @field_validator("reasoning_effort", "max_thinking_tokens")
+    @classmethod
+    def _refuse_unapplied_settings(cls, value: Any, info: Any) -> Any:
+        # Harbor applies these only to the LiteLLM client it builds itself; Gym's Model Server client never sees them.
+        if value is not None:
+            raise ValueError(
+                f"Terminus 2 cannot apply {info.field_name}; leave it null and set the request's reasoning or the "
+                "Model Server's settings instead"
+            )
+        return value
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -315,10 +209,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     """NeMo Gym Responses API wrapper for the Terminus-2 terminal loop."""
 
     config: Terminus2AgentConfig
+    # Agent sessions run Terminus inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
 
     def _logs_dir(self) -> Path:
@@ -339,13 +236,60 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         path_params = getattr(request, "path_params", None)
         return path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
 
+    @staticmethod
+    def _refuse_episode_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse an agent session's max_output_tokens, which bounds the whole episode Terminus cannot enforce.
+
+        The host path keeps sending it as each model call's ``max_tokens``, which Terminal-Bench rows rely on.
+        """
+        if body.max_output_tokens is not None:
+            raise HTTPException(
+                422,
+                "Terminus 2 cannot enforce request max_output_tokens across an agent session's model calls; "
+                "omit it and configure a per-call limit on the Model Server instead",
+            )
+
+    def _prepare_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, str]:
+        """Apply the configured temperature and flatten the instructions and input into Terminus-2's instruction."""
+        body = body.model_copy(deep=True)
+        if body.temperature is None:
+            body.temperature = self.config.temperature
+        if isinstance(body.input, str):
+            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+
+        user_instruction, input_system = _extract_instruction(body.input)
+        instruction_parts = [
+            part for part in (self.config.system_prompt, body.instructions, input_system, user_instruction) if part
+        ]
+        return body, "\n\n".join(instruction_parts)
+
+    def _terminus_settings(self, body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, Any]:
+        """Terminus-2's constructor arguments that come from configuration, shared by host and sandbox runs."""
+        return {
+            "max_turns": self.config.max_turns,
+            "parser_name": self.config.parser_name,
+            "temperature": body.temperature if body.temperature is not None else self.config.temperature,
+            "reasoning_effort": self.config.reasoning_effort,
+            "collect_rollout_details": self.config.collect_rollout_details,
+            "enable_summarize": self.config.enable_summarize,
+            "proactive_summarization_threshold": self.config.proactive_summarization_threshold,
+            "max_thinking_tokens": self.config.max_thinking_tokens,
+            "model_info": self.config.model_info,
+            "trajectory_config": self.config.trajectory_config,
+            "tmux_pane_width": self.config.tmux_pane_width,
+            "tmux_pane_height": self.config.tmux_pane_height,
+            "store_all_messages": self.config.store_all_messages,
+            "interleaved_thinking": self.config.interleaved_thinking,
+        }
+
     def _build_agent(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
         logs_dir: Path,
         api_base: str,
     ) -> StandaloneTerminus2:
-        temperature = body.temperature if body.temperature is not None else self.config.temperature
         model_name = self._model_name(body)
         llm = NemoGymLLM(
             model_name=model_name,
@@ -358,23 +302,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         return StandaloneTerminus2(
             logs_dir=logs_dir,
             model_name=model_name,
-            max_turns=self.config.max_turns,
-            parser_name=self.config.parser_name,
             api_base=api_base,
-            temperature=temperature,
-            reasoning_effort=self.config.reasoning_effort,
-            collect_rollout_details=self.config.collect_rollout_details,
-            enable_summarize=self.config.enable_summarize,
-            proactive_summarization_threshold=self.config.proactive_summarization_threshold,
-            max_thinking_tokens=self.config.max_thinking_tokens,
-            model_info=self.config.model_info,
-            trajectory_config=self.config.trajectory_config,
-            tmux_pane_width=self.config.tmux_pane_width,
-            tmux_pane_height=self.config.tmux_pane_height,
-            store_all_messages=self.config.store_all_messages,
             record_terminal_session=self.config.record_terminal_session,
-            interleaved_thinking=self.config.interleaved_thinking,
             llm=llm,
+            **self._terminus_settings(body),
         )
 
     async def _run_terminus(
@@ -382,7 +313,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         instruction: str,
         api_base: str,
-    ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool, str | None]:
+    ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool, str | None, dict[str, Any]]:
+        """Run Terminus on the Gym host; the last item is the model-usage accounting of ``NemoGymLLM``."""
         logs_dir = self._logs_dir()
         temporary_workspace: Optional[Path] = None
         try:
@@ -412,36 +344,36 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             flags = {"context_length_exceeded": agent.context_length_exceeded}
             llm = getattr(agent, "_llm", None)
             terminal_response_id = llm.last_response_id if isinstance(llm, NemoGymLLM) else None
-            return trajectory, context, flags, timed_out, agent.finished_naturally, terminal_response_id
+            accounting = {
+                # A call cancelled by the timeout stays counted, so its unknown usage keeps the total unknown.
+                "calls_without_usage": llm.calls_without_usage if isinstance(llm, NemoGymLLM) else None,
+                "cached_usage_known": llm.cached_usage_known if isinstance(llm, NemoGymLLM) else False,
+            }
+            return trajectory, context, flags, timed_out, agent.finished_naturally, terminal_response_id, accounting
         finally:
             if not self.config.keep_logs:
                 shutil.rmtree(logs_dir, ignore_errors=True)
             if temporary_workspace is not None:
                 shutil.rmtree(temporary_workspace, ignore_errors=True)
 
-    async def responses(
+    def _response(
         self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        trajectory: dict[str, Any],
+        context: AgentContext,
+        flags: dict[str, bool],
+        timed_out: bool,
+        finished_naturally: bool,
+        terminal_response_id: str | None,
+        usage_known: bool,
+        cached_usage_known: bool,
     ) -> NeMoGymResponse:
-        body = body.model_copy(deep=True)
-        if body.temperature is None:
-            body.temperature = self.config.temperature
-        if isinstance(body.input, str):
-            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+        """Convert a Terminus-2 trajectory and its context into a Responses API result.
 
-        user_instruction, input_system = _extract_instruction(body.input)
-        instruction_parts = [part for part in (self.config.system_prompt, input_system, user_instruction) if part]
-        instruction = "\n\n".join(instruction_parts)
-
-        api_base = self.resolve_model_base_url(
-            self.config.model_server.name,
-            self._rollout_id(request),
-        )
-        async with self.sem:
-            trajectory, context, flags, timed_out, finished_naturally, terminal_response_id = await self._run_terminus(
-                body, instruction, api_base
-            )
+        Usage is reported only when every model call had a usage record. Harbor keeps no reasoning-token counts, and
+        cache counts only when every response reported them; neither becomes a measured zero.
+        """
         output_items = trajectory_to_responses(trajectory)
         if not output_items:
             output_items = [
@@ -454,7 +386,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 ).model_dump()
             ]
 
-        final_metrics = trajectory.get("final_metrics", {})
+        final_metrics = trajectory.get("final_metrics") or {}
         input_tokens = final_metrics.get("total_prompt_tokens", 0)
         output_tokens = final_metrics.get("total_completion_tokens", 0)
         cached_tokens = final_metrics.get("total_cached_tokens", 0)
@@ -484,11 +416,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             store=True,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=cached_tokens if cached_usage_known else None
+                ),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
                 total_tokens=input_tokens + output_tokens,
-            ),
+            )
+            if usage_known
+            else None,
             metadata={
                 "terminus_2": json.dumps(
                     {
@@ -501,7 +437,448 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             },
         )
 
+    # ----- Agent sessions: Terminus-2 in a borrowed or owned task sandbox -----
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> Terminus2SandboxSession:
+        """Connect to or start the episode's sandbox and prepare Terminus-2 in it before activation."""
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            raise AgentSeedRejectedError(
+                "Terminus 2 runs only its terminal; required tool grants it cannot use: " + ", ".join(sorted(required))
+            )
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if self.config.sandbox_provider is None:
+                raise AgentSeedRejectedError(
+                    "Terminus 2 needs sandbox_access or a configured sandbox_provider for an agent session"
+                )
+            provider_ref = self.config.sandbox_provider
+            workdir = self.config.sandbox_config.get("workdir")
+        else:
+            connection = body.sandbox_access.connection
+            if not isinstance(connection, DirectSandboxConnection):
+                raise AgentSeedRejectedError("Terminus 2 supports only direct sandbox connections")
+            provider_ref = connection.provider_config_ref
+            workdir = body.sandbox_access.workdir
+        if not isinstance(workdir, str) or not workdir.startswith("/"):
+            raise AgentSeedRejectedError(f"Terminus 2 needs an absolute sandbox workdir, got {workdir!r}")
+
+        global_config = get_global_config_dict()
+        try:
+            provider_config = resolve_provider_config(provider_ref, global_config)
+            # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
+            # without use_absolute_ip) would make every model call fail.
+            assert_model_url_reachable_from_sandbox(
+                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                provider_name=next(iter(provider_config), None),
+            )
+            spec = None
+            if owns_sandbox:
+                sandbox_config = self.config.sandbox_config.copy()
+                sandbox_config["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **(sandbox_config.get("metadata") or {}),
+                    "gym-agent": "terminus_2",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
+                # Provider TTLs outlive this server; reserve both setup steps (runtime and tmux install), the run,
+                # and ten minutes for cleanup.
+                sandbox_config.setdefault(
+                    "ttl_s", 2 * self.config.sandbox_install_timeout_seconds + self.config.timeout + 600
+                )
+                spec = SandboxSpec(**sandbox_config)
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(str(error)) from error
+        try:
+            if owns_sandbox:
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
+            else:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("Terminus 2 provider cleanup failed after sandbox setup failed")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason="Terminus 2 provider cleanup failed",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
+            raise
+
+        state = Terminus2SandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox,
+                workdir=workdir,
+                session_dir=f"/tmp/nemo-gym-terminus-2-sessions/{uuid4().hex}",
+                owns_sandbox=owns_sandbox,
+                harness="Terminus 2",
+            ),
+            sandbox_id=sandbox.sandbox_id,
+            provider=provider_ref,
+        )
+        try:
+            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException as error:
+            try:
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                LOG.exception(
+                    "Could not clean failed Terminus 2 setup %s; retaining session for close", body.agent_session_id
+                )
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+        return state
+
+    def _require_agent_session(self, agent_session_id: str) -> Terminus2SandboxSession:
+        state = super()._require_agent_session(agent_session_id)
+        if not isinstance(state, Terminus2SandboxSession):
+            raise TypeError("Expected a Terminus 2 agent session state")
+        return state
+
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, Terminus2SandboxSession) else None
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, Terminus2SandboxSession):
+            raise TypeError("Expected a Terminus 2 agent session state")
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
+        await state.close(self.config.session_close_timeout_seconds)
+        observations = state.observations
+        if observations is None and isinstance(state.session.artifacts, dict):
+            # Cancellation can bypass response conversion; the runner's result was still captured.
+            observations = self._observations(state, state.session.artifacts)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations
+            or AgentObservationBundle(source="terminus2", gaps=[ObservationGap(code="observation_capture_failed")]),
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read the error kind the sandbox runner recorded for a run that ended early."""
+        kind = native_result.get("error_kind")
+        status = native_result.get("error_status")
+        if kind == "model_request_error" and isinstance(status, int) and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if kind == "model_transport_error":
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if kind == "output_limit":
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
+        return AgentOutcome(failure_kind="unknown")
+
+    @staticmethod
+    def _stop_reason(output: Mapping[str, Any]) -> str:
+        return (
+            "context_limit"
+            if output.get("error_kind") == "context_limit"
+            else str(output.get("stop_reason") or "error")
+        )
+
+    @staticmethod
+    def _status(output: Mapping[str, Any]) -> Literal["completed", "incomplete", "failed"]:
+        # A context overflow that summarization could not resolve is a limit of the run, graded like a timeout.
+        if output.get("error_kind") == "context_limit":
+            return "incomplete"
+        return _STATUS_BY_STOP_REASON.get(str(output.get("stop_reason")), "failed")
+
+    def _observations(
+        self,
+        state: Terminus2SandboxSession,
+        output: Mapping[str, Any],
+        *,
+        conversation: list[dict[str, Any]] | None = None,
+        duration_ms: float | None = None,
+    ) -> AgentObservationBundle:
+        """Evidence from the runner's result: the invocation, its commands, model calls, summarizations and sandbox.
+
+        ``conversation`` is the response output; without one it is converted again from the runner's trajectory.
+        """
+        invocation_id = state.invocation_id or "terminus2"
+        try:
+            stop_reason = self._stop_reason(output)
+            status = self._status(output)
+            if conversation is None:
+                conversation = trajectory_to_responses(output.get("trajectory") or {"steps": []})
+            # Terminus runs a turn's whole command batch, then records one terminal result for it. Every command of a
+            # turn with a result ran; a turn without one was still running when the run stopped.
+            tool_status: dict[str, str] = {}
+            unfinished = {"wall_time": "timeout", "cancelled": "cancelled"}.get(stop_reason, "failed")
+            turn: list[str] = []
+            for item in [*conversation, {"type": "message"}]:
+                if item.get("type") == "function_call":
+                    turn.append(item["call_id"])
+                elif item.get("type") == "function_call_output":
+                    tool_status.update(dict.fromkeys(turn, "completed"))
+                elif item.get("type") == "message":
+                    tool_status.update({call_id: unfinished for call_id in turn if call_id not in tool_status})
+                    turn = []
+            model_calls = [
+                ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
+                for response_id in output.get("response_ids") or []
+                if isinstance(response_id, str) and response_id
+            ]
+            records: list[Any] = [
+                AgentInvocation(
+                    invocation_id=invocation_id,
+                    status=status,
+                    stop_reason=stop_reason,
+                    duration_ms=duration_ms,
+                    error_type=output.get("error_type")
+                    or {"wall_time": "timeout", "cancelled": "cancelled"}.get(stop_reason),
+                    model_calls=model_calls,
+                    conversation=conversation,
+                )
+            ]
+            # Terminus runs the keystroke batches it parses from the model's text; the response presents each batch
+            # as a function call with the terminal output Terminus recorded for it.
+            records.extend(
+                ToolCallObservation(
+                    invocation_id=invocation_id,
+                    tool_call_id=item["call_id"],
+                    sandbox_id=state.sandbox_id,
+                    tool_name=item["name"],
+                    timing_source="harness",
+                    status=tool_status[item["call_id"]],
+                )
+                for item in conversation
+                if item.get("type") == "function_call"
+            )
+            for compaction in output.get("compactions") or []:
+                records.append(
+                    ContextCompactionObservation(
+                        invocation_id=invocation_id,
+                        observed_at=compaction.get("observed_at"),
+                        trigger="harbor_summarize",
+                        outcome=compaction.get("outcome", "unknown"),
+                        model_calls=[
+                            ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
+                            for response_id in compaction.get("response_ids") or []
+                        ],
+                    )
+                )
+            cleanup = state.session.cleanup
+            records.append(
+                SandboxObservation(
+                    role="agent",
+                    provider=state.provider,
+                    sandbox_id=state.sandbox_id,
+                    outcome=_SANDBOX_OUTCOME_BY_STOP_REASON.get(
+                        stop_reason, "failed" if status == "failed" else "completed"
+                    ),
+                    exit_code=cleanup["return_code"] if cleanup is not None else None,
+                    error_type=output.get("error_kind") if status == "failed" else None,
+                )
+            )
+            gaps = [
+                # Terminus records no start or end time for a command batch.
+                ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id),
+            ]
+            gaps.append(ObservationGap(code="reasoning_token_usage_unavailable", invocation_id=invocation_id))
+            if not output.get("cached_usage_known", False):
+                gaps.append(ObservationGap(code="cached_token_usage_unavailable", invocation_id=invocation_id))
+            calls_without_usage = output.get("calls_without_usage")
+            if calls_without_usage != 0:
+                gaps.append(
+                    ObservationGap(
+                        code="model_usage_unavailable",
+                        invocation_id=invocation_id,
+                        detail=f"{calls_without_usage} model responses had no usage"
+                        if calls_without_usage
+                        else "the runner reported no usage accounting",
+                    )
+                )
+            return AgentObservationBundle(source="terminus2", records=records, gaps=gaps)
+        except Exception as error:
+            # A malformed result, which a task command could also have written, is a gap in the evidence; it must
+            # not fail the activation or every close retry.
+            LOG.exception("Could not build Terminus 2 observations from the runner's result")
+            return AgentObservationBundle(
+                source="terminus2",
+                gaps=[
+                    ObservationGap(
+                        code="observation_capture_failed", invocation_id=invocation_id, detail=type(error).__name__
+                    )
+                ],
+            )
+
+    async def _run_sandbox_activation(
+        self,
+        state: Terminus2SandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        instruction: str,
+        chat_params: dict[str, Any],
+    ) -> NeMoGymResponse:
+        """Run a prepared request (see ``_prepare_request``) in the session's sandbox."""
+        invocation_id = state.invocation_id = f"terminus2_{uuid4().hex}"
+        payload = {
+            "instruction": instruction,
+            "model": self._model_name(body),
+            # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
+            "model_base_url": self.resolve_model_base_url(
+                self.config.model_server.name, state.request.episode_id.capture_key
+            ),
+            "chat_params": chat_params,
+            "invocation_id": invocation_id,
+            "model_timeout_sec": self.config.model_timeout_sec,
+            "command_timeout_sec": self.config.command_timeout_sec,
+            "terminus": self._terminus_settings(body),
+        }
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        async with self.sem:
+            # The budget runs from launch: time spent waiting for a run slot is not the harness's.
+            started = monotonic()
+            try:
+                output = await state.execute(
+                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                )
+            except TimeoutError as error:
+                # Only the supervisor receipt establishes a harness deadline. A provider timeout alone does not.
+                output = state.session.artifacts
+                cleanup = state.session.cleanup
+                if not isinstance(output, dict) or cleanup is None or not cleanup["timed_out"]:
+                    raise
+                state.provider_wait_failure = NgFailureEvent(
+                    boundary="sandbox",
+                    failure_kind="transport_timeout",
+                    failure_reason="Sandbox provider wait expired after Terminus 2's confirmed deadline",
+                    operation="exec_wait",
+                    stage="agent",
+                    foreign_error=sdk_error_details(error, message=str(error)),
+                )
+                state.provider_wait_failure.__cause__ = error
+                observe_failure(state.provider_wait_failure)
+                output = {**output, "stop_reason": "wall_time"}
+        duration_ms = (monotonic() - started) * 1000
+        cleanup = state.session.cleanup
+        if output.get("stop_reason") == "wall_time" and not (cleanup and cleanup["timed_out"]):
+            # The runner reads any SIGTERM without a close request as its deadline, but the supervisor did not stop
+            # it: a task command, such as `pkill python3`, did. That is no timeout.
+            output = {**output, "stop_reason": "terminated"}
+
+        stop_reason = self._stop_reason(output)
+        status = self._status(output)
+        context = AgentContext.model_validate(output.get("context") or {})
+        response = self._response(
+            body,
+            trajectory=output.get("trajectory") or {"steps": []},
+            context=context,
+            flags={"context_length_exceeded": bool(output.get("context_length_exceeded"))},
+            timed_out=stop_reason == "wall_time",
+            finished_naturally=bool(output.get("finished_naturally")),
+            terminal_response_id=output.get("terminal_response_id"),
+            # Pending, failed, or partially accounted attempts make aggregate usage unknown, and so does a result
+            # without the count, such as the runner's report of its own crash.
+            usage_known=output.get("calls_without_usage") == 0,
+            cached_usage_known=bool(output.get("cached_usage_known", False)),
+        )
+        state.observations = self._observations(
+            state,
+            output,
+            conversation=[item.model_dump(mode="json", exclude_none=True) for item in response.output],
+            duration_ms=duration_ms,
+        )
+        error = output.get("error")
+        response = response.model_copy(
+            update={
+                "status": status,
+                "error": ResponseError(code="server_error", message=str(error)[:2000])
+                if status == "failed" and error
+                else None,
+                "metadata": {
+                    **(response.metadata or {}),
+                    "harness_execution": "sandbox",
+                    "stop_reason": stop_reason,
+                    AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                },
+            }
+        )
+        response = self.report_outcome(response, output)
+        return self.report_rollout_stop(response, state.session)
+
+    async def responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is not None:
+            rollout_id = self._rollout_id(request)
+            if not isinstance(rollout_id, str):
+                raise HTTPException(409, "Agent sessions require an attempt-qualified rollout path")
+            state = self._require_agent_session(agent_session_id)
+            if state.request.episode_id.capture_key != rollout_id:
+                raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            if state.task is None:
+                self._refuse_episode_output_budget(body)
+                prepared, instruction = self._prepare_request(body)
+                try:
+                    # Terminus types keystrokes and calls no tools, so the request's tool fields stay out of its
+                    # model calls. A field the converter cannot represent is refused before any sandbox work.
+                    chat_params = chat_completion_params(
+                        prepared.model_dump(
+                            mode="json", exclude_none=True, exclude={"tools", "tool_choice", "parallel_tool_calls"}
+                        ),
+                        collect_rollout_details=self.config.collect_rollout_details,
+                    )
+                except NotImplementedError as error:
+                    raise HTTPException(422, f"Terminus 2 cannot run this request: {error}") from error
+                # No await until the task and its request binding are installed: a retry arriving meanwhile must
+                # find them.
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(
+                    self._run_sandbox_activation(state, prepared, instruction=instruction, chat_params=chat_params)
+                )
+            elif body != state.activation_request:
+                raise HTTPException(409, "Terminus 2 sandbox sessions support one activation; retry the same request")
+            # A disconnected HTTP waiter must not cancel the shared activation. Session close owns cancellation;
+            # identical retries join this task or replay its result or error.
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
+
+        body, instruction = self._prepare_request(body)
+        api_base = self.resolve_model_base_url(
+            self.config.model_server.name,
+            self._rollout_id(request),
+        )
+        async with self.sem:
+            (
+                trajectory,
+                context,
+                flags,
+                timed_out,
+                finished_naturally,
+                terminal_response_id,
+                accounting,
+            ) = await self._run_terminus(body, instruction, api_base)
+        return self._response(
+            body,
+            trajectory=trajectory,
+            context=context,
+            flags=flags,
+            timed_out=timed_out,
+            finished_naturally=finished_naturally,
+            terminal_response_id=terminal_response_id,
+            usage_known=accounting["calls_without_usage"] == 0,
+            cached_usage_known=accounting["cached_usage_known"],
+        )
+
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Use the agent session responses and close routes")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Terminus 2 /run requires resources_server; use agent sessions instead")
         cookies = request.cookies
         seed_response = await self.server_client.post(
             server_name=self.config.resources_server.name,

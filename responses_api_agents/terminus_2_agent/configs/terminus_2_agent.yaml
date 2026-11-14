@@ -2,13 +2,13 @@ terminus_2_agent:
   responses_api_agents:
     terminus_2_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ???
+      # Agent sessions get their task from the environment server. Set a resources server only for /run.
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model
-      concurrency: 1
+      # Bounds concurrent runs: agent session activations, or host runs without a session.
+      concurrency: 32
       model: null
       workspace_root: null
       system_prompt: null
@@ -37,3 +37,8 @@ terminus_2_agent:
       timeout: 10800
       keep_logs: false
       logs_root: outputs/terminus_2_agent/runs
+      # Agent sessions without sandbox_access start their own sandbox from this provider block.
+      sandbox_provider: null
+      sandbox_config: {}
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 30

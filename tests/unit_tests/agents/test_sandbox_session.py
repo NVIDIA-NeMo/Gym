@@ -1174,3 +1174,45 @@ async def test_owned_session_removal_cancellation_still_stops_sandbox(session):
     await session.close(timeout=1)
     assert session.closed
     session.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
+@pytest.mark.parametrize("finished", [True, False], ids=["finished", "active"])
+async def test_borrowed_close_survives_a_task_that_moved_its_workdir(tmp_path, finished):
+    workdir, session_dir = tmp_path / "app", tmp_path / "session"
+    workdir.mkdir()
+    sandbox = await AsyncSandbox(LocalProvider()).start(SandboxSpec(workdir=str(workdir)))
+    # The local provider cannot rebuild a borrowed handle; every exec is real, only the borrower's release is stubbed.
+    sandbox.disconnect = AsyncMock()
+    session = SandboxSession(sandbox=sandbox, session_dir=str(session_dir), workdir=str(workdir), harness="test")
+    started = tmp_path / "started"
+    worker = (
+        f"import os,pathlib,time; os.rename({str(workdir)!r}, {str(workdir)!r} + '.bak'); "
+        f"pathlib.Path({str(started)!r}).touch(); time.sleep(0 if {finished} else 60)"
+    )
+    activation = asyncio.create_task(
+        session.execute(
+            stage_activation=AsyncMock(return_value=SandboxCommand(argv=[sys.executable, "-c", worker])),
+            collect=AsyncMock(return_value="partial transcript"),
+            timeout=60,
+            close_timeout=5,
+        )
+    )
+    try:
+        async with asyncio.timeout(20):
+            while not started.exists():
+                await asyncio.sleep(0.05)
+        if finished:
+            assert await asyncio.wait_for(activation, 20) == "partial transcript"
+        await asyncio.wait_for(session.close(timeout=5), 20)
+        assert session.closed and session.cleanup["cleanup_confirmed"] is True
+        assert session.artifacts == "partial transcript"
+        assert not session_dir.exists()
+        # Close neither recreates the moved workdir nor stops the borrowed sandbox.
+        assert not workdir.exists() and (tmp_path / "app.bak").is_dir()
+        sandbox.disconnect.assert_awaited_once()
+        assert not session.sandbox_stopped
+    finally:
+        activation.cancel()
+        await asyncio.gather(activation, return_exceptions=True)
+        await sandbox.stop()

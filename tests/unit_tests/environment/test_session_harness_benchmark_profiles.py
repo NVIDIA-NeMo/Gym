@@ -58,8 +58,9 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
     assert settings.get("network_access", "inherit") == ("model_only" if agent in MODEL_ONLY_PROFILES else "inherit")
     for key in REQUIRED_SETTINGS[agent]:
         assert settings[key] == REQUIRED_SETTING_VALUES[key]
-    # Hermes derives its TTL from its own timeouts; the others would get OpenSandbox's 10-minute default.
-    assert settings.sandbox_config.get("ttl_s") == (None if agent == "hermes_agent" else 14400)
+    # Hermes and Terminus derive their TTL from their own timeouts; the others would get OpenSandbox's 10-minute
+    # default.
+    assert settings.sandbox_config.get("ttl_s") == (None if agent in {"hermes_agent", "terminus_2_agent"} else 14400)
     if agent == "claude_code_agent":
         assert settings.claude_code_version == "2.1.108"
         assert settings.model_server.name == "policy_model"
