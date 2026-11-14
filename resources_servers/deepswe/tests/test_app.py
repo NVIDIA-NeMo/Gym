@@ -1168,7 +1168,7 @@ async def test_non_oom_verifier_failure_never_returns_an_unmasked_main_row(
         (0, None, '{"reward": true}', "{}", "non-binary reward"),
         (0, None, '{"reward": 2}', "{}", "non-binary reward"),
         (1, None, '{"reward": 0}', "{}", "Verifier command failed with code 1"),
-        (124, "timeout", '{"reward": 0}', "{}", "error_type='timeout'"),
+        (0, "timeout", '{"reward": 0}', "{}", "error_type='timeout'"),
         (0, None, '{"reward": 0}', "{", "Invalid verifier ctrf.json"),
     ],
 )
@@ -1293,9 +1293,10 @@ async def test_an_unconfirmed_deadline_stays_an_ungraded_masked_result(
     assert response.verifier_timeout_s is None
 
 
-def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch, **overrides) -> tuple:
-    config = _config(task_assets, golden=False).model_copy(update=overrides)
-    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch) -> tuple:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
     agent_sandbox = AsyncMock()
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
     verifier_sandbox = AsyncMock()
