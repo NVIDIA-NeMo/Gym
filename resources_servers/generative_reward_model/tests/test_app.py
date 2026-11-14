@@ -16,7 +16,7 @@
 import json
 from unittest.mock import MagicMock
 
-from pytest import approx, fixture
+from pytest import approx, fixture, mark
 
 from nemo_gym.client import ServerClient
 from resources_servers.generative_reward_model.app import (
@@ -258,6 +258,24 @@ class TestGenerativeRewardModelApp:
 
         assert res.reward == approx(-100.0)
         assert res.format_correct == approx(0.0)
+
+    @mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    async def test_non_finite_score_is_parse_failure(self, config, value) -> None:
+        """A NaN or infinite score must get the parse failure penalty, not a NaN or infinite reward."""
+        server_mock = MagicMock(spec=ServerClient)
+        rs = GenerativeRewardModelResourcesServer(config=config, server_client=server_mock)
+
+        output = _make_output([_rubric(1, 5, 1, 1)], _overall(value, 1, 1))
+        body = self._make_verify_request(
+            response_text=output,
+            gt_overall={"score_1": 5.0, "score_2": 1.0, "ranking": 1.0},
+            gt_rubric_scores=[{"rubric_id": 1, "score_1": 5.0, "score_2": 1.0, "ranking": 1.0}],
+        )
+        res = await rs.verify(body)
+
+        assert res.reward == approx(-100.0)
+        assert res.format_correct == approx(0.0)
+        assert res.predicted_score_1 is None
 
     async def test_parse_failure_old_flat_format(self, config) -> None:
         """Old flat format → parse failure."""
