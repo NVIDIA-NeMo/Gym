@@ -328,7 +328,9 @@ def _normalize_unicode_math(text: str) -> str:
     )
 
 
-_MATH_UNITS_RE = re.compile(r"\^\{?\\circ\}?|\\circ|°|cm[²³]?|mm|km|m[²³]?|kg")
+# A unit only counts when no letter is glued to it, so "5 m" and "5kg" lose their unit
+# but words keep their letters ("mother" must not become "other").
+_MATH_UNITS_RE = re.compile(r"(?<![^\W\d_])(?:\^\{?\\circ\}?|\\circ|°|cm[²³]?|mm|km|m[²³]?|kg)(?![^\W\d_])")
 
 
 def _strip_numeric(text: str) -> str:
