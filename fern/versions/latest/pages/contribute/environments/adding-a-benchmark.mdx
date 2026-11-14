@@ -17,6 +17,7 @@ Onboarding can be done in the following order:
 3. **Validate and test:** check the declaration, prepared inputs, and scoring behavior.
 4. **Evaluate:** run a small sample with a configured model and inspect the trajectories and scores.
 5. **Check local publication:** for workloads with verifier fixtures, finish metadata and run `gym env publish` to confirm validation, verifier tests, and catalog discovery.
+6. **Baseline:** score a suite of models against the baselining bar, then set `verified: true` and put the evidence in the PR.
 
 For a benchmark made of task folders, see [Task-folder benchmarks](#task-folder-benchmarks) instead.
 
@@ -136,6 +137,28 @@ gym eval run --benchmark my_benchmark --model-type openai_model \
 ### 5. Check local publication
 
 For workloads with a verifier fixture, finish the local onboarding checks with `gym env publish my_benchmark`. This reruns validation and the fixture, rejects unfinished metadata, and confirms catalog discovery. It does not upload data, register a hosted workload, or push changes.
+
+### 6. Baseline the benchmark
+
+A new benchmark is baselined before it merges. Run it with `gym eval run` and compute the scores with `gym eval profile` on this model suite (models as of February 2026; the [reward-profiling practices](https://github.com/NVIDIA-NeMo/Gym/blob/main/.agents/skills/add-benchmark/references/patterns.md#reward-profiling-best-practices) in the `add-benchmark` skill keep the current list):
+
+- your policy model of interest;
+- a closed-source baseline, such as GPT-5 Nano or GPT-5;
+- an open-source instruct model, such as Qwen 3 30B A3B Instruct 2507; and
+- an open-source thinking model, such as Qwen 3 30B A3B Thinking 2507.
+
+If the 30B models are too weak for the benchmark, use the Qwen 3 235B A22B variants, Kimi K2 Instruct, or GLM-4.7 instead.
+
+The baseline meets the bar when:
+
+- the open-source models score 30% or more, and the closed-source models score at or above them. Either miss usually means a bug; if it remains after you investigate, the PR says what you checked and what you found;
+- both the instruct and the thinking model ran, so the benchmark does not depend on one kind of model;
+- someone read failure cases in the rollout JSONL, not only the aggregate numbers; and
+- the highest-scoring open-source model was run again, raising `num_repeats`, until the variance is under 1%.
+
+The run must also pass the [exit checks](https://github.com/NVIDIA-NeMo/Gym/blob/main/.agents/skills/add-benchmark/SKILL.md#step-7-exit-checks) in the `add-benchmark` skill: few unhealthy rollouts in the run folder's `quality_summary.json`, a score that matches the reference score within tolerance on a current frontier model, and the resolved config saved with the result.
+
+New configs start with `verified: false`. Once the baseline meets the bar and the exit checks pass, set `verified: true` in the benchmark's resources-server config in the same PR, and link the run folder, its `quality_summary.json`, and the baselining numbers in the PR description. Reviewers check that evidence.
 
 ## Task-folder benchmarks
 
