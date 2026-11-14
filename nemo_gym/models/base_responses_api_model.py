@@ -421,9 +421,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
             # Embedding vectors never contain policy-generated text, so an embeddings call under a
-            # rollout's token-capture prefix must not mark that rollout incomplete.
+            # rollout's token-capture prefix must not mark that rollout incomplete. A decision has no
+            # generated tokens to capture either: it returns typed answers with probabilities.
             non_generating_requests=self.non_generating_model_routes
-            | {("POST", "/v1/embeddings")}
+            | {("POST", "/v1/embeddings"), ("POST", "/v1/systemone")}
             | frozenset(
                 (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
             ),
@@ -452,6 +453,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # (e.g. openai_model, inference_provider) override embeddings(); the base default
         # returns 501 so a policy-only server advertises the route but rejects the call.
         app.post("/v1/embeddings")(self.embeddings)
+
+        # Decision API (SystemOne wire format). Decision-capable servers (e.g. openai_model, inference_provider)
+        # override systemone(); the base default returns 501, as for embeddings.
+        app.post("/v1/systemone")(
+            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.systemone", self.systemone, model_attributes)
+        )
 
         self.setup_policy_checkpoint(app, capture_ledger)
         # Added after policy admission and capture, so it runs before them and they see the values the provider receives.
@@ -913,6 +920,19 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         raise HTTPException(
             status_code=501,
             detail="This model server does not support the embeddings endpoint.",
+        )
+
+    async def systemone(self, body: dict = Body()) -> dict:
+        """Decision API ``POST /v1/systemone`` default: 501 unless a server overrides it.
+
+        The request is ``{"model", "state", "questions"}``; each question is a typed primitive (``choice``,
+        ``noul``, ``score``) and the response maps every question key to a typed answer with probabilities.
+        Servers backed by a decision endpoint (e.g. ``openai_model``, ``inference_provider``) override this to
+        pass ``body`` through to the provider and return the provider's JSON unchanged.
+        """
+        raise HTTPException(
+            status_code=501,
+            detail="This model server does not support the decision endpoint (/v1/systemone).",
         )
 
     async def messages(self, request: Request, body: dict = Body()):

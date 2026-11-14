@@ -78,6 +78,22 @@ class TestOpenAIUtils:
             method="POST", url="https://example.com/v1/embeddings", json={"model": "m", "input": "hi"}
         )
 
+    async def test_create_systemone_posts_to_systemone_url(self, monkeypatch) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        request = AsyncMock(return_value=SimpleNamespace(ok=True))
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(openai_client_module, "get_response_json", AsyncMock(return_value={"answers": {}}))
+
+        result = await client.create_systemone(model="m", state="s", questions={})
+
+        assert result == {"answers": {}}
+        request.assert_awaited_once_with(
+            method="POST",
+            url="https://example.com/v1/systemone",
+            json={"model": "m", "state": "s", "questions": {}},
+        )
+
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
         monkeypatch,

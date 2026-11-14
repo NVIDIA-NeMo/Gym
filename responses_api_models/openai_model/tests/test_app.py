@@ -551,6 +551,70 @@ class TestApp:
         assert await server.embeddings({"input": "hi"}) == {"data": []}
         assert server._client.create_embeddings.await_count == 2
 
+    async def test_systemone_passes_every_question_type_through_unchanged(self) -> None:
+        server = self._setup_server(extra_body={"samples": 1, "steps": 4})
+        client = TestClient(server.setup_webserver())
+        questions = {
+            "route": {
+                "type": "choice",
+                "instructions": "Which team?",
+                "criteria": {"billing": "Refunds", "sales": "Upgrades"},
+            },
+            "fraud": {"type": "noul", "instructions": "Is this fraud?"},
+            "urgency": {"type": "score", "instructions": "How urgent?", "criteria": ["low", "medium", "high"]},
+        }
+        provider_json = {
+            "model": "jev",
+            "answers": {
+                "route": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.9, "sales": 0.1}},
+                "fraud": {"type": "noul", "noul": 0.2},
+                "urgency": {
+                    "type": "score",
+                    "probabilities": {"0": 0.1, "1": 0.3, "2": 0.6},
+                    "confidence": 0.4,
+                    "score": 1.5,
+                    "legend": {"0": "low", "1": "medium", "2": "high"},
+                },
+            },
+            "usage": {"input_tokens": 42, "output_tokens": 0},
+            "diagnostics": {"steps": 1},
+        }
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_systemone = AsyncMock(return_value=provider_json)
+
+        response = client.post(
+            "/v1/systemone",
+            json={"model": "override_model", "state": {"ticket": "charged twice"}, "questions": questions, "steps": 1},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_systemone.assert_awaited_once_with(
+            model="dummy_model", state={"ticket": "charged twice"}, questions=questions, samples=1, steps=1
+        )
+
+    @pytest.mark.parametrize("propagate", [False, True])
+    def test_systemone_capacity_refusal_follows_upstream_status_policy(self, propagate) -> None:
+        # A decision harness tells a capacity refusal from an error by the provider's status and body, which the
+        # server's propagate_upstream_http_status_codes setting keeps; without it the refusal becomes a 500.
+        server = self._setup_server(propagate_upstream_http_status_codes=[422] if propagate else [])
+        error = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Entity")
+        error.response_content = b'{"detail":"a choice takes at most 26 options"}'
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_systemone = AsyncMock(side_effect=error)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        with TestClient(app) as client:
+            response = client.post("/v1/systemone", json={"state": "s", "questions": {}})
+
+        if propagate:
+            assert response.status_code == 422
+            assert response.json() == {"detail": "a choice takes at most 26 options"}
+        else:
+            assert response.status_code == 500
+        server._client.create_systemone.assert_awaited_once()
+
     @pytest.mark.parametrize("stream", [False, True])
     async def test_reasoning_replayed_without_id_is_forwarded_without_id(self, stream: bool) -> None:
         server = self._setup_server()

@@ -431,6 +431,11 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         body_dict = self.config.extra_body | body | {"model": self.config.openai_model}
         return await self._call_upstream(lambda: self._client.create_embeddings(**body_dict))
 
+    async def systemone(self, body: dict = Body()) -> dict:
+        """Pass a decision request through to the provider's ``/systemone``; the configured model replaces the request's model."""
+        body_dict = self.config.extra_body | body | {"model": self.config.openai_model}
+        return await self._call_upstream(lambda: self._client.create_systemone(**body_dict))
+
 
 if __name__ == "__main__":
     SimpleModelServer.run_webserver()

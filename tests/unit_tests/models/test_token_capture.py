@@ -1603,6 +1603,23 @@ def test_embeddings_route_is_non_generating(tmp_path):
     assert TokenCaptureStore(tmp_path).freeze_now("embed-roll0").incomplete is False
 
 
+def test_systemone_route_is_non_generating(tmp_path):
+    class _DecisionModel(_CapturingModel):
+        async def systemone(self, body: dict = Body()) -> dict:
+            return {"answers": {"q": {"type": "noul", "noul": 0.9}}}
+
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_DecisionModel).setup_webserver())
+
+    response = client.post(
+        "/ng-rollout/decide-roll0/training-token-capture/v1/systemone",
+        json={"state": "s", "questions": {"q": {"type": "noul", "instructions": "Is it?"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"answers": {"q": {"type": "noul", "noul": 0.9}}}
+    assert TokenCaptureStore(tmp_path).freeze_now("decide-roll0").incomplete is False
+
+
 def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 

@@ -12,9 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -160,6 +162,46 @@ class TestInferenceProvider:
             input="hi", user="request-user", dimensions=256, model="my-embed-model"
         )
         assert server.config.extra_body == {"dimensions": 256, "user": "config-user"}
+
+    async def test_systemone(self) -> None:
+        server = _make_server(model="jev-latest", extra_body={"samples": 1})
+        client = TestClient(server.setup_webserver())
+        questions = {
+            "spam": {"type": "noul", "instructions": "Is it spam?"},
+            "tone": {"type": "score", "instructions": "How polite?", "criteria": ["rude", "neutral", "polite"]},
+        }
+        provider_json = {
+            "model": "jev",
+            "answers": {
+                "spam": {"type": "noul", "noul": 0.7},
+                "tone": {"type": "score", "probabilities": {"0": 0.2, "1": 0.5, "2": 0.3}, "score": 1.1},
+            },
+            "usage": {"input_tokens": 12, "output_tokens": 0},
+        }
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_systemone = AsyncMock(return_value=provider_json)
+
+        response = client.post("/v1/systemone", json={"model": "ignored", "state": "Buy now!", "questions": questions})
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_systemone.assert_awaited_once_with(
+            model="jev-latest", state="Buy now!", questions=questions, samples=1
+        )
+
+    async def test_systemone_capacity_refusal_keeps_provider_status_and_body(self) -> None:
+        server = _make_server()
+        payload = {"detail": "Classifier rejected the input; check the model context limit"}
+        error = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Entity")
+        error.response_content = json.dumps(payload).encode()
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_systemone = AsyncMock(side_effect=error)
+
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/v1/systemone", json={"state": "long", "questions": {}})
+
+        assert response.status_code == 422
+        assert response.json() == payload
 
     async def test_model_default_from_config(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(model="my-configured-model")
