@@ -8,16 +8,14 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from omegaconf import OmegaConf
 
 from benchmarks.wildclawbench.merge import merge
-from nemo_gym.client import ServerClient
 from responses_api_agents.wildclawbench_agent import data
-from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawConfig, WildClawRunRequest
+from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawRunRequest
 from responses_api_agents.wildclawbench_agent.enroot_docker import (
     TrackedSubprocess,
     process_start,
@@ -25,6 +23,7 @@ from responses_api_agents.wildclawbench_agent.enroot_docker import (
     stop_owned_groups,
 )
 from responses_api_agents.wildclawbench_agent.metrics import benchmark_metrics
+from responses_api_agents.wildclawbench_agent.tests.helpers import make_agent
 from responses_api_agents.wildclawbench_agent.worker import grader_failures, read_events
 from responses_api_models.vllm_model.wildclawbench import restore_reasoning
 
@@ -236,44 +235,6 @@ def test_real_cleanup_accepts_already_removed_container_but_not_daemon_failure(t
     assert result.returncode == expected_code
     if daemon_error:
         assert "Sandbox cleanup failed" in result.stderr
-
-
-def make_agent(tmp_path, worker_python):
-    config = WildClawConfig(
-        name="wildclaw_agent",
-        host="127.0.0.1",
-        port=0,
-        entrypoint="app.py",
-        source_root=str(tmp_path),
-        worker_python=worker_python,
-        output_root=str(tmp_path / "episodes"),
-        model_name="policy",
-        model_server=dict(type="responses_api_models", name="policy_model"),
-        sandbox_runtime="docker",
-    )
-    with (
-        patch(
-            "responses_api_agents.wildclawbench_agent.app.get_global_config_dict",
-            return_value=OmegaConf.create(
-                {
-                    "policy_model": {
-                        "responses_api_models": {
-                            "vllm_model": {
-                                "entrypoint": "wildclawbench.py",
-                                "uses_reasoning_parser": True,
-                                "propagate_context_overflow_errors": True,
-                            }
-                        }
-                    }
-                }
-            ),
-        ),
-        patch(
-            "responses_api_agents.wildclawbench_agent.app.subprocess.run",
-            return_value=SimpleNamespace(stdout="sha256:" + "a" * 64),
-        ),
-    ):
-        return WildClawAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio
