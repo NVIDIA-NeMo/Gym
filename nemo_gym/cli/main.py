@@ -608,6 +608,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
     from nemo_gym.orchestration.executors.slurm import RemoteReaderInterrupted
+    from nemo_gym.orchestration.recovery import operator_verdict_line
     from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
 
     _raise_keyboard_interrupt_on_sigterm()
@@ -770,6 +771,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 print(json.dumps(payload))
             else:
                 print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
+            if outcome.operator_verdict is not None:
+                print(operator_verdict_line(outcome.operator_verdict), file=sys.stderr)
             requested_gate = inspect_only or any(
                 getattr(args, name, None) is not None
                 for name in (
@@ -1540,6 +1543,15 @@ COMMANDS = {
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
+            _comma_list_flag(
+                "task-ids", "task_ids", "Only run these task ids (comma-separated): a subset.", metavar="ID[,ID...]"
+            ),
+            _value_flag(
+                "task-ids-file",
+                "task_ids_fpath",
+                "File of task ids to run, one per line (# comments allowed).",
+                quote=True,
+            ),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
             _bool_flag(
                 "interleave-repeats",

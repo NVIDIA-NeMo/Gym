@@ -26,7 +26,7 @@ Computes:
 - is_hallucination: 1.0 when INCORRECT (confident wrong answer)
 
 Based on the AA-Omniscience benchmark:
-https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
+https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
 """
 
 from __future__ import annotations
@@ -218,6 +218,7 @@ class OmniscienceRunRequest(BaseRunRequest):
 
     id: Optional[Union[int, str]] = None
     domain: Optional[str] = None
+    subtopic: Optional[str] = None
     topic: Optional[str] = None
     question: Optional[str] = None
     expected_answer: Optional[str] = None

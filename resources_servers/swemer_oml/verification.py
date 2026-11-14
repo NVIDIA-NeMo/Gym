@@ -273,4 +273,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
+    if result.error_type is not None:
+        return VerificationResult(
+            # Candidate code can hang the test command; that consumes its grading budget.
+            completed=result.error_type == "timeout",
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=f"Test execution did not complete: {result.error_type}",
+        )
+
     return parse_verification_output(output, result.return_code, inputs)

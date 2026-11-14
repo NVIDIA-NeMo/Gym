@@ -4,8 +4,6 @@ description: "Keep requests to NVCF endpoints alive past 340 seconds by letting 
 position: 6
 ---
 
-# NVCF Long Requests (h2-ping-sidecar)
-
 NVCF endpoints (`*.invocation.api.nvcf.nvidia.com`, `integrate.api.nvidia.com`) sit behind AWS Global
 Accelerator, which drops a connection that carries **no application data for 340 seconds**. The limit
 is fixed by AWS and TCP keepalive does not reset it. A request that takes longer than 340 seconds to

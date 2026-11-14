@@ -4,8 +4,6 @@ description: "Capture exact token ids and log probabilities when an external age
 position: 6
 ---
 
-# Training on External Agent Harnesses
-
 An external agent harness runs its own model-calling loop and returns a finished transcript to Gym. Claude Code is one example. The transcript contains the conversation text, but it does not contain the exact token ids and log probabilities produced by each model call.
 
 Training needs those original token ids. Re-tokenizing the final text can produce a different sequence from the one sampled by the policy. Gym's training-token capture records the ids while they are still available in the model server, associates the calls with their rollout, and rebuilds them into the token-bearing response expected by the trainer.
@@ -159,9 +157,9 @@ Gym links each model call to its rollout through the URL path. A training-captur
 
 For example, a harness that calls a chat-completions endpoint for rollout `3-0` sends its request to `http://<model-server>/ng-rollout/3-0/training-token-capture/v1/chat/completions`. The model server removes the prefix before routing the request. It records the call's token ids under rollout `3-0`.
 
-The built-in external agents, such as Claude Code, add this prefix when `token_id_capture` is enabled for them and they call a Gym model server. A custom harness must add it to every model call. Without the `training-token-capture` segment, the call is not recorded for training, and Gym masks the rollout because it finds no captured calls.
+The built-in external agents, such as Claude Code, add this prefix when `token_id_capture` is enabled for them and they call a Gym model server. A custom harness must add it to every model call of a rollout that does not [skip capture](#turn-capture-off-for-a-rollout). Without the `training-token-capture` segment, the call is not recorded for training, and Gym masks the rollout because it finds no captured calls.
 
-Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. While the agent exports traces, `base_url_for_run` also appends `/ng-trace/<traceparent>` after the prefix so the model server can parent the harness's calls to the run's span; the model server strips it, and a harness that inspects the URL should keep it (see [Distributed Tracing](/main/observability/distributed-tracing#trace-context-in-the-model-url)). The built-in agents known to rewrite the model URL, `harness_agent` (replaces a loopback host) and `vibench_agent` (replaces the host and keeps the path), keep every path segment; the OpenHands capture overlay only appends to the base URL. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
+Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. While the agent exports traces, `base_url_for_run` also appends `/ng-trace/<traceparent>` after the prefix so the model server can parent the harness's calls to the run's span; the model server strips it, and a harness that inspects the URL should keep it (see [Distributed Tracing](/main/observability/distributed-tracing#trace-context-in-the-model-url)). The built-in agents known to rewrite the model URL, `harness_agent` (replaces a loopback host) and `vibench_agent` (replaces the host and keeps the path), keep every path segment; the OpenHands capture overlay only appends to the base URL. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture and the row does not set `_ng_skip_token_capture: true`. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
 
 ## Run a first rollout with Claude Code
 
@@ -269,7 +267,7 @@ Gym adds capture metrics under `_ng_token_capture` on each rebuilt rollout.
 
 Terminal attribution is how Gym finds the captured call that produced the response the verifier scored. When attribution succeeds, `terminal_attribution.chain` is `delivered`, and Gym trains on that call's chain even if the harness also made side calls. When Gym cannot identify the final call, `terminal_attribution.chain` is empty and `terminal_attribution.method` is `none`. This is not an error by itself. Gym then keeps the rollout only if the capture contains exactly one chain with no unresolved calls, so `chains` greater than 1 masks an unattributed rollout.
 
-A rollout with no `_ng_token_capture` field was not rebuilt. Verify that capture is enabled for both `gym env start` and `gym eval run`, the agent is opted in, and its model calls use the rollout-correlated model-server URL.
+A rollout with no `_ng_token_capture` field was not rebuilt. Unless its row set `_ng_skip_token_capture: true`, verify that capture is enabled for both `gym env start` and `gym eval run`, the agent is opted in, and its model calls use the rollout-correlated model-server URL.
 
 ## Optionally supply exact prefix tokens
 
@@ -333,7 +331,7 @@ With `rebuild_response: false`, Gym stops after capture. The framework then perf
 2. Write the rebuilt result to the framework's durable storage.
 3. Retire the capture records that the rebuild used.
 
-The following function performs these steps for one result. The framework supplies `source`, which reads from the same backend as the configured sink, and `write_durably`, which returns only after the result is stored durably:
+The following function performs these steps for one result whose row did not skip capture. The framework supplies `source`, which reads from the same backend as the configured sink, and `write_durably`, which returns only after the result is stored durably:
 
 ```python
 from collections.abc import Awaitable, Callable
@@ -450,3 +448,19 @@ model_call_sampling:
 ```
 
 A call to one of those model servers that arrives without the rollout's values fails instead of sampling with others, so a harness that ignores its model URL is caught on its first call. Model calls a resources server makes through Gym's server client while handling a request, such as a verifier's LLM judge, carry a marker that tells the model server to keep the caller's own sampling. A vLLM model server forwards that marker on its Chat Completions requests to its generation server as the header `x-ng-sampling: null`, so a server that checks every call against the training values can skip those calls.
+
+## Turn capture off for a rollout
+
+A training framework that also runs rollouts it does not train on, such as validation rollouts, can skip capture for each of them. Set `_ng_skip_token_capture: true` on the row, next to `_ng_rollout_id`:
+
+```json
+{"_ng_rollout_id": "val-12-0", "_ng_skip_token_capture": true, "responses_create_params": {"input": "..."}}
+```
+
+None of that rollout's model calls carries the `training-token-capture` segment, so the model server records no token ids for it. A flat row keeps the key, which `single_agent_turn_legacy` and the agent's `/run` read. A materialized task row carries the setting as `skip_token_capture: true` in the episode request, and the Environment Server activates its agents without the segment. An agent activated on a rollout path without the segment captures none of that activation's calls, whatever its own `token_id_capture` setting.
+
+`false`, `null`, or no key leaves capture to the run's `token_id_capture` settings: a row can turn capture off, never on. A rollout that skips capture keeps its `/ng-rollout/<id>` prefix and otherwise runs like an uncaptured evaluation rollout: an agent whose output depends on capture returns its evaluation output, and Claude Code, for example, folds its thinking into the message text.
+
+Rollout collection does not rebuild the response of a row that skips capture. A framework that rebuilds responses itself (see [Rebuild and retire rollouts in the framework](#rebuild-and-retire-rollouts-in-the-framework)) must not finalize a row it marked: `finalize_rollout_token_capture` finds no records for it and masks it.
+
+A custom harness sees the setting only through the agent's URL helpers (`resolve_model_base_url`, `model_endpoint`, `base_url_for_run` and `url_path_for_run`), called while the agent handles the activation or `/run`. A URL built when a session is seeded, or in a thread that does not inherit the request's context, such as one from `loop.run_in_executor`, keeps the segment. An agent that registers its own `/run` route must enter `skip_token_capture_context(skips_token_capture(body))` from `nemo_gym.core` before it builds URLs, or build them with `base_url_for_run` or `url_path_for_run` from the original request: `body.model_dump()` leaves the key out.

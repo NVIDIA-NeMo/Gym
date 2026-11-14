@@ -119,7 +119,7 @@ position: 1                  # optional — orders auto-discovered pages within 
 ---
 ```
 
-The MDX body should still open with `# <Page Title>` matching the frontmatter title. Folders using `title-source: frontmatter` in the version YAML pull the nav label from `title:`.
+Fern renders `title:` as the page heading, so do not repeat it as a `# <Page Title>` line in the body; the page would show the title twice. `tests/unit_tests/test_fern_docs_links.py` fails on a repeated title. Folders using `title-source: frontmatter` in the version YAML pull the nav label from `title:`.
 
 ### Components
 
