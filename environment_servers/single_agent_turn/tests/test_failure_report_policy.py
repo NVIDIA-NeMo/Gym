@@ -8,6 +8,7 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     FailureBoundary,
     NgFailureEvent,
     SandboxFailureDetails,
@@ -250,6 +251,34 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     (verify,) = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
     assert verify["response"]["status"] == "failed"
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
+
+
+@pytest.mark.parametrize("final_on_model_timeout", [False, True])
+async def test_queued_timeout_stays_retryable_under_the_default_policy(final_on_model_timeout):
+    environment, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.final_on_model_timeout = final_on_model_timeout
+    agent = {
+        "event_id": "agent",
+        "boundary": "agent",
+        "failure_kind": MODEL_SERVER_QUEUE_TIMEOUT,
+        "operation": "agent.policy_request",
+        "operation_id": "operation",
+    }
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        output=[],
+        error={"code": "server_error", "message": "scripted queued timeout"},
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=MODEL_SERVER_QUEUE_TIMEOUT).model_dump_json()},
+        failure_report={"failure_id": "agent", "events": {"agent": agent}},
+    )
+    client.responses[2] = _Response(response)
+    del client.responses[4]
+    result = await environment.run_request(_request())
+    assert not any(path == "/verify" for _, path, _ in client.calls)
+    assert result.result is None
+    assert result.failure.terminal is False
+    assert result.failure.failure_kind == MODEL_SERVER_QUEUE_TIMEOUT
 
 
 RETRYABLE_PROVIDER_KINDS = [

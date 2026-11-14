@@ -15,6 +15,7 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
     PROVIDER_INTERNAL_ERROR,
@@ -92,6 +93,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            MODEL_SERVER_QUEUE_TIMEOUT: OutcomeAction.RETRY,
             # Transient sandbox-provider failures reported by an agent: the episode runs again, which is not a
             # replay of the uncertain operation inside the provider.
             **dict.fromkeys(
@@ -190,12 +192,39 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
     )
 
 
+def queued_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether a confirmed policy response timeout (``confirmed_policy_response_timeout``) waited in the model
+    server's queue: every attempt recorded the server's queue at its timeout, with requests waiting.
+
+    An attempt without a queue reading, or with an empty queue, keeps the timeout the model's.
+    """
+    if not confirmed_policy_response_timeout(report):
+        return False
+    final = report.events[report.failure_id]
+    attempts = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL
+        and event.operation == "model_request"
+        and event.operation_id == final.operation_id
+    ]
+    return all(
+        isinstance(event.details, ModelFailureDetails)
+        and event.details.server_requests_waiting is not None
+        and event.details.server_requests_waiting > 0
+        for event in attempts
+    )
+
+
 # The classified policy-request timeout whose outcome an agent boundary selects.
 POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
 def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
     """The agent's policy-timeout failure for a failed model reply, or ``None``.
+
+    The kind is ``MODEL_SERVER_QUEUE_TIMEOUT`` when every attempt waited in the model server's queue
+    (``queued_policy_response_timeout``), else ``MODEL_POLICY_RESPONSE_TIMEOUT``.
 
     The reply's report must show that the final model call timed out after its upload on every attempt
     (``confirmed_policy_response_timeout``). The failure is caused by ``error``, so its reply keeps the model's
@@ -204,10 +233,16 @@ def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
     report = FailureHeader.decode(error.headers)
     if not confirmed_policy_response_timeout(report):
         return None
+    # Waiting in the model server's queue is that server's capacity, not the model's answer.
+    queued = queued_policy_response_timeout(report)
     failure = NgFailureEvent(
         boundary=FailureBoundary.AGENT,
-        failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-        failure_reason="Policy model request timed out on every attempt",
+        failure_kind=MODEL_SERVER_QUEUE_TIMEOUT if queued else MODEL_POLICY_RESPONSE_TIMEOUT,
+        failure_reason=(
+            "Policy model request timed out on every attempt while the model server queued requests"
+            if queued
+            else "Policy model request timed out on every attempt"
+        ),
         operation=POLICY_TIMEOUT_OPERATION,
         operation_id=report.events[report.failure_id].operation_id,
     )

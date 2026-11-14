@@ -604,7 +604,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    reported_kind = failure.failure_kind if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)

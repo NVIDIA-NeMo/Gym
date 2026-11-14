@@ -95,6 +95,10 @@ class ModelFailureDetails(BaseModel):
 
     provider_request_id: str | None = Field(default=None, max_length=256)
     request_upload_complete: bool | None = None
+    # The model server's own queue when this attempt timed out waiting for its response, read from the server's
+    # metrics at the timeout. None when the client does not read them, or the server published none.
+    server_requests_waiting: int | None = Field(default=None, ge=0)
+    server_requests_running: int | None = Field(default=None, ge=0)
 
 
 FailureDetails = SandboxFailureDetails | ModelFailureDetails

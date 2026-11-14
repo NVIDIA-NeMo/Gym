@@ -1169,6 +1169,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     else None
                 ),
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                # A timed-out policy request records whether this server was queueing requests.
+                record_server_queue=True,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
@@ -2772,6 +2774,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                record_server_queue=True,
                 connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
         ]

@@ -54,6 +54,16 @@ The shared defaults are:
 Other failures use the shared classification defaults and the selected stage's action rules. For example, a
 sandbox-create timeout is `evaluation`; class alone does not authorize a retry.
 
+A confirmed policy response timeout normally remains `model_policy_response_timeout` (class `model`). Queue evidence
+can reclassify it as a server failure. When a request to a vLLM model server times out waiting for
+its response, the client reads that server's queue from its `/metrics` page at the timeout and records
+`server_requests_waiting` and `server_requests_running` on the attempt's failure, also when nothing is waiting;
+they stay unset when the server publishes no queue metrics. If every attempt of the timed-out call saw requests
+waiting, the agent reports `model_server_queue_timeout` instead: class `evaluation` (server), retried within the
+evaluation's retry budget, never counted as the model's zero. If any attempt has no queue reading or an
+empty queue, the timeout keeps `model_policy_response_timeout` and its configured handling. The reading describes the whole server, so on a saturated server a request that
+had already started generating is treated as the server's too; that errs towards a retry, not a zero.
+
 A `retry` decision never authorizes replaying an uncertain command. The caller retains its retry safety checks
 and existing attempt/deadline budget; exhaustion stays ungraded. Task cancellation continues to propagate. Verification rules apply to inconclusive attempts,
 not ordinary verifier scores. `count_as_zero` ends the episode without retry and includes its zero in the denominator.
