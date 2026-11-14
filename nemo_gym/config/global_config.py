@@ -248,6 +248,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "openhands_agent",
         "pi_agent",
         "pool_agent",
+        "prime_agent",
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
@@ -256,7 +257,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
 )
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
 # Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
-HOST_RUN_SWAP_AGENT_TYPES = frozenset({"simple_strands_agent"})
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"prime_agent", "simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
