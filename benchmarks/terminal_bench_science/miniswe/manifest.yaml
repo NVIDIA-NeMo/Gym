@@ -5,9 +5,9 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
 description: The pinned 70-task Terminal-Bench-Science v0.1 dataset in its Harbor task folders, run by mini-SWE 2.4.6
-  agent sessions through the Harbor environment server with separate no-network official verification. Two tasks
-  whose working directory is / are refused by mini-SWE at seed; use terminal_bench_science/miniswe_legacy_agent for
-  them.
+  agent sessions through the Harbor environment server with separate no-network official verification. Three
+  Compose tasks are skipped during preparation and two tasks whose working directory is / are refused at seed.
+  Use terminal_bench_science/miniswe_legacy_agent for full task coverage.
 modality: text
 licensing: Apache-2.0
 authors:

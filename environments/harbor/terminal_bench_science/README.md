@@ -43,10 +43,14 @@ recorded is skipped with the loader's message. The sandbox deployment must be ab
 
 ## Known limits
 
-- **Compose tasks.** `inverse-lithography`, `longitudinal-clinical-agent`, `noisy-blackbox-optimization`,
-  `protein-active-learning` and `tamp-skill-planning` run sidecars. The Harbor server starts them as separate sandboxes and does not
-  apply the resources server's per-task Compose settings (`compose_service_overrides`, `compose_ignored_settings`,
-  capability probes). `protein-active-learning`'s non-root `submission` service reaches `assay` by name, which a
-  non-root sandbox cannot add to `/etc/hosts`. These tasks have not been run on this path.
+- **Unsupported Compose tasks.** Preparation skips `inverse-lithography` (`fabricator.init`),
+  `noisy-blackbox-optimization` (`init`, `pids_limit`, `read_only`, `cap_drop`) and `protein-active-learning`
+  (`networks.task.internal: true`). The Harbor route rejects these settings and does not apply the resources
+  server's per-task Compose overrides or ignored settings. The skipped tasks have no rollout or reward and are
+  absent from the default score denominator. To select the supported subset explicitly, use
+  `--exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning` with `gym eval run`;
+  this remains a partial benchmark, not a full 70-task result.
+- **Untested Compose tasks.** `longitudinal-clinical-agent` and `tamp-skill-planning` have no known Compose field
+  rejection after image preparation, but neither has been run on this route. Their sidecars run as separate sandboxes.
 - **Disk.** A sandbox's disk limit is the package's `storage_mb`. The resources server raises the limit to 100 GiB
   (`sandbox_min_disk_gib`); OpenSandbox evicts a sandbox that writes past its limit.

@@ -22,11 +22,15 @@ runtime; [Profile](#profile) says which of its settings the Harbor preset carrie
 
 ## Measurement contract
 
-`terminal_bench_science/miniswe` protocol `0.2.0` runs all 70 pinned tasks through the Harbor
-environment server, but mini-SWE supports at most 68 reward-bearing tasks.
+`terminal_bench_science/miniswe` protocol `0.2.0` selects the 70 pinned tasks through the Harbor
+environment server, with incomplete coverage. Preparation skips `inverse-lithography`,
+`noisy-blackbox-optimization` and `protein-active-learning` because their Compose settings are
+unsupported on this route (see the entry's [Known limits](../../environments/harbor/terminal_bench_science/README.md#known-limits)).
 `ode-law-discovery` and `geometric-pharmacophore-alignment` fail at agent seed because their
-working directory is `/`. Those failures have no reward and are excluded from the default
-`mean/reward`, so the unadjusted mean is not a full 70-task leaderboard score. For full task
+working directory is `/`. These skips and failures have no reward and are excluded from the
+default `mean/reward`: at most 65 tasks can return rewards, even if every other task succeeds
+in setup. This is an upper bound, not validated coverage; the two remaining Compose tasks
+are untested. The unadjusted mean is not a full 70-task leaderboard score. For full task
 coverage, use `terminal_bench_science/miniswe_legacy_agent` protocol `0.1.0`. Harbor-path and
 relay scores are separate measurements; the version change records the new adapter and its
 coverage limit.
@@ -48,8 +52,8 @@ it keeps these fixed:
 - **Scoring.** A trial passes only when the verifier's official reward is 1. The leaderboard
   runs three trials per task, 210 in all (`++num_repeats=3`), and includes every trial in its
   denominator. Gym's default `mean/reward` includes only scored trials; count excluded
-  failures as zero when comparing with the leaderboard, including the two unsupported
-  mini-SWE tasks above. Partial credit is reported separately and never replaces the reward
+  failures and skipped tasks as zero when comparing with the leaderboard, including the five
+  tasks above. The resources-server presets report partial credit separately; it never replaces the reward
   ([Scoring](#scoring)).
 - **Deviations.** A few deployment settings differ from the packages. Each is listed with its
   reason and its override in [Deviations from the packages](#deviations-from-the-packages).
@@ -287,12 +291,21 @@ Terminal-Bench 4's profile, this one runs one trial per task; add `++num_repeats
 leaderboard's repeat count. `mean/reward` reports the average over scored trials; the mini-SWE
 preset has the coverage limit described in the [Measurement contract](#measurement-contract).
 
-As on Terminal-Bench 4, a verifier timeout is an infrastructure failure and is left out of the
-default aggregates. The leaderboard's denominator counts every trial, so count such a trial as
-a fail when you compare with it.
+When the agent has no infrastructure failure, a verifier timeout or a missing or invalid reward
+after the verifier runs produces a measured zero included in `mean/reward`. Harbor preserves a
+valid reward written before the verifier times out; the resources-server presets score that
+timeout as zero. Provider or transfer failures that prevent reliable verification remain masked
+or unscored and excluded.
+The leaderboard's denominator counts every trial, so count excluded failures and skipped tasks
+as fails when you compare with it.
+
+On the Harbor route, an incomplete mini-SWE run with a usable trajectory, including a timeout
+or a killed runner, still reaches the official verifier. The `/run` relay instead scores a
+killed runner as zero without verification.
 
 Every Terminal-Bench-Science verifier also writes a CTRF report to `/logs/verifier/ctrf.json`.
-Each rollout carries its test counts (`num_tests_passed`, `num_tests_total`, `num_tests_failed`
+The Codex and `miniswe_legacy_agent` resources-server presets project its test counts
+(`num_tests_passed`, `num_tests_total`, `num_tests_failed`
 and `num_tests_skipped`) and `partial_credit`, the fraction of tests that passed. Skipped tests
 count as not passed.
 
@@ -301,9 +314,11 @@ when pytest skipped some tests, and a verifier without a usable report gets the 
 reward. `mean/partial_credit` is reported beside `mean/reward` and never replaces it. Partial
 credit is not comparable with leaderboard scores.
 
-A trial whose official evaluation did not complete, such as a verifier timeout, carries 0 in both
-the `reward` and `partial_credit` response fields. The failed evaluation is excluded from both
-default means; those diagnostic zeros do not add it to the denominator.
+For those presets, recognized verifier timeout and missing or invalid reward outcomes carry
+0 in both `reward` and `partial_credit` and remain in both means, unless an agent infrastructure
+failure takes precedence. Masked infrastructure failures are excluded. The Harbor preset keeps
+verifier logs but does not project CTRF test counts or `partial_credit` into rollout rows, so it
+does not report `mean/partial_credit`.
 
 ## Profile
 
@@ -358,8 +373,9 @@ How the profile runs:
   `nemo.nvidia.com/s3-hostpath: 'false'`) and the resources server's 1200-second readiness wait
   for lazily pulled images. It does not raise the disk limit: each sandbox's limit is the
   package's `storage_mb`, where the resources server's presets raise it to 100 GiB.
-- **Compose tasks.** The Harbor server starts the five Compose tasks' sidecars as separate
-  sandboxes without the resources server's per-task Compose settings; see the entry's README.
+- **Compose tasks.** The Harbor route rejects three of the five tasks during preparation;
+  the other two are untested. It does not apply the resources server's per-task Compose
+  settings; see the entry's README.
 - **Model address.** mini-SWE calls the model server from inside the sandbox at the address the
   Gym servers bind (see [Run](#run)); there is no separate sandbox-side URL.
 - **Working directory `/`.** `ode-law-discovery` and `geometric-pharmacophore-alignment` set no
