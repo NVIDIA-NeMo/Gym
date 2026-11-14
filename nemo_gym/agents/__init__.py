@@ -72,6 +72,7 @@ if TYPE_CHECKING:
         HARNESS_RUNNER_FAILED,
         HARNESS_RUNNER_FILE,
         HARNESS_RUNNER_SCRIPT,
+        REQUEST_GZIP_FETCH_SOURCE,
         SandboxCommand,
         SandboxSession,
         shell_assignments,
@@ -95,6 +96,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "REQUEST_GZIP_FETCH_SOURCE": "utils.sandbox_session",
     "ActivationConflictError": "utils.ordered_operations",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",

@@ -158,19 +158,24 @@ function relay(upstream, outgoing, observe) {
     });
 }
 
-async function forward(incoming, outgoing, url, invocationId, record, timeoutMs) {
+async function forward(incoming, outgoing, url, invocationId, record, timeoutMs, compressBody) {
     if (incoming.method !== "POST") {
         outgoing.writeHead(501, { Connection: "close" }).end();
         return;
     }
     const chunks = [];
     for await (const chunk of incoming) chunks.push(chunk);
-    const body = Buffer.concat(chunks);
+    let body = Buffer.concat(chunks);
     const compacting = compactionRequest(body);
     const headers = {};
     for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
         const name = incoming.rawHeaders[index].toLowerCase();
         if (!DROPPED_REQUEST_HEADERS.has(name)) headers[name] = incoming.rawHeaders[index + 1];
+    }
+    if (compressBody) {
+        const encodedHeaders = new Headers(headers);
+        body = await compressBody(body, encodedHeaders);
+        if (encodedHeaders.has("content-encoding")) headers["content-encoding"] = encodedHeaders.get("content-encoding");
     }
     headers["content-length"] = body.length;
     headers["x-session-id"] = invocationId;
@@ -228,12 +233,13 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
 }
 
 /** Listen on a loopback port that forwards Responses requests, recording every upstream attempt. */
-export async function rateLimitProxy(baseUrl, invocationId, attemptsPath, { timeoutMs }) {
+export async function rateLimitProxy(baseUrl, invocationId, attemptsPath, { timeoutMs, gzipRequestsEnabled = false }) {
     const url = new URL(`${baseUrl}/responses`);
+    const compressBody = gzipRequestsEnabled ? (await import("./request_gzip.mjs")).gzipBody : null;
     const record = (attempt) => appendFileSync(attemptsPath, `${JSON.stringify(attempt)}\n`);
     const server = http.createServer((incoming, outgoing) => {
         // One failed request must not end the launcher, and with it Codex.
-        forward(incoming, outgoing, url, invocationId, record, timeoutMs).catch((error) => {
+        forward(incoming, outgoing, url, invocationId, record, timeoutMs, compressBody).catch((error) => {
             process.stderr.write(`Codex model forwarder failed: ${error.stack}\n`);
             outgoing.destroy();
         });
@@ -254,7 +260,7 @@ async function run(inputPath) {
             params.model_base_url,
             params.invocation_id,
             join(params.directory, "model_attempts.jsonl"),
-            { timeoutMs: params.timeout * 1000 }
+            { timeoutMs: params.timeout * 1000, gzipRequestsEnabled: params.gzip_requests_enabled }
         );
         const baseUrl = `http://127.0.0.1:${server.address().port}`;
         command.splice(2, 0, "-c", `model_providers.gym.base_url=${JSON.stringify(baseUrl)}`);

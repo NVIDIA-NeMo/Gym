@@ -11,7 +11,14 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    REQUEST_GZIP_FETCH_SOURCE,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -134,6 +141,8 @@ class CodexSandboxSession(AgentSessionState):
         sandbox.
         """
         directory = self.session.session_dir
+        if payload.get("gzip_requests_enabled"):
+            await self.session.sandbox.upload(REQUEST_GZIP_FETCH_SOURCE, f"{directory}/request_gzip.mjs")
         for name, text in (files or {}).items():
             await self.upload_text(name, text)
         await self.upload_json("input.json", payload)

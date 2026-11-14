@@ -857,6 +857,43 @@ Duplicate config paths:
         reference = OmegaConf.select(server_config, "model_server")
         return reference if isinstance(reference, DictConfig) else None
 
+    def raise_on_gzip_mismatch(self, global_config_dict: DictConfig) -> None:
+        """Require gzip senders and receivers to be enabled on connected servers."""
+        models = {
+            instance.name: instance.get_inner_run_server_config_dict()
+            for instance in self.filter_for_server_instance_configs(global_config_dict)
+            if instance.SERVER_TYPE == MODEL_SERVER_TYPE_KEY_NAME
+        }
+        models_with_compressing_agents: Set[str] = set()
+        errors: List[str] = []
+        for agent in self._agent_instances(global_config_dict):
+            if not agent.server_config.get("gzip_requests_enabled", False):
+                continue
+            agent_setting = f"{agent.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent.agent_type}.gzip_requests_enabled"
+            reference = self._model_server_reference(agent.server_config)
+            if reference is None or reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
+                errors.append(
+                    f"{agent_setting}=true requires a model_server reference to a configured Gym model "
+                    "with gzip_requests_enabled=true; its receiver cannot otherwise be validated."
+                )
+                continue
+            model_name = reference["name"]
+            models_with_compressing_agents.add(model_name)
+            if not models[model_name].get("gzip_requests_enabled", False):
+                errors.append(
+                    f"{agent_setting}=true but model '{model_name}' has gzip_requests_enabled=false. "
+                    "Enable gzip_requests_enabled on that model or disable it on the harness."
+                )
+        for model_name, model_config in models.items():
+            if model_config.get("gzip_requests_enabled", False) and model_name not in models_with_compressing_agents:
+                errors.append(
+                    f"Model '{model_name}' has gzip_requests_enabled=true, but no connected harness enables gzip. "
+                    "Enable gzip_requests_enabled on at least one harness referencing this model, "
+                    "or disable it on the model."
+                )
+        if errors:
+            raise ConfigError("Gzip configuration mismatch:\n" + "\n".join(errors))
+
     def raise_on_unsupported_model_pairings(self, global_config_dict: DictConfig) -> None:
         """Reject resource/model bindings that explicitly disallow the selected model adapter.
 
@@ -1788,6 +1825,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             probe_ports=not parse_config.offline,
             host_by_server_type=host_by_server_type,
         )
+        self.raise_on_gzip_mismatch(global_config_dict)
 
         with open_dict(global_config_dict):
             # Head server defaults, filled per key so a config may pin just one.

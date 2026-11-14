@@ -76,6 +76,13 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     os.environ["HERMES_HOME"] = str(hermes_home)
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
+    if payload.get("gzip_requests_enabled"):
+        if __package__:
+            from .request_gzip import install_request_gzip
+        else:
+            from request_gzip import install_request_gzip
+
+        install_request_gzip(payload["model_base_url"])
     _use_model_server(payload["model_base_url"])
 
     try:

@@ -101,6 +101,7 @@ from nemo_gym.server_runtime._checkpoint.control import install_control_routes, 
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
+from nemo_gym.server_runtime.request_handling.request_gzip import GzipRequestMiddleware
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
@@ -280,6 +281,7 @@ class ModelCheckpointConfig(BaseModel):
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
+    gzip_requests_enabled: bool = False
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
     drop_hosted_tools: bool = Field(
@@ -460,6 +462,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             ModelSamplingMiddleware,
             required=sampling_config is not None and self.config.name in sampling_config.required_model_servers,
         )
+        if self.config.gzip_requests_enabled:
+            app.add_middleware(GzipRequestMiddleware)
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
