@@ -54,8 +54,10 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
-        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too.
+        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too, and their
+        # cleanups finish at shutdown.
         self.setup_environment_checkpoint(app)
+        self.setup_shutdown_sweep(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
