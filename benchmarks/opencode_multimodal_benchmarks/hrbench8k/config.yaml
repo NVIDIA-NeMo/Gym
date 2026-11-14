@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 config_paths:
 - resources_servers/opencode_multimodal_benchmarks/configs/opencode_multimodal_benchmarks.yaml
-- benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml
+- benchmarks/opencode_multimodal_benchmarks/opencode_eval.yaml
+- benchmarks/opencode_multimodal_benchmarks/visual_eval_defaults.yaml
 opencode_multimodal_benchmarks:
   resources_servers:
     opencode_multimodal_benchmarks:
       entrypoint: app.py
-      judge_model: null
+      judge_model: azure/openai/gpt-4o-mini
       datasets:
       - name: hrbench8k
         type: benchmark

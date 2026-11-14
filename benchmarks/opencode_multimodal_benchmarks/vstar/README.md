@@ -45,8 +45,8 @@ not certification or an upload.
 
 ## Evaluate
 
-Configure `policy_model` and, when judging is required, `judge_model` plus a
-`judge_server` or `judge_endpoint`. Keep credentials in the runtime environment.
+Configure `policy_model` and the judge endpoint credentials. The default judge is
+`azure/openai/gpt-4o-mini` through `visual_judge`. Keep credentials in the runtime environment.
 See [run configuration](../README.md#run-configuration) before running:
 
 ```bash

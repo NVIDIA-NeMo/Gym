@@ -15,8 +15,13 @@ CATALOG = "benchmarks/opencode_multimodal_benchmarks"
 
 
 @pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
-@pytest.mark.parametrize("mode", ["default", "openai", "vllm", "training"])
+@pytest.mark.parametrize("mode", ["default", "openai", "vllm", "qwen", "training"])
 def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypatch):
+    monkeypatch.setenv("GYM_JUDGE_API_KEY", "test-only")
+    monkeypatch.setenv("GYM_JUDGE_BASE_URL", "https://judge.invalid/v1")
+    monkeypatch.setenv("POLICY_API_KEY", "test-only")
+    monkeypatch.setenv("POLICY_BASE_URL", "http://127.0.0.1:9999/v1")
+    monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-only")
     monkeypatch.setenv("OPENSANDBOX_DOMAIN", "https://sandbox.invalid")
     adapter = "openai_model" if mode == "openai" else "vllm_model"
@@ -29,13 +34,15 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
         paths[-1] = f"{CATALOG}/{benchmark}/opencode.yaml"
     if mode == "vllm":
         paths.append(f"{CATALOG}/opencode_eval_vllm.yaml")
+    if mode == "qwen":
+        paths[0] = f"{CATALOG}/qwen_eval.yaml"
     parser = GlobalConfigDictParser()
     config = parser.parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.create(
                 {
                     "config_paths": [str(ROOT / p) for p in paths],
-                    "policy_model_name": "test-model",
+                    **({"policy_model_name": "test-model"} if mode != "qwen" else {}),
                     "policy_base_url": "http://127.0.0.1:9999/v1",
                     "policy_api_key": "test-only",
                     **overrides,
@@ -62,6 +69,10 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     assert set(agent) == {"opencode_agent"}
     assert agent.opencode_agent.model_server.name == "policy_model"
     assert agent.opencode_agent.network_access == "model_only"
+    assert agent.opencode_agent.concurrency == config.num_samples_in_parallel == 64
+    assert agent.opencode_agent.max_output_tokens == 32768
+    assert agent.opencode_agent.context_window == 131072
+    assert config.sandbox.opensandbox.operations.background_poll_interval_s == 2
     assert agent.opencode_agent.image_input
     assert not agent.opencode_agent.token_id_capture
     assert agent.opencode_agent.opencode_config.permission.webfetch == "deny"
@@ -70,7 +81,16 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     assert manifest.agent_server == "opencode_agent"
     resources = config.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks
     assert resources.datasets[0].num_repeats == (5 if benchmark == "zerobench" else 1)
-    if mode == "vllm":
+    assert resources.judge_concurrency == 16
+    assert resources.judge_required is (benchmark != "zerobench")
+    if benchmark != "zerobench":
+        assert resources.judge_model == "azure/openai/gpt-4o-mini"
+        assert resources.judge_server == "visual_judge"
+        assert config.visual_judge.responses_api_models.openai_model.openai_model == resources.judge_model
+    else:
+        assert resources.judge_model is None
+        assert "visual_judge" not in config
+    if mode in {"vllm", "qwen"}:
         model = config.policy_model.responses_api_models.vllm_model
         assert not agent.opencode_agent.token_id_capture
         assert not model.return_token_id_information
@@ -79,5 +99,14 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
         assert model.sampling_overrides.max_tokens is None
         assert model.sampling_overrides.max_completion_tokens is None
         assert model.extra_body is None and model.propagate_context_overflow_errors
+    if mode == "qwen":
+        from responses_api_models.vllm_model.app import VLLMModelConfig
+
+        model = config.policy_model.responses_api_models.vllm_model
+        parsed = VLLMModelConfig.model_validate(OmegaConf.to_container(model, resolve=True) | {"name": "policy_model"})
+        assert parsed.reasoning_field == "both"
+        assert parsed.model == "nvidia/qwen/qwen3.8-flash-next"
+        assert parsed.sampling_overrides["temperature"] == 0.6
+        assert parsed.sampling_overrides["top_p"] == 0.95
     if mode == "training":
         assert config.policy_model.responses_api_models.vllm_model.return_token_id_information

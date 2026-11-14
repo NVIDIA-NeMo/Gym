@@ -10,7 +10,8 @@ used independently of OpenCode:
 
 Each entry documents its dataset and measurement contract. The catalog defaults
 to `opencode_agent`. Configure the model and sandbox provider separately. Each
-catalog includes [`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs
+catalog includes [`visual_eval_defaults.yaml`](visual_eval_defaults.yaml), which loads
+[`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs
 inside the sandbox through Gym's shared agent-session lifecycle. The `opencode.yaml`
 recipes remain aliases for these defaults.
 
@@ -60,7 +61,10 @@ visual_agent:
 Supply the model adapter's endpoint and credentials, and the OpenSandbox
 provider's `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`, through the runtime
 environment. See the agent session setup linked above for image requirements.
-For judged tasks, explicitly configure the shared resources-server instance:
+VStar, HRBench8K and VTCBench default to `azure/openai/gpt-4o-mini` through
+`visual_judge`. Supply `GYM_JUDGE_BASE_URL` and `GYM_JUDGE_API_KEY` in the runtime
+environment. ZeroBench starts no judge. To select a different judge, configure
+the shared resources-server instance:
 
 ```yaml
 opencode_multimodal_benchmarks:
@@ -70,10 +74,9 @@ opencode_multimodal_benchmarks:
       judge_server: visual_judge
 ```
 
-Also configure the `visual_judge` model-server instance and its runtime credentials.
-This route captures judge calls with Gym's rollout correlation. Alternatively,
-set `judge_endpoint` and `judge_api_key_env` for direct HTTP judging. The catalog
-does not select a hosted model or endpoint. ZeroBench requires no judge.
+The configured `visual_judge` route captures judge calls with Gym's rollout
+correlation. For direct HTTP judging, set `judge_server: null`, `judge_endpoint`
+and `judge_api_key_env` instead. Endpoints and credentials remain deployment inputs.
 
 The shared verifier defaults to a 120-second timeout and three transport attempts
 per judge request. VTCBench additionally
@@ -84,6 +87,16 @@ For each evaluation, retain the resolved config and inspect rollout health,
 coverage and judge failures. Enable model-call capture when collecting evidence.
 A valid manifest and passing verifier fixtures do not establish score parity or
 harness conformance.
+
+For Qwen3.8, add `--config benchmarks/opencode_multimodal_benchmarks/qwen_eval.yaml`
+to preparation and evaluation. This committed model profile selects
+`nvidia/qwen/qwen3.8-flash-next` through the vLLM adapter, preserves history thinking
+(`truncate_history_thinking: false`), propagates context-overflow errors and pins
+temperature 0.6/top-p 0.95. Reasoning serialization retains the adapter default;
+no `reasoning_field` override is applied. Supply `POLICY_BASE_URL` and
+`POLICY_API_KEY`, plus the sandbox deployment settings. With this profile, omit
+the OpenAI adapter from `run.yaml` and omit `--model-type openai_model` from the
+run command. Other policy adapters remain supported.
 
 ## Grading and recovery
 
@@ -120,7 +133,9 @@ Catalog pairings have no whole-episode deadline by default. To set one, configur
 event loop's monotonic clock. Cleanup has a separate
 `cleanup_timeout_seconds` budget and runs after the episode deadline.
 
-The OpenCode overlay has a 131072-token context/output ceiling and requests a
+The four catalogs use a 131072-token context window, a 32768-token output limit,
+agent and collector concurrency of 64, judge concurrency of 16, and a two-second
+sandbox polling interval. OpenCode requests a
 final answer after 65 steps. This request is advisory; tools remain available. Its `timeout` setting (optionally narrowed by request metadata
 `agent_timeout_sec`) is a separate harness execution deadline, enforced
 by the shared OpenCode sandbox session using the monotonic clock; installation
