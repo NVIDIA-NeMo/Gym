@@ -491,3 +491,20 @@ async def test_task_workdir_is_where_the_agent_works(task_assets: Path, monkeypa
     assert server._agent_sessions["s1"].workdir == "/workspace/example"
     assert "-C /workspace/example ." in app_module._collect_command("/workspace/example")
     assert app_module._collect_command("/workspace") == app_module._COLLECT_COMMAND
+
+
+async def test_sandbox_metadata_from_config_reaches_the_spec(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    """nemo.nvidia.com/oom-kill: process (configs/nl2repobench.yaml) must reach OpenSandbox at creation."""
+    config = _config(task_assets).model_copy(update={"sandbox_config": {"metadata": {"nemo.nvidia.com/oom-kill": "process"}}})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s1"}
+    await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+    assert sandbox.start.await_args.args[0].metadata["nemo.nvidia.com/oom-kill"] == "process"

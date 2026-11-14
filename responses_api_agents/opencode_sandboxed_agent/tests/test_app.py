@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import shutil
 import shlex
@@ -962,3 +963,45 @@ async def test_subagent_sessions_are_exported_recursively(tmp_path: Path, monkey
     assert row["opencode_tokens"]["main"]["input"] == 100 and row["opencode_tokens"]["subagents"]["input"] == 43
     assert (tmp_path / "s1" / "export.json").exists()
     assert sorted(p.name for p in (tmp_path / "s1" / "children").iterdir()) == ["ses_a.json", "ses_grand.json"]
+
+
+async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """A run that never returns (provider timeouts not holding) is stopped at sandbox_timeout + wall_grace_s:
+    OpenCode is killed in the sandbox, the session is still exported, and the row says opencode_wall_exceeded."""
+    commands: List[str] = []
+    written: Dict[str, str] = {}
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+        if "opencode run" in command and "pkill" not in command:
+            await asyncio.sleep(3600)  # hangs, as the 14 h rollouts did
+        if "session list" in command:
+            return ok('[{"id": "ses_main"}]')
+        if "opencode export" in command:
+            written[command.rsplit("> ", 1)[1].strip()] = json.dumps(_session("ses_main", [10], []))
+        return ok()
+
+    async def download(remote: str, local: Path) -> None:
+        Path(local).write_text(written[remote])
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.download = AsyncMock(side_effect=download)
+    config = TestOpenCodeSandboxedAgent()._create_config().model_copy(
+        update={"opencode_results_dir": str(tmp_path), "sandbox_timeout": 0.2, "wall_grace_s": 0.0}
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    await asyncio.wait_for(
+        server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        ),
+        timeout=10,
+    )
+    row = server._sandbox_id_to_run_result[""]
+    assert row["opencode_wall_exceeded"] is True and row["opencode_finished"] is False
+    assert any("pkill -KILL -f 'opencode run'" in c for c in commands)
+    assert row["opencode_tokens"]["main"]["input"] == 10  # exported after the cut-off

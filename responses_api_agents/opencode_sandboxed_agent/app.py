@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import base64
 import json
 import re
@@ -438,6 +439,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
     sandbox_timeout: float
+    # Seconds past sandbox_timeout before the agent phase is cut off (OpenCode killed, the workspace graded as it is).
+    wall_grace_s: float = 60.0
 
     debug: bool = False
 
@@ -1047,29 +1050,45 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         run_started = time()
+        # One hard deadline for the whole agent phase (the first `opencode run` and every nudged resume): sandbox_timeout.
+        # The per-exec timeouts alone did not hold it: NL2RepoBench rollouts on OpenSandbox ran ~14 h against a 6 h
+        # sandbox_timeout (2026-11-03), since the provider's own backstop on a detached command is about twice its
+        # timeout and each resume got a fresh one. On expiry OpenCode is killed in the sandbox and the run goes on to
+        # export and grading with what is there; the row says opencode_wall_exceeded.
+        phase = {"result": None, "idle_nudges": 0, "stuck": None}
+
+        async def agent_phase() -> None:
+            phase["result"] = await sandbox.exec(command=command, timeout_s=self.config.sandbox_timeout)
+            if self.config.idle_nudge is not None:
+                phase["result"], phase["idle_nudges"] = await self._nudge_idle_turns(
+                    sandbox=sandbox,
+                    first_result=phase["result"],
+                    config_content=opencode_config_content,
+                    env_suffix=f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str}",
+                    run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
+                    session_env=dict(xdg_env) or None,
+                    deadline=run_started + self.config.sandbox_timeout,
+                )
+                phase["stuck"] = phase["result"].stuck
+
+        wall_exceeded = False
         try:
-            result = await sandbox.exec(
-                command=command,
-                timeout_s=self.config.sandbox_timeout,
-            )
+            await asyncio.wait_for(agent_phase(), timeout=self.config.sandbox_timeout + self.config.wall_grace_s)
+        except asyncio.TimeoutError:
+            wall_exceeded = True
+            run_error_type = "WallTimeExceeded"
+            print(f"OpenCode agent phase passed sandbox_timeout ({self.config.sandbox_timeout:g} s); stopping it",
+                  file=sys.stderr)
+            try:
+                await asyncio.wait_for(
+                    sandbox.exec(command="pkill -KILL -f 'opencode run' >/dev/null 2>&1; true", timeout_s=60), timeout=90
+                )
+            except Exception:
+                print("Could not stop OpenCode after the wall deadline", format_exc(), file=sys.stderr)
         except Exception as exc:
-            result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
-
-        idle_nudges = 0
-        stuck = None
-        if result is not None and self.config.idle_nudge is not None:
-            result, idle_nudges = await self._nudge_idle_turns(
-                sandbox=sandbox,
-                first_result=result,
-                config_content=opencode_config_content,
-                env_suffix=f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str}",
-                run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
-                session_env=dict(xdg_env) or None,
-                deadline=run_started + self.config.sandbox_timeout,
-            )
-            stuck = result.stuck
+        result, idle_nudges, stuck = phase["result"], phase["idle_nudges"], phase["stuck"]
         if result is not None and self.config.stuck_detector and stuck is None:
             stuck = await _read_stuck_marker(sandbox)
 
@@ -1245,6 +1264,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_finished": opencode_finished,
             "opencode_idle_nudges": idle_nudges,
             "opencode_stuck": stuck,
+            "opencode_wall_exceeded": wall_exceeded,
             # Token use of the main agent vs its subagents (`usage` and the trajectory are the main session only)
             "opencode_tokens": _token_breakdown(opencode_export, child_exports),
             "opencode_subagent_sessions": list(child_exports),

@@ -30,6 +30,11 @@ nl2repobench_resources_server:
         metadata:
           benchmark: nl2repobench-v1
           istio.io/dataplane-mode: none
+          # On OpenSandbox, an out-of-memory kill takes the whole pod (SANDBOX::ENDED OOMKilled: no export, no workspace)
+          # unless the sandbox is created with this label; with it only the largest process is killed (exit 137) and
+          # the sandbox, the agent and its workspace carry on, as under Docker. Read at creation only. NL2RepoBench lost
+          # rollouts to pod kills on 2026-11-02/03 (stable-baselines3, a PyTorch project, in 8 GiB).
+          nemo.nvidia.com/oom-kill: process
 
       logs_dir: resources_servers/nl2repobench/logs
       clear_verifier_logs: true
