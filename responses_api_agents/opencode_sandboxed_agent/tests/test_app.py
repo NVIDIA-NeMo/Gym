@@ -584,8 +584,10 @@ class TestOpenCodeSandboxedAgent:
                 'else rg --version && touch "$HOME/agent-started"; fi\n'
             )
             opencode.chmod(0o755)
-            local_command = command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded))).replace(
-                "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error"))
+            local_command = (
+                command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded)))
+                .replace("/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error")))
+                .replace(app_module.STABLE_DATE_MARKER, shlex.quote(str(tmp_path / "stable-date")))
             )
             try:
                 completed = subprocess.run(
@@ -1044,6 +1046,8 @@ class TestOpenCodeSandboxedAgent:
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
+        stable_date = "file:///tmp/nemo-gym-stable-date.js"
+        assert (stable_date in config.get("plugin", [])) == token_capture_enabled
 
     async def test_create_opencode_config_merges_recursively(self, monkeypatch: MonkeyPatch) -> None:
         """A nested override must not blow away its siblings in the generated config.
@@ -2468,6 +2472,49 @@ async def test_plugin_registration_and_upload_come_from_one_list(monkeypatch):
         server._plugin_uploads()
 
 
+async def test_unpinned_date_fails_a_finished_capture_run(monkeypatch):
+    server = OpenCodeSandboxedAgent(
+        config=TestOpenCodeSandboxedAgent()._create_config(), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_token_id_capture_enabled", lambda: True)
+    monkeypatch.setattr(server, "_upload_plugin_verified", AsyncMock())
+    sandbox = MagicMock(
+        upload=AsyncMock(),
+        download=AsyncMock(),
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    stdout="Shell: /bin/sh\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None),
+            ]
+        ),
+    )
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+    with raises(NgFailureEvent, match="stable-date plugin"):
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "trial"}, cookies={"sandbox_id": ""}, path_params={}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+        )
+    assert app_module.STABLE_DATE_MARKER in sandbox.exec.await_args_list[0].kwargs["command"]
+    assert sandbox.exec.await_args_list[1].kwargs["command"] == f"test -f {app_module.STABLE_DATE_MARKER}"
+    sandbox.download.assert_not_awaited()
+    assert not server._sandbox_id_to_run_result
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
+def test_stable_date_extension():
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("test_stable_date.mjs"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
 def test_required_mcp_extension():
     result = subprocess.run(
@@ -2478,6 +2525,61 @@ def test_required_mcp_extension():
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@mark.parametrize("sandbox_error_type", [None, "timeout"])
+async def test_sandbox_error_outranks_the_killed_sessions_last_message(tmp_path, monkeypatch, sandbox_error_type):
+    from fastapi import Request
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        payload = kwargs["json"]
+        if kwargs["url_path"] == "/verify":
+            payload = payload | {"reward": 0.0, "library_reward": 0.0}
+        return SimpleNamespace(
+            cookies={},
+            json=AsyncMock(return_value={}),
+            ok=True,
+            read=AsyncMock(return_value=json.dumps(payload).encode()),
+            raise_for_status=lambda: None,
+        )
+
+    client.post = AsyncMock(side_effect=post)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(stop=AsyncMock(), upload=AsyncMock())
+
+    async def execute(command, **kwargs):
+        if "session list" in command:
+            return SimpleNamespace(return_code=0, error_type=None, stdout='[{"id":"session"}]', stderr="")
+        if "opencode run" in command and sandbox_error_type is not None:
+            return SimpleNamespace(return_code=124, error_type=sandbox_error_type, stdout="Shell: bash\n", stderr="")
+        return SimpleNamespace(return_code=0, error_type=None, stdout="Shell: bash\nOpenCode run finished", stderr="")
+
+    sandbox.exec = AsyncMock(side_effect=execute)
+    export = json.loads(Path(__file__).with_name("opencode_export_test_data.json").read_text())
+    # A killed session leaves its last assistant message with an abort error.
+    export["messages"][-1]["info"]["error"] = {"name": "MessageAbortedError"}
+
+    async def download(remote, local):
+        local.write_text(json.dumps(export))
+
+    sandbox.download = AsyncMock(side_effect=download)
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    server._create_opencode_config = AsyncMock(return_value={})
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
+    body = OpenCodeSandboxedAgentRunRequest.model_validate(
+        {"responses_create_params": {"input": [{"role": "user", "content": "Solve"}]}}
+    )
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/run", "headers": [], "session": {SESSION_ID_KEY: "trial"}}
+    )
+    result = await server.run(request, body)
+    assert result.opencode_error_type == (sandbox_error_type or "MessageAbortedError")
 
 
 @mark.parametrize("stop_reason", ["length", "stop"])
@@ -2550,6 +2652,8 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     result = await server.run(request, body)
     limited = stop_reason == "length"
     assert result.opencode_failed is limited
+    # Only the final assistant message decides it (an earlier length stop does not).
+    assert result.opencode_context_limited is limited
     assert result.reward == (0 if limited and force_zero else 1)
     assert result.model_dump()["library_reward"] == result.reward
     assert result.response.output

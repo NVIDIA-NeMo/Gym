@@ -145,6 +145,8 @@ _RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
 _RIPGREP_UPLOAD_MAX_CONCURRENT = 2
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Written by stable-date.js once it pins a date; must match its MARKER.
+STABLE_DATE_MARKER = "/tmp/nemo-gym-stable-date-active"
 # Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
 # workdir on purpose (see the export path below) and fixed because each rollout owns its sandbox.
 _REMOTE_ATTACHMENTS_DIR = "/tmp/nemo-gym-attachments"
@@ -731,6 +733,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_failed: bool = False
     # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
     opencode_attachment_count: int = 0
+    # The last assistant message stopped on length: the session ended on a full context.
+    opencode_context_limited: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -902,6 +906,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             policy_plugins.append("remaining-context.js")
         if self.config.tool_servers:
             policy_plugins.append("required-mcp.js")
+        if self._token_id_capture_enabled():
+            # Source-history capture links calls by exact prompt text; keep the date stable.
+            policy_plugins.append("stable-date.js")
         uploads.extend((Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}") for name in policy_plugins)
         return uploads
 
@@ -1369,7 +1376,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error
+        && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
         agent_command = f"""
         {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
@@ -1540,6 +1547,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     operation="opencode.setup",
                     stage="seed",
                     failure_reason="Required Gym MCP tools could not be initialized",
+                )
+        if self._token_id_capture_enabled() and result is not None and result.return_code == 0:
+            # A finished run made model calls; without the marker the date pin did not apply.
+            marker_check = await sandbox.exec(command=f"test -f {STABLE_DATE_MARKER}", timeout_s=30)
+            if marker_check.return_code != 0 or marker_check.error_type:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.capture",
+                    failure_reason="OpenCode stable-date plugin did not pin the system prompt date",
                 )
 
         export_fname = "export.json"
@@ -1745,7 +1762,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ]
             length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
             terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
-            if terminal_error and not run_error_type:
+            # A sandbox-reported error (e.g. "timeout") outranks the killed session's last message.
+            if terminal_error and not run_error_type and getattr(result, "error_type", None) is None:
                 run_error_type = (
                     terminal_error.get("name", "OpenCodeError")
                     if isinstance(terminal_error, dict)
@@ -1836,6 +1854,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # so an empty string means the run ended some other way (answered, or infra failure).
             "opencode_terminal_reason": _terminal_reason(run_output),
             "opencode_attachment_count": len(attachments),
+            "opencode_context_limited": length_limited,
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
