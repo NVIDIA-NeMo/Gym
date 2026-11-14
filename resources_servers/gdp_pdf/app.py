@@ -251,6 +251,56 @@ def _criterion_passes(score: Decimal) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# gdp_pdf_agent writes its delivery record under this response metadata key in an agent session; on /run it puts the
+# record on the result itself and verify() never sees it.
+DOCUMENT_DELIVERY_METADATA_KEY = "document_delivery"
+
+
+def _session_document_delivery(body: GdpPdfVerifyRequest) -> Optional[dict[str, Any]]:
+    """The delivery record gdp_pdf_agent left in a session's response metadata, or None."""
+    raw = (body.response.metadata or {}).get(DOCUMENT_DELIVERY_METADATA_KEY)
+    try:
+        record = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _with_document_delivery(result: GdpPdfVerifyResponse, record: Optional[dict[str, Any]]) -> GdpPdfVerifyResponse:
+    """Give a session's result the row fields gdp_pdf_agent's run() writes, from its delivery record.
+
+    In a session the Environment Server, not the agent, returns the row, so the record's facts land here: the
+    ``document_delivery`` record, the ``agent_adaptations`` counts the run's failure facts sum, and for a document
+    that never fit, its ``failure_reason``, plus the training mask when the agent's ``mask_failed_attempts`` marked
+    the attempt.
+    """
+    if record is None:
+        return result
+    update: dict[str, Any] = {
+        "document_delivery": record,
+        "agent_adaptations": {
+            key: record.get(key, 0) for key in ("input_limit_rejections", "output_truncation_regenerations")
+        },
+    }
+    if record.get("pages_truncated"):
+        update["verifier_metadata"] = {
+            **(result.verifier_metadata or {}),
+            "pages_truncated": record["pages_truncated"],
+        }
+    limit = record.get("limit")
+    if limit and not result.mask_sample:
+        update["failure_reason"] = f"GDP.pdf terminal input limit: {limit}"
+        if record.get("mask_failed_attempt"):
+            update["mask_sample"] = True
+            update["failure_kind"] = record.get("failure_kind")
+            # NeMo RL versions that predate the top-level field read instance_config.
+            update["instance_config"] = {
+                **((result.model_extra or {}).get("instance_config") or {}),
+                "mask_sample": True,
+            }
+    return GdpPdfVerifyResponse.model_validate(result.model_dump() | update)
+
+
 class GdpPdfResourcesServer(SimpleResourcesServer):
     config: GdpPdfConfig
 
@@ -264,6 +314,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             self._judge_prompt = f.read().strip()
 
     async def verify(self, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
+        return _with_document_delivery(await self._grade(body), _session_document_delivery(body))
+
+    async def _grade(self, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
         meta = body.verifier_metadata or {}
         criteria = meta.get("criteria") or []
         generated = _extract_generated_answer(body.response)
