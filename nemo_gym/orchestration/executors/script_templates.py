@@ -184,7 +184,7 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
 
 
 def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
-    """Render an &&-chained command that installs git if missing, then clones and checks out `ref`.
+    """Render checkout steps that each fail immediately under the driver's ``set -e``.
 
     `dest` is emitted verbatim so it may be a shell expression (the driver passes
     `"$GYM_SRC/gym"` to clone outside the job directory); omit it to clone into a
@@ -194,7 +194,8 @@ def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
     target = dest if dest is not None else shlex.quote(repo_name)
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
     return (
-        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} && git checkout {shlex.quote(ref)}"
+        f"({ensure_git})\ngit clone --filter=blob:none --no-checkout {shlex.quote(repo)} {target}\n"
+        f"cd {target}\ngit checkout {shlex.quote(ref)}"
     )
 
 

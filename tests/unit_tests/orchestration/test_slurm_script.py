@@ -786,6 +786,38 @@ def test_render_driver_entrypoint_with_gym_install():
     assert '"${GYM_CMD[@]}"' in out
 
 
+@pytest.mark.parametrize("failed_command", ["clone", "checkout"])
+def test_driver_checkout_failure_stops_before_environment_setup(tmp_path: Path, failed_command: str) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "uv-was-run"
+    scripts = {
+        "curl": "#!/bin/bash\nexit 0\n",
+        "git": (
+            "#!/bin/bash\n"
+            f"if [[ $1 == {shlex.quote(failed_command)} ]]; then exit 73; fi\n"
+            'if [[ $1 == clone ]]; then mkdir -p "${@: -1}"; fi\n'
+            "exit 0\n"
+        ),
+        "uv": f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\nexit 0\n",
+    }
+    for name, content in scripts.items():
+        path = tools / name
+        path.write_text(content)
+        path.chmod(0o755)
+    entrypoint = render_driver_entrypoint("https://example.invalid/gym", "pinned-ref", None, cleanup=True)
+    result = subprocess.run(
+        ["bash", "-c", "GYM_CMD=(true); " + entrypoint],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": f"{tools}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 73, result.stderr
+    assert not marker.exists()
+
+
 def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
     # The uv installer does not write $HOME/.local/bin/env when that directory is
     # already on PATH, so sourcing it would abort the `set -e` preamble.
@@ -815,8 +847,8 @@ def _run_private_uv_entrypoint(
         shared.chmod(0o755)
     # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
     (tools / "git").write_text(
-        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
-        'printf "[project.optional-dependencies]\\nray = []\\n" > "$3/pyproject.toml"; fi\nexit 0\n'
+        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "${@: -1}"; '
+        'printf "[project.optional-dependencies]\\nray = []\\n" > "${@: -1}/pyproject.toml"; fi\nexit 0\n'
     )
     (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
@@ -881,7 +913,7 @@ def test_a_private_uv_reader_never_bases_its_venv_on_a_shared_python_on_path(tmp
     shutil.copy(shutil.which("uv"), home / ".local/bin/uv")
     shared_python = home / ".local/bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
     shared_python.symlink_to(Path(sys.executable).resolve())
-    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "${@: -1}"\nexit 0\n')
     (tools / "git").chmod(0o755)
     report = "python -c 'import sys; print(\"BASE=\" + sys.base_prefix)'"
     out = render_driver_entrypoint(
@@ -1949,7 +1981,7 @@ def test_gym_install_does_not_clone_into_the_job_directory():
     entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
     assert "mktemp -d /tmp/gym-install-" in entrypoint
-    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+    assert 'git clone --filter=blob:none --no-checkout https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
 
 
 def test_gym_install_runs_from_the_install_root():
