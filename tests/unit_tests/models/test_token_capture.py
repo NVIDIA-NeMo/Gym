@@ -77,6 +77,8 @@ from nemo_gym.models.token_capture.records import (
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     UNCOMMITTED_CALL_REASON,
     UNSERVED_CALL_FAILURE_REASONS,
+    CallIdentity,
+    ModelRef,
     ParentResolutionStatus,
     TokenEntry,
     compute_digest,
@@ -87,6 +89,7 @@ from nemo_gym.models.token_capture.records import (
 )
 from nemo_gym.models.token_capture.sink import (
     CaptureContext,
+    _mark_incomplete,
     capture_engine_refusal,
     capture_tokens,
     commit_entry,
@@ -1372,6 +1375,92 @@ def test_an_unnamed_call_records_only_the_model_server(tmp_path):
     assert "agent_instance" not in exchange and "agent_kind" not in exchange
     [intent] = TokenCaptureStore(tmp_path).intents_path_for("one-agent").read_text().splitlines()
     assert json.loads(intent) == {"model_call_id": entry.model_call_id, "model_ref": payload["model_ref"]}
+
+
+_JUDGE = CallIdentity(agent_instance="judge.1", model_ref=ModelRef(name="policy"))
+
+
+def _put_root_entry(store: TokenCaptureStore, rollout_id: str, model_call_id: str) -> None:
+    entry = TokenEntry(
+        capture_key=rollout_id,
+        model_call_id=model_call_id,
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    asyncio.run(store.put(entry))
+
+
+def test_an_intents_file_mixing_bare_and_json_lines_is_read(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    # A rollout whose first intent is a bare call id, the form a call without an identity leaves.
+    store.intents_path_for("resolved").write_bytes(b"bare-1\n")
+    asyncio.run(store.begin_call("resolved", "json-1", identity=_JUDGE))
+    for call_id in ("bare-1", "json-1"):
+        _put_root_entry(store, "resolved", call_id)
+    assert store.freeze_now("resolved").incomplete is False
+
+    for rollout_id, lost in (("bare-lost", None), ("json-lost", _JUDGE)):
+        store.intents_path_for(rollout_id).write_bytes(b"bare-1\n")
+        asyncio.run(store.begin_call(rollout_id, "json-1", identity=_JUDGE))
+        asyncio.run(store.begin_call(rollout_id, "lost", identity=lost))
+        for call_id in ("bare-1", "json-1"):
+            _put_root_entry(store, rollout_id, call_id)
+        assert store.freeze_now(rollout_id).incomplete is True
+
+
+@pytest.mark.parametrize("keep", [40, 1], ids=["mid-object", "first-byte"])
+def test_a_torn_json_intent_line_masks_the_rollout_instead_of_failing_freeze(tmp_path, keep):
+    """A crash during ``begin_call`` can leave part of a line; such a rollout freezes incomplete, every time."""
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("r", "call-1", identity=_JUDGE))
+    _put_root_entry(store, "r", "call-1")
+    path = store.intents_path_for("r")
+    whole = path.read_bytes()
+    path.write_bytes(whole + whole[:keep])
+
+    assert store.freeze_now("r").incomplete is True
+    assert store.freeze_now("r").incomplete is True
+
+
+def test_a_lost_call_marks_the_rollout_incomplete_under_its_identity(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    context = CaptureContext(
+        capture_key="r1",
+        model_call_id="c9",
+        agent_instance=_JUDGE.agent_instance,
+        model_ref=_JUDGE.model_ref,
+        token_sink=store,
+    )
+
+    assert asyncio.run(_mark_incomplete(context)) is True
+
+    [mark] = store.incomplete_path_for("r1").read_text().splitlines()
+    assert json.loads(mark) == {
+        "model_call_id": "c9",
+        "agent_instance": "judge.1",
+        "agent_kind": "judge",
+        "model_ref": {"type": "responses_api_models", "name": "policy"},
+    }
+    assert store.is_incomplete("r1")
+
+
+def test_a_call_that_raises_is_still_recorded_under_its_agent_instance(tmp_path):
+    class _Failing(_CapturingModel):
+        async def responses(self, request: Request, body=Body()):
+            raise RuntimeError("engine down")
+
+    client = TestClient(
+        _server(_both_enabled(tmp_path), model_cls=_Failing).setup_webserver(), raise_server_exceptions=False
+    )
+    response = client.post(
+        "/ng-rollout/failed/ng-agent-instance/judge.1/training-token-capture/v1/responses", json={"input": "hi"}
+    )
+    assert response.status_code == 500
+
+    [exchange] = CaptureStore(tmp_path).read("failed")
+    assert (exchange["agent_instance"], exchange["agent_kind"]) == ("judge.1", "judge")
 
 
 def test_captured_entry_carries_content(tmp_path):

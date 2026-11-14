@@ -17,6 +17,7 @@ from nemo_gym.models.token_capture.external_capture import (
     make_external_capture_handler,
 )
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.records import IDENTITY_FIELDS, ModelRef
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.staging.records import (
@@ -392,6 +393,33 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
         _assert_transport_fields_stripped(payload)
     else:
         _assert_poisoned(manifest, context, payload, case.expected_failure)
+
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+@pytest.mark.parametrize("case", list(_FINALIZE_CASES.values()), ids=list(_FINALIZE_CASES))
+async def test_handler_writes_the_call_identity_on_the_row_it_leaves(handler_cls, case: _FinalizeCase) -> None:
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    context.agent_instance = "judge.1"
+    context.model_ref = ModelRef(name="policy")
+    payload = _transport_payload()
+    if case.coords_payload is not None:
+        payload["ng_commit_coords"] = case.coords_payload
+    if case.drop_response_id:
+        payload.pop("id")
+
+    await _prepare_and_finalize(handler_cls(), context, payload)
+
+    # No intent row exists here, so the manifest cannot fill the identity in: the row itself must carry it.
+    manifest = await store.manifest("rollout-1")
+    [row] = manifest["records"] + manifest["failures"]
+    assert (row.get("reason") is None) == (case.expected_failure is None)
+    assert {name: row.get(name) for name in IDENTITY_FIELDS} == {
+        "agent_instance": "judge.1",
+        "agent_kind": "judge",
+        "model_ref": {"type": "responses_api_models", "name": "policy"},
+    }
 
 
 @pytest.mark.asyncio

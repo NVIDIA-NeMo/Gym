@@ -80,14 +80,20 @@ def _call_line(model_call_id: str, identity: CallIdentity | None) -> bytes:
 
 
 def _read_call_line(line: bytes) -> dict[str, Any]:
-    """Parse a line written by ``_call_line``. A call id is never a JSON object, so the two forms cannot collide."""
+    """Parse a line written by ``_call_line``. A call id is never a JSON object, so the two forms cannot collide.
+
+    A line that a crash left incomplete reads as a call id of its raw text, which no entry carries, so the rollout
+    freezes incomplete, as it does for a torn bare call id.
+    """
     line = line.strip()
     if line.startswith(b"{"):
-        row = orjson.loads(line)
-        if not isinstance(row, dict) or not isinstance(row.get("model_call_id"), str):
-            raise ValueError(f"invalid capture call line: {line!r}")
-        return row
-    return {"model_call_id": line.decode("utf-8")}
+        try:
+            row = orjson.loads(line)
+        except orjson.JSONDecodeError:
+            row = None
+        if isinstance(row, dict) and isinstance(row.get("model_call_id"), str):
+            return row
+    return {"model_call_id": line.decode("utf-8", errors="replace")}
 
 
 class TokenCaptureStore:

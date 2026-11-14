@@ -342,3 +342,25 @@ def test_kit_warns_when_a_sink_registers_intents_but_cannot_record_a_refusal(tmp
     assert warning.check_name == "engine_refusal_resolution"
     assert "_IntentOnlySink implements begin_call but not record_engine_refusal" in warning.detail
     assert "the rollout is masked" in warning.detail
+
+
+def test_kit_rejects_a_sink_whose_begin_call_takes_no_identity(tmp_path):
+    class _BeginCallWithoutIdentity(TokenCaptureStore):
+        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+            await super().begin_call(rollout_id, model_call_id)
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(run_conformance(lambda: _BeginCallWithoutIdentity(tmp_path), lambda: TokenCaptureStore(tmp_path)))
+    assert info.value.check_name == "unconditional_retirement"
+
+
+def test_kit_rejects_a_sink_whose_mark_incomplete_takes_no_identity(tmp_path):
+    class _MarkIncompleteWithoutIdentity(TokenCaptureStore):
+        async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
+            await super().mark_incomplete(capture_key, model_call_id)
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(
+            run_conformance(lambda: _MarkIncompleteWithoutIdentity(tmp_path), lambda: TokenCaptureStore(tmp_path))
+        )
+    assert info.value.check_name == "mark_incomplete_durability"
