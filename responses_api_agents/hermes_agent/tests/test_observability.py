@@ -376,3 +376,40 @@ def test_correlated_errors_keep_invocation_headers_without_mutating_input(keywor
     assert seen[0]["extra_headers"] == {"custom": "value", "x-session-id": "root"}
     assert original == {"messages": [], "extra_headers": {"custom": "value"}}
     assert "model_call_ownership_unavailable" not in {g.code for g in observer.finish().gaps}
+
+
+def test_normalize_hermes_messages_keeps_user_images_in_order():
+    image_uri = "data:image/png;base64,image-bytes"
+    items = normalize_hermes_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image_url", "image_url": {"url": image_uri, "detail": "high"}},
+                    {"type": "text", "text": "after"},
+                ],
+            },
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_uri}}]},
+            # Hermes also reads a bare-URL image_url and a Responses input_image part.
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": image_uri},
+                    {"type": "input_image", "image_url": image_uri, "detail": "low"},
+                ],
+            },
+        ]
+    )
+    first, second, third = [item.model_dump(mode="json")["content"] for item in items]
+    assert [part["type"] for part in first] == ["input_text", "input_image", "input_text"]
+    assert first[0]["text"] == "before"
+    assert first[1]["image_url"] == image_uri
+    assert first[1]["detail"] == "high"
+    assert first[2]["text"] == "after"
+    assert second[0]["image_url"] == image_uri
+    assert second[0]["detail"] == "auto"
+    assert [(part["type"], part["image_url"], part["detail"]) for part in third] == [
+        ("input_image", image_uri, "auto"),
+        ("input_image", image_uri, "low"),
+    ]

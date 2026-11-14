@@ -64,6 +64,7 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -76,6 +77,8 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    UnsupportedContentError,
+    split_text_and_media,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -234,7 +237,24 @@ def parse_openclaw_session_items(events: list[dict[str, Any]], *, include_input:
                     for block in content
                     if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]
                 )
-            if text:
+            if (
+                role == "user"
+                and isinstance(content, list)
+                and any(isinstance(block, dict) and block.get("type") == "image" for block in content)
+            ):
+                parts = [
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{block['mimeType']};base64,{block['data']}",
+                        "detail": "auto",
+                    }
+                    if block.get("type") == "image"
+                    else {"type": "input_text", "text": block["text"]}
+                    for block in content
+                    if isinstance(block, dict) and (block.get("type") == "image" or isinstance(block.get("text"), str))
+                ]
+                output_items.append(NeMoGymEasyInputMessage(role=role, content=parts))
+            elif text:
                 output_items.append(NeMoGymEasyInputMessage(role=role, content=text))
             continue
         if not include_input and not isinstance(content, list):
@@ -433,7 +453,7 @@ if [ "$#" -gt 0 ]; then
 fi
 """
     check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
-    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw/media')}"
 
 
 # One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
@@ -530,6 +550,10 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
+    image_input: bool = Field(
+        default=False,
+        description="Declare image input in sandbox sessions even without prompt images, for images read by tools.",
+    )
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
     sandbox_provider: str | None = None
@@ -803,7 +827,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         return prompt, system
 
-    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "OpenClaw sandbox execution model must match the configured model")
@@ -831,18 +855,19 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"]):
             raise HTTPException(
-                422, "OpenClaw sandbox execution accepts one text user prompt with an optional system message"
+                422, "OpenClaw sandbox execution accepts one user prompt with an optional system message"
             )
         for item in items:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "OpenClaw sandbox execution only supports text input")
+            try:
+                _, media = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"OpenClaw sandbox execution: {error}") from error
+            if media and item.role != "user":
+                raise HTTPException(422, "OpenClaw accepts images only in the user prompt")
         prompt, system = self._prompt_input(body)
-        if not prompt.strip():
-            raise HTTPException(422, "OpenClaw sandbox execution requires a nonempty user prompt")
-        return prompt, system
+        if not prompt.strip() and not media:
+            raise HTTPException(422, "OpenClaw sandbox execution requires a nonempty user prompt or an image")
+        return prompt, system, media
 
     async def _sandbox_response(
         self,
@@ -851,11 +876,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: list[MediaFile] | None = None,
     ) -> NeMoGymResponse:
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
         session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
         session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        if media or self.config.image_input:
+            session_config["models"]["providers"]["nemo"]["models"][0]["input"] = ["text", "image"]
         # Capture rejected attempts too: they have no responseId in the transcript.
         session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
         # OpenClaw conservatively disables stream usage for custom origins. Gym
@@ -873,6 +901,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         "model": {"primary": self._effective_model()},
                         "sandbox": {"mode": "off"},
                         "memorySearch": {"enabled": False},
+                        # Disable the configurable 1200 px resize for image-capable sessions.
+                        **({"imageMaxDimensionPx": 2**31 - 1} if media or self.config.image_input else {}),
                     }
                 },
                 "tools": {
@@ -930,7 +960,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 session_config["tools"]["allow"].append("bundle-mcp")
         try:
             async with self.sem:
-                await state.execute(payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds)
+                await state.execute(
+                    payload,
+                    media=media or (),
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
         except BaseException:
             # Cancellation/cleanup failure still leaves useful transcript evidence
             # for the subsequent close. Never convert uncertain cleanup to success.
@@ -945,6 +980,29 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         response = await self._collect_sandbox_response(
             state, body, prompt=prompt, system=system, capture_correlated=True
         )
+        if media and (
+            response.status == "completed"
+            or (response.status == "incomplete" and not (state.session.cleanup or {}).get("timed_out"))
+        ):
+            transcript = (state.session.artifacts or {}).get(
+                f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", ""
+            )
+            messages = parse_openclaw_session_items(parse_openclaw_session_events(transcript), include_input=True)
+            image_count = max(
+                (
+                    sum(
+                        (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) == "input_image"
+                        for part in item.content
+                    )
+                    for item in messages
+                    if getattr(item, "role", None) == "user" and isinstance(item.content, list)
+                ),
+                default=0,
+            )
+            if image_count < len(media):
+                if state.observations is not None and state.observations.records:
+                    state.observations.records[0].status = "failed"
+                raise RuntimeError("OpenClaw retained fewer prompt images than supplied")
         # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
         # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
         stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
@@ -1635,6 +1693,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        if any(
+            isinstance(getattr(item, "content", None), list)
+            and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) == "input_image"
+                for part in item.content
+            )
+            for item in body.input
+        ):
+            raise HTTPException(422, "OpenClaw prompt images require an agent session")
         user_message, system_prompt = self._prompt_input(body)
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
@@ -1704,13 +1771,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             assert isinstance(state, OpenClawSandboxSession)
             if state.request.episode_id.capture_key != request.path_params.get("rollout_id"):
                 raise HTTPException(409, "OpenClaw activation does not match the seeded session and rollout route")
-            prompt, system = self._sandbox_input(body)
             if state.task is None:
+                prompt, system, media = self._sandbox_input(body)
                 # Bind the immutable request before yielding, so identical retries
                 # share one invocation and different requests cannot replace it.
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._sandbox_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenClaw sandbox sessions support one activation; retry the same request")

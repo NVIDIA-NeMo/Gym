@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
 import tomllib
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +27,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
@@ -35,7 +41,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.sandbox import SandboxStatus
+from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.codex_agent.app import (
     _SANDBOX_SESSION_KEY,
     CodexAgent,
@@ -128,7 +134,11 @@ class Sandbox:
         self.signals = []
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
         if destination.endswith("/expire.request"):
             # The supervisor ends the harness as at its deadline; before launch, it never starts it.
             self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
@@ -148,6 +158,11 @@ class Sandbox:
             self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def execute(self, command, **kwargs):
+        if command.startswith("rm -f -- "):
+            for path in shlex.split(command)[3:]:
+                self.files.pop(path, None)
+        for source, destination in re.findall(r"mv -f -- (\S+) (\S+)", command):
+            self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
         if "echo absent" in command:
@@ -3295,12 +3310,16 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         session_id = created.json()["agent_session_id"]
+        started = time.monotonic()
         response = client.post(
             "/ng-rollout/codex-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
         )
+        elapsed = time.monotonic() - started
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        remaining = float(command[command.index("--timeout") + 1])
+        assert 0 < remaining <= expected
+        assert remaining >= expected - elapsed
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
@@ -3933,3 +3952,231 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
                 )
         assert len(run_calls) == 1
     sandbox.launch.assert_awaited_once()
+
+
+def image_bytes(gray: int = 0) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes([0, gray])))
+        + chunk(b"IEND", b"")
+    )
+
+
+def image_part(gray: int = 0) -> dict:
+    return {
+        "type": "input_image",
+        "image_url": "data:image/png;base64," + base64.b64encode(image_bytes(gray)).decode(),
+        "detail": "auto",
+    }
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+def test_session_stages_images_once_and_attaches_in_order(setup, image_only):
+    agent, sandbox = setup
+    grays = (0, 1, 1)  # A reversed attachment order must fail while repeated images still share a file.
+    content = [image_part(gray) for gray in grays]
+    if not image_only:
+        content.insert(1, {"type": "input_text", "text": "Describe these"})
+    body = {"input": [{"role": "system", "content": "system"}, {"role": "user", "content": content}]}
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        assert result.status_code == 200, result.text
+        replay = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        assert replay.json() == result.json()
+        changed = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={**body, "instructions": "changed"})
+        assert changed.status_code == 409
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    command = payload["command"]
+    paths = [command[i + 1] for i, arg in enumerate(command) if arg == "--image"]
+    assert paths == [f"{MEDIA_DIRECTORY}/{hashlib.sha256(image_bytes(gray)).hexdigest()}.png" for gray in grays]
+    assert [sandbox.files[path] for path in paths] == [image_bytes(gray) for gray in grays]
+    assert command[-2:] == ["--", "" if image_only else "-"]
+    assert payload["prompt"] == ("" if image_only else "Describe these")
+    assert len([path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]) == 2
+    sandbox.launch.assert_awaited_once()
+    invocation = closed.json()["agent_observations"]["records"][0]
+    images = [
+        part
+        for msg in invocation["conversation"]
+        if msg.get("role") == "user"
+        for part in msg["content"]
+        if part["type"] == "input_image"
+    ]
+    assert [part["image_url"] for part in images] == [image_part(gray)["image_url"] for gray in grays]
+
+
+@pytest.mark.parametrize("ending", ["completed", "output-limit", "wall-timeout", "model-error"])
+@pytest.mark.parametrize("retained", [0, 1, 2])
+def test_session_requires_every_native_prompt_image(setup, ending, retained):
+    agent, sandbox = setup
+    if ending == "output-limit":
+        transcript = [json.loads(line) for line in sandbox.events.splitlines()]
+        transcript[-1][1] = {
+            "type": "turn.failed",
+            "error": {
+                "message": "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+            },
+        }
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+    elif ending == "wall-timeout":
+        sandbox.result.update(timed_out=True, return_code=-signal.SIGTERM)
+    elif ending == "model-error":
+        sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": BAD_REQUEST}}])
+        sandbox.result["return_code"] = 1
+    publish = sandbox.publish
+
+    def publish_images():
+        publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+            [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        *[image_part() for _ in range(retained)],
+                        {"type": "input_text", "text": "image content omitted because it could not be processed"},
+                    ],
+                }
+            ]
+        )
+
+    sandbox.publish = publish_images
+    body = {"input": [{"role": "user", "content": [image_part(), image_part()]}]}
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        missing = retained < 2 and ending in {"completed", "output-limit"}
+        if missing:
+            assert result.status_code == 502, result.text
+            assert f"Codex attached {retained} of 2 prompt images" in result.json()["detail"]
+        else:
+            assert result.status_code == 200, result.text
+            assert result.json()["status"] == (
+                "failed" if ending == "model-error" else "completed" if ending == "completed" else "incomplete"
+            )
+            if ending != "model-error":
+                assert "Fixed" in json.dumps(result.json()["output"])
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        if missing:
+            assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "role,part,detail",
+    [
+        ("user", {"type": "input_image", "image_url": "https://example.com/a.png"}, "base64 data URI"),
+        ("user", {"type": "input_image", "file_id": "file-id"}, "base64 data URI"),
+        ("user", {"type": "input_image", "image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"type": "input_image", "image_url": "data:image/png;base64,é"}, "invalid base64"),
+        ("user", {"type": "input_image", "image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
+        (
+            "user",
+            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+            "no data of a supported media type",
+        ),
+        ("system", image_part(), "only in the user prompt"),
+        ("developer", image_part(), "only in the user prompt"),
+    ],
+)
+def test_session_rejects_invalid_images_before_consuming_activation(setup, role, part, detail):
+    agent, sandbox = setup
+    content = [{"role": role, "content": [{"detail": "auto", **part}]}]
+    if role != "user":
+        content.append({"role": "user", "content": "question"})
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": content})
+        assert response.status_code == 422 and detail in response.text
+        sandbox.launch.assert_not_awaited()
+        recovery = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "text recovery"})
+        assert recovery.status_code == 200, recovery.text
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+async def start_image_activation(agent, *, timeout=None):
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    seeded = await agent.seed_agent_session(request, seed())
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": [image_part()]}],
+        metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)} if timeout else None,
+    )
+    return request, seeded.agent_session_id, asyncio.create_task(agent.responses(request, body))
+
+
+async def test_close_cancels_image_staging_before_sandbox_release(setup):
+    agent, sandbox = setup
+    staging = asyncio.Event()
+    order = []
+    upload = sandbox.upload
+
+    async def stall(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            staging.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("staging cancelled")
+                raise
+        await upload(source, destination)
+
+    sandbox.upload = stall
+    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    request, session_id, task = await start_image_activation(agent)
+    await asyncio.wait_for(staging.wait(), 2)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert order == ["staging cancelled", "sandbox released"]
+    sandbox.launch.assert_not_awaited()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+
+
+async def test_image_staging_spends_the_activation_deadline(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+
+    async def stall(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            await asyncio.sleep(5)
+        await upload(source, destination)
+
+    sandbox.upload = stall
+    request, session_id, task = await start_image_activation(agent, timeout=0.2)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, 2)
+    assert time.monotonic() - started < 2
+    sandbox.launch.assert_not_awaited()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize(
+    "return_code,error_type,error", [(None, "timeout", SandboxUnavailableError), (1, None, SandboxTransferError)]
+)
+async def test_image_staging_failure_keeps_sandbox_error(setup, return_code, error_type, error):
+    agent, sandbox = setup
+    execute = sandbox.execute
+
+    async def fail_rename(command, **kwargs):
+        if "mv -f -- " in command:
+            return SimpleNamespace(return_code=return_code, error_type=error_type, stderr="rename failed", stdout="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = fail_rename
+    request, session_id, task = await start_image_activation(agent)
+    with pytest.raises(error) as failure:
+        await task
+    assert not isinstance(failure.value, TimeoutError)
+    sandbox.launch.assert_not_awaited()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

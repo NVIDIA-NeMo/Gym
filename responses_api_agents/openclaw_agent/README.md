@@ -56,6 +56,8 @@ Session install/close timeouts default to 600/60 seconds.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
   OpenClaw 2026.6.11 uses 8,192.
+- `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
+  prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
@@ -216,7 +218,15 @@ Sandbox request support is deliberately explicit:
   without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
   explicit ID and episode without a cookie, including after a lost seed response. Closing an
   unknown ID prevents a delayed seed from creating it. Filesystem paths use independent random IDs.
-- A text user prompt, optionally preceded by one system message. Text-part arrays are accepted.
+- One user prompt, optionally preceded by one system message. Text-part arrays are accepted. Sandbox sessions
+  also accept base64 data-URI `input_image` parts, with or without text; local execution rejects images with HTTP 422.
+  Each image occurrence gets a separate file under `<session>/home/.openclaw/media/`, removed on close, so repeated
+  images remain repeated. The adapter appends one `[Image: source: <path>]` line per file after the prompt text.
+  These session-specific paths remain visible to the model. Image order is preserved, but text/image interleaving
+  and the requested `detail` are not. For image-capable sessions, the adapter disables OpenClaw's configurable
+  1200 px resize. OpenClaw 2026.6.11 can still resize or re-encode large images in its native file-loading and
+  byte-limit processing. Exported conversations retain images as data URIs. Completed and output-limit replies
+  must retain every supplied image occurrence; wall-time limits keep their existing behavior.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.

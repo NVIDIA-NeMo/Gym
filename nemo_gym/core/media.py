@@ -106,7 +106,7 @@ class MediaFile:
             )
         try:
             data = base64.b64decode(payload, validate=True)
-        except binascii.Error as error:
+        except (binascii.Error, ValueError) as error:
             raise UnsupportedContentError("Media data URI holds invalid base64") from error
         content_type = _media_type_of(data)
         if content_type is None:

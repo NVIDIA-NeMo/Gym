@@ -364,3 +364,23 @@ def test_compaction_requires_native_event_and_unique_session_helper(damage):
         event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
         assert not event.model_calls and repeated.gaps
         assert not repeated.records[0].model_calls
+
+
+def test_native_prompt_images_are_preserved() -> None:
+    content = [
+        {"type": "input_text", "text": "image follows"},
+        {"type": "input_image", "image_url": "data:image/png;base64,image-bytes", "detail": "high"},
+    ]
+    transcript = json.dumps(
+        {
+            "type": "response_item",
+            "timestamp": "2026-11-10T12:00:00Z",
+            "payload": {"type": "message", "role": "user", "content": content},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "images", returncode=0, timed_out=False)
+    observed = bundle.records[0].conversation[0].model_dump(mode="json")["content"]
+    assert observed[0]["text"] == "image follows"
+    assert observed[1]["image_url"] == content[1]["image_url"]
+    assert observed[1]["detail"] == "high"
+    assert not bundle.gaps

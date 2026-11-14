@@ -1789,3 +1789,96 @@ def test_http_status_alone_does_not_establish_context_overflow(agent, status):
         "model_request_error",
         status,
     )
+
+
+_IMAGE_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+)
+
+
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_images_reach_host_and_sandbox_without_dropping_history(agent, state, monkeypatch, sandbox):
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": _IMAGE_URI, "detail": "high"},
+        {"type": "input_text", "text": "between"},
+        {"type": "input_image", "image_url": _IMAGE_URI.replace("image/png", "image/jpeg"), "detail": "low"},
+    ]
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "system", "content": "instruction"},
+            {"role": "user", "content": content},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": content},
+        ],
+    )
+    original = body.model_dump()
+    result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
+    if sandbox:
+        agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+        state.execute = AsyncMock(return_value={"result": result})
+        await agent.responses(request(state), body)
+        payload = state.execute.await_args.args[0]
+        latest, history = payload["user_message"], payload["history"]
+        await agent.responses(request(state), body)
+        state.execute.assert_awaited_once()
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request(state), body.model_copy(update={"instructions": "different"}))
+        assert error.value.status_code == 409
+    else:
+        runner = MagicMock()
+        runner.run_conversation.return_value = result
+        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
+        monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+        await agent.responses(SimpleNamespace(session={}), body)
+        latest, _, history = runner.run_conversation.call_args.args
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "high"}},
+        {"type": "text", "text": "between"},
+        {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "low"}},
+    ]
+    assert latest == expected
+    assert history == [{"role": "user", "content": expected}, {"role": "assistant", "content": "prior answer"}]
+    assert body.model_dump() == original
+
+
+@pytest.mark.parametrize("sandbox", [False, True])
+@pytest.mark.parametrize(
+    ("role", "image", "message"),
+    [
+        ("user", {"image_url": "https://example.com/image.png"}, "base64 data URI"),
+        ("user", {"image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,é"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,aGVsbG8="}, "no data of a supported media type"),
+        ("user", {"image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
+        ("user", {"file_id": "file-image"}, "base64 data URI"),
+        ("system", {"image_url": _IMAGE_URI}, "only in user messages"),
+        ("assistant", {"image_url": _IMAGE_URI}, "only in user messages"),
+    ],
+)
+async def test_invalid_images_fail_before_execution(agent, state, role, image, message, sandbox):
+    items = [{"role": role, "content": [{"type": "input_image", "detail": "auto", **image}]}]
+    if role != "user":
+        items.append({"role": "user", "content": "question"})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=items)
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._run_sandbox_episode = AsyncMock(side_effect=AssertionError("Must reject before execution"))
+    agent._create_response = AsyncMock(side_effect=AssertionError("Must reject before execution"))
+    with pytest.raises(HTTPException, match=message) as error:
+        await agent.responses(request(state) if sandbox else SimpleNamespace(session={}), body)
+    assert error.value.status_code == 422
+    assert state.task is None
+    agent._run_sandbox_episode.assert_not_awaited()
+    agent._create_response.assert_not_awaited()
+
+    result = episode(agent)
+    agent._run_sandbox_episode = AsyncMock(return_value=result)
+    agent._create_response = AsyncMock(return_value=result.response)
+    recovered = await agent.responses(
+        request(state) if sandbox else SimpleNamespace(session={}),
+        NeMoGymResponseCreateParamsNonStreaming(input="text recovery"),
+    )
+    assert recovered.status == "completed"
+    (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()
