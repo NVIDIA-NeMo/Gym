@@ -160,6 +160,9 @@ def test_a_partition_too_short_for_one_segment_is_refused_before_the_evidence_re
         "12:00:00",
     )
     assert out.decision.reason == f"walltime raise refused: {out.walltime_plan['refused']}"
+    assert out.operator_verdict["state"] == "needs_action" and out.gate_task is None
+    assert out.walltime_plan["refused"] in out.operator_verdict["reason"]
+    assert "reader" not in out.operator_verdict["action"]
     assert out.walltime_plan["segment"] is None
     assert {path: path.read_bytes() for path in files} == files and not (slurm_bin / "env").exists()
 
@@ -203,6 +206,13 @@ def test_a_scheduler_refusal_returns_an_outcome_with_its_text(tmp_path, slurm_bi
     assert not (run_dir / WALLTIME_JOURNAL_NAME).exists() and not (job_dir / sm._RESUBMIT_LOCK).exists()
     assert f"the scheduler refused the job: {text}" in out.decision.reason
     json.loads(out.model_dump_json())
+    verdict = out.operator_verdict
+    assert out.gate_task["operator_verdict"] == verdict and verdict["state"] == "needs_action"
+    assert "recover` now" not in verdict["action"]
+    if ambiguous:
+        assert "whether a job was queued is unknown" in verdict["reason"] and "reconcile" in verdict["action"]
+    else:
+        assert text in verdict["reason"] and "correct" in verdict["action"]
     if ambiguous:
         # A lost reply may still have queued a job: the chain records that its accounting is unknown, as before.
         assert refusal["job_dir_restored"] is False and refusal["chain_marker"].startswith(

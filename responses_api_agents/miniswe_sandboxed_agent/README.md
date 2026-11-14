@@ -7,15 +7,16 @@
 > Both legacy and session configurations log one warning at startup. Existing entrypoints and configs keep working;
 > no removal date is set for this adapter. Use the replacement for new integrations.
 >
-> Legacy `/run` benchmark presets (for example [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml))
+> Legacy `/run` benchmark presets (for example [`benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml`](../../benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml))
 > must stay on this adapter until their environment-server migration; changing only the agent name is insufficient.
-> Terminal-Bench-Science also stays on `/run` until it has a session path. Tasks with `[agent].user` must keep this
+> Terminal-Bench-Science's default `miniswe` preset has migrated to Harbor with `mini_swe_agent`; its
+> `miniswe_legacy_agent` preset retains this `/run` adapter. Tasks with `[agent].user` must keep this
 > adapter because the replacement refuses a task user. Other Harbor task folders can migrate now;
 > the replacement does not establish new benchmark qualification or guarantee identical scores.
 
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
-The legacy `/run` path uses [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
+The legacy `/run` path uses [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml) with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
 `harness.py` supplies execution and trajectory conversion; it imports no benchmark
