@@ -1,7 +1,7 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/opencode_llm_judge_tool_rewards/data/example.jsonl",
+    "jsonl_fpath": "resources_servers/llm_judge_tool_rewards/data/example.jsonl",
     "num_repeats": 1,
     "source": null,
     "gitlab_identifier": null,

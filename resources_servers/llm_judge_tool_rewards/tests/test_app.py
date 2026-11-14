@@ -8,7 +8,7 @@ import pytest
 from nemo_gym.client import ServerClient
 from nemo_gym.verification import JudgeError
 from resources_servers.equivalence_llm_judge import app as judge_app
-from resources_servers.opencode_llm_judge_tool_rewards.app import (
+from resources_servers.llm_judge_tool_rewards.app import (
     ToolRewardConfig,
     ToolRewardServer,
     ToolRewardVerifyRequest,
@@ -175,7 +175,7 @@ async def test_unusable_verdict_is_masked_without_tool_credit(judge_server, text
 
 async def test_offline_verifier_contract():
     from nemo_gym.verification import exercise_verifier_fixture
-    from resources_servers.opencode_llm_judge_tool_rewards.app import VERIFIER_FIXTURE
+    from resources_servers.llm_judge_tool_rewards.app import VERIFIER_FIXTURE
 
     await exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=(0, 1.0), determinism="unknown")
 
@@ -189,9 +189,9 @@ def test_configured_component_collates_generic_rows_with_strict_validation(tmp_p
     from nemo_gym.config import maybe_get_server_instance_config
     from nemo_gym.data import TrainDataProcessor
 
-    config = yaml.safe_load((Path(__file__).parents[1] / "configs/opencode_llm_judge_tool_rewards.yaml").read_text())
+    config = yaml.safe_load((Path(__file__).parents[1] / "configs/llm_judge_tool_rewards.yaml").read_text())
     definition = config["llm_judge_with_tools"]
-    settings = definition["resources_servers"]["opencode_llm_judge_tool_rewards"]
+    settings = definition["resources_servers"]["llm_judge_tool_rewards"]
     source = tmp_path / "judge.jsonl"
     row = {
         "task_id": "capital",
@@ -221,9 +221,9 @@ def test_committed_examples_pass_ci_data_validation_and_strict_collation(tmp_pat
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.data import TrainDataProcessor, materialize_task
     from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
-    from resources_servers.opencode_llm_judge_tool_rewards.task_data import TaskData
+    from resources_servers.llm_judge_tool_rewards.task_data import TaskData
 
-    component = "opencode_llm_judge_tool_rewards"
+    component = "llm_judge_tool_rewards"
     directory = Path(__file__).parents[1]
     _validate_data_single(TestConfig(entrypoint=f"resources_servers/{component}", should_validate_data=True))
     rows = [json.loads(line) for line in (directory / "data/example.jsonl").read_text().splitlines()]
@@ -285,7 +285,7 @@ def test_entrypoint_exports_app_only_in_worker(monkeypatch, worker):
     start = MagicMock(return_value=app)
     monkeypatch.setattr(SimpleResourcesServer, "run_webserver", start)
     monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_WORKER", "1" if worker else "0")
-    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", "opencode_llm_judge_tool_rewards/app.py")
+    monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", "llm_judge_tool_rewards/app.py")
     namespace = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="worker_fixture")
     if worker:
         assert namespace["app"] is app
@@ -329,3 +329,40 @@ async def test_unfinished_tool_turn_does_not_reuse_earlier_answer(judge_server, 
     assert result.reward == 0 and result.failure_reason == "empty_final_answer"
     assert result.response == request.response
     mocked.assert_not_awaited()
+
+
+@pytest.mark.parametrize("evidence", ["missing", "incomplete", "unknown"])
+async def test_unusable_tool_evidence_is_masked_without_credit(judge_server, monkeypatch, evidence):
+    from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import observed
+
+    request = body()
+    request.ng_trajectory = None if evidence == "missing" else trajectory(evidence)
+    original = request.model_dump(mode="json")
+    monkeypatch.setattr(judge_app, "call_judge", AsyncMock(return_value=tool_response("[[A=B]]")))
+    result = await observed(judge_server, request)
+    assert result["mask_sample"] is True and result["failure_kind"] == "verifier_error"
+    assert result["reward"] == 0 and not result.get("opencode_tool_reward")
+    assert result["response"] == original["response"]
+    assert request.model_dump(mode="json") == original
+
+
+@pytest.mark.parametrize("mode,expected", [("default", 0.5), ("proportional", 0.475)])
+async def test_partial_credit_rescue_can_opt_into_proportional_penalties(judge_server, monkeypatch, mode, expected):
+    from resources_servers.opencode_multimodal_benchmarks.rewards import OpenCodeToolRewardConfig
+
+    judge_server.config.tool_rewards = OpenCodeToolRewardConfig(penalty_mode=mode)
+    request = body()
+    request.template_metadata = {"output_regex": r"(P)aris"}
+    request.ng_trajectory = trajectory("failed")
+    original = request.model_dump(mode="json")
+    mocked = AsyncMock(side_effect=[tool_response("[[A!=B]]"), tool_response("[[A=B]]")])
+    monkeypatch.setattr(judge_app, "call_judge", mocked)
+    result = await judge_server.verify(request)
+    assert mocked.await_count == 2
+    assert len(result.judge_evaluations) == 2
+    assert result.reward == pytest.approx(expected)
+    assert result.reward_components["verifier"] == 0.5
+    assert result.reward_components["opencode_tool_reward"] == pytest.approx(expected - 0.5)
+    assert not result.mask_sample
+    assert result.response == request.response
+    assert request.model_dump(mode="json") == original

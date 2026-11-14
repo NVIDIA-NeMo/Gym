@@ -15,7 +15,7 @@ from resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
 )
-from resources_servers.opencode_llm_judge_tool_rewards.verifier_fixture import fixture
+from resources_servers.llm_judge_tool_rewards.verifier_fixture import fixture
 from resources_servers.opencode_multimodal_benchmarks.rewards import (
     ToolRewardEvidence,
     ToolRewardScoringConfig,

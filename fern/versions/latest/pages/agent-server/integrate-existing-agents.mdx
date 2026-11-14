@@ -394,13 +394,16 @@ Understand where shared tool implementations and verification logic belong.
 </Cards>
 
 
-For generic answer-equivalence training with OpenCode tool rewards, use the
-`opencode_llm_judge_tool_rewards` Resources component and
-`resources_servers/opencode_llm_judge_tool_rewards/configs/opencode_llm_judge_tool_rewards.yaml`. It retains
+For generic answer-equivalence training with configurable tool rewards, use the
+`llm_judge_tool_rewards` Resources component and
+`resources_servers/llm_judge_tool_rewards/configs/llm_judge_tool_rewards.yaml`. It retains
 `equivalence_llm_judge`'s dataset schema (`expected_answer` and optional question
 metadata); visual-benchmark metadata is unnecessary. Bind the environment to
 `llm_judge_with_tools`, configure a separate `training_judge` model, and enable
 `forward_agent_evidence: true`. Reverification needs that flag separately when
 recomputing tool rewards. The wrapper preserves the saved policy response and
 records correctness and tool reward separately; unusable judge replies remain
-masked failures.
+masked failures. Shell/search tool names and rate-limit matching are configurable;
+the shipped settings are OpenCode-compatible. Other harnesses must provide matching
+tool settings and canonical execution observations; OpenCode is the currently
+validated tool-using pairing.

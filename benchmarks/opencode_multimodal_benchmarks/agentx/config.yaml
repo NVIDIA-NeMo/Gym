@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 config_paths:
 - resources_servers/opencode_multimodal_benchmarks/configs/opencode_multimodal_benchmarks.yaml
+- benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml
+- benchmarks/opencode_multimodal_benchmarks/agentx/web_filter.yaml
 opencode_multimodal_benchmarks:
   resources_servers:
     opencode_multimodal_benchmarks:
@@ -27,14 +29,15 @@ opencode_multimodal_benchmarks:
       judge_attempts: 10
 visual_agent:
   responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: opencode_multimodal_benchmarks
-      model_server:
-        type: responses_api_models
-        name: policy_model
+    opencode_agent:
+      network_access: inherit
+      sandbox_config:
+        env:
+          OPENCODE_ENABLE_EXA: "true"
+      opencode_config:
+        permission:
+          webfetch: allow
+          websearch: allow
 visual_environment:
   environment_servers:
     single_agent_turn:

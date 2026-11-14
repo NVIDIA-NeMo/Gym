@@ -8,7 +8,8 @@ opencode_multimodal_benchmarks:
     opencode_multimodal_benchmarks:
       entrypoint: agentx_tool_rewards.py
       judge_model: gpt-4o-mini
-      tool_rewards: {}
+      tool_rewards:
+        penalty_mode: proportional
 visual_agent:
   responses_api_agents:
     opencode_agent:

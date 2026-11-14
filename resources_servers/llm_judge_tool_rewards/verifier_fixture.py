@@ -14,11 +14,11 @@ from nemo_gym.verification import VerifierFixture
 
 
 if TYPE_CHECKING:
-    from resources_servers.opencode_llm_judge_tool_rewards.app import FixtureRequest, ToolRewardServer
+    from resources_servers.llm_judge_tool_rewards.app import FixtureRequest, ToolRewardServer
 
 
 def create_server() -> "ToolRewardServer":
-    from resources_servers.opencode_llm_judge_tool_rewards.app import ToolRewardConfig, ToolRewardServer
+    from resources_servers.llm_judge_tool_rewards.app import ToolRewardConfig, ToolRewardServer
 
     return ToolRewardServer(
         config=ToolRewardConfig(
@@ -34,7 +34,7 @@ def create_server() -> "ToolRewardServer":
 
 
 async def invoke(server: "ToolRewardServer", body: "FixtureRequest") -> BaseVerifyResponse:
-    from resources_servers.opencode_llm_judge_tool_rewards.app import ToolRewardVerifyRequest
+    from resources_servers.llm_judge_tool_rewards.app import ToolRewardVerifyRequest
 
     reply = body.response.model_copy(deep=True)
     reply.id = "scripted-judge"

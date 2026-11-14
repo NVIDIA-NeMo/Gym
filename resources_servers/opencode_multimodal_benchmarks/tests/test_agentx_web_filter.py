@@ -36,7 +36,7 @@ def test_web_filter_behavior(tmp_path):
     assert '"phase":"blocked_output"' in result.stderr
 
 
-@pytest.mark.parametrize("preset", ["opencode", "training"])
+@pytest.mark.parametrize("preset", ["config", "opencode", "training"])
 def test_agentx_stages_plugin_and_policy_through_stock_sandbox_config(monkeypatch, preset):
     from omegaconf import OmegaConf
 

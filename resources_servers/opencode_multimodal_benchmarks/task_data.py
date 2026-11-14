@@ -5,7 +5,7 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 
 MetadataString = Annotated[str, Field(json_schema_extra={"legacy_location": "verifier_metadata"})]
@@ -60,6 +60,25 @@ class TaskData(BaseModel):
     video_sampling: dict[str, object] = Field(
         default_factory=dict, json_schema_extra={"legacy_location": "verifier_metadata"}
     )
+
+    @model_serializer(mode="wrap")
+    def serialize_task(self, handler):
+        data = handler(self)
+        if self.benchmark != "AgentX":
+            # Preserve the pre-Agent-X metadata shape, including its existing defaults.
+            # Explicit caller annotations still round-trip as they did with extra="allow".
+            for name in (
+                "task_id",
+                "GT_json",
+                "query_type",
+                "query_type_raw",
+                "modality",
+                "source_media_sha256",
+                "video_sampling",
+            ):
+                if name not in self.model_fields_set:
+                    data.pop(name, None)
+        return data
 
     @field_validator("index", "question", "answer")
     @classmethod

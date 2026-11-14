@@ -56,7 +56,8 @@ not certification or an upload.
 
 ## Evaluate
 
-Configure `policy_model` and a `judge_server` or `judge_endpoint`.
+Configure `policy_model`, a `judge_server` or `judge_endpoint`, and the sandbox provider.
+The catalog defaults to OpenCode with WebSearch, WebFetch and the Agent-X web filter.
 Evaluation defaults to `judge_model: gpt-5.5`, with a 4096-token judge budget.
 Use a routed deployment name such as `azure/openai/gpt-5.5` when required by your provider. Keep credentials in the runtime environment.
 See [run configuration](../README.md#run-configuration) before running:
@@ -67,7 +68,11 @@ gym eval run --benchmark opencode_multimodal_benchmarks/agentx \
   --output results/agentx_smoke.jsonl
 ```
 
-Remove the smoke limit for a complete score. Save the resolved configuration,
+Canonical rows are ordered image-first: a prefix limit of 494 or fewer covers
+images only and does not exercise video handling. A smoke run marked complete
+is complete only for its selected subset; check the Image/Video counts for coverage.
+Remove the smoke limit to evaluate all 494 image and 111 video tasks.
+Save the resolved configuration,
 judge identity, sampling, budgets, timeouts, repeats and supported random seeds.
 The prepared requests use temperature 0.6 and top-p 0.95; the catalog sets one
 repeat. Agent/model limits are supplied by the run configuration.
@@ -83,8 +88,9 @@ Dataset access and redistribution remain subject to the publisher's terms.
 
 | Harness | Configuration | Status |
 | --- | --- | --- |
-| `simple_agent` | This catalog entry, with a vision-capable model | Experimental; no task tools |
-| `opencode_agent` | [`opencode.yaml`](opencode.yaml) plus model and sandbox-provider settings | Experimental; OpenCode 1.17.11, WebSearch and WebFetch enabled, one activation |
+| `opencode_agent` | Default [`config.yaml`](config.yaml), plus model and sandbox-provider settings | Experimental; OpenCode 1.17.11, WebSearch and WebFetch enabled, one activation |
+
+[`opencode.yaml`](opencode.yaml) remains a compatibility alias for the default config.
 
 Configure `webfetch` and `websearch` independently under the pairing's
 `visual_agent.responses_api_agents.opencode_agent.opencode_config.permission`
@@ -142,18 +148,25 @@ deployments use `azure/openai/gpt-4o-mini` for `judge_model`. The evaluation rec
 keeps token capture and tool rewards disabled and defaults to `gpt-5.5`.
 
 Reward components retain the independent verifier score and the tool adjustment
-separately. The shared defaults apply penalties only to answers scoring at least
-1.0: no positive bonuses, failed bash calls cost 0.05, consecutive duplicate calls
-cost 0.02, and three or more bash attempts incur a capped usage penalty. A failed native WebSearch HTTP 429 remains a failed call but is exempt
-from unsuccessful-call penalties. Consecutive duplicate calls remain penalized.
+separately. This training preset enables `tool_rewards.penalty_mode: proportional`:
+failure, duplicate-call and shell-usage costs are multiplied by positive correctness,
+with their combined penalty capped at that score. A nominal cost of 0.10 gives total
+reward 0.891 at correctness 0.99 and 0.90 at correctness 1.0. Zero scores incur no
+penalty. Existing positive-bonus gates and amounts are preserved; the preset offers
+no positive bonuses. Shared tool-reward defaults remain unchanged.
+
+A failed native WebSearch HTTP 429 remains a failed call but incurs neither failure
+nor duplicate penalties. Its immediate retry is also exempt from duplicate penalties;
+repeating a successful search remains penalized.
 Judge failures remain masked; tool rewards do not replace a missing grade.
 Reverification of tool rewards separately requires `forward_agent_evidence: true`.
 
 The `agentx.py` evaluation entrypoint rejects tool-reward settings and returns
 only correctness. The training wrapper records correctness, auxiliary rewards,
-and total reward separately. With the default `correct_only: true`, incorrect and
-partially correct samples receive no tool adjustment. Setting `correct_only: false`
-allows the configured exploration rewards and tool penalties on those samples.
+and total reward separately. In the shared `penalty_mode: default`, `correct_only: true`
+suppresses adjustments below the correctness threshold. The proportional mode selected
+here applies scaled penalties to partial scores too. Setting `correct_only: false`
+continues to allow configured exploration bonuses.
 
 When collecting with the Agent-X training preset, benchmark accuracy and modality
 reports use the verifier's correctness component. Generic `mean/reward` statistics

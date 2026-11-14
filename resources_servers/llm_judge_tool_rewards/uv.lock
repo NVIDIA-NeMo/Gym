@@ -808,7 +808,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gym-resources-servers-opencode-llm-judge-tool-rewards"
+name = "gym-resources-servers-llm-judge-tool-rewards"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [

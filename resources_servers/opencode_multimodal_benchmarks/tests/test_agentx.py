@@ -235,8 +235,8 @@ def test_invalid_judge_limits_fail_at_configuration(field, value):
         AgentXConfig(host="localhost", port=12345, name="visual", entrypoint="agentx.py", **{field: value})
 
 
-@pytest.mark.parametrize("benchmark", ["agentx", "vstar"])
-def test_opencode_pairing_uses_stock_agent_and_effective_web_permissions(monkeypatch, benchmark):
+@pytest.mark.parametrize("benchmark,preset", [("agentx", "config"), ("agentx", "opencode"), ("vstar", "opencode")])
+def test_opencode_pairing_uses_stock_agent_and_effective_web_permissions(monkeypatch, benchmark, preset):
     from pathlib import Path
 
     from omegaconf import OmegaConf
@@ -246,7 +246,7 @@ def test_opencode_pairing_uses_stock_agent_and_effective_web_permissions(monkeyp
 
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     _, configs = GlobalConfigDictParser().load_extra_config_paths(
-        [f"benchmarks/opencode_multimodal_benchmarks/{benchmark}/opencode.yaml"]
+        [f"benchmarks/opencode_multimodal_benchmarks/{benchmark}/{preset}.yaml"]
     )
     merged = OmegaConf.merge(*configs)
     GlobalConfigDictParser()._recursively_swap_keys(merged)
@@ -268,31 +268,56 @@ def test_opencode_pairing_uses_stock_agent_and_effective_web_permissions(monkeyp
 
 
 @pytest.mark.parametrize(
-    "query_type,reply,base", [("objective", '{"verdict":"equivalent"}', 1.0), ("subjective", '{"score":0.65}', 0.65)]
+    "query_type,reply,base",
+    [
+        ("objective", '{"verdict":"equivalent"}', 1.0),
+        ("objective", '{"verdict":"different"}', 0.0),
+        ("subjective", '{"score":0.65}', 0.65),
+        ("subjective", '{"score":0.99}', 0.99),
+    ],
 )
 @pytest.mark.parametrize("status", ["completed", "failed"])
 async def test_agentx_training_shapes_independent_grade_and_preserves_answer(server, query_type, reply, base, status):
+    from pathlib import Path
+
+    import yaml
+
     from resources_servers.opencode_multimodal_benchmarks.agentx_tool_rewards import (
         AgentXToolRewardConfig,
         AgentXToolRewardServer,
     )
     from resources_servers.opencode_multimodal_benchmarks.tests.test_rewards import tool_response, trajectory
 
+    evaluator = server
+    preset = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[3] / "benchmarks/opencode_multimodal_benchmarks/agentx/training.yaml"
+        ).read_text()
+    )
+    tool_settings = preset["opencode_multimodal_benchmarks"]["resources_servers"]["opencode_multimodal_benchmarks"][
+        "tool_rewards"
+    ]
     server = AgentXToolRewardServer(
-        config=AgentXToolRewardConfig(**(server.config.model_dump() | {"tool_rewards": {}})),
+        config=AgentXToolRewardConfig(**(server.config.model_dump() | {"tool_rewards": tool_settings})),
         server_client=server.server_client,
     )
     server._judge_completion = AsyncMock(return_value=reply)
+    evaluator._judge_completion = AsyncMock(return_value=reply)
     body = request("AgentX", "red")
     body.verifier_metadata["query_type"] = query_type
     body.response = tool_response("red")
     body.ng_trajectory = trajectory(status)
     result = await server.verify(body)
-    bonus = -0.05 if status == "failed" and base == 1 else 0.0
+    bonus = -0.05 * base if status == "failed" else 0.0
     assert result.reward == pytest.approx(base + bonus)
     assert result.reward_components == {"verifier": base, "opencode_tool_reward": bonus}
     assert result.response == body.response
     assert server.compute_metrics([[result.model_dump()]])["accuracy"] == base
+    evaluated = await evaluator.verify(body)
+    assert evaluated.reward == base
+    assert evaluated.response == body.response
+    assert "reward_components" not in evaluated.model_dump()
+    assert "opencode_tool_reward" not in evaluated.model_dump()
 
 
 def test_training_recipe_enables_capture_rewards_and_evidence_without_changing_eval(monkeypatch):
@@ -316,7 +341,9 @@ def test_training_recipe_enables_capture_rewards_and_evidence_without_changing_e
         resources = config["opencode_multimodal_benchmarks"]["resources_servers"]["opencode_multimodal_benchmarks"]
         assert agent["token_id_capture"] is training
         assert environment.get("forward_agent_evidence", False) is training
-        assert resources.get("tool_rewards") == ({} if training else None)
+        assert bool(resources.get("tool_rewards")) is training
+        if training:
+            assert resources["tool_rewards"]["penalty_mode"] == "proportional"
         assert resources["judge_model"] == ("gpt-4o-mini" if training else "gpt-5.5")
         assert resources["judge_max_tokens"] == 4096
         assert resources["entrypoint"] == ("agentx_tool_rewards.py" if training else "agentx.py")
@@ -354,3 +381,41 @@ async def test_zero_correctness_has_no_tool_bonus(server, mode):
         assert "reward_components" not in result.model_dump()
         assert "opencode_tool_reward" not in result.model_dump()
     assert result.response == body.response
+
+
+@pytest.mark.parametrize("evidence", ["missing", "incomplete", "unknown", "child"])
+@pytest.mark.parametrize("answer", ["red", ""])
+async def test_unusable_tool_evidence_is_masked_with_original_response(server, evidence, answer):
+    from copy import deepcopy
+
+    from resources_servers.opencode_multimodal_benchmarks.agentx_tool_rewards import (
+        AgentXToolRewardConfig,
+        AgentXToolRewardServer,
+    )
+    from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import observed
+    from resources_servers.opencode_multimodal_benchmarks.tests.test_grading_evidence import judge_reply
+    from resources_servers.opencode_multimodal_benchmarks.tests.test_rewards import tool_response, trajectory
+
+    training = AgentXToolRewardServer(
+        config=AgentXToolRewardConfig(**(server.config.model_dump() | {"tool_rewards": {}, "judge_server": "judge"})),
+        server_client=server.server_client,
+    )
+    training.server_client.post = AsyncMock(return_value=judge_reply('{"verdict":"equivalent"}'))
+    body = request("AgentX", answer)
+    body.response = tool_response(answer)
+    if not answer:
+        body.response.output = body.response.output[:1]  # Cut off during the tool call.
+    body.ng_trajectory = (
+        None
+        if evidence == "missing"
+        else trajectory(evidence if evidence in {"incomplete", "unknown"} else "completed", child=evidence == "child")
+    )
+    original = deepcopy(body.model_dump(mode="json"))
+    result = await observed(training, body)
+    assert result["mask_sample"] is True and result["failure_kind"] == "verifier_error"
+    assert result["evaluation_completed"] is False
+    assert result["reward"] == 0 and result["opencode_tool_reward"] is None
+    assert result["response"] == original["response"]
+    assert body.model_dump(mode="json") == original
+    if not answer:
+        training.server_client.post.assert_not_awaited()

@@ -10,7 +10,8 @@ used independently of OpenCode:
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
-to `simple_agent` with no external task tools. For OpenCode evaluation, use the
+to `simple_agent` with no external task tools, except Agent-X, which defaults to
+OpenCode with WebSearch, WebFetch and its benchmark-local web filter. For OpenCode evaluation, use the
 provider-backed recipes below and configure the model and sandbox provider
 separately. Each recipe composes its catalog with
 [`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs inside the
@@ -199,7 +200,7 @@ or observation bundle; it never interprets model-visible output as an exit statu
 
 For existing math, MCQA, string-match, and generic LLM-judge training tasks, use the
 `opencode_math_tool_rewards`, `opencode_mcqa_tool_rewards`,
-`opencode_string_match_tool_rewards`, or `opencode_llm_judge_tool_rewards` Resources component,
+`opencode_string_match_tool_rewards`, or `llm_judge_tool_rewards` Resources component,
 respectively, each with `entrypoint: app.py`. Each component owns its inherited
 grader's dataset schema, so strict dataset collation accepts native training rows
 without visual benchmark metadata. These thin adapters import the
@@ -230,7 +231,7 @@ Training configurations previously selecting `*_tool_rewards.py` under
 `opencode_multimodal_benchmarks` must use the corresponding component above with
 `entrypoint: app.py`. Keep the instance name and environment bindings unchanged.
 
-The [generic LLM-judge overlay](../../resources_servers/opencode_llm_judge_tool_rewards/configs/opencode_llm_judge_tool_rewards.yaml)
+The [generic LLM-judge overlay](../../resources_servers/llm_judge_tool_rewards/configs/llm_judge_tool_rewards.yaml)
 declares `llm_judge_with_tools`, backed by the existing `equivalence_llm_judge`
 grader. Configure a separate `training_judge` model server (for example,
 GPT-4o-mini), bind the chosen Environment Server's `resources_server` to
@@ -241,10 +242,10 @@ existing observation, including rescue and swap passes. It needs no Agent-X rows
 or Agent-X evaluator. It reuses the generic grader's verdict labels, rescue, and
 swap logic, while rejecting unusable judge replies before applying tool rewards.
 
-A recorded failed WebSearch with the native HTTP 429 envelope is exempt only
-from unsuccessful-call penalties. Failure and rate-limit counts remain visible;
-consecutive duplicates still receive their duplicate penalty. This does not
-reward the failed search as successful.
+A recorded failed WebSearch with the native HTTP 429 envelope is exempt from
+failure and duplicate penalties, and its immediate retry is exempt from duplicate
+penalties too. Failure and rate-limit counts remain visible. Repeating a successful
+search remains penalized; the failed search is never rewarded as successful.
 
 The default `correct_only: true` suppresses tool adjustments on incorrect answers.
 Setting it to `false` allows the configured exploration rewards and tool penalties. Missing, conflicting, or truncated

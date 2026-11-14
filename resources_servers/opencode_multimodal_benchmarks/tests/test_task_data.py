@@ -3,6 +3,7 @@
 """The same schema validates source rows and collated tasks without exposing labels."""
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from benchmarks.opencode_multimodal_benchmarks.prepare import task_row
 from nemo_gym.data import TaskDataValidator
+from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
 from resources_servers.opencode_multimodal_benchmarks.task_data import TaskData
 from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request, server  # noqa: F401
@@ -186,7 +188,22 @@ async def test_minimal_agentx_wire_task_runs_verification_and_reporting(server, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("benchmark", BENCHMARKS)
 async def test_minimal_wire_task_runs_verification_and_reporting(server, benchmark):
-    body = _wire_request(_minimal_metadata(benchmark))
+    metadata = _minimal_metadata(benchmark) | {"custom_provenance": "retained"}
+    # The existing four-benchmark schema supplies these defaults, with no Agent-X fields.
+    legacy_metadata = {
+        "options": {},
+        "category": "",
+        "l2_category": "",
+        "ans_type": "",
+        "cycle_category": "",
+        "split": "",
+        "dataset_revision": "",
+        "source_index": "",
+    } | metadata
+    task = TaskData.model_validate(metadata)
+    assert task.model_dump() == json.loads(task.model_dump_json()) == legacy_metadata
+    body = _wire_request(metadata)
+    assert body.verifier_metadata == legacy_metadata
     if benchmark == "VTCBench":
         assert body.verifier_metadata["options"] == {}
     # Avoid a judge: each benchmark receives an unambiguous correct prediction.
@@ -197,10 +214,32 @@ async def test_minimal_wire_task_runs_verification_and_reporting(server, benchma
     value["verifier_metadata"] = body.verifier_metadata
     result = await server.verify(VisualVerifyRequest.model_validate(value))
     assert result.reward == 1
+    assert result.verifier_metadata == legacy_metadata
+    # A saved repeat from before Agent-X was added can still aggregate with a new repeat.
+    old = {"verifier_metadata": legacy_metadata, "reward": 1, "_ng_rollout_index": 0}
+    rows, complete = average_repeats([[old, result.model_dump() | {"_ng_rollout_index": 1}]])
+    assert complete and rows[0]["reward"] == 1
     repeats = 5 if benchmark == "ZeroBench" else 1
     metrics = server.compute_metrics([[result.model_dump() | {"_ng_rollout_index": i} for i in range(repeats)]])
     assert metrics[f"{benchmark}/complete"] is True
     assert metrics[f"{benchmark}/expected"] == 1
+
+
+@pytest.mark.parametrize("benchmark", [*BENCHMARKS, "AgentX"])
+def test_explicit_task_annotations_survive_schema_and_wire_serialization(benchmark):
+    annotations = {
+        "task_id": "source-1",
+        "GT_json": '{"value":"cat"}',
+        "query_type": "objective",
+        "query_type_raw": "Objective",
+        "modality": "Video",
+        "source_media_sha256": {"clip.mp4": "source-hash"},
+        "video_sampling": {"indices": [0, 2], "fps": 2.0, "frame_count": 3},
+    }
+    metadata = _minimal_metadata(benchmark) | annotations
+    task = TaskData.model_validate(metadata)
+    for dumped in (task.model_dump(), json.loads(task.model_dump_json()), _wire_request(metadata).verifier_metadata):
+        assert {key: dumped[key] for key in annotations} == annotations
 
 
 @pytest.mark.parametrize("benchmark", BENCHMARKS)
