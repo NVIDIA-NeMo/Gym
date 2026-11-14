@@ -1,0 +1,23 @@
+# SpatialClaw is a reusable evaluation harness. This suite config collects all
+# paper benchmark presets; each preset can also be loaded independently.
+config_paths:
+  - benchmarks/spatialclaw/erqa.yaml
+  - benchmarks/spatialclaw/omni3d.yaml
+  - benchmarks/spatialclaw/omnispatial.yaml
+  - benchmarks/spatialclaw/spbench.yaml
+  - benchmarks/spatialclaw/mindcube.yaml
+  - benchmarks/spatialclaw/mmsi.yaml
+  - benchmarks/spatialclaw/sparbench.yaml
+  - benchmarks/spatialclaw/blink.yaml
+  - benchmarks/spatialclaw/spatialtree.yaml
+  - benchmarks/spatialclaw/viewspatial.yaml
+  - benchmarks/spatialclaw/mmsivideo.yaml
+  - benchmarks/spatialclaw/osibench.yaml
+  - benchmarks/spatialclaw/paibench.yaml
+  - benchmarks/spatialclaw/vsibench_unbiased.yaml
+  - benchmarks/spatialclaw/vstibench.yaml
+  - benchmarks/spatialclaw/dsibench.yaml
+  - benchmarks/spatialclaw/cvbench.yaml
+  - benchmarks/spatialclaw/perceptioncomp.yaml
+  - benchmarks/spatialclaw/videomme.yaml
+  - benchmarks/spatialclaw/videomme2.yaml

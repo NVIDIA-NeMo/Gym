@@ -1,0 +1,35 @@
+# vsibench_unbiased evaluated through the SpatialClaw agent and native evaluator.
+config_paths:
+  - resources_servers/spatialclaw/configs/spatialclaw_resources.yaml
+  - responses_api_agents/spatialclaw_agent/configs/spatialclaw_agent.yaml
+
+spatialclaw_vsibench_unbiased_benchmark_resources_server:
+  _inherit_from: spatialclaw_resources_server
+  resources_servers:
+    spatialclaw:
+      dataset_config: vsibench_unbiased_spatialclaw_256f
+      data_root: ${oc.env:SPATIALCLAW_DATA_ROOT}
+
+spatialclaw_vsibench_unbiased_benchmark_agent:
+  _inherit_from: spatialclaw_agent
+  responses_api_agents:
+    spatialclaw_agent:
+      resources_server:
+        name: spatialclaw_vsibench_unbiased_benchmark_resources_server
+      dataset_config: vsibench_unbiased_spatialclaw_256f
+      video_root: ${oc.env:SPATIALCLAW_DATA_ROOT}
+      datasets:
+      - name: spatialclaw_vsibench_unbiased
+        type: benchmark
+        jsonl_fpath: benchmarks/spatialclaw/data/vsibench_unbiased_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/spatialclaw/prepare_vsibench_unbiased.py
+        num_repeats: 1
+
+spatialclaw_vsibench_unbiased_benchmark_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: spatialclaw_vsibench_unbiased_benchmark_agent
