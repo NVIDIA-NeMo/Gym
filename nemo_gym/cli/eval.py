@@ -823,15 +823,22 @@ def _check_collection_completion(
 def _check_saved_completion(output: Path) -> None:
     """Distinguish a valid partial run from successful CLI completion."""
     from nemo_gym.rollouts.rollout_records import coverage_path_for
-    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError, has_only_intentional_gaps
+    from nemo_gym.rollouts.rollout_recovery import (
+        IncompleteEvaluationError,
+        has_only_intentional_gaps,
+        unsettled_masked_note,
+    )
 
     coverage = coverage_path_for(output.resolve())
     if coverage.exists():
         report = json.loads(coverage.read_text())
         if report.get("complete") is False:
+            # Settled, not merely completed: an omission never covers a masked result that is not settled. Reports
+            # that predate ``settled`` have no masked buckets, so their completed count is their settled count.
+            settled = report.get("settled", report["successful"])
             if has_only_intentional_gaps(
                 expected=report["expected"],
-                completed=report["successful"],
+                completed=settled,
                 intentionally_omitted=report.get("intentionally_omitted", 0),
             ):
                 return
@@ -842,8 +849,8 @@ def _check_saved_completion(output: Path) -> None:
                 else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
             )
             raise IncompleteEvaluationError(
-                f"{report['successful']}/{report['expected']} samples completed. "
-                f"Partial artifacts retained at {output}. {guidance}",
+                f"{settled}/{report['expected']} samples completed. "
+                f"Partial artifacts retained at {output}. {guidance} {unsettled_masked_note(report)}".rstrip(),
                 retryable=retryable,
                 # Older coverage reports predate per-invocation progress.
                 made_progress=report.get("progress_outcomes_recorded", report.get("outcomes_recorded", 1)) > 0,
@@ -888,6 +895,7 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
     original rejection.
     """
     from nemo_gym.rollouts import IncompleteEvaluationError, RolloutStore
+    from nemo_gym.rollouts.rollout_recovery import unsettled_masked_note
 
     try:
         store = RolloutStore.read(output, import_legacy=False)
@@ -903,9 +911,10 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
         else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
     )
     return IncompleteEvaluationError(
-        f"{coverage['successful'] - coverage.get('masked_retryable', 0) + coverage['final_zeros']}/{coverage['expected']} "
+        f"{coverage['settled']}/{coverage['expected']} "
         "samples completed after the "
-        f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance}",
+        f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance} "
+        f"{unsettled_masked_note(coverage)}".rstrip(),
         retryable=retryable,
         # exit code 1 is a retryable rejection that made no progress; any other rejection keeps progress.
         made_progress=getattr(rejected, "exit_code", 75) != 1,
@@ -925,7 +934,7 @@ def _saved_run_complete(output: Path) -> bool:
         coverage = store.coverage()
     except Exception:  # the original rejection stands
         return False
-    completed = coverage["successful"] - coverage.get("masked_retryable", 0) + coverage["final_zeros"]
+    completed = coverage["settled"]
     return completed == coverage["expected"] or has_only_intentional_gaps(
         expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
     )

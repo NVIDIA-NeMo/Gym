@@ -117,13 +117,25 @@ def test_a_masked_infrastructure_result_at_the_attempt_cap_is_exhausted_and_not_
     store = RolloutStore.read(output, import_legacy=False)
     assert store.pending() == []
     coverage = store.coverage()
-    assert (coverage["failure_budget_exhausted"], coverage["retryable"], coverage["complete"]) == (1, 0, True)
+    # Never measured: a final failure that leaves the run incomplete, never a masked success.
+    assert (coverage["failure_budget_exhausted"], coverage["retryable"]) == (1, 0)
+    assert (coverage["masked_exhausted"], coverage["masked_retryable"], coverage["open"]) == (1, 0, 0)
+    assert (coverage["measured"], coverage["complete"], coverage["completion_fraction"]) == (1, False, 0.5)
     _, decision = _decide(tmp_path, allocation_cut=False)
     assert decision.action.value == "stop"
     assert decision.counts == {"scored": 1, "exhausted": 1}
     item = _evidence(decision, (1, 0))
     assert (item.failure_kind, item.attempts, item.max_attempts) == ("session_lost", 3, 3)
     assert "used every attempt since the last resubmit" in decision.reason
+
+
+def test_an_attempt_extension_reopens_an_exhausted_masked_infrastructure_result(tmp_path):
+    output, _ = _run(tmp_path, [[_masked("session_lost")] * 3])
+    (output.parent / "rollouts_attempt_extension").write_text("1\n")
+    store = RolloutStore.read(output, import_legacy=False)
+    coverage = store.coverage()
+    assert (coverage["masked_exhausted"], coverage["masked_retryable"], coverage["complete"]) == (0, 1, False)
+    assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in store.pending()] == [(1, 3)]
 
 
 @pytest.mark.parametrize("kind", [None, "agent_timeout", "model_context_limit", "env:own_kind", "not_registered"])
@@ -227,6 +239,83 @@ def test_a_masked_infrastructure_result_that_kept_a_saved_answer_is_not_retried(
     _, decision = _decide(tmp_path, allocation_cut=False)
     assert decision.action.value == "stop"
     assert decision.counts == {"scored": 1, "masked": 1}
+
+
+@pytest.mark.parametrize("kind", ["demo_env:time_cap", "demo_env:simulator_failed"])
+@pytest.mark.parametrize("attribution", ["evaluation", "unknown", None])
+def test_a_masked_namespaced_kind_with_a_recorded_retry_is_retried(tmp_path, kind, attribution):
+    # No recorded attribution is handled as for a registered kind: the owner's retry decides.
+    row = _masked(kind) | {"failure_outcome_action": "retry"}
+    if attribution is not None:
+        row["failure_outcome_attribution"] = attribution
+    output, _ = _run(tmp_path, [[row]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert [(r["_ng_task_index"], r["_ng_attempt_index"]) for r in store.pending()] == [(1, 1)]
+    assert (store.coverage()["complete"], store.coverage()["masked_retryable"]) == (False, 1)
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.action.value == "resubmit", decision.reason
+    assert decision.counts == {"scored": 1, "retryable": 1}
+    assert _evidence(decision, (1, 0)).failure_kind == kind
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({}, id="no-recorded-action"),
+        pytest.param({"failure_outcome_action": "count_as_zero", "failure_outcome_attribution": "model"}, id="zero"),
+        pytest.param({"failure_outcome_action": "retry", "failure_outcome_attribution": "model"}, id="model-retry"),
+        pytest.param(
+            {"failure_outcome_action": "retry", "failure_outcome_attribution": "evaluation"} | _ANSWER,
+            id="saved-answer",
+        ),
+    ],
+)
+def test_a_masked_namespaced_kind_without_a_retry_it_may_take_is_kept(tmp_path, fields):
+    output, _ = _run(tmp_path, [[_masked("demo_env:time_cap") | fields]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == [] and store.coverage()["complete"] is True
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert (decision.action.value, decision.counts) == ("stop", {"scored": 1, "masked": 1})
+
+
+def _retry_at(stage):
+    """A masked model timeout whose owner recorded ``retry``, at ``stage``, with the attempt's partial transcript.
+
+    The shape of a model-call timeout row: the stage sits only on the selected failure event, and the response has
+    output items but no status.
+    """
+    tool_turn = {"type": "function_call", "call_id": "c1", "name": "search", "arguments": "{}"}
+    return _masked("model_transport_error") | {
+        "failure_outcome_action": "retry",
+        "failure_outcome_attribution": "evaluation",
+        "_ng_failure_id": "f1",
+        "_ng_failure_events": {
+            "f1": {
+                "stage": stage,
+                "boundary": "model",
+                "failure_kind": "model_transport_error",
+                "operation": "model_request",
+            }
+        },
+        "response": {"object": "response", "id": "r1", "status": None, "error": None, "output": [tool_turn] * 50},
+    }
+
+
+def test_a_masked_agent_stage_retry_with_a_partial_transcript_is_retried(tmp_path):
+    output, _ = _run(tmp_path, [[_retry_at("agent")]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.coverage()["masked_retryable"] == 1
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
+
+
+def test_a_masked_verification_stage_retry_with_a_response_keeps_its_answer(tmp_path):
+    output, _ = _run(tmp_path, [[_retry_at("verification")]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == []
+    assert store.coverage()["masked_retryable"] == 0
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "masked": 1}, decision.reason
 
 
 def test_a_masked_infrastructure_result_with_only_a_no_generation_placeholder_is_still_retried(tmp_path):
@@ -437,3 +526,109 @@ def test_store_refuses_malformed_saved_policy_sections(tmp_path, section):
     (tmp_path / "resolved-config.yaml").write_text(json.dumps({"driver": {"benchmarks": {"benchmark": section}}}))
     with pytest.raises(ConfigError, match="must be a mapping"):
         RolloutStore.read(output)
+
+
+def test_a_masked_result_its_producer_failed_is_final_and_leaves_the_run_incomplete(tmp_path):
+    # A task-data defect the Environment Server reports with action fail: never measured and never run again.
+    output, _ = _run(tmp_path, [[_masked("demo_env:invalid_reference") | {"failure_outcome_action": "fail"}]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == []
+    coverage = store.coverage()
+    assert (coverage["complete"], coverage["masked"], coverage["masked_failed"], coverage["open"]) == (False, 1, 1, 0)
+    assert coverage["masked_failed_kinds"] == {"demo_env:invalid_reference": 1}
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert (decision.action.value, decision.counts) == ("stop", {"scored": 1, "terminal": 1})
+
+
+def test_a_masked_result_without_an_action_keeps_its_coverage(tmp_path):
+    output, _ = _run(tmp_path, [[_masked("demo_env:invalid_reference")]])
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert (coverage["complete"], coverage["masked"], coverage["masked_failed"]) == (True, 1, 0)
+    assert coverage["masked_failed_kinds"] == {}
+
+
+def test_a_masked_agent_stage_retry_with_a_recorded_grade_keeps_its_graded_answer(tmp_path):
+    # A graded result is never overwritten by a new sample, with or without the collector's saved-answer flag.
+    for flag in ({}, {"_ng_collected_saved_answer": False}):
+        job = tmp_path / ("flag" if flag else "plain")
+        output, _ = _run(job, [[_retry_at("agent") | {"evaluation_completed": True} | flag]])
+        store = RolloutStore.read(output, import_legacy=False)
+        assert store.pending() == []
+        coverage = store.coverage()
+        assert (coverage["masked_retryable"], coverage["retryable"], coverage["complete"]) == (0, 0, True)
+        assert store.attempt_count({"_ng_task_index": 1, "_ng_rollout_index": 0}) == 0
+
+
+def test_a_row_both_infrastructure_masked_and_failed_by_its_producer_is_unsettled_once(tmp_path, monkeypatch):
+    # The two buckets are exclusive: a row that qualified for both would otherwise be subtracted twice.
+    import nemo_gym.rollouts.rollout_records as records
+
+    row = _masked("session_lost") | {"failure_outcome_action": "fail"}
+    monkeypatch.setattr(
+        records,
+        "masked_infrastructure_kind",
+        lambda row, classification=None: "session_lost" if row.get("mask_sample") else None,
+    )
+    output, _ = _run(tmp_path, [[row] * 3])
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert (coverage["masked_exhausted"], coverage["masked_failed"]) == (1, 0)
+    assert (coverage["settled"], coverage["completion_fraction"]) == (1, 0.5)
+    assert coverage["settled"] == coverage["successful"] - coverage["masked_exhausted"] - coverage["masked_failed"]
+
+
+def test_the_incomplete_run_message_names_the_masked_failed_kinds_and_the_retryable_exhausted_ones():
+    from nemo_gym.rollouts.rollout_recovery import unsettled_masked_note
+
+    note = unsettled_masked_note(
+        {
+            "masked_failed": 2,
+            "masked_failed_kinds": {"demo_env:invalid_reference": 2},
+            "masked_exhausted": 1,
+        }
+    )
+    assert "masked_failed_kinds: demo_env:invalid_reference (2)" in note and "fix or drop" in note
+    assert "--extend-attempts" in note
+    assert unsettled_masked_note({"masked_failed": 0, "masked_exhausted": 0}) == ""
+
+
+@pytest.mark.parametrize(
+    "masked, note",
+    [
+        ([_masked("session_lost")] * 3, "masked_exhausted"),
+        ([_masked("demo_env:invalid_reference") | {"failure_outcome_action": "fail"}], "masked_failed_kinds"),
+    ],
+    ids=["exhausted", "producer-failed"],
+)
+def test_the_strict_saved_completion_gate_never_covers_an_unsettled_masked_result_with_an_omission(
+    tmp_path, masked, note
+):
+    import orjson
+
+    from nemo_gym.cli.eval import _check_saved_completion
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    omitted = [{"_ng_failure_class": "skipped", "_ng_failure_terminal": True}]
+    output, _ = _run(tmp_path, [omitted, masked])
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert (coverage["intentionally_omitted"], coverage["successful"], coverage["complete"]) == (1, 2, False)
+    coverage_path_for(output).write_bytes(orjson.dumps(coverage))
+    with pytest.raises(IncompleteEvaluationError, match=note):
+        _check_saved_completion(output)
+
+
+@pytest.mark.parametrize("action", ["retry", "fail"])
+def test_a_namespaced_kind_that_starts_with_transport_follows_its_recorded_action(tmp_path, action):
+    row = _masked("transport_demo:time_cap") | {
+        "failure_outcome_action": action,
+        "failure_outcome_attribution": "evaluation",
+    }
+    output, _ = _run(tmp_path, [[row]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert [r["_ng_task_index"] for r in store.pending()] == ([1] if action == "retry" else [])
+    assert store.coverage()["masked_retryable"] == (1 if action == "retry" else 0)
+
+
+def test_a_built_in_transport_kind_keeps_its_masked_result(tmp_path):
+    output, _ = _run(tmp_path, [[_masked("transport_timeout") | {"failure_outcome_action": "retry"}]])
+    assert RolloutStore.read(output, import_legacy=False).pending() == []
