@@ -127,8 +127,12 @@ SDK error: its type, a scalar message and its HTTP status. SDK objects, request 
 and response payloads are not serialized. A long message keeps a visible
 `[truncated]` marker.
 
-aiohttp rejects a reply header line over 8190 bytes. A report over 4096 bytes is
-therefore not sent: the header carries `{"omitted": true}`, every hop above keeps the
+aiohttp rejects a reply header line over 8190 bytes, so a report is kept within 4096
+bytes. A larger report is trimmed: the request's own failure and its cause chain are
+always kept, then each other event, in report order, that still fits with its causes.
+A larger event that does not fit is skipped, so a smaller one after it can still be
+kept. When the request's own failure chain does not fit alone, the header carries
+`{"omitted": true}`. Either way the report is marked `omitted`, every hop above keeps the
 flag, and Collection saves `_ng_failure_events_omitted`. The real status and body
 still arrive. This diagnostic loss does not change the task outcome. Old records with
 no failure report keep their meaning. The final saved-record migration remains a

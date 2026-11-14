@@ -37,8 +37,11 @@ class FailureHeader:
     """Encode a ``FailureReport`` into one reply header and decode it on the other side.
 
     aiohttp's client rejects a reply whose header line (name and value) is over 8190 bytes, and the caller then
-    sees an unreadable error instead of the real status and body. A report whose JSON is over ``MAX_BYTES`` is
-    therefore not sent: the header says ``{"omitted": true}``, and every hop above keeps that flag.
+    sees an unreadable error instead of the real status and body, so a report's JSON is kept within ``MAX_BYTES``.
+    A report over it is trimmed and marked ``omitted``, and every hop above keeps that flag: the request's own
+    failure and its cause chain are always kept, then each other event, in report order, that still fits with
+    its causes. A larger event that does not fit is skipped, so a smaller one after it can still be kept. A report
+    whose own failure chain does not fit alone is sent as ``{"omitted": true}``.
     """
 
     NAME: ClassVar[str] = "X-NG-Failure-Report"
@@ -52,11 +55,68 @@ class FailureHeader:
         """The reply headers for ``report``; none when it holds nothing."""
         if not report.events and not report.omitted:
             return {}
-        value = json.dumps(report.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":"))
+        value = _compact_json(report.model_dump(mode="json"))
         if len(value) > cls.MAX_BYTES:
-            LOGGER.warning("Failure report of %d bytes not sent; %d events omitted", len(value), len(report.events))
-            value = json.dumps({"omitted": True})
+            full_bytes = len(value)
+            trimmed = cls._trimmed(report)
+            value = _compact_json(trimmed.model_dump(mode="json")) if trimmed else ""
+            if not value or len(value) > cls.MAX_BYTES:
+                trimmed, value = None, json.dumps({"omitted": True})
+            LOGGER.warning(
+                "Failure report of %d bytes trimmed to %d bytes; %d of %d events omitted",
+                full_bytes,
+                len(value),
+                len(report.events) - (len(trimmed.events) if trimmed else 0),
+                len(report.events),
+            )
         return {cls.NAME: value}
+
+    @classmethod
+    def _trimmed(cls, report: FailureReport) -> FailureReport | None:
+        """``report`` cut to ``MAX_BYTES`` and marked omitted; ``None`` when its own failure chain does not fit.
+
+        Events are added whole with their causes, so every ``cause_id`` still resolves and no event is altered.
+        """
+        events = report.events
+
+        def with_causes(event_id: str) -> list[str]:
+            chain = [event_id]
+            while (cause := events[chain[-1]].cause_id) is not None:
+                chain.append(cause)
+            return chain
+
+        # The compact JSON of the kept events is the empty report's JSON plus each event's ``"id":{...}`` and a
+        # separating comma, so the size is summed per event instead of serializing the report on every insert.
+        # It is budgeted with ``"omitted":false``, one byte longer than the ``true`` sent, so a report over
+        # ``MAX_BYTES`` always loses at least one event and its ``omitted`` flag is truthful.
+        size = len(_compact_json({"failure_id": report.failure_id, "events": {}, "omitted": False}))
+        kept: set[str] = set()
+
+        def add(chain: list[str]) -> bool:
+            nonlocal size
+            new = [event_id for event_id in dict.fromkeys(chain) if event_id not in kept]
+            grown = size + sum(
+                len(_compact_json(event_id)) + 1 + len(_compact_json(events[event_id].model_dump(mode="json")))
+                for event_id in new
+            )
+            grown += len(new) - (0 if kept else min(len(new), 1))
+            if grown > cls.MAX_BYTES:
+                return False
+            size = grown
+            kept.update(new)
+            return True
+
+        if report.failure_id is not None and not add(with_causes(report.failure_id)):
+            return None
+        for event_id in events:
+            if event_id not in kept:
+                add(with_causes(event_id))
+        # Report order is kept, so the request's own failure stays where ``merged`` put it.
+        return FailureReport.model_construct(
+            failure_id=report.failure_id,
+            events={event_id: event for event_id, event in events.items() if event_id in kept},
+            omitted=True,
+        )
 
     @classmethod
     def stream_value(cls, report: FailureReport) -> dict[str, Any] | None:
@@ -90,6 +150,11 @@ class FailureHeader:
         except (ValueError, TypeError, RecursionError):
             LOGGER.warning("Invalid %s header; its failure events are omitted", cls.NAME)
             return FailureReport(omitted=True)
+
+
+def _compact_json(value: Any) -> str:
+    """``value`` as the compact JSON ``FailureHeader`` sends and budgets."""
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
 
 UNREGISTERED_KIND_PREFIX = "unregistered:"
