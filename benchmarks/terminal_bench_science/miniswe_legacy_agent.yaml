@@ -1,5 +1,5 @@
 # Deprecated: miniswe_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
-# migration. Use miniswe.yaml instead, which runs mini_swe_agent through single_agent_turn_legacy.
+# migration. Use miniswe.yaml instead, which runs mini_swe_agent through the Harbor environment server.
 # The two adapters are configured differently, so do not compare their scores as the same measurement.
 config_paths:
 - benchmarks/terminal_bench_science/resources.yaml
