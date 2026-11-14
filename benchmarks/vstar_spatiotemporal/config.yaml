@@ -1,0 +1,48 @@
+# V-STaR spatio-temporal reasoning: 2,094 items x 5 sub-tasks, up to 16 frames at 1 fps, boxes on a 0-1000 grid.
+config_paths:
+- resources_servers/vstar_spatiotemporal/configs/vstar_spatiotemporal.yaml
+
+# Rates the "what" answers. V-STaR uses Qwen2.5-72B-Instruct; set JUDGE_BASE_URL (and JUDGE_API_KEY, JUDGE_MODEL)
+# to an OpenAI-compatible endpoint serving it. Scores are comparable only between runs with the same judge.
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:JUDGE_BASE_URL,http://localhost:8001/v1}
+      api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      model: ${oc.env:JUDGE_MODEL,Qwen/Qwen2.5-72B-Instruct}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+vstar_spatiotemporal_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: vstar_spatiotemporal_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+vstar_spatiotemporal_resources_server:
+  resources_servers:
+    vstar_spatiotemporal:
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      datasets:
+      - name: vstar_spatiotemporal
+        type: benchmark
+        jsonl_fpath: benchmarks/vstar_spatiotemporal/data/vstar_spatiotemporal_benchmark.jsonl
+        prepare_script: benchmarks/vstar_spatiotemporal/prepare.py
+        # prepare.py resizes the frames with Pillow. It also needs OpenCV to decode the videos, which Gym's
+        # dependency overrides exclude, so it has to be installed by hand (see the README).
+        prepare_dependencies: [pillow, numpy]
+        num_repeats: 1
+vstar_spatiotemporal_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vstar_spatiotemporal_agent
