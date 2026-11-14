@@ -61,6 +61,24 @@ def _catalog_configs_in_tree(tree: Path, value: str, kind: str) -> tuple[Path | 
     return None, (candidates[0].resolve() if candidates else None)
 
 
+def _taskset_config(tasksets: Path, value: str, kind: str) -> Path | None:
+    """The config of the task set in one root's ``tasksets/`` whose manifest declares the name ``value`` and ``kind``.
+
+    ``tasksets/`` holds both kinds and has no configs without a manifest, so only a manifest of the flag's kind
+    selects a name there, never a folder path.
+    """
+    from nemo_gym.environment.manifest import ManifestError, resolve_manifest_config_path
+    from nemo_gym.environment.registry import declared_manifests
+
+    for manifest_path, manifest in declared_manifests(tasksets):
+        if manifest.name == value and manifest.kind == kind:
+            try:
+                return resolve_manifest_config_path(manifest_path, manifest)
+            except ManifestError:
+                continue
+    return None
+
+
 def asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
@@ -81,12 +99,16 @@ def asset_config_path(flag: str, value: str) -> str:
     matches: list[Path] = []
 
     if flag in _CATALOG_FLAGS:
-        # The catalog's rule, root by root: the highest-priority root with a catalog entry for the name wins.
+        from nemo_gym.environment.manifest import TASKSETS_SUBDIR
+
+        # The catalog's rule, root by root: the highest-priority root with a catalog entry for the name wins. In each
+        # root, the kind's own folder comes before tasksets/; validation keeps a name from being in both.
         old_paths: list[Path] = []
         for root in roots:
             entry, old_path = _catalog_configs_in_tree(root / parent, value, flag)
-            if entry is not None and entry not in matches:
-                matches.append(entry)
+            for found in (entry, _taskset_config(root / TASKSETS_SUBDIR, value, flag)):
+                if found is not None and found not in matches:
+                    matches.append(found)
             if old_path is not None and old_path not in old_paths:
                 old_paths.append(old_path)
         matches = matches or old_paths
@@ -111,9 +133,13 @@ def asset_config_path(flag: str, value: str) -> str:
     if flag in _CATALOG_FLAGS:
         from nemo_gym.environment.registry import _legacy_config_paths, declared_manifests
 
-        # Suggest declared IDs as well as the folder/flavor aliases that remain selectable.
+        # Suggest declared IDs, including task sets of this kind, as well as the folder/flavor aliases that remain
+        # selectable.
         config_names: set[str] = set()
         for root in roots:
+            config_names.update(
+                manifest.name for _, manifest in declared_manifests(root / TASKSETS_SUBDIR) if manifest.kind == flag
+            )
             tree = root / parent
             if not tree.is_dir():
                 continue
@@ -132,7 +158,8 @@ def asset_config_path(flag: str, value: str) -> str:
         # at the config names under it; otherwise fall back to a fuzzy match across every token.
         under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
         hint = f" Did you mean `{min(under_dir, key=len)}`?" if under_dir else did_you_mean(value, config_names)
-        available = ", ".join(sorted(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
+        trees = [tree for root in roots for tree in (root / parent, root / TASKSETS_SUBDIR) if tree.is_dir()]
+        available = ", ".join(sorted(f"`{tree.resolve()}`" for tree in trees))
     else:
         # Suggest the closest real name across all roots: a config flavor when the server exists, else a server
         # name, reporting the full paths that were searched in each case.

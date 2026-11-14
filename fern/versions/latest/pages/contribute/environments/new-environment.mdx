@@ -402,7 +402,7 @@ For benchmarks and named configs, additional fields apply — in particular `con
 
 | Field | Type | Requirement and allowed values |
 | --- | --- | --- |
-| `name` | string | Required; non-empty; the manifest's ID, unique within its `benchmarks/` or `environments/` tree; see [Names](#names) |
+| `name` | string | Required; non-empty; the manifest's ID, unique within its `benchmarks/`, `environments/`, or `tasksets/` tree; see [Names](#names) |
 | `setup_of` | string or null | Optional; the manifest whose tasks and scoring this config runs with another harness or runtime; see [Setups and Protocols](#setups-and-protocols) |
 | `protocol_of` | string or null | Optional, benchmarks only; the benchmark whose tasks this config scores under another prompt, tools, or scoring; not set together with `setup_of` |
 | `version` | string | Required; non-empty, with Semantic Versioning recommended |
@@ -448,6 +448,7 @@ For named configs, put the manifest in the workload's catalog directory and set 
 A manifest's `name` is its ID. `gym list environments`, `setup_of`, and `protocol_of` refer to a manifest by its name. The scaffold sets the name to the folder path under `benchmarks/` or `environments/`, such as `aime24` or `deepsearchqa/configs/deepsearchqa_codex`. The name does not have to match the folder, so moving the folder does not change the ID. The manifest still sits in a folder of its own, not directly in `benchmarks/` or `environments/`.
 
 - Two manifests in the same `benchmarks/` or `environments/` tree cannot declare the same name. A manifest in an earlier search root (`--search-dir`) shadows one of the same name in a later root.
+- A search root can also keep manifests in `tasksets/<name>/`, such as a separate environments repository passed with `--search-dir`. A manifest there can be either kind; its `kind` field says which, so the rule that a manifest's kind matches its folder does not apply. Gym lists and selects a task set only by its manifest's `name`, not by its folder path. Within one search root, a task set cannot have the same name as another manifest in `tasksets/`, or as a manifest or config of the same kind in `benchmarks/` or `environments/`.
 - `--benchmark` and `--environment` select what the catalog lists under a name: in the first search root that has it, the manifest that declares the name, or else a config the catalog lists under that name that no other manifest claims. Any other config at that path, such as an environment's flavor file `<folder>/<flavor>.yaml`, is selected only when no search root lists the name. A manifest whose name differs from its folder cannot take a name that is already another config's path, because it would hide that config.
 
 ### Setups and Protocols
@@ -459,7 +460,7 @@ A named config is often a variant of another workload rather than a workload of 
 
 `protocol_of` names a benchmark's main manifest. `setup_of` names a main manifest or a protocol, so a protocol can also run under another harness. Neither names a setup. Scores from different protocols are not comparable.
 
-Write a link as the `name` the target manifest declares. Validation finds the target by that name: first in the same tree as the manifest that links to it, then in the same tree of the other search roots. A setup kept in another repository can therefore name a benchmark that Gym ships.
+Write a link as the `name` the target manifest declares. Validation finds the target by that name: first in the search root of the manifest that links to it, then in the other search roots. In each root it looks in `benchmarks/` or `environments/`, whichever matches the linking manifest's kind, and then in `tasksets/`. A setup kept in another repository can therefore name a benchmark that Gym ships.
 
 A setup or protocol declares its own selection fields; it does not take them from the manifest it names, so each manifest can be read on its own.
 
