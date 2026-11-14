@@ -1,28 +1,31 @@
+# Job-Bench with Codex. The resources server lends each task's sandbox through sandbox_access; Codex installs
+# its pinned CLI there and works in /workspace. single_agent_turn_legacy seeds both, closes Codex before
+# grading, then closes the resources session, which stops the sandbox.
 config_paths:
 - resources_servers/job_bench/configs/job_bench.yaml
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The agent calls the model server from inside a remote sandbox, so the servers advertise this host's address
+# instead of loopback. Pass +default_host=<address the sandbox reaches> when the hostname does not resolve.
+use_absolute_ip: true
+
 job_bench_codex_agent:
   responses_api_agents:
-    harness_agent:
+    codex_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: job_bench_resources_server
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model
-      agent: codex
-      agent_kwargs:
-        model: ${policy_model_name}
-        openai_api_key: ${policy_api_key}
-        cwd: /workspace
-        sandbox_mode: danger-full-access
-        timeout: 7200
-        codex_version: 0.144.4
-        system_prompt: Complete the task using its specified input paths. Save every requested deliverable in /workspace/output.
-      sandbox_provider: sandbox
-      rollout_timeout: 7800
+      model: ${policy_model_name}
+      timeout: 7200
+      # As harness_agent did: a run whose CLI exits with an error is still graded, and Codex's shell sees the
+      # task image's environment.
+      verify_after_agent_error: true
+      inherit_sandbox_environment: true
+      codex_version: 0.144.4
+      system_prompt: Complete the task using its specified input paths. Save every requested deliverable in /workspace/output.
+      # Keep it at least max_concurrent_episodes: an episode beyond it waits with its sandbox started.
       concurrency: 32
       datasets:
         - name: job_bench
@@ -33,8 +36,22 @@ job_bench_codex_agent:
 
 job_bench_codex_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: job_bench_resources_server
       agent_server:
         type: responses_api_agents
         name: job_bench_codex_agent
+      # Job-Bench serves no tools: the agent uses its own tools in the task sandbox.
+      resources_tool_transports: []
+      # Bounds the task sandboxes that run at once, as the agent's concurrency did behind legacy_agent.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400
+      # Covers the slowest scored path, so a slow grade is not a timeout that reruns the 2-hour episode: sandbox
+      # start (ready_timeout_s 1200), agent CLI setup (up to 1200, outside the agent's timeout), the agent's 7200 s,
+      # output collection, and one round of rubric judging (300 s x 3 tries each, max_judge_workers at a time).
+      # Verify starts well before the session's ttl_s (10800) ends; the task sandbox is stopped after collection
+      # and the judge runs on this host.
+      default_episode_timeout_seconds: 11400
