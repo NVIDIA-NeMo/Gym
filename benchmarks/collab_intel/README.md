@@ -41,3 +41,14 @@ gym eval run --config benchmarks/collab_intel/config.yaml \
   --model-type vllm_model --model <served name> --model-url http://<policy>/v1 --model-api-key dummy \
   ++rollout_correlation=true
 ```
+
+The coding scenarios need a sandbox provider, so a run adds its config and a deny-by-default network policy (for
+OpenSandbox, with `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` set):
+
+```bash
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  '++collab_intel_benchmark_agent.responses_api_agents.collab_intel_agent.sandbox_spec.provider_options={network_policy: {defaultAction: deny}}'
+```
+
+Without a provider the coding episodes end as `agent_run_error` and never run on the host. `code_execution: host`
+restores the old unsandboxed run, for trusted models only.
