@@ -16,7 +16,7 @@ from asyncio import Semaphore
 from time import time
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from openai import AsyncAzureOpenAI
 
 from nemo_gym.core import (
@@ -59,6 +59,8 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        if (body.reasoning or {}).get("effort") == "max":
+            raise HTTPException(status_code=422, detail="reasoning.effort='max' is not supported by this adapter")
         async with self._semaphore:
             chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
             chat_completion_params_dict = chat_completion_create_params.model_dump(exclude_unset=True)

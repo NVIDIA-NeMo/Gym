@@ -24,7 +24,7 @@ from asyncio import Semaphore
 from time import time
 from typing import Any, Dict
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import Field
 
 from nemo_gym.client import NeMoGymAsyncOpenAI
@@ -82,6 +82,8 @@ class InferenceProvider(SimpleResponsesAPIModel):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        if (body.reasoning or {}).get("effort") == "max":
+            raise HTTPException(status_code=422, detail="reasoning.effort='max' is not supported by this adapter")
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         body.model = self.config.model
 

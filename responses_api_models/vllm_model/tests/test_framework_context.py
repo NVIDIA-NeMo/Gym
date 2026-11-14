@@ -490,6 +490,7 @@ def test_measurement_renders_the_reasoning_effort_generation_forwards(monkeypatc
 @pytest.mark.parametrize(
     "invalid_fields",
     [
+        {"reasoning": {"effort": "max"}},
         {"metadata": {"chat_template_kwargs": "{"}},
         {"metadata": {"extra_body": '{"n":2}'}},
         {"metadata": {"extra_body": '{"stream":true}'}},

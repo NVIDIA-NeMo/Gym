@@ -124,6 +124,18 @@ def _set_aside_unlisted_reasoning_effort(request: Request, body: Dict[str, Any])
     return body
 
 
+def _validate_listed_reasoning_effort(body: Dict[str, Any]) -> None:
+    """Keep vLLM's default effort gate independent of the shared Responses schema."""
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("effort") is not None:
+        try:
+            _LISTED_REASONING_EFFORT.validate_python(reasoning["effort"])
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422, detail="reasoning.effort requires forward_unvalidated_reasoning_effort"
+            ) from exc
+
+
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
     """Log an engine answer the server does not handle, once, before it is re-raised.
 
@@ -1054,6 +1066,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         # Validated as /v1/responses does, so an effort generation forwards is measured, not refused.
         if self.config.forward_unvalidated_reasoning_effort:
             body = _set_aside_unlisted_reasoning_effort(request, body)
+        else:
+            _validate_listed_reasoning_effort(body)
         body = _validate_responses_params(body)
         if self._external_capture_handler is None or self._capture_lineage is None:
             raise HTTPException(status_code=409, detail="measurement requires external capture")
@@ -1121,6 +1135,8 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         if self.config.forward_unvalidated_reasoning_effort:
             body = _set_aside_unlisted_reasoning_effort(request, body)
+        else:
+            _validate_listed_reasoning_effort(body)
         return await super().responses_dispatch(request, body)
 
     def _sampling_pins(self) -> List[str]:
