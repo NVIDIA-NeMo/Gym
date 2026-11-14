@@ -1443,3 +1443,41 @@ def test_session_ending_on_an_unavailable_tool_attributes_the_served_call(
     else:
         assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
         assert built[MASK_SAMPLE_KEY] is True
+
+
+async def test_timeout_kills_processes_the_model_left_running(tmp_path: Path) -> None:
+    """A timed-out local run takes its whole process group down, not only the OpenCode process."""
+    import os
+    import signal
+    import time
+
+    pid_file = tmp_path / "descendant.pid"
+    fake = tmp_path / "fake_opencode.sh"
+    # Stands in for OpenCode: leaves a background job running (as a model's shell command would), then hangs.
+    fake.write_text(f"#!/bin/sh\nsleep 300 &\necho $! > {pid_file}\nwait\n")
+    fake.chmod(0o755)
+    agent = _make_agent(command=str(fake), workspace_root=str(tmp_path / "work"))
+    descendant = None
+    try:
+        with patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})):
+            # Without the fix the surviving job keeps the output pipes open and the run never returns.
+            await asyncio.wait_for(agent._run_opencode("task", None, collect_observations=False, timeout=2), 15)
+        descendant = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                # Reaped by init once its parent is gone; a zombie still answers signal 0, so check its state.
+                state = Path(f"/proc/{descendant}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                alive = state != "Z"
+            except FileNotFoundError:
+                alive = False
+            if alive:
+                await asyncio.sleep(0.1)
+        assert not alive, "the background job survived the timeout"
+    finally:
+        if descendant:
+            try:
+                os.kill(descendant, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
