@@ -187,13 +187,26 @@ The benchmark verifier accepts only `tool_rewards: null` (the default) and never
 adds tool rewards. Non-null settings are rejected. Tool shaping is available only
 through the training adapters below; `tool_rewards: {}` selects their default schedule.
 The default applies penalties only to correct answers, with no positive bonuses.
-Zero to two bash attempts have no count penalty; three, four, five, and six or more
-attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed bash
-calls incur an additional 0.05 penalty; consecutive successful duplicate calls
-incur a 0.02 penalty. Other tools do not incur failure penalties. Override individual
-`tool_rewards` fields to change this schedule.
+The shell tool is selected by `tool_rewards.shell_tool_name` (default `bash`).
+Zero to two shell attempts have no count penalty; three, four, five, and six or more
+attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed calls
+selected by `tool_rewards.invalid_tool_call_names` incur an additional 0.05 penalty; consecutive successful duplicate calls
+incur a 0.02 penalty. When omitted, `invalid_tool_call_names` follows `shell_tool_name`;
+other tools do not incur failure penalties. An explicit list selects eligible tools,
+`null` includes all tools and `[]` disables failure penalties. For example:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+  # invalid_tool_call_names defaults to [shell].
+```
+
+The shell name must be a nonempty string. Override individual `tool_rewards` fields
+to change this schedule.
 Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
+A nonzero shell exit must be reported as a failed tool observation. The shell name
+controls call counting, duplicate normalization and success bonuses.
 
 For existing math, MCQA, and string-match training tasks, use the
 `math_tool_rewards`, `mcqa_tool_rewards`, or

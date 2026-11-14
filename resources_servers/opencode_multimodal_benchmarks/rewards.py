@@ -6,7 +6,7 @@ import json
 import re
 from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from nemo_gym.server_runtime import BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
@@ -23,7 +23,11 @@ def final_assistant_text(output: list[dict[str, Any]], *, block_separator: str =
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
-    shell_tool_name: str | None = "bash"
+    shell_tool_name: str = Field(
+        default="bash",
+        min_length=1,
+        description="Shell tool used for call counts, duplicate normalization and bonuses.",
+    )
     correct_answer_reward_threshold: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     correct_tool_call_bonuses: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], ...] = Field(
         default=(0.0,), min_length=1
@@ -37,12 +41,18 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
     correct_bash_call_penalties: tuple[Annotated[float, Field(le=0, allow_inf_nan=False)], ...] = Field(
         default=(0.0, 0.0, 0.0, -0.025, -0.05, -0.075, -0.10),
         min_length=1,
-        description="Penalty by total bash attempts on correct answers; the final entry caps the schedule.",
+        description="Penalty by total shell_tool_name attempts on correct answers; the final entry caps the schedule.",
     )
     invalid_tool_call_names: tuple[str, ...] | None = Field(
         default=("bash",),
-        description="Tools eligible for failure penalties; None includes all tools.",
+        description="Tools eligible for failure penalties; defaults to shell_tool_name. None includes all tools.",
     )
+
+    @model_validator(mode="after")
+    def default_failure_filter_to_shell(self) -> "OpenCodeToolRewardConfig":
+        if "invalid_tool_call_names" not in self.model_fields_set:
+            self.invalid_tool_call_names = (self.shell_tool_name,)
+        return self
 
     @field_validator("correct_tool_call_bonuses", "correct_bash_call_penalties")
     @classmethod
@@ -110,7 +120,7 @@ def score_opencode_tools(
     previous = None
     records = execution_records
     if len({item["call_id"] for item in calls}) != len(calls):
-        raise ValueError("Repeated call ID in the live OpenCode trajectory")
+        raise ValueError("Repeated call ID in the live tool trajectory")
 
     exploration = penalties = 0.0
     successes = errors = duplicates = 0
@@ -120,7 +130,7 @@ def score_opencode_tools(
         previous = identity
         record = records.get(item["call_id"])
         if record is None or record[0] != item["name"] or record[1] not in ("completed", "error"):
-            raise ValueError(f"Missing or unfinished OpenCode tool record: {item['call_id']}")
+            raise ValueError(f"Missing or unfinished tool record: {item['call_id']}")
         tool, status, exit_code = record
         if tool == config.shell_tool_name and status == "completed" and not isinstance(exit_code, int):
             # Timeout/abort has a null exit code in OpenCode's shell tool.

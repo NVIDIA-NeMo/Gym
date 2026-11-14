@@ -1,0 +1,356 @@
+{
+  "passed": true,
+  "branch_commit": "bca494cb3",
+  "harness": "Pi 0.80.2",
+  "mode": "local CLI, direct model provider",
+  "policy": "azure/openai/gpt-4o-mini",
+  "dummy_data": true,
+  "optimizer_steps": 0,
+  "shell_tool_name": "shell",
+  "failure_filter": "derived from shell_tool_name",
+  "earlier_attempt": "initial-extra-call: model added an unrequested exit 1; retained unchanged",
+  "live_episodes": [
+    {
+      "id": "numeric-success",
+      "tool_calls": 1,
+      "statuses": [
+        "completed"
+      ],
+      "tool_names": [
+        "shell"
+      ],
+      "artifact": "numeric-success.json"
+    },
+    {
+      "id": "numeric-failed",
+      "tool_calls": 1,
+      "statuses": [
+        "failed"
+      ],
+      "tool_names": [
+        "shell"
+      ],
+      "artifact": "numeric-failed.json"
+    },
+    {
+      "id": "numeric-duplicate",
+      "tool_calls": 2,
+      "statuses": [
+        "completed",
+        "completed"
+      ],
+      "tool_names": [
+        "shell",
+        "shell"
+      ],
+      "artifact": "numeric-duplicate.json"
+    },
+    {
+      "id": "numeric-incorrect",
+      "tool_calls": 1,
+      "statuses": [
+        "completed"
+      ],
+      "tool_names": [
+        "shell"
+      ],
+      "artifact": "numeric-incorrect.json"
+    },
+    {
+      "id": "mcqa-success",
+      "tool_calls": 1,
+      "statuses": [
+        "completed"
+      ],
+      "tool_names": [
+        "shell"
+      ],
+      "artifact": "mcqa-success.json"
+    },
+    {
+      "id": "mcqa-failed",
+      "tool_calls": 1,
+      "statuses": [
+        "failed"
+      ],
+      "tool_names": [
+        "shell"
+      ],
+      "artifact": "mcqa-failed.json"
+    },
+    {
+      "id": "mcqa-duplicate",
+      "tool_calls": 2,
+      "statuses": [
+        "completed",
+        "completed"
+      ],
+      "tool_names": [
+        "shell",
+        "shell"
+      ],
+      "artifact": "mcqa-duplicate.json"
+    },
+    {
+      "id": "mcqa-incorrect",
+      "tool_calls": 1,
+      "statuses": [
+        "completed"
+      ],
+      "tool_names": [
+        "shell"
+      ],
+      "artifact": "mcqa-incorrect.json"
+    },
+    {
+      "id": "numeric-usage",
+      "tool_calls": 3,
+      "statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "tool_names": [
+        "shell",
+        "shell",
+        "shell"
+      ],
+      "artifact": "numeric-usage.json"
+    },
+    {
+      "id": "mcqa-usage",
+      "tool_calls": 3,
+      "statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "tool_names": [
+        "shell",
+        "shell",
+        "shell"
+      ],
+      "artifact": "mcqa-usage.json"
+    }
+  ],
+  "checks": [
+    {
+      "component": "string_match_tool_rewards",
+      "case": "success",
+      "reward": 1.0,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "string_match_tool_rewards",
+      "case": "success-local-override",
+      "reward": 1.1,
+      "tool_rewards": {
+        "shell_tool_name": "shell",
+        "correct_tool_call_bonuses": [
+          0.0,
+          0.1
+        ]
+      }
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "success",
+      "reward": 1.0,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "success-local-override",
+      "reward": 1.1,
+      "tool_rewards": {
+        "shell_tool_name": "shell",
+        "correct_tool_call_bonuses": [
+          0.0,
+          0.1
+        ]
+      }
+    },
+    {
+      "component": "string_match_tool_rewards",
+      "case": "failed",
+      "reward": 0.95,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.05
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "string_match_tool_rewards",
+      "case": "failed-local-override",
+      "reward": 1.0,
+      "tool_rewards": {
+        "shell_tool_name": "shell",
+        "invalid_tool_call_names": []
+      }
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "failed",
+      "reward": 0.95,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.05
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "failed-local-override",
+      "reward": 1.0,
+      "tool_rewards": {
+        "shell_tool_name": "shell",
+        "invalid_tool_call_names": []
+      }
+    },
+    {
+      "component": "string_match_tool_rewards",
+      "case": "duplicate",
+      "reward": 0.98,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.02
+      },
+      "shell_call_count": 2
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "duplicate",
+      "reward": 0.98,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.02
+      },
+      "shell_call_count": 2
+    },
+    {
+      "component": "string_match_tool_rewards",
+      "case": "incorrect",
+      "reward": 0.0,
+      "reward_components": {
+        "verifier": 0.0,
+        "opencode_tool_reward": 0.0
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "incorrect",
+      "reward": 0.0,
+      "reward_components": {
+        "verifier": 0.0,
+        "opencode_tool_reward": 0.0
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "success",
+      "reward": 1.0,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": 0.0
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "success-local-override",
+      "reward": 1.1,
+      "tool_rewards": {
+        "shell_tool_name": "shell",
+        "correct_tool_call_bonuses": [
+          0.0,
+          0.1
+        ]
+      }
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "failed",
+      "reward": 0.95,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.05
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "failed-local-override",
+      "reward": 1.0,
+      "tool_rewards": {
+        "shell_tool_name": "shell",
+        "invalid_tool_call_names": []
+      }
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "duplicate",
+      "reward": 0.98,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.02
+      },
+      "shell_call_count": 2
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "incorrect",
+      "reward": 0.0,
+      "reward_components": {
+        "verifier": 0.0,
+        "opencode_tool_reward": 0.0
+      },
+      "shell_call_count": 1
+    },
+    {
+      "component": "string_match_tool_rewards",
+      "case": "usage",
+      "reward": 0.975,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.025
+      },
+      "shell_call_count": 3
+    },
+    {
+      "component": "math_tool_rewards",
+      "case": "usage",
+      "reward": 0.975,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.025
+      },
+      "shell_call_count": 3
+    },
+    {
+      "component": "mcqa_tool_rewards",
+      "case": "usage",
+      "reward": 0.975,
+      "reward_components": {
+        "verifier": 1.0,
+        "opencode_tool_reward": -0.025
+      },
+      "shell_call_count": 3
+    }
+  ],
+  "workspace_cleanup": true,
+  "response_and_inputs_preserved": true,
+  "tool_calls": 16,
+  "extension": "Pi createBashToolDefinition registered as shell through an explicit local extension; execution delegates to Pi without rewriting observations.",
+  "scope": "Live local CLI smoke on synthetic tasks; no optimizer steps or sandbox-session validation. The initial extra-call attempt was retained separately and is excluded from the prescribed-case counts."
+}

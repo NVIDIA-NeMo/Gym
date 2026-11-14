@@ -202,6 +202,32 @@ def trajectory(status="completed", *, child=False):
     )
 
 
+@pytest.mark.parametrize("shell_name", ["bash", "shell", "exec_command"])
+def test_default_failure_filter_follows_shell_name(shell_name):
+    config = OpenCodeToolRewardConfig(shell_tool_name=shell_name)
+    calls = [call(0, name=shell_name)]
+    result = score_opencode_tools(execution_records(calls, statuses={"0": ("error", None)}), calls, 1.0, config)
+    assert config.invalid_tool_call_names == (shell_name,)
+    assert result.auxiliary_reward == pytest.approx(-0.05)
+    assert result.tool_error_count == 1
+    assert OpenCodeToolRewardConfig.model_validate_json(config.model_dump_json()) == config
+
+
+@pytest.mark.parametrize("names,penalty", [(None, -0.05), ((), 0.0), (("read",), 0.0), (("shell",), -0.05)])
+def test_explicit_failure_filter_is_preserved(names, penalty):
+    config = OpenCodeToolRewardConfig(shell_tool_name="shell", invalid_tool_call_names=names)
+    calls = [call(0, name="shell")]
+    result = score_opencode_tools(execution_records(calls, statuses={"0": ("error", None)}), calls, 1.0, config)
+    assert config.invalid_tool_call_names == names
+    assert result.auxiliary_reward == pytest.approx(penalty)
+
+
+@pytest.mark.parametrize("name", [None, ""])
+def test_shell_name_must_be_nonempty(name):
+    with pytest.raises(ValidationError, match="shell_tool_name"):
+        OpenCodeToolRewardConfig(shell_tool_name=name)
+
+
 @pytest.mark.parametrize("status,exit_code", [("completed", 0), ("completed", 1), ("error", None)])
 @pytest.mark.parametrize("base", [0.0, 0.65, 1.0])
 def test_configured_shell_name_preserves_reward_schedule(status, exit_code, base):
