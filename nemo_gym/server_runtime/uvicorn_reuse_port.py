@@ -14,6 +14,7 @@ own socket reserves the address, also while workers are still starting, and is n
 it takes no connections.
 """
 
+import inspect
 import logging
 import socket
 import sys
@@ -22,6 +23,7 @@ from typing import Any, List, Optional
 import uvicorn
 from uvicorn.main import STARTUP_FAILURE
 from uvicorn.supervisors import Multiprocess
+from uvicorn.supervisors import multiprocess as uvicorn_multiprocess
 
 
 LOG = logging.getLogger("uvicorn.error")
@@ -90,6 +92,17 @@ class _ReusePortWorker(uvicorn.Server):
         await super().startup(sockets=sockets)
 
 
+class _ReusePortProcess(uvicorn_multiprocess.Process):
+    """A Uvicorn worker process whose server is a _ReusePortWorker, for Uvicorn versions that build each
+    worker's server inside its Process."""
+
+    @property
+    def server(self) -> uvicorn.Server:
+        if self._server is None:
+            self._server = _ReusePortWorker(config=self.config)
+        return self._server
+
+
 def run_with_reuse_port(**uvicorn_kwargs: Any) -> None:
     """``uvicorn.run`` for a multi-worker server, with one SO_REUSEPORT listening socket per worker.
 
@@ -103,9 +116,16 @@ def run_with_reuse_port(**uvicorn_kwargs: Any) -> None:
         raise ValueError(f"run_with_reuse_port serves a multi-worker server; got workers={config.workers}")
     if not isinstance(config.app, str):
         raise ValueError("run_with_reuse_port starts workers by import: pass the app as an import string")
-    server = _ReusePortWorker(config=config)
     sock = config.bind_socket()
+    if "target" in inspect.signature(Multiprocess.__init__).parameters:
+        # Older Uvicorn runs the target it is given in each worker.
+        supervisor = Multiprocess(config, target=_ReusePortWorker(config=config).run, sockets=[sock])
+    else:
+        # Newer Uvicorn builds each worker's server inside its Process, at every place it starts a worker
+        # (startup, restarts, scale-up). This main process runs only this server, so swap the class.
+        uvicorn_multiprocess.Process = _ReusePortProcess
+        supervisor = Multiprocess(config, sockets=[sock])
     try:
-        Multiprocess(config, target=server.run, sockets=[sock]).run()
+        supervisor.run()
     except KeyboardInterrupt:
         pass

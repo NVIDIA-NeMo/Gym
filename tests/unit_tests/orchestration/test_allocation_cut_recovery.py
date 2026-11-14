@@ -38,9 +38,9 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
@@ -571,6 +571,29 @@ def test_a_terminal_requeued_chain_is_reconciled_and_resumes_its_in_flight_rows(
     assert (job / ".gym_infra_retries").read_text() == "1\n"
 
 
+def test_a_requeued_then_failed_incarnation_is_accounted_and_recoverable(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.executors.resume_script import REQUEUE_RECONCILED_NOTE
+    from nemo_gym.orchestration.submit import recover
+
+    # A node prolog failure: the first incarnation is REQUEUED with its Start and End recorded, the second FAILED.
+    job, _, _ = _requeued_run(tmp_path, slurm_bin, "100|REQUEUED|36|0\n100|FAILED|15|1\n101|FAILED|16|0\n")
+    result = recover(*_handle(job))
+    assert result.dispatched == "resubmit", result.decision.reason
+    assert (job / ".gym_accumulated_walltime").read_text() == "67\n"
+    assert (job / ".gym_chain_incomplete").read_text() == REQUEUE_RECONCILED_NOTE + "\n"
+
+
+def test_a_requeued_incarnation_without_an_end_still_blocks_recovery(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    # The last incarnation is still REQUEUED (no End yet): its elapsed time is unknown.
+    job, _, _ = _requeued_run(tmp_path, slurm_bin, "100|REQUEUED|36|0\n101|FAILED|16|0\n")
+    result = recover(*_handle(job))
+    # A requeued incarnation that has not ended is a live continuation: nothing is decided or queued.
+    assert (result.decision.action.value, result.dispatched) == ("noop", None)
+    assert (job / ".gym_chain_incomplete").read_text() == _REQUEUE_MARKER
+
+
 @pytest.mark.parametrize(
     "accounting,marker,stored",
     [
@@ -702,3 +725,25 @@ def test_reservations_without_a_known_ending_never_read_as_failures_nobody_owns(
         "2 reservation(s) have no saved outcome and the allocation that made them is not known to have ended"
     )
     assert "nobody owns them" not in reason
+
+
+def test_an_installer_error_with_a_credential_never_leaves_the_run_host(tmp_path):
+    secret = "synthetic-install-secret"
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    job.mkdir(parents=True)
+    (job / ".gym_chain_incomplete").write_text(
+        "Previous job 100 ended FAILED: driver_install_failed: fatal: unable to access "
+        f"'https://user:{secret}@example.invalid/gym.git/': Could not resolve host; the chain does not retry it; "
+        "see logs/driver-100.log\n"
+    )
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+    )
+    assert secret not in raw.stdout
+    collected = CollectedEvidence.model_validate_json(raw.stdout)
+    # The typed failure and the driver-log reference stay; the raw log on the run host holds the detail.
+    assert "driver_install_failed" in collected.chain_continuation_note
+    assert "see logs/driver-100.log" in collected.chain_continuation_note
+    decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
+    assert secret not in decision.reason
+    assert "driver_install_failed" in decision.reason

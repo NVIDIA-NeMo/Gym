@@ -59,6 +59,7 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
 from nemo_gym.server_runtime.base_server import SimpleServer  # noqa: E402
 from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
+    _to_result,
     bind_route,
     install_auto_exposure,
     maybe_auto_expose,
@@ -456,6 +457,54 @@ def test_non_json_2xx_response_passes_through_as_text():
         r = _call(client, "plain_ok", {}, token=token)
         assert r.get("isError") is not True
         assert r["content"][0]["text"] == "plain hello"
+
+
+def test_tool_output_images_become_image_content_after_the_text():
+    result = _to_result(
+        {
+            "ok": True,
+            "tool_output_images": [
+                {
+                    "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+                    "label": "Image 2",
+                },
+                {"image_url": "data:image/jpeg;base64,/9j/4AAQ"},
+            ],
+        }
+    )
+
+    # OpenCode replaces the content with structured content when it is present, which would drop the images.
+    assert result.structuredContent is None
+    assert [content.model_dump(exclude_none=True) for content in result.content] == [
+        {"type": "text", "text": '{"ok":true}'},
+        {"type": "text", "text": "Image 2"},
+        {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            "mimeType": "image/png",
+        },
+        {"type": "image", "data": "/9j/4AAQ", "mimeType": "image/jpeg"},
+    ]
+
+
+def test_tool_output_images_keep_the_structured_content_that_an_output_schema_requires():
+    payload = {
+        "ok": True,
+        "tool_output_images": [
+            {
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+            }
+        ],
+    }
+
+    result = _to_result(payload, output_schema={"type": "object"})
+
+    assert result.structuredContent == {"ok": True}
+    assert [content.type for content in result.content] == ["text", "image"]
+
+
+def test_a_result_without_images_keeps_its_structured_content():
+    assert _to_result({"ok": True}).structuredContent == {"ok": True}
 
 
 def test_sequential_calls_keep_sessions_isolated_and_ordered():

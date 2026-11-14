@@ -30,7 +30,7 @@ from pytest import MonkeyPatch, raises
 import nemo_gym.cli.dataset
 import nemo_gym.cli.env
 import nemo_gym.config.global_config
-import nemo_gym.orchestration.server_supervisor
+import nemo_gym.server_runtime.supervisor.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.cli.env import (
     RunConfig,
@@ -62,7 +62,7 @@ from nemo_gym.config.config_types import (
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.environment.registry import EnvironmentCatalogEntry
 from nemo_gym.environment.scaffold import ScaffoldError
-from nemo_gym.orchestration.server_supervisor import (
+from nemo_gym.server_runtime.supervisor.server_supervisor import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunHelper,
@@ -72,21 +72,21 @@ from nemo_gym.orchestration.server_supervisor import (
 
 @pytest.fixture(autouse=True)
 def mock_server_process_groups(monkeypatch):
-    signal_group = nemo_gym.orchestration.server_supervisor._signal_server_group
-    group_exists = nemo_gym.orchestration.server_supervisor._server_group_exists
+    signal_group = nemo_gym.server_runtime.supervisor.server_supervisor._signal_server_group
+    group_exists = nemo_gym.server_runtime.supervisor.server_supervisor._server_group_exists
 
     def send(process, number):
         if isinstance(process, MagicMock):
-            if number == nemo_gym.orchestration.server_supervisor.SIGINT:
+            if number == nemo_gym.server_runtime.supervisor.server_supervisor.SIGINT:
                 process.send_signal(number)
             else:
                 process.kill()
         else:
             signal_group(process, number)
 
-    monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "_signal_server_group", send)
+    monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "_signal_server_group", send)
     monkeypatch.setattr(
-        nemo_gym.orchestration.server_supervisor,
+        nemo_gym.server_runtime.supervisor.server_supervisor,
         "_server_group_exists",
         lambda process: bool(process.wait.side_effect) if isinstance(process, MagicMock) else group_exists(process),
     )
@@ -177,9 +177,9 @@ def test_server_suite_exit_status(
     config = OmegaConf.create({"uv_cache_dir": str(tmp_path / "uv-cache"), "fail_on_total_and_test_mismatch": True})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.orchestration.server_venv.get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stdout", sys.stdout)
-    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stderr", sys.stderr)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_venv.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_venv.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_venv.stderr", sys.stderr)
     monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
     # Reuse this interpreter's pytest instead of installing a venv for each synthetic server.
     monkeypatch.setattr(
@@ -243,9 +243,9 @@ def test_server_suite_setup_only_installs_every_venv_without_running_tests(
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.orchestration.server_venv.get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stdout", sys.stdout)
-    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stderr", sys.stderr)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_venv.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_venv.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_venv.stderr", sys.stderr)
     monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
     monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", fake_setup)
 
@@ -404,6 +404,57 @@ class TestResolveServerDir:
         rel = Path("resources_servers/arc_agi")
         assert _resolve_server_dir(rel) == PARENT_DIR / rel
 
+    def test_refuses_a_local_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # NVIDIA-NeMo/Gym#4725: a local server dir without requirements.txt silently resolved to the installed one.
+        local = tmp_path / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(
+            ConfigError, match=r"contains server code but no requirements.txt or pyproject.toml, so Gym would use"
+        ):
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+
+    def test_a_local_data_copy_without_server_code_still_resolves_to_the_installed_server(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Data paths such as resources_servers/<env>/data/example.jsonl resolve by name, so a local data copy
+        # beside a built-in server name is legitimate and must not be mistaken for a server.
+        data = tmp_path / "resources_servers" / "arc_agi" / "data"
+        data.mkdir(parents=True)
+        (data / "example.jsonl").write_text("{}\n", encoding="utf-8")
+        # A helper script or package marker beside the data is not a server entrypoint.
+        (data.parent / "__init__.py").write_text("", encoding="utf-8")
+        (data.parent / "prepare_data.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_a_local_server_without_install_marker_and_no_installed_one_resolves_locally(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "resources_servers" / "only_here"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/only_here")) == local
+
+    def test_refuses_a_search_dir_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # --search-dir and NEMO_GYM_EXTRA_ROOTS roots outrank cwd and the install root, so they get the same check.
+        search_dir = tmp_path / "search"
+        local = search_dir / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(search_dir))
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ConfigError, match="contains server code") as error:
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+        assert f"Server directory {local} contains" in str(error.value)
+
     def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
@@ -438,7 +489,7 @@ class TestRunHelperDryRunSpinup:
         parent_dir.mkdir()
         if source_checkout:
             (parent_dir / "pyproject.toml").write_text("[project]\nname = 'nemo-gym'\n", encoding="utf-8")
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "PARENT_DIR", parent_dir)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "PARENT_DIR", parent_dir)
 
         process = MagicMock(pid=123)
         process.poll.return_value = 0
@@ -462,15 +513,19 @@ class TestRunHelperDryRunSpinup:
                 "uv_venv_dir": str(tmp_path),
             }
         )
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "run_command", run)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "setup_env_command", lambda *_: "setup")
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", run)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "get_global_config_dict", MagicMock(return_value=config)
+            nemo_gym.server_runtime.supervisor.server_supervisor, "setup_env_command", lambda *_: "setup"
         )
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "ServerClient", server_client_cls)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.server_runtime.supervisor.server_supervisor,
+            "get_global_config_dict",
+            MagicMock(return_value=config),
+        )
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "ServerClient", server_client_cls)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor.HeadServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
@@ -541,24 +596,32 @@ class TestRunHelperLaunchEnvironment:
                 },
             }
         )
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "configure_telemetry_env", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "init_telemetry", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", MagicMock())
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "configure_telemetry_env", MagicMock()
+        )
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", MagicMock())
         mock_head_instance = MagicMock()
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.server_runtime.supervisor.server_supervisor.HeadServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), mock_head_instance)),
         )
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "_resolve_server_dir", lambda p: Path("/mock/server/dir")
+            nemo_gym.server_runtime.supervisor.server_supervisor,
+            "_resolve_server_dir",
+            lambda p: Path("/mock/server/dir"),
         )
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "setup_env_command", lambda *args: "echo setup")
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "setup_env_command", lambda *args: "echo setup"
+        )
         mock_client = MagicMock()
         mock_client.poll_for_status.return_value = "success"
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "ServerClient", MagicMock(return_value=mock_client)
+            nemo_gym.server_runtime.supervisor.server_supervisor, "ServerClient", MagicMock(return_value=mock_client)
         )
 
         captured_calls = []
@@ -569,7 +632,7 @@ class TestRunHelperLaunchEnvironment:
             captured_calls.append((cmd, extra_env))
             return mock_proc
 
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "run_command", mock_run_command)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", mock_run_command)
         runner = RunHelper()
         runner.wait_for_dry_run_spinup = MagicMock()
         runner.start(MagicMock())
@@ -590,25 +653,33 @@ class TestRunHelperH2PingSidecar:
 
     def _patch_launch(self, monkeypatch: MonkeyPatch, cfg, events: list) -> None:
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "configure_telemetry_env", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "init_telemetry", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", MagicMock())
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "configure_telemetry_env", MagicMock()
+        )
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", MagicMock())
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor.HeadServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
         monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: Path("/mock/server/dir"))
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "_resolve_server_dir", lambda p: Path("/mock/server/dir")
+            nemo_gym.server_runtime.supervisor.server_supervisor,
+            "_resolve_server_dir",
+            lambda p: Path("/mock/server/dir"),
         )
         monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "setup_env_command", lambda *args: "echo setup")
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "setup_env_command", lambda *args: "echo setup"
+        )
         mock_client = MagicMock()
         mock_client.poll_for_status.return_value = "success"
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "ServerClient", MagicMock(return_value=mock_client)
+            nemo_gym.server_runtime.supervisor.server_supervisor, "ServerClient", MagicMock(return_value=mock_client)
         )
 
         def mock_run_command(cmd, dir_path, server_name="", extra_env=None, **kwargs):
@@ -616,7 +687,7 @@ class TestRunHelperH2PingSidecar:
             return MagicMock(pid=1, **{"poll.return_value": None})
 
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", mock_run_command)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "run_command", mock_run_command)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", mock_run_command)
 
     def _config(self, dry_run: bool):
         return OmegaConf.create(
@@ -647,7 +718,7 @@ class TestRunHelperH2PingSidecar:
             global_config_dict["policy_base_url"] = "http://127.0.0.1:1250/v1"
             return manager
 
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "start_h2_ping_sidecar", fake_start)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "start_h2_ping_sidecar", fake_start)
         runner = RunHelper()
         runner.wait_for_server_readiness = MagicMock()
         runner.start(MagicMock())
@@ -671,7 +742,7 @@ class TestRunHelperH2PingSidecar:
         events: list = []
         self._patch_launch(monkeypatch, self._config(dry_run=False), events)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor,
+            nemo_gym.server_runtime.supervisor.server_supervisor,
             "start_h2_ping_sidecar",
             MagicMock(side_effect=RuntimeError("no port")),
         )
@@ -686,7 +757,7 @@ class TestRunHelperH2PingSidecar:
         events: list = []
         self._patch_launch(monkeypatch, self._config(dry_run=True), events)
         start = MagicMock()
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "start_h2_ping_sidecar", start)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "start_h2_ping_sidecar", start)
         runner = RunHelper()
         runner.wait_for_dry_run_spinup = MagicMock()
         runner.start(MagicMock())
@@ -714,29 +785,39 @@ class TestRunHelperRayStartup:
             }
         )
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "configure_telemetry_env", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "init_telemetry", MagicMock())
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "ray_is_installed", lambda: ray_installed)
-        initialize_ray = MagicMock()
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", initialize_ray)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", lambda **kwargs: cfg
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "configure_telemetry_env", MagicMock()
+        )
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "init_telemetry", MagicMock())
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "ray_is_installed", lambda: ray_installed
+        )
+        initialize_ray = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", initialize_ray)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor.HeadServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
         monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: tmp_path)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "_resolve_server_dir", lambda p: tmp_path)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "_resolve_server_dir", lambda p: tmp_path
+        )
         monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "setup_env_command", lambda *args: "echo setup")
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "setup_env_command", lambda *args: "echo setup"
+        )
         mock_client = MagicMock()
         mock_client.poll_for_status.return_value = "success"
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "ServerClient", MagicMock(return_value=mock_client)
+            nemo_gym.server_runtime.supervisor.server_supervisor, "ServerClient", MagicMock(return_value=mock_client)
         )
         run_command = MagicMock(return_value=MagicMock(pid=12345))
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "run_command", run_command)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", run_command)
 
         runner = RunHelper()
         runner.wait_for_dry_run_spinup = MagicMock()
@@ -799,9 +880,9 @@ class TestRunHelperServerReadiness:
 
         profiler = MagicMock()
         profiler_type = MagicMock(return_value=profiler)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "MemoryProfiler", profiler_type)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "MemoryProfiler", profiler_type)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor,
+            nemo_gym.server_runtime.supervisor.server_supervisor,
             "get_telemetry",
             MagicMock(return_value=SimpleNamespace(is_exporting=True)),
         )
@@ -849,7 +930,7 @@ class TestRunHelperServerReadiness:
         runner.poll = MagicMock()
         runner.check_http_server_statuses = MagicMock(return_value=[("broken", "connection_error")])
         monotonic_mock = MagicMock(side_effect=[0.0, 2.0])
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "monotonic", monotonic_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "monotonic", monotonic_mock)
 
         with raises(RuntimeError, match="Timed out after 1s.*broken") as excinfo:
             runner.wait_for_spinup()
@@ -888,7 +969,7 @@ class TestRunHelperServerReadiness:
         ]
         runner.poll = MagicMock()
 
-        started_at = nemo_gym.orchestration.server_supervisor.monotonic()
+        started_at = nemo_gym.server_runtime.supervisor.server_supervisor.monotonic()
         try:
             with raises(RuntimeError, match="stalled_a, stalled_b"):
                 runner.wait_for_spinup()
@@ -896,7 +977,7 @@ class TestRunHelperServerReadiness:
             for stalled_socket in stalled_sockets:
                 stalled_socket.close()
 
-        assert nemo_gym.orchestration.server_supervisor.monotonic() - started_at < 3.0
+        assert nemo_gym.server_runtime.supervisor.server_supervisor.monotonic() - started_at < 3.0
 
     def test_zero_server_spinup_timeout_waits_without_a_deadline(self, monkeypatch: MonkeyPatch) -> None:
         runner = RunHelper()
@@ -908,9 +989,11 @@ class TestRunHelperServerReadiness:
             side_effect=[[("slow", "connection_error")]] * 3 + [[("slow", "success")]]
         )
         # A clock that has run far past the default budget must not end the wait.
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "monotonic", MagicMock(return_value=1e9))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "monotonic", MagicMock(return_value=1e9)
+        )
         sleep_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "sleep", sleep_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "sleep", sleep_mock)
 
         runner.wait_for_spinup()
 
@@ -929,10 +1012,13 @@ class TestServerSpinupTimeoutFromConfig:
     def test_normalizes_numeric_values(self, value: object, expected: float) -> None:
         config = OmegaConf.create({nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
 
-        assert nemo_gym.orchestration.server_supervisor._server_spinup_timeout_seconds(config) == expected
+        assert nemo_gym.server_runtime.supervisor.server_supervisor._server_spinup_timeout_seconds(config) == expected
 
     def test_absent_key_uses_the_config_parser_default(self) -> None:
-        assert nemo_gym.orchestration.server_supervisor._server_spinup_timeout_seconds(OmegaConf.create({})) == 600.0
+        assert (
+            nemo_gym.server_runtime.supervisor.server_supervisor._server_spinup_timeout_seconds(OmegaConf.create({}))
+            == 600.0
+        )
 
     def test_environment_interpolation_yields_a_number(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("GYM_STARTUP_TIMEOUT", "900")
@@ -940,14 +1026,14 @@ class TestServerSpinupTimeoutFromConfig:
             {nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "${oc.env:GYM_STARTUP_TIMEOUT}"}
         )
 
-        assert nemo_gym.orchestration.server_supervisor._server_spinup_timeout_seconds(config) == 900.0
+        assert nemo_gym.server_runtime.supervisor.server_supervisor._server_spinup_timeout_seconds(config) == 900.0
 
     @pytest.mark.parametrize("value", ["ten minutes", [600]])
     def test_malformed_value_is_a_config_error(self, value: object) -> None:
         config = OmegaConf.create({nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
 
         with raises(ConfigError, match="server_spinup_timeout_seconds` must be a number of seconds"):
-            nemo_gym.orchestration.server_supervisor._server_spinup_timeout_seconds(config)
+            nemo_gym.server_runtime.supervisor.server_supervisor._server_spinup_timeout_seconds(config)
 
 
 class TestRunHelperStartUnwind:
@@ -988,11 +1074,13 @@ class TestRunHelperStartUnwind:
             {nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "ten minutes"}
         )
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor, "get_global_config_dict", MagicMock(return_value=config)
+            nemo_gym.server_runtime.supervisor.server_supervisor,
+            "get_global_config_dict",
+            MagicMock(return_value=config),
         )
         monkeypatch.setattr(nemo_gym.cli.env.GlobalConfigDictParser, "raise_on_no_server_instances", MagicMock())
         initialize_ray = MagicMock()
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", initialize_ray)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", initialize_ray)
         run_command = MagicMock()
         monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
 
@@ -1193,7 +1281,7 @@ class TestExitCleanlyOnConfigError:
             raise NoServerInstancesError("nothing configured to run")
 
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "get_global_config_dict", _raise)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", _raise)
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", _raise)
 
         with raises(SystemExit) as exc_info:
@@ -1207,7 +1295,7 @@ class TestExitCleanlyOnConfigError:
             raise RuntimeError("unexpected")
 
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "get_global_config_dict", _raise)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", _raise)
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", _raise)
 
         with raises(RuntimeError, match="unexpected"):
@@ -2115,6 +2203,38 @@ class TestListEnvironments:
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
 
+    @pytest.mark.parametrize(
+        ("kind", "harbor_target", "usage"),
+        [
+            (
+                "benchmark",
+                "terminal_bench_4",
+                "gym eval run --benchmark tb4 --sandbox <provider> --model-type vllm_model",
+            ),
+            (
+                "environment",
+                "terminal_bench_4",
+                "gym eval run terminal_bench_4 --agent <harness> --sandbox <provider> --model-type vllm_model",
+            ),
+            ("benchmark", None, "gym env start --benchmark tb4 --model-type vllm_model"),
+        ],
+    )
+    def test_inspect_shows_how_a_harbor_backed_entry_runs(
+        self, monkeypatch: MonkeyPatch, capsys, kind, harbor_target, usage
+    ) -> None:
+        """`gym env start` does not compose a Harbor-backed entry's environment server; `gym eval run` does."""
+        entry = replace(self._ALPHA, name="tb4", kind=kind, harbor_target=harbor_target)
+        self._mock_catalog(monkeypatch, overrides={"component_name": "tb4", "json": True}, entries=(entry,))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {"domain": "agent", "description": "", "value": None, "datasets": []},
+        )
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out)["usage_example"] == usage
+
     def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"component_name": "alfa"}, entries=(self._ALPHA,))
 
@@ -2199,7 +2319,7 @@ def test_version_reports_a_missing_dependency_instead_of_failing(
 
 def test_missing_local_lock_does_not_fall_back_to_installed_component(tmp_path, monkeypatch):
     import nemo_gym
-    from nemo_gym.orchestration.server_supervisor import _resolve_server_dir
+    from nemo_gym.server_runtime.supervisor.server_supervisor import _resolve_server_dir
 
     local = tmp_path / "local/resources_servers/sample"
     installed = tmp_path / "installed/resources_servers/sample"
@@ -2218,8 +2338,8 @@ def test_managed_servers_use_sessions_and_the_configured_shutdown_budget(monkeyp
     fixture._patch_launch(monkeypatch, config, [])
     process = MagicMock(**{"poll.return_value": None, "wait.return_value": 0})
     launch = MagicMock(return_value=process)
-    monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "run_command", launch)
-    monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "start_h2_ping_sidecar", MagicMock())
+    monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", launch)
+    monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "start_h2_ping_sidecar", MagicMock())
     runner = RunHelper()
     runner.wait_for_server_readiness = MagicMock()
     runner.start(MagicMock())
@@ -2233,16 +2353,91 @@ def test_managed_servers_use_sessions_and_the_configured_shutdown_budget(monkeyp
 def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
     config = OmegaConf.create({"server_shutdown_timeout_seconds": "inf"})
     monkeypatch.setattr(
-        nemo_gym.orchestration.server_supervisor, "get_global_config_dict", MagicMock(return_value=config)
+        nemo_gym.server_runtime.supervisor.server_supervisor, "get_global_config_dict", MagicMock(return_value=config)
     )
     monkeypatch.setattr(
-        nemo_gym.orchestration.server_supervisor.GlobalConfigDictParser, "raise_on_no_server_instances", MagicMock()
+        nemo_gym.server_runtime.supervisor.server_supervisor.GlobalConfigDictParser,
+        "raise_on_no_server_instances",
+        MagicMock(),
     )
     initialize = MagicMock()
     launch = MagicMock()
-    monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", initialize)
-    monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "run_command", launch)
+    monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "initialize_ray", initialize)
+    monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "run_command", launch)
     with raises(ConfigError, match="server_shutdown_timeout_seconds"):
         RunHelper().start(None)
     initialize.assert_not_called()
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("verifier_error", [False, True])
+def test_server_data_validation_checks_manifest_verifiers(
+    monkeypatch: MonkeyPatch, tmp_path: Path, verifier_error: bool
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo"
+    server_dir.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    entries = [
+        EnvironmentCatalogEntry(
+            name=name,
+            config_path=tmp_path / name / "config.yaml",
+            path=tmp_path / name,
+            manifest_path=tmp_path / name / "manifest.yaml",
+            resources_server="demo",
+        )
+        for name in ("benchmark_a", "benchmark_b")
+    ]
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    validation = MagicMock(return_value=SimpleNamespace(datasets=()))
+    monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validation)
+    verifier = MagicMock(side_effect=RuntimeError("bad verifier") if verifier_error else None)
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    if verifier_error:
+        with raises(RuntimeError, match="bad verifier"):
+            nemo_gym.cli.env._validate_data_single(config)
+    else:
+        nemo_gym.cli.env._validate_data_single(config)
+        assert verifier.call_count == 2
+        for entry in entries:
+            validation.assert_any_call(entry.manifest_path, entry.config_path, validate_datasets=False)
+            verifier.assert_any_call(entry, update_expected=False, validation=validation.return_value)
+
+
+@pytest.mark.parametrize("legacy_artifact", [None, "example_metrics.json", "example_rollouts.jsonl"])
+def test_server_data_validation_keeps_legacy_contract(
+    monkeypatch: MonkeyPatch, tmp_path: Path, legacy_artifact: str | None
+) -> None:
+    server_dir = tmp_path / "resources_servers/demo/data"
+    server_dir.mkdir(parents=True)
+    (server_dir / "example.jsonl").write_text("{}\n" * 5)
+    monkeypatch.chdir(tmp_path)
+    entries = ()
+    if legacy_artifact:
+        (server_dir / legacy_artifact).write_text("{}\n" * 5)
+        # Neither partial legacy artifacts nor invalid metrics may bypass legacy validation.
+        if legacy_artifact == "example_metrics.json":
+            (server_dir / "example.jsonl").write_text("{}\n" * 4)
+        entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    message = (
+        "Expected 5 examples" if legacy_artifact == "example_metrics.json" else "must run the example data validation"
+    )
+    with raises(AssertionError, match=message):
+        nemo_gym.cli.env._validate_data_single(config)
+
+
+def test_manifest_server_data_validation_rejects_conflict_artifacts(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "resources_servers/demo/data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "example-conflict.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    entries = (SimpleNamespace(manifest_path=tmp_path / "manifest.yaml", resources_server="demo"),)
+    monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda: entries)
+    verifier = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verifier)
+    config = EnvironmentTestConfig(entrypoint="resources_servers/demo", should_validate_data=True)
+    with raises(AssertionError, match="Found conflicting paths"):
+        nemo_gym.cli.env._validate_data_single(config)
+    verifier.assert_not_called()

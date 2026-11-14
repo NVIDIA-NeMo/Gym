@@ -1,5 +1,5 @@
 # AA-Omniscience judge prompt (4-tier grading)
-# https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
+# https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
 #
 # Placeholders: {question}, {expected_answer}, {generation}
 

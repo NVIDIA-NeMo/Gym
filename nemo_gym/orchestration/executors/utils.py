@@ -31,7 +31,9 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
             items = ",".join(str(v) for v in value)
             args.append(shlex.quote(f"+{full_key}=[{items}]"))
         else:
-            args.append(shlex.quote(f"+{full_key}={value}"))
+            # None is Hydra's null: str(None) is the string "None", which a typed field such as an output cap rejects.
+            rendered = hydra_literal(value) if value is None else value
+            args.append(shlex.quote(f"+{full_key}={rendered}"))
     return args
 
 

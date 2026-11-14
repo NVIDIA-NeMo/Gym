@@ -18,7 +18,7 @@ This measures the dataset, not a model. A row whose golden patch does not make F
 pass is unusable for evaluation or training, so this is the check to run before trusting any
 score from SWE-rebench-V2.
 
-    gym env start --config resources_servers/swe_rebench/configs/swe_rebench.yaml \
+    gym env start --config resources_servers/swe_rebench/configs/swe_rebench_legacy_agent.yaml \
         --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
     python resources_servers/swe_rebench/apply_golden_patch.py \
