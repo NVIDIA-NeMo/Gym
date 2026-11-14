@@ -44,6 +44,7 @@ from nemo_gym.rollouts.health.checks import (
     _is_failed,
     _is_failed_attempt,
     _is_length_refusal,
+    _is_repetition_stop,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -255,7 +256,6 @@ def evaluate_record(
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
-            continue
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
@@ -527,8 +527,8 @@ def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[
     Selected means bound to an agent turn of a complete call scope. A bound call that failed is a trial matter and
     is left out. Every other bound call must carry an explicit 2xx/3xx status, a raw response and a call id, or the
     population is unknown. A fault is judged from the raw output itself: a length-limited finish that is not a
-    length refusal (truncated), or an output with nothing usable (`_response_has_usable_output`: empty, reasoning
-    only or malformed). Token counts alone are never a fault.
+    length refusal (truncated), an explicit provider repetition stop, or an output with nothing usable
+    (`_response_has_usable_output`: empty, reasoning only or malformed). Token counts alone are never a fault.
     """
     if not scope_complete or not bindings.complete:
         return None
@@ -553,7 +553,7 @@ def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[
             return None
         selected.append(identity)
         truncated = call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and not _is_length_refusal(call)
-        if truncated or not _response_has_usable_output(call["response"]):
+        if truncated or _is_repetition_stop(call) or not _response_has_usable_output(call["response"]):
             faulted.append(identity)
     return {"selected": sorted(selected), "faulted": sorted(faulted)}
 

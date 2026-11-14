@@ -52,6 +52,10 @@ INHERITED_RAY_DECLARATIONS = {
     ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
+    # Serves an external GenRM vLLM pool; app.py keeps Ray to launch vLLM locally.
+    ("responses_api_models/genrm_model/external_app.py", "GenRMExternalModel"): False,
+    # Serves an external vLLM endpoint; app.py keeps Ray to launch vLLM locally.
+    ("responses_api_models/local_vllm_model/external_app.py", "LocalVLLMExternalModel"): False,
     # Serves agent sessions only and refuses /run; app.py keeps Ray for the SWE-Gym /run path.
     ("responses_api_agents/mini_swe_agent/sessions_app.py", "MiniSWESessionsAgent"): False,
 }
@@ -372,3 +376,27 @@ def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch, entrypoint)
         entrypoint_fpath=Path(entrypoint),
     )
     assert _ray_server_names([server]) == []
+
+
+@pytest.mark.parametrize("model_dir", ["responses_api_models/local_vllm_model", "responses_api_models/genrm_model"])
+def test_vllm_model_starts_ray_only_for_the_local_launch_entrypoint(
+    monkeypatch: pytest.MonkeyPatch, model_dir: str
+) -> None:
+    monkeypatch.setattr("nemo_gym.server_runtime.supervisor.server_supervisor.ray_is_installed", lambda: True)
+
+    def server(name: str, entrypoint: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            top_level_path=name,
+            dir_path=PARENT_DIR / model_dir,
+            entrypoint_fpath=Path(entrypoint),
+        )
+
+    # A missing entrypoint also reads as no declaration,
+    # so check that the file declares False before trusting the names below.
+    # The supervisor launches every server it does not name with RAY_ENABLE_AUTO_CONNECT=0.
+    # It starts no Ray cluster when it names no server.
+    assert entrypoint_ray_enabled(PARENT_DIR / model_dir / "external_app.py") is False
+    assert _ray_server_names([server("external_judge", "external_app.py")]) == []
+    assert _ray_server_names([server("external_judge", "external_app.py"), server("local_judge", "app.py")]) == [
+        "local_judge"
+    ]
