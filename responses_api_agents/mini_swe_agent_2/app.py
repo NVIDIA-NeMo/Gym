@@ -21,6 +21,7 @@ import time
 import traceback
 from asyncio import Semaphore
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, cast
 from uuid import uuid4
@@ -561,7 +562,6 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     model_config["model_name"] = params["model"]
     model_config.setdefault("cost_tracking", "ignore_errors")
     model_kwargs = model_config.setdefault("model_kwargs", {})
-    model_kwargs["api_key"] = params["api_key"]
     model_kwargs["base_url"] = params["base_url"]
     # Bounded retries for transient LLM-call failures (disconnects, resets):
     # without any retry a single failed call kills the whole rollout, while a
@@ -597,6 +597,9 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
         print(f"[EVAL]{instance_id} Environment created", flush=True)
 
         model = get_model(config=model_config)
+        # mini-swe-agent writes model_kwargs into every saved trajectory, so the
+        # policy key goes to litellm per call instead of through the model config.
+        model.query = partial(model.query, api_key=params["api_key"])
         agent = DefaultAgent(model, env, **agent_config)
 
         if params["run_golden"]:
