@@ -159,11 +159,11 @@ set -- "$4.json" "$2/$3.json"
 
 @dataclass
 class OpenCodeSandboxSession(AgentSessionState):
-    """Keep OpenCode HOME/history under ``conversation_directory`` across launches.
+    """Keep OpenCode HOME/history under ``persistent_directory`` across launches.
 
     ``session.session_dir`` holds only the current supervisor and input/output
-    files. ``persistent_directory`` selects that original session root for legacy
-    one-shot calls and the retained conversation root for continuation calls.
+    files. ``persistent_directory`` is the session root, where legacy one-shot
+    calls run and continuation calls retain their conversation.
     SandboxSession owns finalization and removal of the entire directory tree.
     """
 
@@ -185,7 +185,6 @@ class OpenCodeSandboxSession(AgentSessionState):
     validated_input: tuple[NeMoGymResponseCreateParamsNonStreaming, str, str, list[MediaFile]] | None = field(
         default=None, repr=False
     )
-    conversation_directory: str | None = None
     # Whether an activation of this session has declared image input; later activations keep declaring it.
     declares_image_input: bool = False
     harness_session_id: str | None = None
@@ -219,7 +218,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     @property
     def persistent_directory(self) -> str:
         """Private OpenCode session storage that survives process activations."""
-        return self.conversation_directory or self.session.session_dir
+        return self.session.root_dir
 
     async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
         """Keep one conversation while rearming the supervised execution lifecycle."""
@@ -230,8 +229,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         self.activation_trajectory = None
         self.runtime_info = None
         self.stderr = ""
-        self.conversation_directory = self.persistent_directory
-        directory = f"{self.conversation_directory}/activation-{activation_id}"
+        directory = f"{self.persistent_directory}/activation-{activation_id}"
         await self.session.begin_activation(session_dir=directory, timeout=timeout)
         result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
         if result.error_type == "timeout":
