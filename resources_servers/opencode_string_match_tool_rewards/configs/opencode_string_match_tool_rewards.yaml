@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-opencode_string_match_tool_rewards:
-  resources_servers:
-    opencode_string_match_tool_rewards:
-      entrypoint: app.py
-      domain: agent
-      verified: false
-      description: string_match training verification with configurable OpenCode tool penalties

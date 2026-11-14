@@ -195,17 +195,17 @@ class _ObservedDependencies(_Client):
             return await super().post(server_name, url_path, **kwargs)
 
         if self.verifier is not None:
-            from resources_servers.opencode_string_match_tool_rewards.app import (
+            from resources_servers.string_match.app import StringMatchResourcesServer, StringMatchResourcesServerConfig
+            from resources_servers.string_match_tool_rewards.app import (
                 ToolRewardConfig,
                 ToolRewardServer,
             )
-            from resources_servers.string_match.app import StringMatchResourcesServer, StringMatchResourcesServerConfig
 
             if self.verifier == "math_tool_rewards":
-                from resources_servers.opencode_math_tool_rewards.app import (
+                from resources_servers.math_tool_rewards.app import (
                     ToolRewardConfig as MathConfig,
                 )
-                from resources_servers.opencode_math_tool_rewards.app import (
+                from resources_servers.math_tool_rewards.app import (
                     ToolRewardServer as MathServer,
                 )
 

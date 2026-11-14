@@ -381,6 +381,40 @@ Existing agents may come with predefined tools, allowing you to leverage them di
 
 See [Choose a Path](/main/agent-server#choose-a-path) to compare the options.
 
+## Training with tool rewards
+
+Use `string_match_tool_rewards`, `mcqa_tool_rewards` or `math_tool_rewards` to
+combine the standalone grader (`string_match`, `mcqa` or `math_with_judge`) with optional tool rewards. Their dataset schemas and
+grading behavior match the corresponding standalone graders. Enable
+`forward_agent_evidence: true` on the paired environment so the wrapper receives
+Gym's canonical tool-execution observations.
+
+The default shell name is `bash`. For a harness that calls its shell tool `shell`,
+configure the resources server with:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+```
+
+When omitted, `invalid_tool_call_names` defaults to the configured shell name.
+An explicit list selects tools eligible for failure penalties; `null` includes all
+tools and `[]` disables failure penalties. The shell name must be a nonempty string.
+
+A nonzero shell exit must be reported as a failed tool observation.
+`shell_tool_name` controls shell counting, duplicate normalization and success
+bonuses; it does not infer exit status from tool output. Changing tool names does
+not supply missing execution evidence. OpenCode and a local Pi CLI smoke have
+been exercised. The Pi smoke registered its shell as `shell` and checked failure
+filtering and call-count penalties; it does not validate Pi sandbox sessions.
+
+These components replace `opencode_string_match_tool_rewards`,
+`opencode_mcqa_tool_rewards` and `opencode_math_tool_rewards`. Update component
+keys, imports and config paths. Keep logical server-instance names unchanged to
+preserve environment bindings. The `opencode_*_tool_rewards` component paths are removed. Reward
+defaults and saved reward fields such as `opencode_tool_reward` and
+`bash_call_count` are unchanged.
+
 <Cards>
 
 <Card title="Agent Server" href="/agent-server">
