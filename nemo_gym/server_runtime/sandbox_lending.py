@@ -64,7 +64,10 @@ class LentSandboxes:
         model_server: str | None = None,
         tool_servers: Sequence[str] = (),
     ) -> None:
-        # LentSandboxes has no no_network: a harness in the lent sandbox calls the model server.
+        if network_access == "no_network":
+            raise ValueError(
+                "LentSandboxes cannot use no_network: the harness in a lent sandbox calls the model server"
+            )
         self._network = SandboxNetwork(
             access=network_access,
             model_server=model_server if network_access != "inherit" else None,

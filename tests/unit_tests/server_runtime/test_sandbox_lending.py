@@ -412,6 +412,11 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(mon
     }
 
 
+def test_no_network_is_refused_because_the_lent_harness_calls_the_model_server() -> None:
+    with pytest.raises(ValueError, match="cannot use no_network"):
+        LentSandboxes("sandbox", SandboxConfig(), image=None, workdir="/workspace", network_access="no_network")
+
+
 def test_model_and_tools_needs_tool_servers_and_only_it_takes_them() -> None:
     with pytest.raises(ValueError, match="needs tool_servers"):
         LentSandboxes(

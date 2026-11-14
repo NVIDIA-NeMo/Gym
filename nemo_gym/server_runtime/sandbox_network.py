@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
+from typing_extensions import Self
 
 from nemo_gym.client.server_client import get_server_url
 from nemo_gym.sandbox.config import SandboxConfig
@@ -35,7 +36,7 @@ class SandboxNetwork(BaseModel):
     tool_servers: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _servers_match_access(self) -> "SandboxNetwork":
+    def _servers_match_access(self) -> Self:
         if self.access in ("model_only", "model_and_tools") and not self.model_server:
             raise ValueError(f"network_access {self.access} needs model_server, the model server the sandbox calls")
         if self.access in ("inherit", "no_network") and self.model_server:
