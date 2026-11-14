@@ -734,7 +734,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                # OpenCode can exit on its own as the timeout fires, and killing an exited process raises.
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
                 _, stderr = await proc.communicate()
                 timed_out = True
                 LOG.warning("opencode timed out after %ss", timeout)
