@@ -47,6 +47,11 @@ _EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
 _TASK = "Write hello to out.txt. Keep the {braces} as they are."
 
 
+# Deadline of the tests that end on it after a command ran. It also covers the crew's start, which takes about 7 s per
+# turn on a CI runner shared with other suites (3 s alone), so a shorter one can end the crew before its command runs.
+_DEADLINE_AFTER_A_COMMAND_S = 20
+
+
 def _agent(**config: Any) -> CrewAIAgent:
     return CrewAIAgent(
         config=CrewAIAgentConfig(
@@ -382,7 +387,7 @@ async def test_a_crew_that_runs_out_of_time_answers_incomplete(lent_sandbox, run
     )
     started = time.monotonic()
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        response, close = await _episode(_agent(timeout=_DEADLINE_AFTER_A_COMMAND_S), access)
     finally:
         model.close()
 
@@ -679,7 +684,7 @@ async def test_a_deadline_during_a_command_answers_incomplete_with_the_call_canc
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt; sleep 30"}), id="chatcmpl-1")
     )
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        response, close = await _episode(_agent(timeout=_DEADLINE_AFTER_A_COMMAND_S), access)
     finally:
         model.close()
 
