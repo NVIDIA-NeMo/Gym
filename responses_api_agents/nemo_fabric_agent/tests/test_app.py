@@ -304,10 +304,16 @@ def test_rollout_mcp_metadata_is_optional_and_headers_are_optional(caplog) -> No
     ("answer_key", "completed", "finished_naturally"),
     [("response", True, True), ("output", False, False)],
 )
-def test_run_preserves_fabric_result_and_verifies(
-    answer_key: str, completed: bool, finished_naturally: bool, tmp_path: Path
+@pytest.mark.parametrize(("skip_verification", "skip_reward"), [(False, 0.25), (True, 0.0), (True, 0.25)])
+def test_run_preserves_fabric_result_and_verification_setting(
+    answer_key: str,
+    completed: bool,
+    finished_naturally: bool,
+    tmp_path: Path,
+    skip_verification: bool,
+    skip_reward: float,
 ) -> None:
-    agent = _agent(cwd=str(tmp_path))
+    agent = _agent(cwd=str(tmp_path), skip_verification=skip_verification, skip_verification_reward=skip_reward)
     agent.server_client.global_config_dict = {
         "resources": {"resources_servers": {"resources": {"host": "127.0.0.1", "port": 9001}}},
         "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}},
@@ -327,6 +333,7 @@ def test_run_preserves_fabric_result_and_verifies(
                 },
                 cookies={"session": "seeded"},
             )
+        assert not skip_verification, "Skipped verification must not call the verifier"
         assert url_path == "/verify"
         assert json["response"]["output"][0]["content"][0]["text"] == "fabric answer"
         return _FakeHttpResponse(json | {"reward": 1.0})
@@ -352,7 +359,8 @@ def test_run_preserves_fabric_result_and_verifies(
     with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
         result = asyncio.run(agent.run(request, body))
 
-    assert result.reward == 1.0
+    assert result.reward == (skip_reward if skip_verification else 1.0)
+    assert result.model_dump().get("verification_skipped", False) is skip_verification
     assert result.fabric_result["request_id"] == "request-1"
     assert result.turns_used == 2
     assert result.finished_naturally is finished_naturally

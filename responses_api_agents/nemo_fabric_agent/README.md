@@ -6,6 +6,19 @@ Run interchangeable agent harnesses through [NeMo Fabric](https://github.com/NVI
 OpenClaw adapter is installed but has no preset, because it also needs the OpenClaw CLI and Node.js, which this server
 does not provision (`npm install --global openclaw@2026.9.34`, Node.js 24.22.1 or later).
 
+## Skip verification
+
+Set the inherited agent options to run without calling the resources server's verifier:
+
+```yaml
+skip_verification: true
+skip_verification_reward: 0.0
+```
+
+`/run` still seeds the resources session and returns the agent response, usage, turn count and Fabric result.
+The result has `verification_skipped: true` and the configured reward; that reward is a placeholder, not a verifier score.
+Verification remains enabled by default.
+
 ## Relay
 
 Set `relay: true` to record each run with [NeMo Relay](https://github.com/NVIDIA/NeMo-Relay). The response is then
