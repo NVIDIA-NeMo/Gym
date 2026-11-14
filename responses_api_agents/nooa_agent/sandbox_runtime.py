@@ -21,7 +21,7 @@ from typing import TypeVar
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, exec_as_root
 
 
 LOGGER = logging.getLogger(__name__)
@@ -80,6 +80,8 @@ def _stage_runtime_artifacts(
 
 
 _RUNTIME_ROOT = "/opt/nemo-gym-nooa"
+# Like /tmp: any user may add a runtime there, and only its owner may replace or remove it.
+_PREPARE_RUNTIME_ROOT = f"mkdir -p -- {_RUNTIME_ROOT} && chmod 1777 -- {_RUNTIME_ROOT}"
 _PYTHON_VERSION = "3.13.14"
 _PYTHON_RELEASE = "20260805"
 _INSTALLER_PATH = "responses_api_agents/nooa_agent/install_nooa_runtime.sh"
@@ -178,11 +180,13 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
     """Stage verified artifacts and return the target's healthy private Python.
 
     Cold setup requires Linux x86_64/aarch64 with glibc, bash, tar, gzip,
-    sha256sum, flock, tee, mv with -T support, and writable /opt/nemo-gym-nooa
-    and /tmp. No root or system
-    package manager is invoked. The controller supplies Python; the sandbox still
-    needs outbound package/build dependency access unless wheelhouse_path selects
-    a source-bound bundle prepared outside the task. Offline setup installs only
+    sha256sum, flock, tee, mv with -T support, and writable /tmp. Root only creates
+    /opt/nemo-gym-nooa, open to every user like /tmp, so a task's non-root user can
+    install there; the runtime is installed by, and private to, the sandbox's default
+    user, and no system package manager is invoked. A sandbox that cannot switch
+    users needs that directory writable by its default user. The controller supplies
+    Python; the sandbox still needs outbound package/build dependency access unless
+    wheelhouse_path selects a source-bound bundle prepared outside the task. Offline setup installs only
     local wheels, without package indexes, URL requirements or build isolation.
     A healthy preinstalled or mounted runtime is reused without writing into it.
     """
@@ -275,6 +279,9 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
                     *([wheels_sha256] if wheels_sha256 is not None else []),
                 ]
             )
+            # A Harbor task's `[agent].user` may not be allowed to create directories under /opt. When this fails,
+            # the installer reports the unwritable root itself.
+            await exec_as_root(sandbox, _PREPARE_RUNTIME_ROOT, timeout_s=30)
             result = await sandbox.exec(command, cwd="/", timeout_s=1800)
             if result.return_code != 0:
                 raise RuntimeError(
