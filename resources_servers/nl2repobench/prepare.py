@@ -29,9 +29,15 @@ DEFAULT_TASKS_DIR = PACKAGE_DIR / "data" / "cache" / "tasks"
 DEFAULT_JSONL = NEMO_GYM_ROOT / "benchmarks" / "nl2repobench" / "data" / "nl2repobench_benchmark.jsonl"
 CACHE_MARKER = ".nemo_gym_nl2repobench.json"
 
+# NL2RepoBench's own task prompt, verbatim: the `-t` argument of its OpenHands launcher (openhands/openhands_app.py in
+# the pinned upstream source, line 199). Until 2026-11-04 this was a shortened paraphrase ("...as per the requirements
+# described in start.md."), which every OpenCode row used; the OpenHands agent overrode it with this text (its
+# user_prompt default), so the two harnesses were asked different questions. Runs before and after differ.
 FIXED_INSTRUCTION = (
-    "According to the start.md in the workspace, implement the entire project as per the "
-    "requirements described in start.md."
+    "According to the start.md in the workspace, implement the entire project as per the requirements specified in "
+    "the document, ensuring that the final product can be directly run in the current directory. The running "
+    "requirements should comply with the <API Usage Guide> section of the document. Please complete this task step "
+    "by step."
 )
 
 
