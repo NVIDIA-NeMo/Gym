@@ -25,7 +25,13 @@ import json
 import pytest
 from anthropic.types import Message
 
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+)
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
@@ -703,6 +709,91 @@ class TestSharedHelperBranches:
         assert anthropic_body["tool_choice"] == {"type": "any"}
 
 
+class TestCacheUsage:
+    """Anthropic reports cache reads and writes apart from ``input_tokens``; Responses counts them inside it."""
+
+    def _served(self, usage: dict):
+        return _converter().anthropic_to_responses(
+            {"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn", "usage": usage},
+            request_body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            model="m",
+        )
+
+    def test_anthropic_cache_reads_and_writes_join_the_responses_input(self) -> None:
+        usage = self._served(
+            {
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 800,
+                "output_tokens": 50,
+            }
+        ).usage
+        assert (usage.input_tokens, usage.input_tokens_details.cached_tokens, usage.output_tokens) == (1100, 800, 50)
+        assert usage.input_tokens_details.cache_write_tokens == 100
+        assert usage.total_tokens == 1150
+        assert usage.output_tokens_details.reasoning_tokens is None
+
+    def test_anthropic_usage_without_cache_counts_reports_none_cached(self) -> None:
+        usage = self._served({"input_tokens": 5, "output_tokens": 7}).usage
+        assert (usage.input_tokens, usage.input_tokens_details.cached_tokens, usage.total_tokens) == (5, None, 12)
+
+    def test_responses_cached_input_becomes_anthropic_cache_reads(self) -> None:
+        conv = _converter()
+        response = self._served({"input_tokens": 1, "output_tokens": 1})
+        response.usage = NeMoGymResponseUsage(
+            input_tokens=1000,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=800),
+            output_tokens=50,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
+            total_tokens=1050,
+        )
+        out = conv.responses_to_anthropic_response(response, model="m")
+        assert out["usage"] == {"input_tokens": 200, "cache_read_input_tokens": 800, "output_tokens": 50}
+        events = [
+            json.loads(line.split("data: ", 1)[1]) for line in conv.anthropic_response_to_sse(out) if "data: " in line
+        ]
+        start = next(event for event in events if event["type"] == "message_start")
+        delta = next(event for event in events if event["type"] == "message_delta")
+        # The split arrives with message_start; message_delta adds only the output, as Anthropic streams it.
+        assert start["message"]["usage"] == out["usage"]
+        assert delta["usage"] == {"output_tokens": 50}
+
+    def test_responses_usage_without_a_cache_count_has_no_cache_reads(self) -> None:
+        response = self._served({"input_tokens": 5, "output_tokens": 7})
+        assert _converter().responses_to_anthropic_response(response, model="m")["usage"] == {
+            "input_tokens": 5,
+            "output_tokens": 7,
+        }
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            {"input_tokens": 200, "cache_read_input_tokens": 800, "output_tokens": 50},
+            {"input_tokens": 200, "cache_read_input_tokens": 0, "output_tokens": 50},
+            {
+                "input_tokens": 200,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 800,
+                "output_tokens": 50,
+            },
+            {"input_tokens": 200, "cache_creation_input_tokens": 100, "output_tokens": 50},
+            {"input_tokens": 5, "output_tokens": 7},
+        ],
+    )
+    def test_round_trip_keeps_the_input_without_double_counting_cache_tokens(self, usage: dict) -> None:
+        conv = _converter()
+        served = self._served(usage)
+        rebuilt = conv.responses_to_anthropic_response(served, model="m")
+        assert rebuilt["usage"] == usage
+        again = self._served(rebuilt["usage"]).usage
+        details, served_details = again.input_tokens_details, served.usage.input_tokens_details
+        assert (again.input_tokens, details.cached_tokens, details.cache_write_tokens) == (
+            served.usage.input_tokens,
+            served_details.cached_tokens,
+            served_details.cache_write_tokens,
+        )
+
+
 @pytest.mark.parametrize("count", [None, 0, 7])
 def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | None) -> None:
     usage = {"input_tokens": 11, "output_tokens": 3}
@@ -712,4 +803,6 @@ def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | N
     result = _converter()._usage_to_responses_usage(usage)
 
     assert result.input_tokens_details.cache_write_tokens == count
-    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11, 3, 14)
+    # Responses counts the cache writes inside input_tokens.
+    written = count or 0
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11 + written, 3, 14 + written)
