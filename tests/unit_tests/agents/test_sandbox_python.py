@@ -296,6 +296,51 @@ async def test_the_adapter_lock_reaches_the_host_install_as_its_constraints(host
     assert host.installs[0].constraints == "litellm==1.106.0\nmcp==2.2.0\n"
 
 
+async def test_a_runtime_on_another_pinned_python_is_built_and_keyed_for_that_version(host) -> None:
+    default = SandboxPythonRuntime(harness="hermes", requirements=("openai==2.24.0",), import_check="import x")
+    runtime = SandboxPythonRuntime(
+        harness="hermes",
+        requirements=("openai==2.24.0",),
+        import_check="import x",
+        constraints=("openai==2.24.0",),
+        python_version="3.14.7",
+    )
+
+    archive = await runtime._site_packages_archive(SandboxPlatform("x86_64", "gnu", 35))
+
+    argv = host.installs[0].argv
+    assert argv[argv.index("--python-version") + 1] == "3.14.7"
+    assert argv[argv.index("--target") + 1].endswith("/python/lib/python3.14/site-packages")
+    with tarfile.open(archive) as tar:
+        assert "python/lib/python3.14/site-packages/run_agent.py" in tar.getnames()
+    assert runtime.directory != default.directory
+    with pytest.raises(ValueError, match="No pinned Python build for 3.12.1"):
+        SandboxPythonRuntime(
+            harness="hermes", requirements=(), import_check="import x", constraints=(), python_version="3.12.1"
+        )
+
+
+def test_a_runtime_on_another_python_needs_its_own_constraints() -> None:
+    # This server's versions were resolved for PYTHON_VERSION and may have no wheels for another one.
+    with pytest.raises(ValueError, match="needs constraints locked for that version"):
+        SandboxPythonRuntime(harness="hermes", requirements=(), import_check="import x", python_version="3.14.7")
+
+
+async def test_install_fetches_the_python_build_of_the_runtimes_version(monkeypatch) -> None:
+    platform = SandboxPlatform("x86_64", "gnu", 35)
+    monkeypatch.setattr(sandbox_python, "probe_sandbox_platform", AsyncMock(return_value=platform))
+    archive = AsyncMock(side_effect=RuntimeError("stop after the Python build"))
+    monkeypatch.setattr(sandbox_python, "_python_archive", archive)
+    runtime = SandboxPythonRuntime(
+        harness="hermes", requirements=(), import_check="import x", constraints=(), python_version="3.14.7"
+    )
+
+    with pytest.raises(RuntimeError, match="stop after the Python build"):
+        await runtime.install(AsyncMock(), timeout_s=30)
+
+    archive.assert_awaited_once_with(platform, "3.14.7")
+
+
 async def test_the_host_build_requires_uv(host, monkeypatch) -> None:
     monkeypatch.setattr(sandbox_python.shutil, "which", lambda name: None)
     runtime = SandboxPythonRuntime(harness="stirrup", requirements=("stirrup==0.1.12",), import_check="import x")
@@ -410,6 +455,19 @@ async def test_the_python_build_is_downloaded_once_and_checked_on_every_use(pyth
     path.write_bytes(b"replaced")
     with pytest.raises(RuntimeError, match="does not match its pinned checksum"):
         await sandbox_python._python_archive(platform)
+
+
+async def test_another_pinned_python_build_is_downloaded_under_its_own_name(python_build, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_python, "_OTHER_PYTHON_SHA256", {"3.14.7": {"x86_64/gnu": python_build.pinned}})
+    # The default build's pin differs, so a lookup in the wrong table refuses the download.
+    monkeypatch.setattr(sandbox_python, "_PYTHON_SHA256", {"x86_64/gnu": "0" * 64})
+
+    path = await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35), "3.14.7")
+
+    assert path.name == "cpython-3.14.7+20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    assert python_build.urls[-1].endswith(
+        "/20260805/cpython-3.14.7%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    )
 
 
 async def test_a_python_build_that_does_not_match_its_pin_is_not_cached(python_build, tmp_path) -> None:
