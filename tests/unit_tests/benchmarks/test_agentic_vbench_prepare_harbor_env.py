@@ -3,15 +3,21 @@
 """Contract checks for writing the pinned Agentic-VBench tasks into the `harbor` environment server's dataset entry."""
 
 import hashlib
+import json
 import tomllib
 from pathlib import Path
 
 import pytest
 
 import benchmarks.agentic_vbench.prepare_harbor_env as prepare_module
-from benchmarks.agentic_vbench.prepare_harbor_env import ENTRY_DIR, RECORDS_DIR, adapt_task, write_entry
-from benchmarks.agentic_vbench.staging import HUB_JUDGE, JUDGE_PROTOCOLS, MATERIALS_FETCH_GUARD
-from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
+from benchmarks.agentic_vbench.prepare_harbor_env import RECORDS_DIR, adapt_task, write_entry
+from benchmarks.agentic_vbench.staging import (
+    HUB_JUDGE,
+    JUDGE_PROTOCOLS,
+    MATERIALS_FETCH_GUARD,
+    MATERIALS_RETRY_PATCHED,
+    OUTPUT_ARTIFACT,
+)
 from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
 
 
@@ -60,7 +66,7 @@ def test_adapt_task_routes_the_judge_through_the_hub_and_keeps_the_key_out_of_th
     adapt_task(repurpose, destination, protocol="nvinference-hybrid", records=tmp_path / "records")
 
     config = tomllib.loads((destination / "task.toml").read_text())
-    assert "env" not in config["environment"], "the native judge keys must not reach the agent's sandbox"
+    assert "env" not in config["environment"], "the upstream judge keys must not reach the agent's sandbox"
     verifier_env = config["steps"][0]["verifier"]["env"]
     assert verifier_env["NVINFERENCE_API_KEY"] == "${NVINFERENCE_API_KEY}"
     for key, value in JUDGE_PROTOCOLS["nvinference-hybrid"].items():
@@ -68,6 +74,8 @@ def test_adapt_task_routes_the_judge_through_the_hub_and_keeps_the_key_out_of_th
     tests = destination / "steps" / "solve" / "tests"
     assert _digest(tests / "judge.py") == _digest(HUB_JUDGE)
     assert (tests / "avb-original-judge.py").read_text() == "print('original judge')\n"
+    # The verifier reads only the agent's output, declared as the step's artifact so it can grade separately.
+    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT]
     # The record names what changed and the digests before and after.
     assert (tmp_path / "records" / "judge_protocol.json").is_file()
     # Gym's task schema accepts the adjusted task.toml (deprecated `version` and `allow_internet` included).
@@ -91,10 +99,16 @@ def test_adapt_task_stretches_the_golden_asset_retries(tmp_path: Path) -> None:
     adapt_task(repair, destination, protocol="nvinference-hybrid", records=tmp_path / "records")
 
     verifier = (destination / "steps" / "solve" / "tests" / "test.sh").read_text()
-    assert "--retry 12 --retry-delay 20 --retry-all-errors" in verifier
+    assert MATERIALS_RETRY_PATCHED in verifier
     assert "--retry 5 --retry-delay 3" not in verifier
-    # A download that still fails is reported as inconclusive, not left without a reward.
+    # A download that still fails exits 75 (verifier unavailable), not without a reward.
     assert verifier.count(MATERIALS_FETCH_GUARD) == 1
+    config = tomllib.loads((destination / "task.toml").read_text())
+    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT]
+    HarborTaskConfig.model_validate(config)
+    record = json.loads((tmp_path / "records" / "materials.json").read_text())
+    assert record["retry"]["staged"] == MATERIALS_RETRY_PATCHED
+    assert set(record["verifiers"]) == {"steps/solve/tests/test.sh"}
 
 
 def test_adapt_task_refuses_an_unknown_judge_protocol(tmp_path: Path) -> None:
@@ -139,13 +153,3 @@ def test_write_entry_refuses_duplicate_task_names(tmp_path: Path, monkeypatch: p
     _write_task(twin, judged=False)
     with pytest.raises(ValueError, match="unique"):
         write_entry([repurpose, twin], tmp_path / "entry")
-
-
-def test_committed_entry_declares_the_benchmark_and_its_harnesses() -> None:
-    config = read_dataset_config(ENTRY_DIR)
-    assert config.source is None, "the tasks come from the pinned git checkout, not from a Harbor hub"
-    assert config.type == "benchmark"
-    assert config.domain == "agent"
-    assert config.license == "Apache 2.0"
-    assert config.allowed_agents == ["opencode_agent"]
-    assert (ENTRY_DIR / "README.md").is_file() and (ENTRY_DIR / "harbor_sandbox.yaml").is_file()

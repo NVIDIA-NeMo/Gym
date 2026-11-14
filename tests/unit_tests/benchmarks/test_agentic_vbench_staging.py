@@ -6,8 +6,11 @@ import hashlib
 import importlib
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 import types
 from pathlib import Path
@@ -21,6 +24,7 @@ from benchmarks.agentic_vbench.staging import (
     MATERIALS_FETCH_GUARD,
     MATERIALS_RETRY,
     MATERIALS_RETRY_PATCHED,
+    OUTPUT_ARTIFACT,
     TYPING_DIAGNOSTIC,
     stage_assembly_judge_guard,
     stage_judge,
@@ -208,6 +212,7 @@ def test_hub_judge_is_verifier_only(tmp_path: Path, protocol: str) -> None:
     config = tomllib.loads((staged / "task.toml").read_text())
     assert "env" not in config["environment"]
     assert config["steps"][0]["verifier"]["timeout_sec"] == 1800.0
+    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT]
     assert config["steps"][0]["verifier"]["env"] == {
         "NVINFERENCE_API_KEY": "${NVINFERENCE_API_KEY}",
         **JUDGE_PROTOCOLS[protocol],
@@ -231,7 +236,7 @@ def test_unjudged_task_is_not_staged(tmp_path: Path) -> None:
         JUDGED_TASK[JUDGED_TASK.index("[environment.env]") : JUDGED_TASK.index("[[steps]]")], ""
     )
     task = make_task(tmp_path, unjudged)
-    assert stage_judge(task, staging=tmp_path / "staging", output=tmp_path, protocol="nvinference-native") == task
+    assert stage_judge(task, staging=tmp_path / "staging", output=tmp_path, protocol="nvinference-upstream") == task
     assert not (tmp_path / "staging").exists()
 
 
@@ -241,58 +246,70 @@ def test_judged_task_without_a_judge_and_unknown_protocols_are_rejected(tmp_path
         stage_judge(task, staging=tmp_path / "s", output=tmp_path, protocol="native-guess")
     (task / "steps/solve/tests/judge.py").unlink()
     with pytest.raises(ValueError, match="without tests/judge.py"):
-        stage_judge(task, staging=tmp_path / "s", output=tmp_path, protocol="nvinference-native")
+        stage_judge(task, staging=tmp_path / "s", output=tmp_path, protocol="nvinference-upstream")
 
 
-def test_materials_download_retries_longer_and_reports_a_failed_fetch_as_inconclusive(tmp_path: Path) -> None:
+def test_materials_download_retries_longer_and_a_failed_fetch_exits_75(tmp_path: Path) -> None:
     task = make_task(tmp_path / "source", MATERIALS_TASK)
     verifier = task / "steps/solve/tests/test.sh"
     verifier.write_text(MATERIALS_VERIFIER)
+    output = tmp_path / "records"
+    output.mkdir()
 
-    staged = stage_materials(task, staging=tmp_path / "staging")
+    staged = stage_materials(task, staging=tmp_path / "staging", output=output)
 
     assert staged != task
     patched = (staged / "steps/solve/tests/test.sh").read_text()
     assert MATERIALS_RETRY_PATCHED in patched and MATERIALS_RETRY not in patched
+    assert "--max-time" in MATERIALS_RETRY_PATCHED and "--retry-max-time" in MATERIALS_RETRY_PATCHED
     assert patched.count(MATERIALS_FETCH_GUARD) == 1
     assert '"$MATERIALS_URL" -o /tmp/g.zip' + MATERIALS_FETCH_GUARD in patched
     assert patched.endswith("unzip -qo /tmp/g.zip 'golden/*' -d /tmp/g\n")
+    # The verifier reads only the agent's output: declared as the step's artifact for separate verification.
+    config = tomllib.loads((staged / "task.toml").read_text())
+    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT]
+    assert config["steps"][0]["verifier"]["env"]["MATERIALS_URL"].endswith("exp-demo.zip")
     # Source task and non-verifier files are untouched.
     assert verifier.read_text() == MATERIALS_VERIFIER
-    assert (staged / "task.toml").read_text() == MATERIALS_TASK
+    assert (task / "task.toml").read_text() == MATERIALS_TASK
+    record = json.loads((output / "materials.json").read_text())
+    assert record["verifiers"]["steps/solve/tests/test.sh"]["original_sha256"] == _sha256(MATERIALS_VERIFIER)
+    assert record["verifiers"]["steps/solve/tests/test.sh"]["staged_sha256"] == _sha256(patched)
+    assert record["task_toml_sha256"]["original"] != record["task_toml_sha256"]["staged"]
     # Re-staging the same task replaces the earlier copy instead of failing or doubling the guard.
-    assert stage_materials(task, staging=tmp_path / "staging") == staged
+    assert stage_materials(task, staging=tmp_path / "staging", output=output) == staged
     assert (staged / "steps/solve/tests/test.sh").read_text().count(MATERIALS_FETCH_GUARD) == 1
 
 
-def test_guarded_materials_fetch_writes_the_inconclusive_note_when_curl_fails(tmp_path: Path) -> None:
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_guarded_materials_fetch_exits_75_with_the_reason_when_curl_fails(tmp_path: Path) -> None:
     task = make_task(tmp_path / "source", MATERIALS_TASK)
     (task / "steps/solve/tests/test.sh").write_text(MATERIALS_VERIFIER)
-    staged = stage_materials(task, staging=tmp_path / "staging")
+    staged = stage_materials(task, staging=tmp_path / "staging", output=tmp_path)
     script = (staged / "steps/solve/tests/test.sh").read_text()
-    # Run the patched fetch with `curl` replaced by a stub that fails like a 429 (exit 22), writing under tmp_path.
-    verifier_dir = tmp_path / "logs/verifier"
+    # Run the patched fetch with `curl` replaced by a stub that fails like a 429 (exit 22).
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "curl").write_text("#!/bin/bash\nexit 22\n")
     (fake_bin / "curl").chmod(0o755)
-    script = script.replace("/logs/verifier", str(verifier_dir)).replace("mkdir -p /tests /tmp/g\n", "")
+    script = script.replace("mkdir -p /tests /tmp/g\n", "")
     result = subprocess.run(
         ["bash", "-c", script],
         env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "MATERIALS_URL": "x"},
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 22
-    assert json.loads((verifier_dir / "inconclusive.json").read_text()) == {
-        "reason": "golden assets download from MATERIALS_URL failed (curl exit 22)"
-    }
+    assert result.returncode == 75
+    assert "verifier unavailable: golden assets download from MATERIALS_URL failed (curl exit 22)" in result.stderr
     assert "unzip" not in result.stderr  # the script stopped at the fetch
 
 
 def test_tasks_without_materials_download_are_unchanged(tmp_path: Path) -> None:
     task = make_task(tmp_path / "source", JUDGED_TASK)
-    assert stage_materials(task, staging=tmp_path / "staging") == task
+    assert stage_materials(task, staging=tmp_path / "staging", output=tmp_path) == task
 
 
 @pytest.fixture
@@ -303,10 +320,10 @@ def hub_judge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sys.modules["google"].genai = sys.modules["google.genai"]
     sys.modules["google.genai"].Client = object
     sys.modules["anthropic"].Anthropic = object
-    monkeypatch.setenv("AVB_VERIFIER_DIR", str(tmp_path / "verifier"))
+    monkeypatch.setenv("AVB_JUDGE_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     monkeypatch.delitem(sys.modules, "benchmarks.agentic_vbench.hub_judge", raising=False)
     module = importlib.import_module("benchmarks.agentic_vbench.hub_judge")
-    for key, value in JUDGE_PROTOCOLS["nvinference-native"].items():
+    for key, value in JUDGE_PROTOCOLS["nvinference-upstream"].items():
         monkeypatch.setenv(key, value)
     calls = []
 
@@ -402,7 +419,7 @@ def test_hub_post_retries_transient_400_but_records_auth_failures(hub_judge, mon
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
     module.FAILURES.clear()
     assert module.real_post("/v1/messages", {}) == {"ok": True}
-    assert module.FAILURES == []
+    assert module.FAILURES == {}
 
     monkeypatch.setattr(
         module.urllib.request, "urlopen", lambda request, timeout: (_ for _ in ()).throw(_http_error(request, 403))
@@ -436,27 +453,191 @@ def test_hub_post_surfaces_provider_status_message_only(hub_judge, monkeypatch: 
     message = str(info.value)
     assert len(message) < 220 and "\n" not in message
     assert "AAAA" not in message and "secret-key" not in message  # no payloads, no credentials
-    assert module.FAILURES == []  # a persistent 4xx is this request's error, not an infrastructure rejection
+    assert module.FAILURES == {}  # a persistent 4xx is this request's error, not an infrastructure rejection
 
 
-def test_hub_judge_reports_outages_and_missing_configuration_as_inconclusive(
-    hub_judge, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def _socket_server(handler):
+    """A local TCP server that answers each connection with ``handler(conn)`` on a daemon thread."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    handler(conn)
+                except OSError:
+                    pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    return server
+
+
+def _drop_before_status_line(conn) -> None:
+    conn.recv(65536)
+
+
+def _truncate_body(conn) -> None:
+    conn.recv(65536)
+    conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{"content": [')
+
+
+def _stall(conn) -> None:
+    conn.recv(65536)
+    time.sleep(1.0)
+
+
+@pytest.mark.parametrize(
+    "handler,expected",
+    [
+        (_drop_before_status_line, "RemoteDisconnected"),
+        (_truncate_body, "IncompleteRead"),
+        (_stall, "TimeoutError"),
+    ],
+    ids=["dropped-before-status-line", "truncated-body", "stalled"],
+)
+def test_hub_post_records_transport_failures_as_unavailable(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, handler, expected: str
 ) -> None:
     module, _ = hub_judge
-    note = tmp_path / "verifier" / "inconclusive.json"
-    monkeypatch.delenv("NVINFERENCE_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="Missing verifier configuration: NVINFERENCE_API_KEY"):
-        module.main()
-    assert json.loads(note.read_text()) == {"reason": "missing verifier configuration: NVINFERENCE_API_KEY"}
-    note.unlink()
+    server = _socket_server(handler)
+    try:
+        monkeypatch.setenv("AVB_JUDGE_BASE_URL", f"http://127.0.0.1:{server.getsockname()[1]}")
+        monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+        monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(module, "CALL_TIMEOUT_SECONDS", 0.2)
+        module.FAILURES.clear()
+        with pytest.raises(RuntimeError, match=expected):
+            module.real_post("/v1/messages", {"model": "m"})
+        assert len(module.FAILURES) == 1 and expected in next(iter(module.FAILURES.values()))
+    finally:
+        server.close()
 
-    # The original judge ran (stubbed), but a Hub route failed on the way: no score, an inconclusive note.
+
+def test_hub_post_records_5xx_and_size_rejections_but_forgets_a_failure_a_retry_scored(
+    hub_judge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
+    module, _ = hub_judge
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
     monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+    module.FAILURES.clear()
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda request, timeout: (_ for _ in ()).throw(_http_error(request, 503))
+    )
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        module.real_post("/v1/messages", {"item": 1})
+    assert len(module.FAILURES) == 1
+    # A request the Hub refuses for its size is the Hub's limit, not a judge error of the item.
+    big = json.dumps({"error": {"message": "Request payload size exceeds the limit"}}).encode()
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(_http_error(request, 413, big)),
+    )
+    with pytest.raises(RuntimeError, match="HTTP 413"):
+        module.real_post("/v1beta/models/m:generateContent", {"item": 2})
+    assert len(module.FAILURES) == 2
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    # The judge's own item retry repeats the same request and scores it: that failure no longer counts.
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: Resp(b'{"ok": true}'))
+    assert module.real_post("/v1/messages", {"item": 1}) == {"ok": True}
+    assert len(module.FAILURES) == 1 and "HTTP 413" in next(iter(module.FAILURES.values()))
+
+
+def test_hub_post_stops_at_the_overall_deadline(hub_judge, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _ = hub_judge
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    calls = []
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: calls.append(request))
+    monkeypatch.setattr(module, "_STARTED", time.monotonic() - module.DEADLINE_SECONDS - 1)
+    module.FAILURES.clear()
+    with pytest.raises(RuntimeError, match="deadline"):
+        module.real_post("/v1/messages", {})
+    assert calls == [] and len(module.FAILURES) == 1
+
+
+def _stub_original_judge(module, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, results: bool) -> Path:
+    base = tmp_path / "base"
+    (base / "results").mkdir(parents=True)
+    if results:
+        (base / "results" / "harbor_trial_p1.json").write_text(json.dumps({"pass": True, "score": 1.0}))
     original = tmp_path / "avb-original-judge.py"
-    original.write_text("BASE = '.'\n")
+    original.write_text(f"BASE = {str(base)!r}\n")
     monkeypatch.setattr(module, "__file__", str(tmp_path / "judge.py"))
     monkeypatch.setattr(module.sys, "argv", ["judge.py", "run", "source.mp4", "harbor_trial"])
-    module.FAILURES[:] = ["/v1/messages: Hub judge HTTPError HTTP 403 (not available for this API key)"]
-    with pytest.raises(RuntimeError, match="Rejecting verifier result after 1 Hub failures"):
+    return base
+
+
+def test_hub_judge_merges_provenance_into_every_result_when_the_hub_served_every_call(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    module, calls = hub_judge
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    base = _stub_original_judge(module, monkeypatch, tmp_path, results=True)
+    module.FAILURES.clear()
+
+    module.main()
+
+    # One preflight request per route went out before the judge ran.
+    assert [path for path, _, _ in calls] == [
+        "/v1/messages",
+        f"/v1beta/models/{JUDGE_PROTOCOLS['nvinference-upstream']['AVB_JUDGE_GEMINI_MODEL']}:generateContent",
+    ]
+    result = json.loads((base / "results" / "harbor_trial_p1.json").read_text())
+    assert result["pass"] is True and result["judge_provider"] == "nvidia-inference-hub"
+    assert result["judge_claude_model"] == JUDGE_PROTOCOLS["nvinference-upstream"]["AVB_JUDGE_CLAUDE_MODEL"]
+    assert json.loads((tmp_path / "artifacts" / "harbor_trial_p1.json").read_text()) == result
+    assert "verifier unavailable" not in capsys.readouterr().err
+
+
+def test_hub_judge_exits_75_on_missing_configuration_unusable_routes_and_outages(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    module, _ = hub_judge
+    _stub_original_judge(module, monkeypatch, tmp_path, results=False)
+    monkeypatch.delenv("NVINFERENCE_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as info:
         module.main()
-    assert "HTTP 403" in json.loads(note.read_text())["reason"]
+    assert info.value.code == 75
+    assert "verifier unavailable: missing verifier configuration: NVINFERENCE_API_KEY" in capsys.readouterr().err
+
+    # A route the key cannot use fails its preflight request: the whole verification is unavailable, before the
+    # judge scores a single item 0.
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+
+    def refuse_gemini(path: str, payload: dict, headers: dict | None = None) -> dict:
+        if "generateContent" in path:
+            raise RuntimeError("Hub judge HTTPError HTTP 404 (model not found)")
+        return {"content": []}
+
+    monkeypatch.setattr(module, "post", refuse_gemini)
+    with pytest.raises(SystemExit) as info:
+        module.main()
+    assert info.value.code == 75
+    err = capsys.readouterr().err
+    assert "Gemini judge route" in err and "HTTP 404" in err
+
+    # The judge ran (stubbed), but a Hub call failed on the way and no later attempt scored it: unavailable.
+    monkeypatch.setattr(module, "post", lambda path, payload, headers=None: {"content": [], "candidates": []})
+    module.FAILURES.clear()
+    module.FAILURES["abc"] = "/v1/messages: Hub judge HTTPError HTTP 403 (not available for this API key)"
+    with pytest.raises(SystemExit) as info:
+        module.main()
+    assert info.value.code == 75
+    assert "1 Hub judge failures" in capsys.readouterr().err

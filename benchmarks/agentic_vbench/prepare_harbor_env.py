@@ -4,13 +4,13 @@
 
 The 100 pinned tasks are written into the dataset entry `environments/harbor/agentic_vbench/`, where the generic
 `harbor` environment server seeds each task's image as a sandbox for any sandboxed harness and runs the task's own
-verifier. Each task gets the adjustments in `staging.py` (Hub judge protocol, assembly judge guard, longer
-golden-asset retries, inconclusive verdicts for verifier-side infrastructure failures); the records of what changed
-land under `.records/<task>/` in the entry.
+verifier. Each task gets the adjustments in `staging.py` (Hub judge protocol, assembly judge guard, bounded longer
+golden-asset retries, exit 75 for verifier-side infrastructure failures, `/workspace/output` as the judged and repair
+steps' artifact); the records of what changed land under `.records/<task>/` in the entry.
 
 Environment: AGENTIC_VBENCH_ROOT names an existing pinned checkout (else it is fetched into the cache root),
 AGENTIC_VBENCH_HARBOR_FAMILIES selects families (comma-separated; default all four) and
-AGENTIC_VBENCH_JUDGE_PROTOCOL selects the judge protocol (default nvinference-native, the upstream judge pair).
+AGENTIC_VBENCH_JUDGE_PROTOCOL selects the judge protocol (default nvinference-upstream, the upstream judge pair).
 """
 
 import os
@@ -58,7 +58,7 @@ def adapt_task(source: Path, destination: Path, *, protocol: str, records: Path)
     try:
         staged = stage_assembly_judge_guard(source, staging=_fresh(work / "guard"), output=records)
         staged = stage_judge(staged, staging=_fresh(work / "judge"), output=records, protocol=protocol)
-        staged = stage_materials(staged, staging=_fresh(work / "materials"))
+        staged = stage_materials(staged, staging=_fresh(work / "materials"), output=records)
         shutil.copytree(staged, destination)
     finally:
         shutil.rmtree(work, ignore_errors=True)

@@ -4,15 +4,19 @@
 
 Rubric prompts, evidence, deterministic checks and aggregation are the original task's. Claude items keep the
 original Anthropic Messages request and change only the model name to the Hub route; Gemini items keep the
-original prompts and media and go to the Hub's Gemini route as inline native generateContent parts.
+original prompts and media and go to the Hub's Gemini route as inline generateContent parts.
 
-Transport or authentication failures that persist, and a missing judge configuration, are not scored: the
-verifier writes ``/logs/verifier/inconclusive.json`` and exits nonzero, which the ``harbor`` environment server
-masks (``harbor:verifier_inconclusive``). A 4xx that persists for one request (e.g. Gemini refusing empty audio)
-is raised to the judge, which scores that rubric item as a judge error exactly as it does with the native SDK.
+A verification the Hub kept from completing is not scored: a missing judge configuration, a route the key cannot
+use (checked with one request per route before the judge runs), a transport failure or a request the Hub rejects
+for its size that persists through the retries, or the overall deadline passing, make the verifier print the reason
+and exit 75 (``EX_TEMPFAIL``) without a reward, which the ``harbor`` environment server masks
+(``harbor:verifier_unavailable``). A 4xx that persists for one request (e.g. Gemini refusing empty audio) is raised
+to the judge, which scores that rubric item as a judge error exactly as it does with the upstream SDKs.
 """
 
 import base64
+import hashlib
+import http.client
 import json
 import mimetypes
 import os
@@ -30,15 +34,37 @@ from google import genai
 
 
 ATTEMPTS = 5
-FAILURES = []
+# Exit code for "could not grade" (sysexits EX_TEMPFAIL); the harbor server masks a verifier that exits with it and
+# no reward. curl, Python, pytest, `timeout` and the shell never use it on their own.
+UNAVAILABLE_EXIT_CODE = 75
+# One Hub call; the attempts and their backoff (2+4+8+16 s) fit well inside the overall deadline.
+CALL_TIMEOUT_SECONDS = float(os.environ.get("AVB_JUDGE_CALL_TIMEOUT_SECONDS", "120"))
+# The whole judge run, from preflight to the last item, below the tasks' 1800 s verifier budget so a slow or
+# stalled Hub ends as "could not grade" rather than as the verifier timeout, which is a measured 0.
+DEADLINE_SECONDS = float(os.environ.get("AVB_JUDGE_DEADLINE_SECONDS", "1500"))
+# Transport errors urllib raises unwrapped: a connection the Hub drops before the status line or mid-body
+# (RemoteDisconnected, ConnectionResetError, IncompleteRead) is an OSError or an HTTPException, not a URLError.
+TRANSPORT_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError)
+# Unrecovered Hub failures by request: a request a later attempt of the same item scored is dropped again, so a
+# flaky Hub that the judge's own item retry rode out does not mask a fully scored verification.
+FAILURES: dict[str, str] = {}
 _LOCK = threading.Lock()
-VERIFIER_DIR = Path(os.environ.get("AVB_VERIFIER_DIR", "/logs/verifier"))
+_STARTED = time.monotonic()
 
 
-def inconclusive(reason: str) -> None:
-    """Record that the verification could not be completed, so the episode is masked rather than scored."""
-    VERIFIER_DIR.mkdir(parents=True, exist_ok=True)
-    (VERIFIER_DIR / "inconclusive.json").write_text(json.dumps({"reason": reason}) + "\n")
+def unavailable(reason: str) -> None:
+    """Report that the verification could not be completed and exit so the episode is masked, not scored."""
+    print(f"verifier unavailable: {reason}", file=sys.stderr, flush=True)
+    sys.exit(UNAVAILABLE_EXIT_CODE)
+
+
+def _request_key(path: str, payload: dict) -> str:
+    return hashlib.sha256((path + "\n" + json.dumps(payload, sort_keys=True)).encode()).hexdigest()
+
+
+def _size_rejection(code: int, detail: str) -> bool:
+    """A request the Hub refuses for its size (inline media): infrastructure, not a judge error of this item."""
+    return code == 413 or (code == 400 and any(w in detail.lower() for w in ("too large", "exceeds", "payload size")))
 
 
 def post(path: str, payload: dict, headers: dict | None = None) -> dict:
@@ -52,13 +78,21 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
             **(headers or {}),
         },
     )
+    key = _request_key(path, payload)
     error = "unknown"
     request_error = False
     for attempt in range(ATTEMPTS):
+        if time.monotonic() - _STARTED > DEADLINE_SECONDS:
+            error = f"Hub judge deadline of {DEADLINE_SECONDS:g} s passed"
+            request_error = False
+            break
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                return json.load(response)
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            with urllib.request.urlopen(request, timeout=CALL_TIMEOUT_SECONDS) as response:
+                result = json.load(response)
+            with _LOCK:
+                FAILURES.pop(key, None)
+            return result
+        except TRANSPORT_ERRORS as exc:
             # Never print request headers, media or credentials. Of the provider error body keep only the
             # short status message so a persistent 4xx is diagnosable.
             error = f"Hub judge {type(exc).__name__}"
@@ -72,17 +106,20 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
                 if exc.code in (401, 403):
                     break
                 # Other 4xx are about this request (e.g. Gemini rejecting an empty audio extract). Hub
-                # occasionally returns transient ones, so they are retried, but when they persist the native
+                # occasionally returns transient ones, so they are retried, but when they persist the upstream
                 # SDK would raise the same error to the judge, which scores that rubric item as a judge error.
-                request_error = exc.code not in (408, 429) and 400 <= exc.code < 500
+                # A request refused for its size is the Hub's limit, not the item's fault.
+                request_error = (
+                    exc.code not in (408, 429) and 400 <= exc.code < 500 and not _size_rejection(exc.code, detail)
+                )
             if attempt < ATTEMPTS - 1:
                 time.sleep(2 ** (attempt + 1))
     if request_error:
         raise RuntimeError(error)
-    # Transport or authentication failures must not silently become zero scores: record them so the
-    # verification is reported inconclusive once the judge returns.
+    # Transport failures, authentication failures and size rejections must not silently become zero scores:
+    # record them so the verification is reported unavailable once the judge returns.
     with _LOCK:
-        FAILURES.append(f"{path}: {error}")
+        FAILURES[key] = f"{path}: {error}"
     raise RuntimeError(error)
 
 
@@ -168,11 +205,37 @@ class HubGemini:
         return SimpleNamespace(text=text)
 
 
+def preflight() -> None:
+    """One minimal request per route before the judge runs: a route the key cannot use (401/403, a retired or
+    renamed model's 404/400) or a Hub that is down makes the whole verification unavailable, instead of scoring
+    every item on that provider 0 or masking the 36 judged tasks one at a time."""
+    probes = {
+        "Claude": (
+            "/v1/messages",
+            {
+                "model": os.environ["AVB_JUDGE_CLAUDE_MODEL"],
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+            {"anthropic-version": "2023-06-01"},
+        ),
+        "Gemini": (
+            f"/v1beta/models/{os.environ['AVB_JUDGE_GEMINI_MODEL']}:generateContent",
+            {"contents": [{"role": "user", "parts": [{"text": "ping"}]}], "generationConfig": {"maxOutputTokens": 1}},
+            None,
+        ),
+    }
+    for provider, (path, payload, headers) in probes.items():
+        try:
+            post(path, payload, headers)
+        except RuntimeError as exc:
+            unavailable(f"{provider} judge route {path} is not usable with this key: {exc}")
+
+
 def main() -> None:
     for key in ("NVINFERENCE_API_KEY", "AVB_JUDGE_BASE_URL", "AVB_JUDGE_CLAUDE_MODEL", "AVB_JUDGE_GEMINI_MODEL"):
         if not os.environ.get(key):
-            inconclusive(f"missing verifier configuration: {key}")
-            raise ValueError(f"Missing verifier configuration: {key}")
+            unavailable(f"missing verifier configuration: {key}")
     original = Path(__file__).with_name("avb-original-judge.py")
     anthropic.Anthropic = HubAnthropic
     genai.Client = HubGemini
@@ -182,19 +245,19 @@ def main() -> None:
         f"{os.environ['AVB_JUDGE_CLAUDE_MODEL']} + {os.environ['AVB_JUDGE_GEMINI_MODEL']}",
         flush=True,
     )
+    preflight()
     namespace = runpy.run_path(str(original), run_name="__main__")
-    # The original judge turns some provider errors into zero-score items. Report the whole verification as
-    # inconclusive instead, so an outage is masked and retried, not scored as a failure.
+    # The original judge turns provider errors into zero-score items. Report the whole verification as
+    # unavailable instead, so an outage is masked, not scored as a failure of the agent.
     if FAILURES:
-        inconclusive(f"{len(FAILURES)} Hub judge failures: {FAILURES[:3]}")
-        raise RuntimeError(f"Rejecting verifier result after {len(FAILURES)} Hub failures: {FAILURES[:3]}")
+        unavailable(f"{len(FAILURES)} Hub judge failures: {sorted(FAILURES.values())[:3]}")
     provenance = {
         "judge_provider": "nvidia-inference-hub",
         "judge_claude_model": os.environ["AVB_JUDGE_CLAUDE_MODEL"],
         "judge_gemini_model": os.environ["AVB_JUDGE_GEMINI_MODEL"],
         "judge_gemini_thinking": os.environ.get("AVB_JUDGE_GEMINI_THINKING", "low"),
     }
-    artifacts = Path("/logs/artifacts/hub-judge")
+    artifacts = Path(os.environ.get("AVB_JUDGE_ARTIFACTS_DIR", "/logs/artifacts/hub-judge"))
     artifacts.mkdir(parents=True, exist_ok=True)
     for result_path in (Path(namespace["BASE"]) / "results").glob(f"{sys.argv[3]}_p*.json"):
         result = {**json.loads(result_path.read_text()), **provenance}

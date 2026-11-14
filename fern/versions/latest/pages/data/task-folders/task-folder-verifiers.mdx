@@ -52,10 +52,15 @@ These rows count in the score, and a reward written before a timeout still stand
 sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in `rollouts.jsonl` but is
 left out of the score.
 
-A verifier that cannot grade, because a judge service or an asset download it depends on is unavailable, writes
-`/logs/verifier/inconclusive.json` (a JSON object with a `reason` string) and no reward. Such a rollout is masked
-with `harbor:verifier_inconclusive` instead of scoring 0. A reward written beside the note wins; the note is read
-only when no reward file exists.
+A verifier that cannot grade, because a judge service or an asset download it depends on is unavailable, exits
+75 (`EX_TEMPFAIL`) without writing a reward, after printing why to its output. Such a rollout is masked with
+`harbor:verifier_unavailable` instead of scoring 0, with the tail of `test-stdout.txt` as the reason. Three rules
+bound the signal: a verifier timeout still wins (a measured 0, since the timer stops `test.sh` before any code);
+the code is only for infrastructure the agent cannot influence, so every other exit without a reward stays a
+measured 0; and in shared mode `test.sh` runs in the agent's sandbox, where the agent can make it exit 75, so a task
+that relies on the signal should verify separately (`artifacts` plus `separate_verifier_for_artifacts`, or
+`environment_mode = "separate"`). A written reward always wins over the code. The server does not re-run a masked
+verification.
 
 ## Python verifiers
 

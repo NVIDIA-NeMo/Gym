@@ -15,7 +15,7 @@ from typing import Iterator
 
 
 REPO_URL = "https://github.com/PhiloLabs/agentic-vbench.git"
-REVISION = "410a75fe3dae37de4344fc9e5317da089505330a"
+REVISION = "410a75fe3dae37de4344fc9e5317da089505330a"  # pragma: allowlist secret
 # The four leaderboard families and their task counts; the checkout's separate "understanding" area is not part
 # of the benchmark.
 BENCHMARK_FAMILIES = {"repair": 18, "assembly": 18, "sequencing": 28, "repurpose": 36}

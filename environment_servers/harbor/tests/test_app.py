@@ -1714,34 +1714,35 @@ class TestVerify:
         assert "pytest exploded" in result.failure_reason
         assert result.verifier_return_code == 1
 
-    async def test_inconclusive_verifier_is_masked_not_scored(self, tmp_path, monkeypatch):
+    async def test_exit_75_without_a_reward_is_masked_not_scored(self, tmp_path, monkeypatch):
+        # EX_TEMPFAIL from test.sh and no reward: the verifier could not grade (judge service or asset download
+        # unavailable), so the rollout is masked with the stdout tail as the reason.
         sandbox = FakeSandbox(
             verifier_files={
-                "inconclusive.json": json.dumps({"reason": "judge service HTTP 403 (not available for this key)"}),
-                "test-stdout.txt": "Rejecting verifier result",
+                "test-stdout.txt": "verifier unavailable: judge route HTTP 403 (not available for this key)"
             },
-            test_result=SandboxExecResult(stdout="", stderr="", return_code=1),
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=75),
         )
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         result = response.result
         assert result.reward == 0.0 and result.mask_sample is True
-        assert result.failure_kind == "harbor:verifier_inconclusive"
-        assert (
-            "judge service HTTP 403" in result.failure_reason and "Rejecting verifier result" in result.failure_reason
-        )
-        # A reward beside the note wins: the note is only read when no reward was written.
+        assert result.failure_kind == "harbor:verifier_unavailable"
+        assert result.verifier_return_code == 75
+        assert "exited 75" in result.failure_reason and "judge route HTTP 403" in result.failure_reason
+        # A written reward wins over the exit code.
         sandbox = FakeSandbox(
-            verifier_files={
-                "inconclusive.json": json.dumps({"reason": "late"}),
-                "reward.json": json.dumps({"reward": 1}),
-            }
+            verifier_files={"reward.json": json.dumps({"reward": 1})},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=75),
         )
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.reward == 1.0 and response.result.failure_kind is None
-        # A malformed note still masks, with its text as the reason.
-        sandbox = FakeSandbox(verifier_files={"inconclusive.json": "curl: (22) 429 Too Many Requests"})
+        # Any other nonzero exit without a reward is still a measured 0: the agent can cause those.
+        sandbox = FakeSandbox(
+            verifier_files={"test-stdout.txt": "curl: (22) 429 Too Many Requests"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=22),
+        )
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
-        assert response.result.mask_sample is True and "429 Too Many Requests" in response.result.failure_reason
+        assert response.result.mask_sample is False and response.result.failure_kind == "harbor:missing_reward"
 
     async def test_invalid_reward_scores_zero(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.txt": "maybe"})
