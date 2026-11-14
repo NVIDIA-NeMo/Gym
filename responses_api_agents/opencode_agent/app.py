@@ -1597,7 +1597,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         deadline = started + timeout
         failure: BaseException | None = None
         try:
-            async with asyncio.timeout_at(deadline):
+            # Not timeout_at: uvloop's clock runs ahead of monotonic() once a macOS host has slept.
+            async with asyncio.timeout(deadline - monotonic()):
                 await state.prepare_activation(
                     activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
                 )
@@ -1840,7 +1841,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         export = {}
         failure = None
         try:
-            async with asyncio.timeout_at(deadline):
+            # Not timeout_at: uvloop's clock runs ahead of monotonic() once a macOS host has slept.
+            async with asyncio.timeout(None if deadline is None else deadline - monotonic()):
                 await self.sem.acquire()
             try:
                 if deadline is None:

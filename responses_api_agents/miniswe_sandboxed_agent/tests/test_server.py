@@ -442,6 +442,35 @@ async def test_setup_budget_covers_workdir_and_never_grades(fixture, monkeypatch
     assert all(env.closed for env in f.envs)
 
 
+async def test_setup_keeps_its_budget_when_the_loop_clock_runs_ahead(fixture, monkeypatch):
+    """uvloop's clock runs ahead of time.monotonic() once a macOS host has slept; setup still gets its budget."""
+    f = fixture
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda clock=loop.time: clock() + 86_400)
+    connect, original = module.AsyncSandbox.connect, module.MiniSWEHarness
+
+    async def slow_connect(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        return await connect(*args, **kwargs)
+
+    def harness(**kw):
+        h = original(**kw)
+        setup = h.setup.side_effect
+
+        async def slow_setup():
+            await asyncio.sleep(0.01)
+            setup()
+
+        h.setup.side_effect = slow_setup
+        return h
+
+    monkeypatch.setattr(module.AsyncSandbox, "connect", slow_connect)
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    result = await f.agent.run(f.request, f.body)
+    assert result.termination["reason"] == "completed"
+    assert result.reward == 0.75 and result.evaluation_completed
+
+
 async def test_sandbox_model_url_keeps_training_capture_route(fixture, monkeypatch):
     f = fixture
     original = module.MiniSWEHarness

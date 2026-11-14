@@ -295,6 +295,50 @@ async def test_deadline_shorter_than_supervisor_resolution_never_launches(sessio
     await session.close(timeout=1)
 
 
+def run_loop_clock_ahead(monkeypatch, seconds=86_400):
+    """Put the event loop's clock ahead of time.monotonic(), as uvloop's is once a macOS host has slept."""
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda clock=loop.time: clock() + seconds)
+
+
+async def test_staging_keeps_its_deadline_when_the_loop_clock_runs_ahead(session, receipt_reader, monkeypatch):
+    run_loop_clock_ahead(monkeypatch)
+
+    async def stage():
+        await asyncio.sleep(0.01)
+        return SandboxCommand(argv=["worker"])
+
+    assert (
+        await session.execute(
+            stage_activation=stage,
+            collect=AsyncMock(return_value="transcript"),
+            timeout=10,
+            close_timeout=1,
+            deadline=monotonic() + 10,
+        )
+        == "transcript"
+    )
+    assert session.launch_started
+    await session.close(timeout=1)
+
+
+async def test_staging_deadline_expires_on_time_when_the_loop_clock_runs_ahead(session, receipt_reader, monkeypatch):
+    run_loop_clock_ahead(monkeypatch)
+
+    async def stage():
+        await asyncio.Future()
+
+    started = monotonic()
+    with pytest.raises(TimeoutError):
+        await session.execute(
+            stage_activation=stage, collect=AsyncMock(), timeout=10, close_timeout=1, deadline=started + 0.2
+        )
+    assert monotonic() - started >= 0.19
+    assert not session.launch_started
+    session.sandbox.exec.assert_not_awaited()
+    await session.close(timeout=1)
+
+
 async def test_close_during_input_preparation_prevents_launch(session, receipt_reader):
     preparing = asyncio.Event()
 

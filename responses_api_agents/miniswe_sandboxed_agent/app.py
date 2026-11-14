@@ -464,7 +464,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     if seed.termination is None:
                         timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
                         deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
-                        async with asyncio.timeout_at(deadline):
+                        # Not timeout_at: uvloop's clock runs ahead of monotonic() once a macOS host has slept.
+                        async with asyncio.timeout(deadline - monotonic()):
                             workdir = state.workdir
                             if workdir is None:
                                 cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
@@ -671,7 +672,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 setup_started_at = now()
                 setup_deadline = monotonic() + self.config.setup_timeout_sec
                 result.agent_timings["agent_setup"] = {"started_at": setup_started_at}
-                async with asyncio.timeout_at(setup_deadline):
+                # Not timeout_at: uvloop's clock runs ahead of monotonic() once a macOS host has slept.
+                async with asyncio.timeout(setup_deadline - monotonic()):
                     provider = create_provider(resolve_provider_config(seed.sandbox_provider))
                     sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
                 if key in self._sessions:

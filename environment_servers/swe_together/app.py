@@ -307,7 +307,8 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     turn_deadline + self.config.cleanup_timeout_seconds, state.interaction_deadline
                 )
                 try:
-                    async with asyncio.timeout_at(collection_deadline) as timer:
+                    # Not timeout_at: uvloop's clock runs ahead of monotonic() once a macOS host has slept.
+                    async with asyncio.timeout(collection_deadline - monotonic()) as timer:
                         response = await self.server_client.post(
                             self.config.agent_server.name,
                             self._activation_path(request),

@@ -212,6 +212,7 @@ class SandboxSession[Artifacts]:
     ) -> Artifacts:
         """Run once, preserving captured artifacts even when execution raises.
 
+        ``deadline`` is a ``time.monotonic()`` instant bounding staging and the run.
         Cancellation stops the remote harness before releasing provider exec.
         Callers that merely stop waiting (such as disconnected HTTP requests)
         must shield their shared activation task.
@@ -222,7 +223,9 @@ class SandboxSession[Artifacts]:
         self._collect = collect
         self._stage_task = asyncio.create_task(self._stage(stage_activation))
         try:
-            async with asyncio.timeout_at(deadline):
+            # Not timeout_at: it reads the event loop's clock, which need not be time.monotonic(). uvloop's counts
+            # the time a macOS host slept, so after a sleep every monotonic deadline would already have passed.
+            async with asyncio.timeout(None if deadline is None else deadline - monotonic()):
                 command = await asyncio.shield(self._stage_task)
             if self._expire_requested:
                 await self._request_expiry(timeout=close_timeout)
