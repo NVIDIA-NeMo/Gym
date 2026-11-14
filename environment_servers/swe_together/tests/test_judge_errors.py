@@ -26,7 +26,7 @@ def http_error(status):
     return ClientResponseError(SimpleNamespace(real_url="http://judge"), (), status=status, message="error")
 
 
-async def run_judge(tmp_path, monkeypatch, *, failures, close, verdict=None):
+async def run_judge(tmp_path, monkeypatch, *, failures, close, verdict=None, model_sampling=None):
     """Run the judge against a fake agent; ``failures`` maps a path to the exception it raises."""
     monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="test"))
     monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
@@ -68,6 +68,7 @@ async def run_judge(tmp_path, monkeypatch, *, failures, close, verdict=None):
         cookies={},
         artifact_dir=tmp_path,
         evidence=evidence,
+        model_sampling=model_sampling,
     )
     return run, calls, evidence
 
@@ -132,6 +133,17 @@ async def test_successful_judge_is_unchanged(tmp_path, monkeypatch):
     assert verdict["judge_score"] == 1.0
     assert verdict["judge_close"]["cleanup_confirmed"] is True
     assert "judge_close_error" not in evidence and "judge_transport_error" not in evidence
+
+
+@pytest.mark.asyncio
+async def test_the_judge_keeps_its_own_sampling_in_an_episode_with_sampling_values(tmp_path, monkeypatch):
+    raw = json.dumps({"goal_results": [{"id": "goal", "met": True}]})
+    run, calls, _ = await run_judge(
+        tmp_path, monkeypatch, failures={}, close=CONFIRMED, verdict=raw, model_sampling="null"
+    )
+    verdict = await run
+    assert calls == [SEED, "/ng-rollout/one-judge-test/ng-sampling/null/v1/responses", CLOSE]
+    assert verdict["judge_score"] == 1.0
 
 
 @pytest.mark.parametrize("attempt", [0, 2])

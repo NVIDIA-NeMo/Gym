@@ -47,6 +47,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
     NgFailureEvent,
+    model_sampling_context,
+    model_sampling_path_segment,
 )
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -88,6 +90,11 @@ _INVOCATION_ROLE_BY_ALIAS = {
 }
 _PARTICIPANT_ALIASES = ("user_model", "assistant_model")
 _PARTICIPANT_ROLES = {"user", "assistant"}
+# The participant a training framework trains: its calls are captured for training and sample with the episode's
+# values. The user simulator, judge, summary and tool simulation keep their own sampling.
+# TODO(#5252): read this from token_id_capture.training_agent_instances, and give capture and the sampling
+# segment the same selection, so a participant is never captured for training while it samples with its own values.
+_TRAINED_ALIAS = "assistant_model"
 
 
 class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
@@ -266,7 +273,7 @@ class _ConversationBridge:
                     url_path=self.environment_server.responses_path(
                         target.name,
                         self.request,
-                        capture_training_tokens=alias == "assistant_model",
+                        trained=alias == _TRAINED_ALIAS,
                     ),
                     json=request_params,
                     cookies=agent_session.cookies,
@@ -278,11 +285,14 @@ class _ConversationBridge:
             except Exception as error:
                 raise _ParticipantActivationError(alias, error) from error
         else:
-            response = await self.environment_server.server_client.post(
-                server_name=target.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
+            # The judge, summary and tool-simulation calls are never trained. The server client puts their segment
+            # after the rollout prefix it may add.
+            with model_sampling_context(self.environment_server.model_sampling_segment(self.request, trained=False)):
+                response = await self.environment_server.server_client.post(
+                    server_name=target.name,
+                    url_path="/v1/responses",
+                    json=request_params,
+                )
             await raise_for_status(response)
             response_data = await get_response_json(response)
             trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
@@ -361,6 +371,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     config: UserSimEnvironmentServerConfig
     request_model = UserSimEpisodeRequest
     response_model = UserSimEpisodeResponse
+    applies_model_sampling = True
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         response = await self.server_client.post(
@@ -596,19 +607,26 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         target_name: str,
         request: UserSimEpisodeRequest,
         *,
-        capture_training_tokens: bool,
+        trained: bool,
     ) -> str:
+        """The activation path of one participant's agent session.
+
+        A participant the training framework trains carries the training tag, when its agent captures and the
+        rollout does not skip capture, and the episode's sampling values. The other participant keeps its own
+        sampling (``null``).
+        """
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
         # A request whose rollout skips capture (a validation rollout) activates no participant with the tag.
         token_capture = (
-            capture_training_tokens
+            trained
             and not request.skip_token_capture
             and bool(block.get("enabled", False))
             and (bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=trained))
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(

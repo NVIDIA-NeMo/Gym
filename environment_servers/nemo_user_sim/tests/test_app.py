@@ -32,7 +32,15 @@ from environment_servers.nemo_user_sim.app import (
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef, ResourcesServerRef
-from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    MaterializedTask,
+    ModelCallSampling,
+    TaskId,
+    current_model_sampling_segment,
+    encode_model_sampling,
+    rollout_context,
+)
 from nemo_gym.data import materialize_task
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.server_runtime import is_handled_episode_failure
@@ -69,7 +77,7 @@ def _server() -> UserSimEnvironmentServer:
 
 
 @pytest.mark.parametrize(
-    ("capture_training_tokens", "skip_token_capture", "path"),
+    ("trained", "skip_token_capture", "path"),
     [
         (True, False, "/ng-rollout/rollout/training-token-capture/v1/responses"),
         # The user simulator is never captured.
@@ -79,7 +87,7 @@ def _server() -> UserSimEnvironmentServer:
     ],
 )
 def test_only_the_assistant_of_a_captured_episode_is_activated_with_the_training_tag(
-    capture_training_tokens: bool, skip_token_capture: bool, path: str
+    trained: bool, skip_token_capture: bool, path: str
 ) -> None:
     server = _server()
     server.server_client.global_config_dict = OmegaConf.create(
@@ -90,10 +98,7 @@ def test_only_the_assistant_of_a_captured_episode_is_activated_with_the_training
     )
     request = _request().model_copy(update={"skip_token_capture": skip_token_capture})
 
-    assert (
-        server.responses_path("nemo_user_sim_assistant", request, capture_training_tokens=capture_training_tokens)
-        == path
-    )
+    assert server.responses_path("nemo_user_sim_assistant", request, trained=trained) == path
 
 
 def test_aliases_route_participants_and_support_roles() -> None:
@@ -670,9 +675,12 @@ class _Client(ServerClient):
 
     calls: list[tuple[str, str, dict[str, Any]]]
     responses: list[_Response | Exception]
+    # The sampling segment current at each call, which the real server client adds to a generation path.
+    segments: list[str | None]
 
     async def post(self, server_name: str, url_path: str, **kwargs: Any) -> _Response:
         self.calls.append((server_name, url_path, kwargs))
+        self.segments.append(current_model_sampling_segment())
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -730,6 +738,7 @@ def _lifecycle_server() -> tuple[UserSimEnvironmentServer, _Client]:
         global_config_dict=global_config,
         calls=[],
         responses=[],
+        segments=[],
     )
     server = UserSimEnvironmentServer(
         config=UserSimEnvironmentServerConfig(
@@ -846,6 +855,159 @@ async def test_committed_activation_fixtures_round_trip_through_real_bridge(
     else:
         assert sent_tools == []
         assert result.response["content"] == "Here is a safe answer."
+
+
+_SAMPLING = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+
+def _bridge_for_all_roles(server: UserSimEnvironmentServer, request: UserSimEpisodeRequest) -> _ConversationBridge:
+    return _ConversationBridge(
+        server,
+        request,
+        request.task.task_input,
+        {},
+        {
+            alias: _AgentSession(
+                alias=alias,
+                target=server.config.target_for_alias(alias),
+                session_id=f"{alias}-session",
+                cookies={"session": alias},
+            )
+            for alias in ("user_model", "assistant_model")
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling", [None, _SAMPLING])
+async def test_only_the_assistant_samples_with_the_episodes_values(sampling: ModelCallSampling | None) -> None:
+    server, client = _lifecycle_server()
+    request = _request().model_copy(update={"model_sampling": sampling})
+    bridge = _bridge_for_all_roles(server, request)
+    aliases = ("user_model", "assistant_model", "judge_model", "summary_model", "api_response_model")
+    client.responses = [
+        _Response(_responses_body(_BRIDGE_PARITY_FIXTURES["safety_agentic"]["output"])) for _ in aliases
+    ]
+
+    for alias in aliases:
+        await bridge.invoke(alias, [{"role": "user", "content": "Hello."}], parameters={})
+
+    key = request.episode_id.capture_key
+    values = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampling is not None else ""
+    null = "/ng-sampling/null" if sampling is not None else ""
+    assert [(name, path) for name, path, _ in client.calls] == [
+        ("user", f"/ng-rollout/{key}{null}/v1/responses"),
+        ("assistant", f"/ng-rollout/{key}{values}/v1/responses"),
+        ("support", "/v1/responses"),
+        ("support", "/v1/responses"),
+        ("support", "/v1/responses"),
+    ]
+    # The judge, summary and tool-simulation calls get null from the server client, which reads this segment.
+    support_segment = "null" if sampling is not None else None
+    assert client.segments == [None, None, support_segment, support_segment, support_segment]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling", [None, _SAMPLING])
+async def test_only_the_assistant_captures_and_samples_with_the_episodes_values(
+    sampling: ModelCallSampling | None,
+) -> None:
+    server, client = _lifecycle_server()
+    client.global_config_dict = OmegaConf.merge(
+        client.global_config_dict, {"token_id_capture": {"enabled": True, "all_agents": True}}
+    )
+    request = _request().model_copy(update={"model_sampling": sampling})
+    bridge = _bridge_for_all_roles(server, request)
+    client.responses = [
+        _Response(_responses_body(_BRIDGE_PARITY_FIXTURES["safety_agentic"]["output"])) for _ in range(2)
+    ]
+
+    for alias in ("user_model", "assistant_model"):
+        await bridge.invoke(alias, [{"role": "user", "content": "Hello."}], parameters={})
+
+    key = request.episode_id.capture_key
+    values = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampling is not None else ""
+    null = "/ng-sampling/null" if sampling is not None else ""
+    # Only the trained assistant is captured; its tag precedes the values, as the Model Server requires.
+    assert [path for _, path, _ in client.calls] == [
+        f"/ng-rollout/{key}{null}/v1/responses",
+        f"/ng-rollout/{key}/training-token-capture{values}/v1/responses",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observability", [False, True])
+@pytest.mark.parametrize("sampling", [None, _SAMPLING])
+async def test_a_support_role_call_reaches_its_model_server_marked_null(
+    sampling: ModelCallSampling | None, observability: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[str] = []
+
+    async def send(*, url: str, **_kwargs: Any) -> _Response:
+        sent.append(url)
+        return _Response(_responses_body(_BRIDGE_PARITY_FIXTURES["safety_agentic"]["output"]))
+
+    monkeypatch.setattr("nemo_gym.client.server_client.request", send)
+    server, fake_client = _lifecycle_server()
+    global_config = OmegaConf.merge(
+        fake_client.global_config_dict,
+        {
+            "support": {"responses_api_models": {"vllm_model": {"host": "support-host", "port": 9001}}},
+            "observability_enabled": observability,
+        },
+    )
+    server = UserSimEnvironmentServer(
+        config=server.config,
+        server_client=ServerClient(
+            head_server_config=fake_client.head_server_config, global_config_dict=global_config
+        ),
+    )
+    request = _request().model_copy(update={"model_sampling": sampling})
+
+    # run_request sets the episode's rollout id for every downstream call.
+    with rollout_context(request.episode_id.capture_key):
+        await _bridge_for_all_roles(server, request).invoke(
+            "judge_model", [{"role": "user", "content": "Grade this."}], parameters={}
+        )
+
+    prefix = f"/ng-rollout/{request.episode_id.capture_key}" if observability else ""
+    null = "/ng-sampling/null" if sampling is not None else ""
+    assert sent == [f"http://support-host:9001{prefix}{null}/v1/responses"]
+
+
+@pytest.mark.asyncio
+async def test_an_episode_with_sampling_values_runs_and_the_assistant_gets_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, client = _lifecycle_server()
+    client.responses = [
+        *_seeded_participant_responses(),
+        _Response(_responses_body(_BRIDGE_PARITY_FIXTURES["safety_agentic"]["output"])),
+        _Response({}),
+        _Response({}),
+        _Response({"reward": 1.0, "mask_sample": False, "reward_components": {}, "scenario_completed": True}),
+        _Response({}),
+    ]
+
+    async def converse(bridge: _ConversationBridge, _row: dict[str, Any]) -> dict[str, Any]:
+        await bridge.invoke("assistant_model", [{"role": "user", "content": "Hello."}], parameters={})
+        return {
+            "trajectory_id": "trajectory",
+            "conversation_messages": [{"role": "assistant", "content": "Here is a safe answer."}],
+            "conversation_status": True,
+            "simulation_outcome": {"status": "completed"},
+        }
+
+    monkeypatch.setattr(server, "_run_usersim", converse)
+    request = _request().model_copy(update={"model_sampling": _SAMPLING})
+
+    response = await server.run_request(request)
+
+    assert response.failure is None, response.failure
+    activation = next(path for _, path, _ in client.calls if path.endswith("/v1/responses"))
+    assert activation == (
+        f"/ng-rollout/{request.episode_id.capture_key}/ng-sampling/{encode_model_sampling(_SAMPLING)}/v1/responses"
+    )
 
 
 @pytest.mark.asyncio
