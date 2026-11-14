@@ -1721,6 +1721,80 @@ class TestVerify:
         )
         assert result.reward_components is None and result.verifier_return_code == 0
 
+    @staticmethod
+    def _mask_nonzero_exits(tmp_path, text='[gym.defaults]\nverifier_exit_nonzero = "mask"\n'):
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text(text)
+
+    async def test_a_nonzero_exit_with_a_reward_is_measured_by_default(self, tmp_path, monkeypatch):
+        """#5642: without the dataset option the exit code is ignored, as in Harbor; the reward file is the score."""
+        sandbox = FakeSandbox(
+            verifier_files={"reward.json": json.dumps({"reward": 0.0})},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=1),
+        )
+        _, task, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert task.config.verifier.exit_nonzero is None
+        assert result.reward == 0.0 and result.mask_sample is False and result.failure_kind is None
+        assert result.verifier_return_code == 1
+
+    async def test_dataset_masks_a_nonzero_exit_and_keeps_the_reward_as_metrics(self, tmp_path, monkeypatch):
+        """#5642: a verifier that writes `overall: 0.0` and exits 1 when its required LLM judge fails was scored as
+        a measured 0; with `verifier_exit_nonzero = "mask"` the trial is left out and its reward file kept."""
+        self._mask_nonzero_exits(tmp_path)
+        sandbox = FakeSandbox(
+            verifier_files={
+                "reward.json": json.dumps({"overall": 0.0}),
+                "test-stdout.txt": "ERROR: required LLM judging failed",
+            },
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=1),
+        )
+        _, task, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert task.config.verifier.exit_nonzero == "mask"
+        assert result.mask_sample is True and result.reward == 0.0
+        assert result.failure_kind == "harbor:verifier_exit_nonzero"
+        assert "test.sh exited 1" in result.failure_reason
+        assert "required LLM judging failed" in result.failure_reason
+        assert result.verifier_rewards == {"overall": 0.0} and result.verifier_return_code == 1
+
+    async def test_dataset_masks_a_nonzero_exit_without_a_reward_file(self, tmp_path, monkeypatch):
+        self._mask_nonzero_exits(tmp_path)
+        sandbox = FakeSandbox(verifier_files={}, test_result=SandboxExecResult(stdout="", stderr="", return_code=2))
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "harbor:verifier_exit_nonzero"
+        assert result.verifier_rewards is None
+
+    async def test_masking_leaves_a_zero_exit_and_a_timeout_as_they_were(self, tmp_path, monkeypatch):
+        self._mask_nonzero_exits(tmp_path)
+        _, _, _, response = await self.verified(tmp_path, monkeypatch)
+        assert response.result.reward == 1.0 and response.result.mask_sample is False
+
+        timed_out = FakeSandbox(
+            verifier_files={"test-stdout.txt": "still running"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
+            test_elapsed=120,
+        )
+        self._mask_nonzero_exits(tmp_path / "timeout")
+        _, _, _, response = await self.verified(tmp_path / "timeout", monkeypatch, timed_out)
+        # The timeout keeps its own measured outcome; the option only reads exits test.sh reached on its own.
+        assert response.result.failure_kind == "harbor:verifier_timeout" and response.result.mask_sample is False
+
+    async def test_a_task_override_scores_a_nonzero_exit_under_a_masking_default(self, tmp_path, monkeypatch):
+        self._mask_nonzero_exits(
+            tmp_path,
+            '[gym.defaults]\nverifier_exit_nonzero = "mask"\n\n[gym.tasks."hello".verifier]\nexit_nonzero = "score"\n',
+        )
+        sandbox = FakeSandbox(
+            verifier_files={"reward.txt": "0.5\n"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=1),
+        )
+        _, task, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert task.config.verifier.exit_nonzero == "score"
+        assert response.result.reward == 0.5 and response.result.mask_sample is False
+
     async def test_missing_reward_scores_zero_and_is_measured(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
             verifier_files={"test-stdout.txt": "pytest exploded"},
@@ -1903,6 +1977,22 @@ class TestSeparateVerification:
 
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, agent, verifier, created
+
+    async def test_a_separate_verifier_masks_a_nonzero_exit(self, tmp_path, monkeypatch):
+        """#5642: the separate path passes the task's `[verifier]` itself as the settings `_score` reads."""
+        (tmp_path / "datasets" / "ds").mkdir(parents=True)
+        (tmp_path / "datasets" / "ds" / "dataset.toml").write_text('[gym.defaults]\nverifier_exit_nonzero = "mask"\n')
+        verifier = FakeSandbox(
+            verifier_files={"reward.txt": "0\n"},
+            test_result=SandboxExecResult(stdout="", stderr="", return_code=1),
+        )
+        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, verifier=verifier)
+
+        result = (await run_episode(server, task)).result
+
+        assert result.verifier_mode == "separate"
+        assert result.mask_sample is True and result.failure_kind == "harbor:verifier_exit_nonzero"
+        assert result.verifier_rewards == {"reward": 0.0}
 
     async def test_collects_artifacts_then_verifies_in_a_fresh_sandbox(self, tmp_path, monkeypatch):
         server, task, agent, verifier, created = self.prepared(tmp_path, monkeypatch)

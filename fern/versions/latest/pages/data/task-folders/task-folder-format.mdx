@@ -132,6 +132,7 @@ None of these keys enters a task digest.
 | `num_repeats` | `1` | Rollouts per task for `gym eval run`. `+num_repeats=<n>` replaces it. |
 | `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`, including a step's own. Collect hooks, health checks and build timeouts do not scale. |
 | `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. GPUs, `[steps.verifier.environment]` and Compose sidecars do not scale. |
+| `verifier_exit_nonzero` | none | `mask` leaves a trial whose `test.sh` exits non-zero without being stopped by its timeout out of the scores (`harbor:verifier_exit_nonzero`) and keeps any reward file it wrote in `verifier_rewards`, for a verifier that exits non-zero when it could not grade, such as a failed LLM judge. Unset, the exit code is ignored, as in Harbor. A `task.toml` cannot set it. |
 
 ### [gym.tasks."task-id"]
 
@@ -139,7 +140,8 @@ Per-task overrides, keyed by folder name and applied before the multipliers. `en
 key of the task's table: `env` merges over the task's own, `verifier.environment` merges field by field like
 `[environment]` (or, on a task without one, creates it and so selects separate mode), and every other key replaces
 it. `verifier` also takes the Gym-only `inputs` list (see
-[Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs)). `artifacts` adds entries after the task's own.
+[Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs)) and `exit_nonzero`, which overrides
+`verifier_exit_nonzero` for the task. `artifacts` adds entries after the task's own.
 Once `dataset.toml` sets a multiplier other than `1.0` or any override, every task's digest includes the defaults
 and its own (possibly empty) override, so adding the first such key, or removing the last, changes every digest.
 

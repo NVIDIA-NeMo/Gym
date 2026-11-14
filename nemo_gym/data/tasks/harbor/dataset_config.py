@@ -51,6 +51,11 @@ class GymDatasetDefaults(BaseModel):
     # Rollouts per task for an evaluation of the dataset. The generated run config starts from it and a
     # `+num_repeats=` on the command line replaces it. A run fact, not a task fact: it never enters a task's digest.
     num_repeats: int = Field(default=1, ge=1, strict=True)
+    # What a test.sh that exits non-zero without being stopped by its timeout means for every task;
+    # `[gym.tasks."<id>".verifier] exit_nonzero` overrides it. `mask` leaves the trial out of the scores, for a
+    # verifier that exits non-zero when it could not grade (a required LLM judge failing), and keeps any reward file
+    # as metrics. Unset or `score`: the exit code is ignored and the reward file is the score, as in Harbor.
+    verifier_exit_nonzero: Literal["score", "mask"] | None = None
 
 
 class GymTaskOverride(BaseModel):
@@ -306,6 +311,8 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
         verifier_update["timeout_sec"] = verifier.timeout_sec * defaults.timeout_multiplier
     if verifier.environment is not None and defaults.resource_multiplier != 1:
         verifier_update["environment"] = _scale_environment(verifier.environment, defaults.resource_multiplier)
+    if defaults.verifier_exit_nonzero is not None and "exit_nonzero" not in verifier.model_fields_set:
+        verifier_update["exit_nonzero"] = defaults.verifier_exit_nonzero
     if verifier_update:
         verifier = verifier.model_copy(update=verifier_update)
     agent = config.agent

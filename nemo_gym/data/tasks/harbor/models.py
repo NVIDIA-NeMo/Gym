@@ -181,7 +181,11 @@ class HarborVerifier(HarborPhaseSettings):
     for ``main``'s ``tests/score.py``). The server empties ``/logs/verifier`` before a shared verification and
     before the next turn of a multi-step task; these names alone survive, as regular files, so an agent-planted
     report or reward is never left for the grader. Plain file names: no path separators, never the grader's own
-    outputs (:data:`VERIFIER_OUTPUT_NAMES`)."""
+    outputs (:data:`VERIFIER_OUTPUT_NAMES`). ``exit_nonzero`` is a Gym extension set from ``dataset.toml`` alone
+    (``[gym.defaults] verifier_exit_nonzero``, or ``[gym.tasks."<task_id>".verifier] exit_nonzero`` over it; the
+    loader ignores it in a ``task.toml``): ``mask`` leaves out of the scores a trial whose ``test.sh`` exits non-zero
+    without being stopped by its timeout, keeping any reward file as metrics. Unset or ``score``, the exit code is
+    ignored, as in Harbor."""
 
     timeout_sec: float = Field(default=600, gt=0)
     user: str | int | None = None
@@ -190,6 +194,7 @@ class HarborVerifier(HarborPhaseSettings):
     environment: HarborEnvironment | None = None
     collect: list[HarborCollectHook] = Field(default_factory=list)
     inputs: list[str] = Field(default_factory=list)
+    exit_nonzero: Literal["score", "mask"] | None = None
 
     @model_validator(mode="after")
     def shared_has_no_environment(self) -> "HarborVerifier":
@@ -365,6 +370,21 @@ class HarborTaskConfig(HarborSettings):
     # it (not a task.toml key): the default a step inherits for a budget it does not name reads scaled by it too,
     # like the budgets the task names (`step_verifier_timeout_sec`).
     _timeout_multiplier: float = PrivateAttr(default=1.0)
+
+    @classmethod
+    def strip_dataset_only_keys(cls, data: Any) -> list[str]:
+        """Drop from raw ``task.toml`` data the keys only ``dataset.toml`` sets, and return their dotted paths.
+
+        ``[verifier].exit_nonzero`` changes the score and Harbor ignores it, so in a task's own file it stays an
+        unknown key: the task folder scores the same under Gym and under Harbor. Every reader of a raw ``task.toml``
+        drops it before validating, so a value the field would refuse never makes one reader skip a task another
+        one loads. Not for dataset settings, which do set the key.
+        """
+        verifier = data.get("verifier") if isinstance(data, dict) else None
+        if not isinstance(verifier, dict) or "exit_nonzero" not in verifier:
+            return []
+        data["verifier"] = {key: value for key, value in verifier.items() if key != "exit_nonzero"}
+        return ["verifier.exit_nonzero"]
 
     @model_validator(mode="before")
     @classmethod
