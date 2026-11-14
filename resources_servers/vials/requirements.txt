@@ -1,8 +1,0 @@
--e nemo-gym[dev] @ ../..
-
-# Judge verdict schema. Upstream prompts/parsing are vendored with their MIT license.
-pydantic>=2.0
-
-# Hugging Face dataset download and preparation.
-datasets>=2.20
-huggingface_hub>=0.24

@@ -1,3 +1,4 @@
-/images/
 /harbor/
-!/example.jsonl
+
+# Small Harbor smoke index; task folders are generated.
+!/harbor_example.jsonl

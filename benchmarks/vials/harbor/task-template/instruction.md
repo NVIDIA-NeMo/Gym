@@ -1,16 +1,9 @@
-You are an expert scientist working inside a Linux container.
+You are an expert scientist. Study the original scientific image panels and answer the question.
 
-The task image panels are available in canonical order at: ${image_paths}.
-You have access to a shell and may use the software available in the container to inspect and analyze these files. The following Python libraries are installed:
+The image panels are available in canonical order at: ${image_paths}.
+The evaluation uses direct image input without tools. A compatible harness must present these images to the policy model.
 
-- numpy, scipy, sympy
-- pillow, imageio, opencv-python-headless, scikit-image
-- matplotlib, pandas, networkx
-- pytesseract (backed by the tesseract-ocr CLI)
-
-Do not use the internet, external databases, or information outside the files provided for this task. You may write scratch files under /task/ while you work. You may also inspect the original image or cropped regions as additional vision inputs.
-
-When finished, write your response to /task/answer.txt, with the final line in this format:
+Provide your reasoning and a single final answer. The harness must save the completed response to /task/answer.txt, ending with:
 
 ANSWER: <your final answer>
 

@@ -2,7 +2,7 @@ name: vials
 version: 0.1.0
 experimental: true
 kind: benchmark
-integration_profile: custom-gym-verifier
+integration_profile: external-agent-loop
 domain: other
 description: Direct visual question answering on VIALS scientific images with upstream LLM judging.
 modality: multimodal
@@ -15,19 +15,18 @@ reward:
   - 1.0
   higher_is_better: true
 determinism: unknown
-resources_server: vials
-agent_server: simple_agent
+resources_server: null
+agent_server: harbor_agent_general
 datasets:
 - name: vials
   type: benchmark
-  jsonl_fpath: benchmarks/vials/data/vials.jsonl
+  jsonl_fpath: benchmarks/vials/data/harbor/gym.jsonl
   prepare_script: benchmarks/vials/prepare.py
   num_repeats: 1
 - name: vials_example
   type: example
-  jsonl_fpath: benchmarks/vials/data/example.jsonl
+  jsonl_fpath: benchmarks/vials/data/harbor_example.jsonl
   num_repeats: 1
-model_server: policy_model
 canonical_split: test
-prompt_source: prepared
+prompt_source: agent
 lifecycle: active

@@ -1,221 +1,155 @@
 # VIALS: Visual Interpretation of Artifacts in the Life Sciences
 
-The VIALS benchmark evaluates how accurately frontier models interpret visual artifacts
-from professional life sciences workflows. This configuration implements direct
-evaluation: questions and images go to a vision-capable policy model without tools.
+VIALS contains 161 scientific image questions and 174 image panels. The default
+integration exports Harbor tasks and executes them through Gym's shared
+`harbor_agent_general` bridge. The VIALS vision agent sends the original question
+and images to an OpenAI-compatible policy endpoint once, with no tools, and saves
+the answer. Harbor runs the independent judge in a separate verifier container.
+No VIALS Gym resources server or experiment audit proxy is used in this path.
 
-- Integration profile: `custom-gym-verifier`
-- Agent: Gym's existing `simple_agent`
-- Scorer: `resources_servers/vials`
+## Install and prepare
 
-
-An optional Harbor exporter prepares tool-assisted tasks; direct evaluation uses
-the existing configuration unchanged. See the Harbor export instructions below.
-
-## Sources
-
-- Code: https://github.com/Handshake-AI-Research/VIALS
-- Dataset: https://huggingface.co/datasets/handshake-ai-research/VIALS
-- Direct pipeline: vials/pipeline.py
-
-Pinned versions:
-- VIALS code commit: 002a0d25031f02a760da5d14f2c29bbd26eb06e4
-- Hugging Face dataset commit: 9657bf84c6f6e470e1c31123afe3f9152c3655bd
-- Source configuration: `tasks`; source split: `test`; no task filtering.
-
-## Task contract
-
-The full benchmark contains 161 tasks. Each task provides a question
-and one or more images.
-
-The agent receives:
-- The question.
-- All task images embedded in the model input, preserving multi-panel order.
-- The direct-evaluation system prompt and answer instructions from upstream VIALS.
-
-The model returns text with a final line:
-ANSWER: <final answer>
-
-Ground-truth answers and numeric bounds remain outside the model input. There
-are no solver tools, filesystem access, or task sandboxes in this configuration.
-The policy endpoint must support image inputs.
-
-## Scoring
-
-Use the upstream VIALS answer extraction and LLM judge.
-Each attempt receives a binary reward: 1 for correct, 0 otherwise.
-
-Judge model: `gpt-5-mini`, configured separately through Gym's model-server adapter.
-Image-assisted regrading is enabled: unresolved label mappings from the text-only
-judge are regraded with all original panels. Numeric bounds are passed unchanged
-to the upstream judge. Judge usage combines both passes.
-Aggregate metric: mean correctness across task attempts.
-
-Missing/incorrect answers count as zero. Judge/API failures are reported and
-masked from aggregation, unlike the upstream pipeline's zero-score treatment of
-exhausted judge failures. Report masked counts alongside accuracy.
-
-## Evaluation configuration
-
-- Agent: `simple_agent`, one model turn, no tools.
-- Reference policy: Nemotron VL 3.5. Select the adapter with `--model-type` and
-  set `policy_model_name` to the exact model ID exposed by your endpoint. The
-  example uses serving alias `nemotron-vl-3.5`; this does not download or launch
-  a checkpoint. Other vision-capable policies can use the same benchmark config.
-- Upstream reproduction settings: temperature `1.0`, output budget `32768`,
-  three attempts per task, provider-default reasoning effort.
-- The checked-in dataset defaults to one attempt for initial evaluation. Use the
-  explicit evaluation flags below for upstream sampling settings.
-- Judge concurrency defaults to `4`. Transport retries use Gym's model-server
-  client; received but malformed judge JSON is retried up to three times and then
-  scores zero with a diagnostic flag.
-- Record the policy model/version, endpoint, runtime limits, and settings with results.
-
-## Preparation and execution
-
-Run from the Gym repository root in its development environment:
+Use Gym's development setup with Python 3.13.14+. A working Docker-compatible
+engine and Docker Compose are needed on the execution host. Rootless Podman can
+provide the Docker API, but its networking and health checks must work on that
+host. An interactive Slurm allocation alone does not install a container engine.
+The policy may run on another reachable host; the Harbor worker needs no GPU.
 
 ```bash
+uv venv --python 3.13.14
+source .venv/bin/activate
+uv sync --extra dev
+# Install the shared bridge's declared dependencies, including Harbor and Ray.
+uv pip install -e responses_api_agents/harbor_agent_general
+
+docker build -t vials-inputs:local \
+    -f benchmarks/vials/harbor/Dockerfile benchmarks/vials/harbor
+
 gym eval prepare --benchmark vials
-gym env validate vials
-gym env test vials
-gym env test --resources-server vials
+gym env validate --manifest benchmarks/vials/manifest.yaml
 ```
 
-Preparation writes `data/vials.jsonl`, a five-task `data/example.jsonl`, and
-original images under `data/images/`. Inputs are self-contained base64 images;
-`prompt.yaml` is applied during preparation, not again at rollout time. Rerun
-preparation after changing prompts.
-
-Merge the fields from `env.example.yaml` into the repository-root `env.yaml`,
-providing your vision policy endpoint and a separate judge key. Credentials stay
-in local Gym configuration. The default judge uses OpenAI's `gpt-5-mini`; its
-endpoint and model are independently configurable with `judge_base_url`,
-`judge_api_key`, and `judge_model_name`, matching other benchmark recipes. Existing
-`vials_judge_base_url`, `vials_judge_api_key`, and `vials_judge_model_name` overrides
-take precedence when present. Do not set a scalar `vials_judge_model` value: that
-name identifies the judge server instance.
-
-The benchmark config defines the dataset, agent, and verifier. It does not bind
-the policy model implementation. Select `vllm_model` for a vLLM-served Nemotron
-policy, or `openai_model` for a policy endpoint served through that adapter.
-`--benchmark vials` is shorthand for `--config benchmarks/vials/config.yaml`;
-no separate local dataset-selection YAML is needed for this single benchmark.
-
-A one-task smoke evaluation against a vLLM-served policy is:
+Preparation downloads `handshake-ai-research/VIALS`, configuration `tasks`, split
+`test`, at revision `9657bf84c6f6e470e1c31123afe3f9152c3655bd`. No S3 credentials
+are required. It generates `data/harbor/` and a five-task example index. Set
+`VIALS_HARBOR_IMAGE` before preparation to use a different shared image name.
+The exporter can also be used independently:
 
 ```bash
-gym eval run --benchmark vials --model-type vllm_model \
-    --split example --limit 1 --num-repeats 1 \
-    --temperature 1.0 --max-output-tokens 32768 --concurrency 1 \
-    --output results/vials_smoke.jsonl \
-    ++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true
+python -m benchmarks.vials.harbor.adapter --docker-image vials-inputs:local \
+    --output-dir /path/to/tasks --limit 5
 ```
 
-Use the thinking flag only for a checkpoint/chat template that supports it. For
-a policy using Gym's OpenAI adapter, the equivalent smoke command is:
+Each task has instructions, a task configuration, policy-side images and a public
+`vials_input.json`, plus private verifier code, references and trusted image
+copies. The public manifest contains only original prompts and ordered image
+filenames. References and numeric bounds never enter the policy input.
+
+## Configure models
+
+Copy [env.example.yaml](env.example.yaml) into your local root `env.yaml`, merging
+with existing settings, and supply the actual URLs and served model IDs. Export
+`VIALS_POLICY_API_KEY` and `VIALS_JUDGE_API_KEY`. Never commit credentials.
+The policy endpoint must support direct image input and the requested output
+limit plus the prompt within its context window. Gym does not serve weights here.
+The default judge is `gpt-5-mini`. NVIDIA's gateway uses
+`https://inference-api.nvidia.com/v1` and `openai/openai/gpt-5-mini`.
+
+The Harbor worker calls the policy endpoint directly. Do not add `--model-type`;
+this configuration does not start a Gym policy model server.
+
+## Run without tools
 
 ```bash
-gym eval run --benchmark vials --model-type openai_model \
-    --split example --limit 1 --num-repeats 1 \
-    --temperature 1.0 --max-output-tokens 32768 \
-    --output results/vials_smoke.jsonl
+gym eval run --benchmark vials --split benchmark \
+    --num-repeats 8 --concurrency 4 --output results/vials/rollouts.jsonl \
+    ++vials_max_output_tokens=32768
 ```
 
-For a full evaluation, select `--split benchmark`, remove `--limit 1`, and use
-`--num-repeats 3`. For example:
+The single model request explicitly sets `tool_choice: none` and omits `tools`
+(an empty array is rejected by some vLLM versions). No terminal, Python, OCR,
+MCP, or tool loop is exposed. Reading images and saving `/task/answer.txt` are
+harness file transfers, not model-selected tools. The agent writes a standard
+ATIF `trajectory.json`; Gym's shared bridge returns its reward and usage.
+
+Generation settings are forwarded through `harbor_agent.kwargs`. Use
+`++vials_max_output_tokens=131072` or `262144` for the longer Nemotron budgets.
+This includes reasoning tokens. Do not use Gym's `--max-output-tokens` flag for
+this external agent: it does not control Harbor's agent configuration. Defaults
+are temperature 1 and top-p 1; override `vials_temperature` and `vials_top_p` as
+needed. For Nemotron/Qwen thinking, append:
 
 ```bash
-gym eval run --config benchmarks/vials/config.yaml --model-type vllm_model \
-    --split benchmark --num-repeats 3 --concurrency 16 \
-    --temperature 1.0 --max-output-tokens 32768 \
-    --output results/vials_full.jsonl \
-    ++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true
+++vials_chat_template_kwargs.enable_thinking=true
 ```
 
-The source HF split is `test`; the Gym dataset role is `benchmark`, so this recipe
-uses `--split benchmark`, not `--split validation`. The five committed smoke tasks
-have role `example`. The full dataset is regenerated from pinned HF data rather
-than retrieved from Gym's dataset registry.
-
-For separate server and collection terminals, start the same configuration with
-`gym env start --benchmark vials --model-type vllm_model` (including any thinking
-override). Then collect with:
+For DeepSeek, use the endpoint's native template settings:
 
 ```bash
-gym eval run --no-serve --benchmark vials --model-type vllm_model \
-    --agent vials_agent --input benchmarks/vials/data/example.jsonl \
-    --output results/vials_examples.jsonl --num-repeats 1 \
-    --temperature 1.0 --max-output-tokens 32768 --concurrency 1 \
-    ++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true
+++vials_chat_template_kwargs.thinking=true \
+++vials_chat_template_kwargs.reasoning_effort=high
 ```
 
-Inspect policy responses, judge diagnostics, and masked samples before interpreting
-accuracy. Offline verifier fixtures do not establish agreement with live judges.
+The task environment has no network; the host-side agent calls the policy API.
+The separate verifier has public networking for judge calls. Policy and judge
+credentials are installed in the Harbor worker environment; only judge variables
+are declared in the verifier container configuration.
 
-## Harbor export (tool-assisted)
-
-`harbor/adapter.py` follows the other benchmark adapters: its `prepare()` function
-returns a `gym.jsonl` task index, and it can also run as a CLI. It reuses the
-pinned direct preparation when the source JSONL is missing. Generated tasks live
-under `data/harbor/` and are gitignored.
-
-Build the shared scientific-Python runtime on a Docker-capable machine:
+For five representative examples:
 
 ```bash
-docker build -t vials-tools:local -f benchmarks/vials/harbor/Dockerfile benchmarks/vials
+# Terminal 1
+gym env start --benchmark vials
+
+# Terminal 2
+gym eval run --no-serve --benchmark vials --agent vials_agent \
+    --input benchmarks/vials/data/harbor_example.jsonl \
+    --output results/vials/examples.jsonl --num-repeats 1 --concurrency 1
 ```
 
-Export a small suite first:
+On Slurm, request an interactive CPU allocation using your cluster's account and
+partition, configure the container engine on the allocated node, and ensure both
+endpoint URLs are reachable. Request GPUs only when also serving the policy.
+
+## Scoring and evidence
+
+The policy's visible answer must end in `ANSWER: <final answer>`. The standalone
+verifier uses the original VIALS prompts, answer extraction and inclusive numeric
+bounds. An unverifiable text verdict triggers grading with original image panels.
+Missing final answers score zero; exhausted transport failures are trial errors.
+Three received but unparseable verdicts score zero with a diagnostic flag.
+
+Report pass@1 accuracy averaged over eight complete repeats, with the sample SD
+of the eight accuracy percentages. This is not pass@8. Keep all 161 questions,
+including output-truncated answers, in the denominator. Resolve infrastructure
+and judge failures before reporting complete results. Record the model revision,
+thinking settings and output cap.
+
+Harbor artifacts live under `results/vials/harbor/`; rollouts are at the selected
+output path. Inspect `agent/trajectory.json`, `agent/policy-response.json`, and
+verifier `reward.json`/`info.json` to audit image inputs, finish reasons and grading.
+The benchmark remains experimental (`experimental: true` in its manifest).
+The current integration profile is `external-agent-loop`.
+
+## Contributor checks
 
 ```bash
-python -m benchmarks.vials.harbor.adapter \
-    --docker-image vials-tools:local \
-    --verifier-url http://YOUR-GYM-VERIFIER-HOST:PORT/verify \
-    --limit 3
+pytest benchmarks/vials/tests
+gym env validate --manifest benchmarks/vials/manifest.yaml
+pre-commit run --all-files
 ```
 
-`--verifier-url` must point to the running **VIALS resources server** (not the
-head server or a model provider), reachable from the task container. Judge
-credentials and model configuration stay on that Gym server. Start the normal
-VIALS services using `gym env start --benchmark vials --model-type openai_model`
-with the policy/judge settings from `env.yaml`; find the resources server URL
-using `gym env status`. On a remote/container deployment, configure its listen
-address and routing so that this URL is reachable; `localhost` inside a container
-usually addresses the container itself.
+A real container/policy/judge smoke is required in addition to unit tests. Harbor
+and container runtime requirements apply to live trials; optional Harbor unit
+tests skip when Harbor is absent. VIALS uses only the shared Harbor integration; no benchmark-specific Gym resources
+server or alternate direct-Gym configuration is required.
 
-To export all 161 tasks, omit `--limit`. Existing tasks require `--overwrite`;
-use a new output directory when changing to a smaller subset. `--source` can
-select another prepared JSONL, such as `data/example.jsonl`. The ordinary
-direct-evaluation JSONL is not changed when exporting an existing source.
+## Sources and licenses
 
-Each task has instructions, a lightweight Dockerfile copying only ordered images
-on top of the shared runtime, and private `tests/` assets. Harbor must stage the
-tests **after agent execution**, without mounting the full task tree into the
-agent container. The agent writes `/task/answer.txt`; the verifier sends that
-answer and the original grading inputs to Gym and writes Harbor `reward.json`
-plus diagnostic `info.json`. Missing/empty answers score zero. Judge transport
-or masked failures raise a trial error instead of creating a zero reward.
+- VIALS code: `002a0d25031f02a760da5d14f2c29bbd26eb06e4` (MIT).
+- Dataset: `9657bf84c6f6e470e1c31123afe3f9152c3655bd` (CC-BY-4.0).
+- Judge prompts/parser retain upstream notices in the verifier's `upstream.py`.
+- See [UPSTREAM_LICENSE](UPSTREAM_LICENSE), [ATTRIBUTIONS.md](../../ATTRIBUTIONS.md)
+  and [attributions.csv](attributions.csv) for code and image attribution.
 
-The task requests a network allowlist containing only the Gym verifier hostname.
-Use a Harbor backend that enforces that allowlist, and a shared image available
-to its builder. The native `gym eval run <Harbor-folder>` loader currently rejects
-network-restricted tasks; use Harbor itself or a compatible Harbor bridge/backend
-for these exports. A full Harbor rollout and runtime isolation checks remain
-necessary before claiming tool-assisted benchmark results. Export validation is
-not an end-to-end Harbor evaluation. Agent/harness selection and image-input
-support must also be tested for the chosen Harbor harness.
-
-The instructions and scientific package selection adapt upstream VIALS's
-MIT-licensed Harbor adapter at the code revision above. The tool-assisted setting
-differs from the direct runs and must be reported separately.
-
-## Licenses and intended use
-
-Upstream code: MIT (see `UPSTREAM_LICENSE` and
-`resources_servers/vials/UPSTREAM_LICENSE`). Dataset: CC-BY-4.0.
-
-Evaluation only: upstream states that benchmark data must not appear in training
-corpora. Attribute individual images using the upstream dataset's attribution records.
-
-Of the 161 images, 152 are already CC BY 4.0, and the remaining 9 are CC BY 4.0-compatible (CC BY 2.0, CC BY 3.0, CC0, CC BY 4.0 (US), or dual-licensed). Internal lab images originally produced by Handshake AI are released under CC BY 4.0 as part of this dataset. When reusing individual images, please cite the source listed for that task in [attributions.csv](./attributions.csv).
+Evaluation only: upstream specifies that VIALS must not appear in training data.

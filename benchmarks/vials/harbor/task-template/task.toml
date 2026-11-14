@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 version = "1.0"
+artifacts = ["/task/answer.txt"]
 
 [task]
 name = ${task_name}
@@ -12,14 +13,21 @@ user = "agent"
 [verifier]
 timeout_sec = 300
 user = "root"
+environment_mode = "separate"
 
 [verifier.env]
-VIALS_VERIFIER_URL = ${verifier_url}
+VIALS_JUDGE_API_KEY = "$${VIALS_JUDGE_API_KEY}"
+VIALS_JUDGE_BASE_URL = "$${VIALS_JUDGE_BASE_URL:-https://api.openai.com/v1}"
+VIALS_JUDGE_MODEL = "$${VIALS_JUDGE_MODEL:-gpt-5-mini}"
+
+[verifier.environment]
+network_mode = "public"
+cpus = 1
+memory_mb = 1024
 
 [environment]
 workdir = "/task"
 cpus = 2
 memory_mb = 4096
 storage_mb = 2048
-network_mode = "allowlist"
-allowed_hosts = [${verifier_host}]
+network_mode = "no-network"

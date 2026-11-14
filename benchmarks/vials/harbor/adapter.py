@@ -1,76 +1,112 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Export prepared VIALS questions as tool-assisted Harbor tasks."""
+"""Download the pinned VIALS dataset directly into Harbor task folders.
+
+Image handling adapts the MIT-licensed upstream vials/download.py at
+002a0d25031f02a760da5d14f2c29bbd26eb06e4. See ../UPSTREAM_LICENSE.
+"""
 
 import argparse
+import html
 import json
 import math
 import re
 import shutil
 from pathlib import Path
 from string import Template
-from urllib.parse import urlsplit
 
-from benchmarks.vials.prepare import BENCHMARK_DIR, GYM_ROOT, OUTPUT_PATH
-from benchmarks.vials.prepare import prepare as prepare_direct
+from nemo_gym.prompt import load_prompt_config
 
 
+BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = Path(__file__).parent / "task-template"
-DEFAULT_OUTPUT_DIR = OUTPUT_PATH.parent / "harbor"
+DEFAULT_OUTPUT_DIR = BENCHMARK_DIR / "data" / "harbor"
+HF_REPO = "handshake-ai-research/VIALS"
+HF_REVISION = "9657bf84c6f6e470e1c31123afe3f9152c3655bd"
+HF_CONFIG = "tasks"
+HF_SPLIT = "test"
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
-def _task_id(row: dict) -> str:
-    task_id = row["task_id"]
-    if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task_id):
-        raise ValueError(f"Invalid VIALS task ID: {task_id!r}")
-    return f"vials-{task_id}"
+def _task_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+        raise ValueError(f"Invalid VIALS task ID: {value!r}")
+    return f"vials-{value}"
 
 
-def _image_path(value: str) -> Path:
-    path = Path(value)
-    path = path if path.is_absolute() else GYM_ROOT / path
-    if not path.is_file():
-        raise FileNotFoundError(f"VIALS image does not exist: {path}")
-    return path
+def _numeric_bound(value: float | str | None) -> float | None:
+    if value is None:
+        return None
+    bound = float(value)
+    if math.isnan(bound):
+        return None
+    if not math.isfinite(bound):
+        raise ValueError(f"Non-finite numeric answer bound: {value!r}")
+    return bound
 
 
-def _write_task(row: dict, destination: Path, *, docker_image: str, verifier_url: str, verifier_host: str) -> None:
-    images = [_image_path(value) for value in row["image_paths"]]
+def _validate_row(row: dict) -> None:
+    task_id = _task_id(row["id"])
+    for key in ("question", "answer"):
+        if not isinstance(row.get(key), str) or not html.unescape(row[key]).strip():
+            raise ValueError(f"{task_id} requires a nonempty {key}")
+    images = row["images"]
+    if not images or len(images) != len(row["metadata"]["image_filenames"]):
+        raise ValueError(f"{task_id}: image and filename counts must match and be nonzero")
+    if any(not isinstance(image.get("bytes"), bytes) or not image["bytes"] for image in images):
+        raise ValueError(f"{task_id}: images must contain embedded bytes")
+    lower = _numeric_bound(row["metadata"].get("answer_lower_bound"))
+    upper = _numeric_bound(row["metadata"].get("answer_upper_bound"))
+    if lower is not None and upper is not None and lower > upper:
+        raise ValueError(f"{task_id}: answer_lower_bound must not exceed answer_upper_bound")
+
+
+def _write_task(row: dict, destination: Path, *, docker_image: str) -> None:
     shutil.copytree(TEMPLATE_DIR, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     input_dir = destination / "environment" / "input"
+    verifier_images = destination / "tests" / "images"
     input_dir.mkdir(parents=True)
+    verifier_images.mkdir()
     names = []
-    for index, image in enumerate(images, start=1):
-        stem = "image" if len(images) == 1 else f"image_{index}"
-        name = stem + image.suffix.lower()
-        shutil.copy2(image, input_dir / name)
-        names.append(f"/task/{name}")
-    instruction = Template((TEMPLATE_DIR / "instruction.md").read_text()).substitute(
-        image_paths=", ".join(names), question=row["question"]
+    for index, (image, filename) in enumerate(zip(row["images"], row["metadata"]["image_filenames"], strict=True), 1):
+        suffix = Path(filename or "").suffix.lower()
+        if suffix not in _IMAGE_EXTENSIONS:
+            suffix = ".png"
+        stem = "image" if len(row["images"]) == 1 else f"image_{index}"
+        name = stem + suffix
+        (input_dir / name).write_bytes(image["bytes"])
+        # Trusted copies are independent of any agent edits to /task images.
+        (verifier_images / name).write_bytes(image["bytes"])
+        names.append(name)
+    prompts = load_prompt_config(BENCHMARK_DIR / "prompt.yaml")
+    public_input = {
+        "system": prompts.system,
+        "user": prompts.user.format(question=html.unescape(row["question"])),
+        "images": names,
+    }
+    (input_dir / "vials_input.json").write_text(json.dumps(public_input) + "\n")
+    (destination / "instruction.md").write_text(
+        Template((TEMPLATE_DIR / "instruction.md").read_text()).substitute(
+            image_paths=", ".join(f"/task/{name}" for name in names), question=html.unescape(row["question"])
+        )
     )
-    (destination / "instruction.md").write_text(instruction)
-    config = Template((TEMPLATE_DIR / "task.toml").read_text()).substitute(
-        task_name=json.dumps(f"vials/{_task_id(row)}"),
-        verifier_url=json.dumps(verifier_url),
-        verifier_host=json.dumps(verifier_host),
+    (destination / "task.toml").write_text(
+        Template((TEMPLATE_DIR / "task.toml").read_text()).substitute(
+            task_name=json.dumps(f"vials/{_task_id(row['id'])}")
+        )
     )
-    (destination / "task.toml").write_text(config)
-    # Harbor builds only this small input layer on top of the shared runtime.
     (destination / "environment" / "Dockerfile").write_text(
         f"FROM {docker_image}\nCOPY --chown=agent:agent input/ /task/\nWORKDIR /task\nUSER agent\n"
     )
-    # Verifier assets are staged by Harbor after the agent finishes, never COPY'd into the image.
     payload = {
-        key: row[key]
-        for key in (
-            "question",
-            "expected_answer",
-            "responses_create_params",
-            "answer_lower_bound",
-            "answer_upper_bound",
-        )
-        if key in row
+        "question": html.unescape(row["question"]),
+        "expected_answer": html.unescape(row["answer"]),
+        "answer_lower_bound": _numeric_bound(row["metadata"].get("answer_lower_bound")),
+        "answer_upper_bound": _numeric_bound(row["metadata"].get("answer_upper_bound")),
+        "images": [f"images/{name}" for name in names],
+        "domain": row["domain"],
+        "secondary_tags": list(row["metadata"].get("secondary_tags") or []),
     }
     (destination / "tests" / "verifier_input.json").write_text(json.dumps(payload, allow_nan=False) + "\n")
     shutil.copy2(BENCHMARK_DIR / "UPSTREAM_LICENSE", destination / "tests" / "UPSTREAM_LICENSE")
@@ -80,98 +116,76 @@ def _write_task(row: dict, destination: Path, *, docker_image: str, verifier_url
 def prepare(
     *,
     docker_image: str,
-    verifier_url: str,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
-    source: str | Path = OUTPUT_PATH,
     limit: int | None = None,
     overwrite: bool = False,
 ) -> Path:
-    """Download if necessary, export Harbor tasks, and return their Gym JSONL index.
+    """Write Harbor tasks directly from Hugging Face and a bridge compatibility index.
 
-    ``docker_image`` is the shared scientific-Python base image, built from the
-    adjacent Dockerfile. ``verifier_url`` is the reachable Gym VIALS resources
-    server's /verify endpoint; it is not a provider endpoint or an API key.
-    A limit restricts export, not the source download. Existing tasks are never
-    replaced unless overwrite=True. The ordinary direct dataset is preserved.
+    No intermediate evaluation dataset is written. ``gym.jsonl`` contains only
+    task names and empty inputs required by Gym's current shared Harbor bridge.
     """
+    from datasets import Image, load_dataset
+
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", docker_image):
         raise ValueError("docker_image must be a container image reference")
-    endpoint = urlsplit(verifier_url)
-    if (
-        endpoint.scheme not in {"http", "https"}
-        or not endpoint.hostname
-        or endpoint.username is not None
-        or endpoint.password is not None
-        or endpoint.query
-        or endpoint.fragment
-        or endpoint.path != "/verify"
-    ):
-        raise ValueError("verifier_url must be an HTTP(S) /verify endpoint without credentials or query parameters")
-    source = Path(source).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
-    if not source.exists():
-        prepare_direct(output=source)
-    rows = []
-    seen = set()
-    with source.open() as stream:
-        for line in stream:
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            task_id = _task_id(row)
-            if task_id in seen:
-                raise ValueError(f"Duplicate VIALS task ID: {task_id}")
-            seen.add(task_id)
-            for key in ("question", "expected_answer"):
-                if not isinstance(row.get(key), str) or not row[key].strip():
-                    raise ValueError(f"{task_id} requires a nonempty {key}")
-            if not row.get("image_paths") or not isinstance(row.get("responses_create_params"), dict):
-                raise ValueError(f"{task_id} requires image_paths and prepared model inputs")
-            for key in ("answer_lower_bound", "answer_upper_bound"):
-                if row.get(key) is not None and not math.isfinite(float(row[key])):
-                    raise ValueError(f"{task_id} has a non-finite {key}")
-            if limit is None or len(rows) < limit:
-                rows.append(row)
-    if not rows:
-        raise ValueError("VIALS source contains no tasks")
-    selected_ids = {_task_id(row) for row in rows}
-    stale = [path.name for path in output_dir.glob("vials-*") if path.name not in selected_ids]
-    if stale:
+    dataset = load_dataset(HF_REPO, HF_CONFIG, split=HF_SPLIT, revision=HF_REVISION)
+    ids = [_task_id(value) for value in dataset["id"]]
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("VIALS requires a nonempty dataset with unique task IDs")
+    dataset = dataset.cast_column("images", [Image(decode=False)])
+    rows = list(dataset.select(range(min(len(dataset), limit or len(dataset)))))
+    selected_ids = {_task_id(row["id"]) for row in rows}
+    if any(path.name not in selected_ids for path in output_dir.glob("vials-*")):
         raise ValueError("Output contains tasks outside this selection; choose a new output_dir")
-    # Preflight the entire selected set before replacing any existing output.
+    # Validate every selected row before replacing any existing task.
     for row in rows:
-        destination = output_dir / _task_id(row)
+        _validate_row(row)
+        destination = output_dir / _task_id(row["id"])
         if destination.is_symlink():
             raise ValueError(f"Harbor task output must not be a symlink: {destination}")
         if destination.exists() and not overwrite:
             raise FileExistsError(f"Harbor task output already exists: {destination}; use overwrite=True")
-        for image in row["image_paths"]:
-            _image_path(image)
     output_dir.mkdir(parents=True, exist_ok=True)
     index = []
     for row in rows:
-        destination = output_dir / _task_id(row)
+        destination = output_dir / _task_id(row["id"])
         if destination.exists():
             shutil.rmtree(destination)
-        _write_task(
-            row, destination, docker_image=docker_image, verifier_url=verifier_url, verifier_host=endpoint.hostname
-        )
+        _write_task(row, destination, docker_image=docker_image)
         index.append({"task_name": destination.name, "responses_create_params": {"input": []}})
     path = output_dir / "gym.jsonl"
     path.write_text("".join(json.dumps(row) + "\n" for row in index))
+    chosen = []
+    for predicate in (
+        lambda row: len(row["images"]) == 1,
+        lambda row: len(row["images"]) > 1,
+        lambda row: any(
+            _numeric_bound(row["metadata"].get(key)) is not None
+            for key in ("answer_lower_bound", "answer_upper_bound")
+        ),
+    ):
+        for row in rows:
+            name = _task_id(row["id"])
+            if name not in chosen and predicate(row):
+                chosen.append(name)
+                break
+    chosen += [entry["task_name"] for entry in index if entry["task_name"] not in chosen][: max(0, 5 - len(chosen))]
+    (output_dir / "example.jsonl").write_text(
+        "".join(json.dumps({"task_name": name, "responses_create_params": {"input": []}}) + "\n" for name in chosen)
+    )
     shutil.copy2(BENCHMARK_DIR / "attributions.csv", output_dir / "attributions.csv")
-    print(f"Exported {len(index)} tool-assisted VIALS tasks to {output_dir}")
+    print(f"Prepared {len(index)} VIALS Harbor tasks: {output_dir}")
     return path
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--docker-image", required=True)
-    parser.add_argument("--verifier-url", required=True)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--source", type=Path, default=OUTPUT_PATH)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite", action="store_true")
     prepare(**vars(parser.parse_args()))
