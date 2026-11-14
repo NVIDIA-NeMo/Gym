@@ -850,9 +850,13 @@ async def test_a_session_less_verify_only_reads_its_own_persisted_episode(world,
 # --------------------------------------------------------------------------------------------- configuration
 
 
-def test_a_session_server_refuses_more_than_one_worker(tmp_path):
-    with pytest.raises(ValueError, match="num_workers"):
-        make_server(tmp_path, Backends(), num_workers=2)
+def test_the_server_runs_with_several_workers(tmp_path):
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    # Episodes are keyed by resources_session_id, which session routing follows to the worker that holds them.
+    server = make_server(tmp_path, Backends(), num_workers=2)
+    assert server.multiple_workers_unsupported_reason() is None
+    refuse_unsupported_num_workers(server)
 
 
 def test_the_server_declares_stateless_reverification_and_no_ray():
@@ -1218,3 +1222,24 @@ async def test_a_boundary_that_did_not_load_masks_the_episode(real_bundle):
     result = await verify(world, row, session_id)
     assert result.mask_sample is True and result.failure_kind == "agentic_if:evidence_incomplete"
     assert "bundle_gap:boundary_load_receipt_missing" in result.evidence.issues
+
+
+def test_uvicorn_workers_import_a_module_level_app(monkeypatch):
+    # With num_workers > 1, each uvicorn worker imports the entrypoint module's `app`.
+    import runpy
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    from nemo_gym.server_runtime import SimpleServer
+    from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+
+    path = str(Path(__file__).parents[1] / "app.py")
+    started = MagicMock(return_value=object())
+    monkeypatch.setattr(SimpleServer, "run_webserver", started)
+    for key in (IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME):
+        monkeypatch.delenv(key, raising=False)
+    assert "app" not in runpy.run_path(path, run_name="resources_servers.agentic_if.app")
+    started.assert_not_called()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "resources_servers/agentic_if/app.py")
+    assert runpy.run_path(path, run_name="resources_servers.agentic_if.app")["app"] is started.return_value

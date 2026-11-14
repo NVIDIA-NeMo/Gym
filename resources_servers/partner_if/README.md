@@ -138,8 +138,8 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   `{"error": ...}` and the call is graded. Any other failure is the environment's: the model sees only
   `Internal Server Error`, the call leaves no receipt, and the rollout is masked as
   `partner_if:tool_backend_failed`. The verify response adds `tool_calls`, `environment_receipts` (the
-  backend's records) and, in sandboxed mode, `tool_sandbox_id`. Episodes live in the server's memory, so it
-  requires `num_workers: 1`.
+  backend's records) and, in sandboxed mode, `tool_sandbox_id`. Episodes live in the memory of the
+  worker that seeded them, and session routing sends their requests there.
 - `swe_app.py` runs a `live_agent` episode with OpenCode (`opencode_agent`) in the row's Scale-SWE sandbox:
   - An Environment Server seeds each rollout. The server starts the row's image and runs the row's
     `pre_commands`, which also set up the agent's harness, such as OpenCode's system prompt. It then runs
@@ -159,7 +159,7 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   - A run `opencode_agent` reports as `completed` is graded. One its deadline stopped (`incomplete`) or that
     broke (`failed`) is masked as `partner_if:unscorable`.
   - Close, retire and shutdown stop any sandbox that verify did not, and `sandbox_config.ttl_s` is the backstop.
-    Sandboxes live in the server's memory, so it requires `num_workers: 1`.
+    Sandboxes live in the memory of the worker that seeded them, and session routing sends their requests there.
   - `VERIFIER_FIXTURE` grades `tests/swe_verifier_cases.jsonl` through `grade_if`, without the native tests.
     `configs/swe.yaml` validates, but it runs only with a sandbox provider and Scale-SWE rows that carry such a
     contract, which Gym does not ship. OpenCode calls the model from inside the sandbox, so run it with

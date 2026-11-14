@@ -15,7 +15,6 @@ gdp_pdf_sandbox:
       entrypoint: sandbox_app.py
       allowed_agents:
       - opencode_agent
-      num_workers: 1
       sandbox_provider: sandbox
       sandbox_image: ${gdp_pdf_sandbox_image}
       sandbox_config:

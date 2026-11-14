@@ -35,8 +35,9 @@ session regrades the same copy. The harvest holds the session's lock, so a concu
 `close` waits for it, and each `verify` grades its own copy outside the lock. A missing app directory, or one tar cannot read, is a build
 failure. A provider that fails to run the harvest or transfer the archive is the environment's
 failure, not the model's: the sample is masked with that failure kind, and the sandbox is kept so
-a resent `verify` can harvest again (close stops it). Sessions are process-local, so the server
-runs with one worker.
+a resent `verify` can harvest again (close stops it). Each worker keeps the sessions it seeded in
+its memory; with several workers, session routing sends every request of a session to the worker
+that holds it.
 
 The sandbox provider has to support reattaching (`serialize()`/`connect()`), since the agent
 borrows the sandbox from another process. OpenSandbox, Docker, Apptainer and E2B do; enroot and the
@@ -190,7 +191,9 @@ tarball into `artifact_dir`, a directory it shares with this server; `seed_sessi
 directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
 the agent and this server on one host. With Docker, use the agent's own `configs/docker.yaml`; with
 OpenSandbox, set `sandbox_model_base_url` on the agent. See
-[its README](../../responses_api_agents/vibench_agent/README.md).
+[its README](../../responses_api_agents/vibench_agent/README.md). A server with `artifact_dir` set runs with one
+worker: the agent never closes the session its seed opens, so with several workers a relay episode that fails before
+`verify` would leave a worker owning that session until the server exits.
 
 ```bash
 gym env start \
@@ -243,8 +246,8 @@ These are known and deliberate; each is a follow-up rather than a bug.
 - **Grading runs on the resources server's Docker daemon**, not inside a Gym sandbox,
   because ViBench's grading stack is multi-container (app + postgres + code-browse). Folding
   it into one supervisord image is the prerequisite for running this on more than one host.
-- **Sessions are process-local**: the resources server runs with one worker and holds every
-  episode's build sandbox until its verify or close.
+- **Sessions live in worker memory**: the worker that seeded an episode holds its build sandbox
+  until its verify or close, and a restart loses it.
 - **The verifier is itself an LLM agent** driving a browser, so reward is stochastic.
   Profile that variance — repeated grading of one fixed app — before treating this as a
   training signal. `REVERIFY_MODE` is `UNSUPPORTED` for the same reason: scores cannot be

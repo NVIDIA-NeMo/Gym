@@ -201,8 +201,7 @@ config:
 | Harness | Keys Gym sets |
 | --- | --- |
 | `hermes_agent` | `enabled_toolsets: [terminal]`, `chat_template_kwargs_enabled: false`, `sandbox_provider: null` |
-| `terminus_2_sandboxed_agent` | `num_workers: 1`, `resources_server: null` |
-| `miniswe_sandboxed_agent` | `num_workers: 1` |
+| `terminus_2_sandboxed_agent` | `resources_server: null` |
 
 Change these keys on the generated instance, not the shipped one. With `chat_template_kwargs_enabled: false`, Hermes
 does not add `truncate_history_thinking: false`, the vLLM chat template argument that keeps a reasoning model's earlier

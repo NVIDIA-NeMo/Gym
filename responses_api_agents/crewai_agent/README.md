@@ -22,8 +22,8 @@ task's working directory and the tools of the episode's MCP grants, and its mode
 ## Configure a pairing
 
 [`configs/crewai_agent.yaml`](configs/crewai_agent.yaml) declares the agent `crewai_agent` with
-`resources_server: null`, so the Environment Server binds the benchmark. Keep `num_workers: 1`: sessions live in the
-process that seeded them.
+`resources_server: null`, so the Environment Server binds the benchmark. Each agent session lives in the worker that
+seeded it, and routing sends the session's requests to that worker, so the agent runs with any `num_workers`.
 
 The crew calls the Model Server, and the MCP grants, from inside the sandbox, so both must be reachable from it at the
 addresses Gym gives out. Set `use_absolute_ip: true` unless the sandbox shares the host's network: a seed whose model

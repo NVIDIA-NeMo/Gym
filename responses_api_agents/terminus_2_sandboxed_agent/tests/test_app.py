@@ -32,6 +32,7 @@ from nemo_gym.core import (
     agent_route_failure,
     failure_report_for,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.trajectory import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
@@ -748,14 +749,13 @@ class TestNativeSessions:
         assert connect.await_count == 1
         assert client.post("/v1/agent_sessions", json=_seed_body(rollout="other")).status_code == 409
 
-    def test_multiple_workers_are_refused_at_startup(self):
-        # Session state is process-local: a hand-written config fails at `gym env start`, not per episode.
+    def test_episode_sessions_run_with_several_workers(self):
+        # Episode sessions are agent sessions, which session routing follows by agent_session_id.
         config = _native_config()
         config.num_workers = 4
-        with pytest.raises(ValueError, match="num_workers=1"):
-            Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
-        config.num_workers = 1
-        Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+        agent = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert agent.multiple_workers_unsupported_reason() is None
+        refuse_unsupported_num_workers(agent)
 
     def test_benchmark_composition_keeps_its_legacy_workers(self):
         """The shipped template (num_workers: 4) composed onto a benchmark still starts: /run is per request."""
@@ -786,11 +786,10 @@ class TestNativeSessions:
         )
         assert config.num_workers == 4
         assert config.resources_server.name == "terminal_bench_2_1_terminus_2_sandboxed_resources_server"
-        Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
-        # The same block without a resources server is session-only, and four workers are refused.
+        refuse_unsupported_num_workers(Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient)))
+        # The same block without a resources server is session-only, and it runs with four workers too.
         config.resources_server = None
-        with pytest.raises(ValueError, match="num_workers=1"):
-            Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+        refuse_unsupported_num_workers(Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient)))
 
     def test_close_carries_the_runs_observations(self, monkeypatch):
         """seed -> responses -> close: the harness bundle (invocation record, compactions) rides on the close."""

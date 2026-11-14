@@ -55,8 +55,6 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("GDP.pdf sandbox sessions require num_workers=1")
         if self.config.sandbox_config.ttl_s is None:
             raise ValueError("GDP.pdf sandboxes require ttl_s for abandoned episodes")
         # The seed of each session that holds a lent sandbox or is starting one.
@@ -165,6 +163,11 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
             request.session[SESSION_ID_KEY] = session_id
             return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=access)
 
+    def session_release_pending(self, session_id: str) -> bool:
+        # verify leaves the lent sandbox running until close, so with several workers the close must still reach
+        # the worker that holds it.
+        return session_id in self._seeds or super().session_release_pending(session_id)
+
     async def _release(self, session_id: str) -> None:
         await self._sandboxes.release(session_id)
         self._seeds.pop(session_id, None)
@@ -191,4 +194,4 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
 if __name__ == "__main__":
     GdpPdfSandboxResourcesServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = GdpPdfSandboxResourcesServer.run_webserver()
+    app = GdpPdfSandboxResourcesServer.run_webserver()  # noqa: F401

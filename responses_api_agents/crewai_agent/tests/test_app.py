@@ -36,6 +36,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from responses_api_agents.crewai_agent import app
 from responses_api_agents.crewai_agent.app import CrewAIAgent, CrewAIAgentConfig
 from responses_api_agents.crewai_agent.sandbox_runner import configure_crewai
@@ -960,3 +961,10 @@ async def test_unclassified_crew_exception_returns_failed_unknown_and_survives_c
     assert (sandbox.outcome, sandbox.error_type) == ("failed", "RuntimeError")
     assert close.cleanup_confirmed is True
     close_state.assert_awaited_once_with(agent.config.session_close_timeout_seconds)
+
+
+def test_the_agent_runs_with_several_workers() -> None:
+    # Agent sessions are keyed by agent_session_id, which session routing follows to the worker that seeded them.
+    agent = _agent(num_workers=2)
+    assert agent.multiple_workers_unsupported_reason() is None
+    refuse_unsupported_num_workers(agent)
