@@ -27,8 +27,11 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from nemo_gym.client.server_client import ServerClient
 
 
 def _load(name: str, path: Path):
@@ -292,3 +295,159 @@ class TestFunctionCallingWire:
             '\nAssistant (tool call): [{"function": {"arguments": "{\\"command\\": \\"ls\\"}", "name": "bash"}, '
             '"id": "c", "type": "function"}]'
         )
+
+
+@pytest.fixture
+def configured_server(monkeypatch):
+    """Construct a configured model with a mocked completion transport."""
+    backend = SimpleNamespace(create_completion=AsyncMock())
+    create_client = MagicMock(return_value=backend)
+    monkeypatch.setattr(BM, "NeMoGymAsyncOpenAI", create_client)
+
+    def create(**overrides):
+        """Initialize the real server and capture its outgoing backend requests."""
+        config = BM.BaseModelServerConfig(
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            name="model",
+            openai_base_url="http://127.0.0.1:9000/v1",
+            openai_api_key="test-key",
+            openai_model="base",
+            max_tokens=64,
+            temperature=0.6,
+            top_p=0.8,
+            max_concurrent_requests=2,
+            extra_body={"seed": 42},
+            **overrides,
+        )
+        server = BM.BaseModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+        create_client.assert_called_once_with(base_url=config.openai_base_url, api_key=config.openai_api_key)
+        assert server._semaphore._value == 2
+        return server, backend
+
+    return create
+
+
+@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+@pytest.mark.parametrize("wire", ["backticks", "function_calling"])
+@pytest.mark.parametrize("finish", ["stop", "length"])
+def test_configured_model_adapters(configured_server, api, wire, finish):
+    """Exercise initialization, sampling, typed output, tool calls, usage and truncation."""
+    server, backend = configured_server(wire=wire)
+    generated = "ls\n```" if wire == "backticks" else 'name": "bash", "arguments": {"command": "ls"}}]'
+    backend.create_completion.return_value = {
+        "choices": [{"text": generated, "finish_reason": finish}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }
+    messages = [{"role": "user", "content": "task"}]
+    if api == "responses":
+        body = BM.NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": messages,
+                "temperature": 0.0,
+                "top_p": 0.4,
+                "max_output_tokens": 23,
+            }
+        )
+    else:
+        body = BM.NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "requested-model",
+                "messages": messages,
+                "temperature": 0.0,
+                "top_p": 0.4,
+                "max_tokens": 23,
+            }
+        )
+    result = asyncio.run(getattr(server, api)(body))
+    expected = {"model": "base", "max_tokens": 23, "temperature": 0.0, "top_p": 0.4, "seed": 42}
+    defaults = BM.WIRE_DEFAULTS[wire]
+    expected["prompt"] = "\nUser: task" + defaults["steer"] + defaults["primer"] + defaults["prefill"]
+    if wire == "backticks":
+        expected["stop"] = list(BM.DEFAULT_STOP)
+    backend.create_completion.assert_awaited_once_with(**expected)
+    assert result.model == "base"
+    if api == "responses":
+        assert (result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens) == (11, 7, 18)
+        assert result.status == ("incomplete" if finish == "length" else "completed")
+        if finish == "length":
+            assert result.incomplete_details.reason == "max_output_tokens"
+        else:
+            assert result.incomplete_details is None
+        if wire == "function_calling":
+            assert (result.output[0].type, result.output[0].name) == ("function_call", "bash")
+            assert json.loads(result.output[0].arguments) == {"command": "ls"}
+            assert result.output[0].call_id
+        else:
+            assert result.output[0].content[0].text == BM.DEFAULT_PREFILL + generated
+    else:
+        assert (result.usage.prompt_tokens, result.usage.completion_tokens, result.usage.total_tokens) == (11, 7, 18)
+        choice = result.choices[0]
+        assert choice.finish_reason == ("tool_calls" if wire == "function_calling" else finish)
+        if wire == "function_calling":
+            call = choice.message.tool_calls[0]
+            assert call.function.name == "bash"
+            assert json.loads(call.function.arguments) == {"command": "ls"}
+            assert call.id and choice.message.content is None
+        else:
+            assert choice.message.content == BM.DEFAULT_PREFILL + generated
+
+
+def test_configured_wire_overrides_and_sampling_defaults(configured_server):
+    """Explicit stops and custom prompt fields override function-calling defaults."""
+    server, backend = configured_server(
+        wire="function_calling",
+        steer="STEER",
+        primer="PRIMER",
+        prefill="PREFILL",
+        stop=["HALT"],
+        tool_definitions_json="TOOLS",
+    )
+    backend.create_completion.return_value = {"choices": [{"text": "plain reply", "finish_reason": "stop"}]}
+    result = asyncio.run(
+        server.responses(
+            BM.NeMoGymResponseCreateParamsNonStreaming.model_validate(
+                {
+                    "input": [{"role": "user", "content": "task"}],
+                }
+            )
+        )
+    )
+    backend.create_completion.assert_awaited_once_with(
+        model="base",
+        prompt="\nTool definitions:\nTOOLS\n\n\nUser: taskSTEERPRIMERPREFILL",
+        max_tokens=64,
+        temperature=0.6,
+        top_p=0.8,
+        seed=42,
+        stop=["HALT"],
+    )
+    assert result.output[0].content[0].text == "PREFILLplain reply"
+    assert (result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "module_name,worker", [("base_model_worker", True), ("__mp_main__", True), ("base_model_regular", False)]
+)
+def test_multiworker_import_exports_app(monkeypatch, module_name, worker):
+    """Import the entrypoint as a worker and expose its FastAPI application."""
+    from fastapi import FastAPI
+
+    from nemo_gym.models.base_responses_api_model import SimpleResponsesAPIModel
+    from nemo_gym.utils import server_process
+
+    app = FastAPI()
+    start = MagicMock(return_value=app)
+    monkeypatch.setenv(server_process.IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "0")
+    monkeypatch.setenv(
+        server_process.IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "responses_api_models/base_model/app.py"
+    )
+    monkeypatch.setattr(SimpleResponsesAPIModel, "run_webserver", start)
+    worker_module = _load(module_name, Path(__file__).parent.parent / "app.py")
+    if worker and module_name != "__mp_main__":
+        assert worker_module.app is app
+        start.assert_called_once_with()
+    else:
+        assert not hasattr(worker_module, "app")
+        start.assert_not_called()
