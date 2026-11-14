@@ -1,0 +1,2 @@
+config_paths:
+- resources_servers/mm_coding_training/configs/mm_coding_multi.yaml

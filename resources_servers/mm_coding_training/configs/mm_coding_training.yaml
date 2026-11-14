@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+head_server:
+  host: 127.0.0.1
+mm_coding_training:
+  resources_servers:
+    mm_coding_training:
+      host: 127.0.0.1
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Single-answer visual coding training with independent remote execution
+        and quality grading.
+      value: Train chart, SVG, document and webpage generation on the same execution-gated
+        quality reward.
+      reference_root: ${oc.env:MM_CODING_REFERENCE_ROOT,environments/mm_coding_single/data}
+      sandbox_provider: sandbox
+      sandbox_image: ${oc.env:MM_CODING_SANDBOX_IMAGE}
+      judge_model_server:
+        type: responses_api_models
+        name: mm_coding_quality_judge
+      judge_model: ${oc.env:MM_CODING_JUDGE_MODEL}
+      judge_api: chat_completions
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mm_coding_training/data/example.jsonl
+      allowed_agents:
+      - simple_agent
+mm_coding_training_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      host: 127.0.0.1
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mm_coding_training
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+mm_coding_training_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      host: 127.0.0.1
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mm_coding_training
+      agent_server:
+        type: responses_api_agents
+        name: mm_coding_training_simple_agent
+      resources_tool_transports: []
+      default_episode_timeout_seconds: 3600
+      cleanup_timeout_seconds: 300
+mm_coding_quality_judge:
+  responses_api_models:
+    openai_model:
+      host: 127.0.0.1
+      entrypoint: app.py
+      openai_base_url: ${oc.env:MM_CODING_JUDGE_BASE_URL,https://api.openai.com/v1}
+      openai_api_key: ${oc.env:MM_CODING_JUDGE_API_KEY,""}
+      openai_model: ${oc.env:MM_CODING_JUDGE_MODEL}
+      openai_default_headers: {}
+      max_concurrent_requests: 8
+      drop_output_reasoning_items: true

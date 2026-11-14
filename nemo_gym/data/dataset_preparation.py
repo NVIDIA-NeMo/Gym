@@ -1303,7 +1303,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         # Count each source row once, using its original JSONL line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
-                        if d.taskset is not None:
+                        if d.taskset is not None and is_materialized_task_row(row):
+                            # A prepared task row already names its taskset; it must be this dataset's.
+                            if row["task_id"].get("taskset") != d.taskset:
+                                raise ValueError(
+                                    f"{d.jsonl_fpath} row {row_index}: task_id.taskset "
+                                    f"{row['task_id'].get('taskset')!r} differs from the dataset taskset {d.taskset!r}"
+                                )
+                        elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization, and keep a row's
                             # request to skip token capture.

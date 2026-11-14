@@ -1,0 +1,3 @@
+{"name": "execution_failed", "kind": "zero_reward", "request": {"executed": false}, "expected_reward": 0.0}
+{"name": "faithful", "kind": "full_reward", "request": {"executed": true, "verdict": {"quality": 1.0, "task_fidelity": 1.0, "visual_fidelity": 1.0, "reason": "Faithful"}}, "expected_reward": 1.0}
+{"name": "missing_judge", "kind": "malformed", "request": {"executed": true}, "expected_error": "Successful execution requires a verdict"}

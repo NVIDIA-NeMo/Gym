@@ -981,6 +981,23 @@ class TestBuildVerifyPayload:
         assert result["task"] == "q1"
         assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
 
+    def test_preserves_a_saved_source_and_its_binding(self) -> None:
+        """A verifier that grades a saved source again gets the source, its SHA256 and its binding."""
+        saved = {"source_artifact": "<svg/>", "source_sha256": "a" * 64, "source_binding_sha256": "b" * 64}
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={
+                "response": {"output": "x"},
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
+                **saved,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {"task": "q1", "response": {"output": "x"}, **saved}
+
 
 # ---------------------------------------------------------------------------
 # Judge-failure recovery helpers (--judge-failed-only)

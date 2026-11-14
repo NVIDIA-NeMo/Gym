@@ -55,6 +55,7 @@ def test_conversion_preserves_model_and_verifier_fields_without_mutating_source(
         "_ng_attempt_index": 1,
         "_ng_rollout_id": "rollout",
         "_ng_custom_metadata": "collector-only",
+        "_rowidx": 7,
     }
     original = deepcopy(row)
     task = materialize_task(row, taskset="test")
@@ -403,3 +404,32 @@ def test_single_agent_task_data_container_merges_flat_fields_and_rejects_conflic
 def test_single_agent_input_rejects_invalid_task_data_container(invalid):
     with pytest.raises(ValidationError):
         SingleAgentTurnTaskInput.model_validate({"responses_create_params": {"input": "x"}, "task_data": invalid})
+
+
+@pytest.mark.parametrize("unexpected", [None, "unknown_task_field"])
+def test_rl_stream_index_stays_outside_strict_seed_task(unexpected: str | None) -> None:
+    class StrictSeed(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        question: str
+
+    row = {
+        "_rowidx": 7,
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 7,
+        "_ng_rollout_id": "rollout",
+        "responses_create_params": {"input": "Answer the question"},
+        "question": "What is 2 + 2?",
+    }
+    if unexpected is not None:
+        row[unexpected] = "must remain visible to schema validation"
+    request = SingleAgentTurnRequest.model_validate(
+        {"episode_id": {"rollout_id": "rollout"}, "task": materialize_task(row, taskset="test")}
+    )
+    assert row["_rowidx"] == 7
+    task_data = request.task.task_input.task_data
+    assert "_rowidx" not in task_data
+    if unexpected is None:
+        assert StrictSeed.model_validate(task_data).question == row["question"]
+    else:
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            StrictSeed.model_validate(task_data)

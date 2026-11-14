@@ -119,6 +119,22 @@ def _missing_content(value: object) -> bool:
     return False
 
 
+def _missing_request_content(value: object) -> bool:
+    """Inspect payloads while treating declared function parameters as JSON Schema."""
+    if not isinstance(value, dict) or not isinstance(value.get("tools"), list):
+        return _missing_content(value)
+    tools = []
+    for tool in value["tools"]:
+        if isinstance(tool, dict) and tool.get("type") == "function":
+            tool = dict(tool)
+            if isinstance(tool.get("function"), dict):
+                tool["function"] = {k: v for k, v in tool["function"].items() if k != "parameters"}
+            else:
+                tool.pop("parameters", None)
+        tools.append(tool)
+    return _missing_content({**value, "tools": tools})
+
+
 def _resolve(reference: dict, calls: list[dict]) -> list[int]:
     if not Draft202012Validator(MODEL_CALL_REF).is_valid(reference):
         return []
@@ -461,7 +477,8 @@ class Inspector:
                 location="$.ng_trajectory.model_calls",
                 reason="external, encrypted or invalid media is unavailable to this reader",
                 predicate=lambda: not any(
-                    (_missing_content(c.get(k)) for c in self.calls for k in ("request", "response"))
+                    _missing_request_content(c.get("request")) or _missing_request_content(c.get("response"))
+                    for c in self.calls
                 ),
                 available=self.available,
                 depends_on=("model_calls.present", "calls.request", "calls.response"),

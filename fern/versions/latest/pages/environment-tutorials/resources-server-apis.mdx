@@ -529,8 +529,11 @@ into it, with conflicting values rejected. Dataset metrics count custom rows
 without requiring Responses API fields; response-specific metrics are collected
 only when those fields validate.
 The source JSONL stays unchanged and can still be shared with flat-row recipes.
-Omit `taskset` to keep the current flat-row format. This option accepts flat input
-only; already materialized input should be passed directly with `--input`.
+Omit `taskset` to keep the current flat-row format. With `taskset`, collation also
+accepts already materialized rows whose `task_id.taskset` matches the dataset's
+declaration and preserves their task input. A mismatched taskset is rejected
+rather than silently rerouted. Already materialized input may also be passed
+directly with `--input` to bypass collation.
 
 For example, add these keys to a config whose `swebench_pro_hermes` Environment
 Server binds the `swebench_pro_hermes_resources_server` instance:
