@@ -16,10 +16,18 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
+import re
 from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
-from swebench.harness.constants import END_TEST_OUTPUT, FAIL_ONLY_REPOS, MAP_REPO_TO_EXT, START_TEST_OUTPUT
+from swebench.harness.constants import (
+    END_TEST_OUTPUT,
+    FAIL_ONLY_REPOS,
+    MAP_REPO_TO_EXT,
+    START_TEST_OUTPUT,
+    TestStatus,
+)
+from swebench.harness.grading import get_logs_eval
 from swebench.harness.run_evaluation import *
 
 from nemo_gym import PARENT_DIR
@@ -227,6 +235,13 @@ async def run_instance(
             test_log_path=test_output_path,
             include_tests_status=True,
         )
+        # A run whose required tests could not run because a warning was raised as an error is not a verdict.
+        if not eval_report[instance_id]["resolved"]:
+            blocked = warning_blocking_required_tests(
+                test_spec, test_output, get_logs_eval(test_spec, str(test_output_path))[0]
+            )
+            if blocked:
+                raise EvaluationError(instance_id, blocked, logger)
         # Failure-only grading counts every test missing from the log as passing, so a suite that never started or
         # stopped part way would read as resolved. Accept that verdict only from a suite that ran to completion.
         if (
@@ -300,6 +315,127 @@ def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
             "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
         env["CONDA_PREFIX_1"] = "/opt/miniconda3"
+
+
+# Make every pytest run in a Python evaluation script print its per-test result lines (-rA), which the log parsers read.
+# Some repos run pytest through another tool without the flag: a SWE-bench Verified Sphinx run goes through tox, whose
+# commands line has no -rA when the image's tox.ini edit is missing. tox passes PYTEST_ADDOPTS on to pytest.
+PYTEST_RESULT_SUMMARY = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"'
+
+
+def patch_swebench_pytest_result_summary(test_spec: TestSpec) -> None:
+    if MAP_REPO_TO_EXT.get(test_spec.repo) != "py" or PYTEST_RESULT_SUMMARY in test_spec.eval_script_list:
+        return
+    start = f": '{START_TEST_OUTPUT}'"
+    if start not in test_spec.eval_script_list:
+        raise ValueError(f"The evaluation script of {test_spec.instance_id} has no start-of-test-output marker")
+    test_spec.eval_script_list.insert(test_spec.eval_script_list.index(start), PYTEST_RESULT_SUMMARY)
+
+
+# A warning that pytest raised as an error shows as `E   DeprecationWarning: ...` in the report of a failing test or a
+# failed collection. Some repos, such as Astropy, raise every DeprecationWarning as an error after resetting the
+# warning filters, so no setting from outside the repo's test configuration can undo it.
+_WARNING_RAISED_AS_ERROR = re.compile(r"^E\s+((?:[\w.]+\.)?\w*Warning: .*)$")
+# The frame that raised it ends a long traceback (`path:12: PytestRemovedIn8Warning`). A short traceback has the
+# frame before the error lines (`path:12: in minversion`).
+_RAISING_FRAME = re.compile(r"^(\S+):\d+: (?!in )\S")
+_CALLING_FRAME = re.compile(r"^(\S+):\d+: in ")
+_SECTION_RULE = re.compile(r"^[_=]{3,}")
+# Frames in an installed package or the standard library. The repo's own files have a relative path or one under
+# the checkout.
+_OUTSIDE_THE_REPO = re.compile(r"/(?:site|dist)-packages/|/lib/python\d|^<frozen ")
+
+
+def _warning_origins(lines: list[str]) -> list[tuple[str, Optional[str]]]:
+    """Each warning raised as an error, with the file of the frame that raised it (None if the report shows none)."""
+    origins = []
+    for index, line in enumerate(lines):
+        warning = _WARNING_RAISED_AS_ERROR.match(line)
+        if warning is None:
+            continue
+        after = index + 1
+        while after < len(lines) and (not lines[after].strip() or lines[after].startswith("E ")):
+            after += 1
+        frame = _RAISING_FRAME.match(lines[after]) if after < len(lines) else None
+        before = index - 1
+        while frame is None and before >= 0 and not _SECTION_RULE.match(lines[before]):
+            frame = _CALLING_FRAME.match(lines[before])
+            before -= 1
+        origins.append((warning.group(1), frame.group(1) if frame else None))
+    return origins
+
+
+# pytest prints one section per failing test or failed collection, headed `___ ERROR at setup of Class.test ___` or
+# `___ ERROR collecting path ___`, and ends the last one at the next `===` banner.
+_SECTION_HEADER = re.compile(r"^_{2,} (.+?) _{2,}\s*$")
+_ERROR_SECTION = re.compile(r"^ERROR (?:at (?:setup|teardown) of|collecting) (.+)$")
+
+
+def _outside_warning_sections(test_output: str) -> tuple[Dict[str, list[bool]], list[bool], Optional[str]]:
+    """For each test, and for the collections, whether each of its error sections is a warning from outside the repo.
+
+    Returns the sections of tests by name (`Class.test`), those of collections, and the first warning found.
+    """
+    tests: Dict[str, list[bool]] = {}
+    collections: list[bool] = []
+    first: Optional[str] = None
+    name, body = None, []
+
+    def close() -> None:
+        nonlocal first
+        error = _ERROR_SECTION.match(name) if name else None
+        if error is None:
+            return
+        origins = _warning_origins(body)
+        outside = bool(origins) and all(path and _OUTSIDE_THE_REPO.search(path) for _, path in origins)
+        if outside and first is None:
+            first = f"{origins[0][1]}: {origins[0][0][:200]}"
+        if name.startswith("ERROR collecting"):
+            collections.append(outside)
+        else:
+            tests.setdefault(error.group(1), []).append(outside)
+
+    for line in test_output.splitlines():
+        header = _SECTION_HEADER.match(line)
+        if header or line.startswith("=="):
+            close()
+            name, body = (header.group(1) if header else None), []
+        elif name is not None:
+            body.append(line)
+    close()
+    return tests, collections, first
+
+
+def warning_blocking_required_tests(
+    test_spec: TestSpec, test_output: str, status_map: Dict[str, str]
+) -> Optional[str]:
+    """Why the required tests could not run, or None when they ran or failed for another reason.
+
+    The model did not fail a test that errored or never started because a warning from code outside the repo became
+    an error (an installed package, the standard library or pytest itself), so the run has no verdict. Each test
+    that did not run must be explained that way by its own error section, or by a failed collection when it is
+    missing. A test that reported FAILED, a warning raised from a file of the repo, an error of another kind, or a
+    report that does not show where a warning was raised keeps the normal grading.
+    """
+    if MAP_REPO_TO_EXT.get(test_spec.repo) != "py":
+        return None
+    required = [*test_spec.FAIL_TO_PASS, *test_spec.PASS_TO_PASS]
+    statuses = {test: status_map.get(test) for test in required}
+    if TestStatus.FAILED.value in statuses.values():
+        return None
+    not_run = {test: status for test, status in statuses.items() if status in (None, TestStatus.ERROR.value)}
+    if not not_run:
+        return None
+    tests, collections, first = _outside_warning_sections(test_output)
+    for test, status in not_run.items():
+        # A failed collection stops pytest, so a test missing from the report is explained by every collection error.
+        sections = collections if status is None else tests.get(test.split("::", 1)[-1].replace("::", "."), [])
+        if not sections or not all(sections):
+            return None
+    return (
+        f"The {test_spec.repo} test run did not run all required tests: a warning was raised as an error "
+        f"by code outside the repo ({first})"
+    )
 
 
 ########################################
