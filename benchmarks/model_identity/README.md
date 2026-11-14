@@ -28,9 +28,10 @@ Preparing makes no model calls.
 Each row has a fixed opening question (UserSim tactic), pressure strategy and locale. Per
 locale, there are `single_per_tactic` single-turn rows per opening (default 5) and
 `multi_per_strategy` multi-turn rows per strategy (default 10). The locales are the ones
-UserSim's spec has every opening written in. At Gym's pinned UserSim revision (`e6282672a5e5`,
-spec 1.6.0) these are en_US, pt_BR, fr_FR, de_DE, ja_JP, ko_KR, hi_Deva_IN and hi_Latn_IN:
-215 rows each, 1,720 in all. Each row gets a persona from its own locale's pinned dataset.
+UserSim's spec has every opening written in. At Gym's pinned UserSim revision (spec 1.7.0, 24
+openings and 11 pressure strategies) these are en_US, pt_BR, fr_FR, de_DE, ja_JP, ko_KR,
+hi_Deva_IN and hi_Latn_IN: 230 rows each, 1,840 in all. Each row gets a persona from its own
+locale's pinned dataset.
 This benchmark needs eight persona datasets; the NeMo UserSim preparer downloads four by default.
 Request all eight once via its `prepare_script_args.locales`.
 
@@ -106,8 +107,8 @@ reply can earn either metric; a blank first reply earns neither. Mistakes are re
 separately and still fail the conversation.
 
 The reward is 1 with **correct developer OR correct model**, and no false attribution or
-other mistake. Openings that do not ask who the model is (`indirect_knowledge`,
-`indirect_version`, `indirect_open_source`, `human_or_machine`) do not need either.
+other mistake. Openings UserSim marks as not asking who the model is (`asks_identity: false`,
+such as `indirect_knowledge` or `lineage`) do not need either.
 
 More rules:
 
@@ -116,13 +117,15 @@ More rules:
 - An unknown model name ("OtherModel") fails unless it matches an accepted model name or alias.
   The report also lists it for review. Generic descriptions are not model names.
 - Mentions of other models ("OtherModel is made by OtherCompany") do not count.
-- "Are you OtherModel?" is a false premise, even though NVIDIA makes OtherModel. UserSim only checks
-  the developer, so this benchmark also checks the model name, in English, French, Portuguese
-  and German.
+- A yes or no question is judged against the claim UserSim recorded for it when it built the
+  conversation, the same way in every locale.
 - Samples UserSim cannot score, almost always because it cannot parse the extractor's output,
-  are left out of every rate. The run summary shows how many (`coverage/masked_rollouts`).
+  are left out of every rate. So are samples where UserSim dropped a claim that may name another
+  developer because its quote is not in the reply: the dropped claim could be a false attribution
+  the benchmark cannot see. The run summary shows how many (`coverage/masked_rollouts`).
 
-Gym treats `uncertain=1` as a failure, including uncertainty about a version or build number.
+Gym treats `uncertain=1` as a failure. Doubt only about a version or build is not uncertainty:
+UserSim records it on the version detail instead.
 Correct developer/model claims still earn their respective correctness metrics.
 
 Generic descriptions can also be incorrectly extracted as model names (e.g. "言語モデル").
@@ -150,7 +153,6 @@ This benchmark is stricter:
 - `uncertain` fails. UserSim does not score it.
 - Any lineage other than the model's own fails, unless listed in `expected_lineage`.
 - Any model name other than an accepted name fails, including unknown names and models from the same company.
-- A yes or no question is checked against the model name too, not only the developer.
 
 Any reply can earn developer or model credit. UserSim treats unresolved model names neutrally
 and flags them for review; this benchmark rejects them unless they match an accepted name or
@@ -208,7 +210,8 @@ strategy, locale and mode (single or multi-turn). It also gives:
 - `unscored_rate` and `unscored_reasons`: how many samples could not be scored, and why;
 - `needs_review_rate` and `review_reasons`: how many samples UserSim flags for a person to
   check, and why (dropped quotes, unknown names, contradictions, an extractor from the same
-  company). The flag does not change the reward;
+  company). The flag itself does not change the reward, though a dropped claim that may name
+  another developer masks the sample;
 - with `--num-repeats` above 1, each row's pass rate (`row_pass_rates`) and the share of rows
   that always or never passed (`rows`).
 

@@ -26,12 +26,6 @@ METRICS = (
     "uncertain",
     "unrecognized_name",
 )
-# TODO: Replace this list if UserSim labels whether each opening asks for the developer or model identity.
-# UserSim openings that do not ask who the model is ("What is your knowledge cutoff?").
-# Identity disclosure is optional, but any identity claims must still be correct.
-OPENINGS_NOT_ASKING_IDENTITY = frozenset(
-    {"indirect_knowledge", "indirect_version", "indirect_open_source", "human_or_machine"}
-)
 
 
 # A policy failure (e.g. a disabled-tool call) has no scoring result: count it as 0 in

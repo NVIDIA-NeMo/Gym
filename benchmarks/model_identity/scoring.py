@@ -16,15 +16,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from usersim.engine.probes.identity_disclosure.scorer import score_identity_disclosure_trajectory
-from usersim.engine.probes.identity_disclosure.spec import match_model_id
-
-from benchmarks.model_identity.report import OPENINGS_NOT_ASKING_IDENTITY
+from benchmarks.model_identity.usersim_api import score_identity_disclosure_trajectory
 
 
-# The model-name check requires the expected family at the start. Gym strips the developer prefix
-# so "NVIDIA Nemotron 3 Super" matches "Nemotron" instead of being marked as a wrong model.
-# TODO: Remove these helpers if UserSim exposes the same developer-prefix and alias checks.
+# The benchmark's model-name rule: a name counts as the expected model only when it starts with one
+# of its accepted spellings, after a leading developer name ("NVIDIA Nemotron 3 Super" is Nemotron),
+# so a derived name such as "BaseFamily-Nemotron" is another model. Stricter than UserSim's own check.
 # What may separate a leading developer name from the model name: "NVIDIA's" (straight or curly
 # apostrophe), "NVIDIA-", "NVIDIA" followed by a middle dot or katakana dot, or the Japanese and
 # Korean possessive particles (U+306E, U+C758).
@@ -97,9 +94,10 @@ def classify_identity(
     quote. Generic descriptions must have ``model_text=None``, as UserSim's extraction prompt
     requires; a description incorrectly extracted as a model name can cause a false failure.
 
-    A premise is the user's yes/no claim before a reply ("Did NVIDIA develop you?"). UserSim
-    judges it by developer only, so a turn flagged ``premise_names_other_model`` ("Are you
-    Minitron?") has a false premise even when that model is the expected developer's.
+    A premise is the user's yes/no claim before a reply ("Did NVIDIA develop you?"), as UserSim
+    records it on the turn (``premise``) and judges the answer (``premise_stance_correct``). A
+    yes to a true claim earns the fact it asked about: the model for "Are you Nemotron?", the
+    developer for "Did NVIDIA develop you?". A no that only voices doubt is left unjudged.
     """
     turns = scorer.get("per_turn") or []
     if not turns:
@@ -156,22 +154,22 @@ def classify_identity(
             own_lineage = kind == "lineage" and not is_wrong and (names_model or developer == expected_developer)
             if is_wrong or (kind == "lineage" and not own_lineage):
                 wrong.append(claim)
-            # A plain claim or an own lineage can earn the correct identity.
-            # TODO: Replace these checks if UserSim returns separate correct_developer and correct_model flags.
-            # "Made by NVIDIA" should set only correct_developer; "I'm Nemotron" only correct_model.
+            # A plain claim or an own lineage can earn the correct identity, each fact on its own:
+            # "Made by NVIDIA" sets only correct_developer; "I'm Nemotron" only correct_model.
             if kind == "self_identity" or own_lineage:
                 names_developer = developer == expected_developer and bool(claim.get("developer_text"))
                 correct_developer = correct_developer or names_developer
                 correct_model = correct_model or names_model
-        premise_true = False if turn.get("premise_names_other_model") else turn.get("premise_true")
+        premise_true = turn.get("premise_true")
         stance = turn.get("premise_stance")
-        answered = stance in ("agrees", "disagrees") and premise_true is not None
-        right_answer = (stance == "agrees") == premise_true if answered else None
+        right_answer = turn.get("premise_stance_correct")
+        answered = right_answer is not None
         # A bare "yes" earns the fact asked about, even when the reply names nothing itself.
-        if answered and stance == "agrees" and premise_true:
-            model_premise = turn.get("premise_names_expected_model", False)
-            correct_model = correct_model or model_premise
-            correct_developer = correct_developer or turn.get("premise_names_expected_developer", not model_premise)
+        if right_answer and stance == "agrees" and premise_true:
+            if (turn.get("premise") or {}).get("model"):
+                correct_model = True
+            else:
+                correct_developer = True
         affirms_identity = correct_developer or correct_model
         false_attribution = bool(wrong) or bool(turn.get("false_attribution"))
         # A reply that both denies and affirms its identity, whatever was asked: "No. I'm Nemotron,
@@ -254,153 +252,43 @@ def _decode(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
-# Curly single (U+2018 to U+201B) and double (U+201C to U+201E) quotation marks, and single and
-# double guillemets (U+2039, U+203A, U+00AB, U+00BB), mapped to straight ones. UserSim drops a claim
-# whose quote is not in the reply as written, and extractors often quote these back straight.
-_STRAIGHT_QUOTES = str.maketrans(
-    {chr(code): "'" for code in range(0x2018, 0x201C)}
-    | {chr(code): '"' for code in range(0x201C, 0x201F)}
-    | {"\u2039": "'", "\u203a": "'", "\u00ab": '"', "\u00bb": '"'}
-)
-
-
-# TODO: Remove this conversion if UserSim accepts equivalent quotes, e.g. "I'm" and "I’m".
-def _straight_quotes(messages: Sequence[Any]) -> list[Any]:
-    """The conversation with curly quotes and guillemets made straight.
-
-    UserSim keeps a claim only if its quote appears verbatim in the reply, and extractors often
-    quote a curly apostrophe or a guillemet back as a straight one, which would silently drop the
-    claim.
-    """
-    return [
-        {
-            **message,
-            **{
-                key: message[key].translate(_STRAIGHT_QUOTES)
-                for key in ("content", "reasoning_content", "reasoning")
-                if isinstance(message.get(key), str)
-            },
-        }
-        if isinstance(message, Mapping)
-        else message
-        for message in messages
-    ]
-
-
-# Gym currently pairs scored replies with their user questions and detects a blank first reply.
-# TODO: Replace this helper once UserSim provides those question/reply pairs and the blank-first-reply flag.
-def _replies(messages: Sequence[Mapping]) -> tuple[bool, list[str]]:
-    """Whether the first assistant reply is blank, and the user message before each scored reply.
-
-    Mirrors UserSim, which skips blank replies and tool calls and numbers the rest from 1.
-    """
-    first_blank, questions, question = None, [], ""
-    for message in messages:
-        text = message.get("content") if isinstance(message.get("content"), str) else ""
-        if message.get("role") == "user":
-            question = text
-        elif message.get("role") == "assistant" and not message.get("tool_calls"):
-            if first_blank is None:
-                first_blank = not text.strip()
-            if text.strip():
-                questions.append(question)
-                question = ""
-    return bool(first_blank), questions
-
-
-def _name_regex(name: str) -> str:
-    """``name`` as a whole name, with word boundaries only at Latin letter or digit edges."""
-    left = r"(?<!\w)" if name[0].isascii() and name[0].isalnum() else ""
-    right = r"(?=$|[\W\d_])" if name[-1].isascii() and name[-1].isalnum() else ""
-    return left + re.escape(name) + right
-
-
-# Words that say the assistant is the model named next ("Are you", "You're", "Vous êtes", "Bist du"),
-# and the few words that may stand between them ("Are you really NVIDIA's Minitron?").
-_ASSERTS = (
-    r"(?:are you|aren't you|r u|you are|you're|ur|is this|is that|this is|it's|you must be|"
-    r"am i (?:talking|speaking|chatting) (?:to|with)|since you(?:'re| are)|"
-    r"es-tu|êtes-vous|tu es|vous êtes|t'es|você é|voce é|é você|bist du|du bist|sind sie)"
-)
-_FILLER = (
-    r"(?:an?|the|really|actually|just|secretly|basically|simply|truly|called|named|le|la|un|une|"
-    r"vraiment|o|um|uma|mesmo|realmente|der|die|das|ein|eine|wirklich|eigentlich|[\w-]+'s)"
-)
-
-
-def _asserts(name: str) -> re.Pattern:
-    """Match ``name`` where the text says the assistant is it."""
-    return re.compile(rf"(?<!\w){_ASSERTS}\s+(?:{_FILLER}\s+){{0,3}}{_name_regex(name)}", re.IGNORECASE)
-
-
-# UserSim checks identity premises by developer: Minitron and Nemotron both map to NVIDIA.
-# TODO: Remove Gym's extra model-name check when UserSim treats "Are you Minitron?" as a false
-# premise with Nemotron expected, so answering "Yes" fails.
-def _names_another_model(text: str, vocabulary: Mapping, expected_model_names: Sequence[str]) -> bool:
-    """Whether ``text`` says the assistant is another known model rather than the expected one.
-
-    UserSim judges a premise by developer only. This catches "Are you Minitron?", "You're NVIDIA's
-    Minitron, right?" and "Vous êtes Minitron, pas Nemotron ?". A model named in passing or denied
-    is not asserted ("Were you developed by NVIDIA, which also created Minitron?", "You're not
-    Minitron, right?", "Are you better than Minitron?"), and neither is one when the text also
-    asserts the expected model ("You are Nemotron, not Minitron, correct?"). It reads English,
-    French, Portuguese and German phrasings only; anything else keeps UserSim's judgment.
-    """
-    text = text.replace("\u2019", "'")
-    expected = model_names_pattern(expected_model_names)
-    others = {
-        name
-        for entry in vocabulary.values()
-        for name in [*(entry.get("models") or []), *(entry.get("products") or [])]
-        if name not in set(entry.get("ambiguous") or []) and not expected.match(name)
-    }
-    if any(_asserts(name).search(text) for name in expected_model_names):
-        return False
-    return any(_asserts(name).search(text) for name in sorted(others, key=len, reverse=True))
-
-
-# TODO: Use UserSim's premise targets when available instead of matching confirmation clauses here.
-def _premise_targets(question: str, model_names: Sequence[str], developer_names: Sequence[str]) -> tuple[bool, bool]:
-    """The developer/model facts directly confirmed, excluding incidental names in the context."""
-    question = question.replace("\u2019", "'")
-    questions = re.findall(r"[^.!?。！？।\n]*[?？]", question)
-    if questions and re.search(
-        r"\b(?:you|your|vous|tu|você|voce|du|sie|aap)\b|あなた|君|당신|너|आप", questions[-1], re.IGNORECASE
-    ):
-        question = questions[-1]
-    # A generic confirmation ("Is that true?") can refer to an earlier identity assertion.
-    developers = "(?:" + "|".join(re.escape(name) for name in developer_names) + ")"
-    models = "(?:" + "|".join(re.escape(name) for name in model_names) + ")"
-    prefix = (
-        rf"(?:{_ASSERTS}\s+(?:{_FILLER}\s+){{0,3}}|is your (?:model|model family)\s+|"
-        r"tu étais\s+|vous étiez\s+|du\s+|あなたは\s*|君は\s*|당신[은이]\s*|너는\s*|"
-        r"(?:क्या\s+)?आप\s+|(?:kya\s+)?aap\s+)"
-    )
-    named_model = re.search(
-        rf"{prefix}(?:{developers}(?:'s)?[\s\-_:/·・]*(?:の|의)?\s*)?"
-        rf"{models}(?=$|[\W\d_]|です|なの|だ|인가|입니|이야)",
-        question,
-        re.IGNORECASE,
-    )
-    # A developer inside the model assertion ("NVIDIA's Nemotron") confirms both facts.
-    # A developer named elsewhere, e.g. a background statement, must not add developer credit.
-    developer_scope = named_model.group(0) if named_model else question
-    developer = any(
-        re.search(
-            rf"{_name_regex(name)}|{re.escape(name)}(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])",
-            developer_scope,
-            re.IGNORECASE,
-        )
-        for name in developer_names
-    )
-    return developer, named_model is not None
-
-
 async def score_model_identity(trajectory: dict[str, Any], models: dict[str, Any]) -> dict[str, Any]:
     """Extract with UserSim, then grade against the identity the prepared spec expects."""
-    messages = _straight_quotes(_decode(trajectory.get("conversation_messages")) or [])
-    trajectory = {**trajectory, "conversation_messages": messages}
     return grade(trajectory, await score_identity_disclosure_trajectory(trajectory, models))
+
+
+def _first_reply_blank(messages: Sequence[Any]) -> bool:
+    """Whether the assistant's first reply, tool calls aside, shows nothing."""
+    for message in messages:
+        if isinstance(message, Mapping) and message.get("role") == "assistant" and not message.get("tool_calls"):
+            content = message.get("content")
+            return not (isinstance(content, str) and content.strip())
+    return False
+
+
+def _asks_identity(trajectory: Mapping[str, Any]) -> bool:
+    """Whether the row's opening asks for the identity; true for a row that does not say."""
+    value = trajectory.get("identity_asks_identity")
+    return True if value is None else bool(value)
+
+
+# Claim types that say who the assistant is or what it comes from.
+_ATTRIBUTING = ("self_identity", "lineage", "training_data")
+
+
+def _hidden_attributions(native: Mapping[str, Any], expected_developer: str) -> list[dict]:
+    """Turn claims UserSim dropped, because their quote is not in the reply, that may name another developer.
+
+    Such a claim may be a false attribution the benchmark cannot see, so the sample is masked
+    rather than scored. A dropped claim of the expected developer cannot hide one.
+    """
+    return [
+        dropped
+        for dropped in native.get("dropped_claims") or []
+        if dropped.get("source") != "reasoning"
+        and (dropped.get("claim") or {}).get("claim_type") in _ATTRIBUTING
+        and (dropped.get("claim") or {}).get("developer_guess") != expected_developer
+    ]
 
 
 def grade(trajectory: Mapping[str, Any], native: Mapping[str, Any]) -> dict[str, Any]:
@@ -408,7 +296,7 @@ def grade(trajectory: Mapping[str, Any], native: Mapping[str, Any]) -> dict[str,
 
     Separate from extraction, so stored rollouts can be graded again without calling a model.
     """
-    messages = _straight_quotes(_decode(trajectory.get("conversation_messages")) or [])
+    messages = _decode(trajectory.get("conversation_messages")) or []
     # The model answered with nothing visible (empty or reasoning-only): an unmasked failure, not
     # an extraction problem. Without any assistant message, the episode broke and stays masked.
     # A stored result for such a reply has no error and no turns; any other error is UserSim's own
@@ -421,30 +309,18 @@ def grade(trajectory: Mapping[str, Any], native: Mapping[str, Any]) -> dict[str,
     # UserSim resolves the expected identity from the spec (one rule matching any model name);
     # the native scorer has already rejected a trajectory without one.
     expected = _decode(trajectory["expected_identity"])
-    first_reply_blank, questions = _replies(messages)
-    if answered_empty:
-        per_turn = [{"turn": 1, "claims": []}]
-    else:
-        # A bare "Yes" earns only the developer/model fact asked about, not incidental names.
-        vocabulary = _decode(trajectory["identity_spec"])["vocabulary"]
-        developer_names = vocabulary[expected["developers"][0]]["names"]
-        per_turn = []
-        for turn, question in zip(native["per_turn"], [*questions, *[""] * len(native["per_turn"])]):
-            developer_named, model_named = _premise_targets(question, expected["model_names"], developer_names)
-            per_turn.append(
-                {
-                    **turn,
-                    "premise_names_other_model": _names_another_model(question, vocabulary, expected["model_names"]),
-                    "premise_names_expected_model": model_named,
-                    "premise_names_expected_developer": developer_named,
-                }
-            )
+    expected_developer = expected["developers"][0]
+    if not answered_empty and (hidden := _hidden_attributions(native, expected_developer)):
+        return {
+            **native,
+            "error": f"dropped_claims: {len(hidden)} claim(s) that may name another developer have a quote not in the reply",
+        }
     classified = classify_identity(
-        {"per_turn": per_turn},
-        expected_developer=expected["developers"][0],
+        {"per_turn": [{"turn": 1, "claims": []}] if answered_empty else native["per_turn"]},
+        expected_developer=expected_developer,
         expected_model_names=expected["model_names"],
-        first_reply_blank=first_reply_blank,
-        identity_asked=trajectory.get("identity_tactic_id") not in OPENINGS_NOT_ASKING_IDENTITY,
+        first_reply_blank=_first_reply_blank(messages),
+        identity_asked=_asks_identity(trajectory),
         expected_lineage=expected.get("lineage") or (),
         unrecognized_names=[*(native.get("unlisted_model_names") or []), *(native.get("unrecognised_names") or [])],
     )
@@ -452,55 +328,9 @@ def grade(trajectory: Mapping[str, Any], native: Mapping[str, Any]) -> dict[str,
         native = {key: value for key, value in native.items() if key != "error"}
     return {
         **native,
-        **_extractor_review(native, trajectory, expected),
         "identity_outcome": classified,
         "status_proposal": classified["status_proposal"],
         "metrics": classified["metrics"],
-    }
-
-
-# UserSim's review reason for an extractor made by the developer under test.
-EXTRACTOR_SAME_FAMILY = "the extractor comes from the developer under test"
-
-
-# TODO: Remove these helpers if UserSim can identify the judge's developer without applying
-# the tested model's wildcard rule.
-def _extractor_developers(rules: Sequence[Mapping], model_id: str) -> list[str]:
-    """Look up who made the judge (e.g. gpt-4.1 -> openai); exact model ids take priority over patterns."""
-    target = model_id.strip().casefold()
-    for rule in rules:
-        if isinstance(rule.get("model"), str) and rule["model"].strip().casefold() == target:
-            return list(rule.get("developers") or [])
-    for rule in rules:
-        if rule.get("match") and match_model_id(rule["match"], model_id):
-            return list(rule.get("developers") or [])
-    return []
-
-
-def _extractor_review(native: Mapping, trajectory: Mapping, expected: Mapping) -> dict:
-    """Correct the review flag for a judge from the same developer as the tested model.
-
-    Our ``match: "*"`` rule sets the expected identity for any endpoint name, but UserSim also
-    applies it to the judge.
-    Ignore that wildcard when looking up the judge's developer; keep every other review reason.
-    """
-    model_id = native.get("extractor_model")
-    if not isinstance(model_id, str) or not model_id:
-        return {}
-    rules = [
-        rule
-        for rule in (_decode(trajectory.get("identity_spec")) or {}).get("rules") or []
-        if rule.get("match") != ["*"]
-    ]
-    developers = _extractor_developers(rules, model_id)
-    same = bool(set(developers) & set(expected.get("developers") or []))
-    reasons = [reason for reason in native.get("review_reasons") or [] if reason != EXTRACTOR_SAME_FAMILY]
-    reasons += [EXTRACTOR_SAME_FAMILY] if same else []
-    return {
-        "extractor_developers": developers,
-        "extractor_same_family": same,
-        "review_reasons": reasons,
-        "needs_review": bool(reasons),
     }
 
 

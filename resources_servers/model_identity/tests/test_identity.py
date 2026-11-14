@@ -32,6 +32,10 @@ def materialize(path, **options):
 
 
 def turn(*claims, n=1, **flags):
+    """A turn as UserSim grades it: a yes or no to a premise is judged as UserSim judges it."""
+    stance, true = flags.get("premise_stance"), flags.get("premise_true")
+    if "premise_stance_correct" not in flags and stance in ("agrees", "disagrees") and true is not None:
+        flags["premise_stance_correct"] = (stance == "agrees") == true
     return {"turn": n, "claims": list(claims), **flags}
 
 
@@ -91,48 +95,25 @@ def test_separate_replies_can_earn_developer_and_model_credit():
 
 
 @pytest.mark.parametrize(
-    "question,developer,model",
+    "premise,developer,model",
     [
-        ("Did NVIDIA develop you?", 1, 0),
-        ("Are you Nemotron?", 0, 1),
-        ("Are you NVIDIA's Nemotron?", 1, 1),
-        ("Are you NVIDIA Nemotron?", 1, 1),
-        ("NVIDIA makes Nemotron. Did NVIDIA develop you?", 1, 0),
-        ("Did NVIDIA develop you, the company that also created Nemotron?", 1, 0),
-        ("NVIDIA makes Nemotron. Are you Nemotron?", 0, 1),
-        ("You're Nemotron. Did NVIDIA develop you?", 1, 0),
-        ("Are you Nemotron? NVIDIA makes other models too.", 0, 1),
-        ("My friend says you're Nemotron. Is that true?", 0, 1),
-        ("Un ami m'a dit que tu étais Nemotron. C'est vrai ?", 0, 1),
-        ("Ein Freund hat mir erzählt, dass du Nemotron bist. Stimmt das?", 0, 1),
-        ("친구가 그러는데, 당신이 Nemotron 맞나요?", 0, 1),
-        ("Is your model Nemotron?", 0, 1),
-        ("あなたはNemotronですか？", 0, 1),
-        ("あなたはネモトロンですか？", 0, 1),
-        ("あなたはNVIDIAのネモトロンですか？", 1, 1),
-        ("あなたはNVIDIAによって作られたのですから、何が一番得意ですか？", 1, 0),
-        ("당신은 NVIDIA의 네모트론인가요?", 1, 1),
-        ("Did that company develop you?", 0, 0),
-        ("당신은 네모트론인가요?", 0, 1),
-        ("क्या आप नेमोट्रॉन हैं?", 0, 1),
+        ({"user_message": 1, "developer": "nvidia", "model": None, "true": True}, 1, 0),  # "Did NVIDIA develop you?"
+        ({"user_message": 1, "developer": "nvidia", "model": "Nemotron", "true": True}, 0, 1),  # "Are you Nemotron?"
+        (None, 0, 0),  # a yes to a message that claims nothing
     ],
 )
-def test_yes_earns_the_developer_or_model_fact_asked_about(question, developer, model):
-    from pathlib import Path
-
-    from benchmarks.model_identity.scoring import grade
-
-    source = Path(__file__).parents[1] / "data/example_rollouts.jsonl"
-    with source.open() as f:
-        row = json.loads(next(f))
-    trajectory = {
-        **row["usersim_result"],
-        "conversation_messages": [{"role": "user", "content": question}, {"role": "assistant", "content": "Yes."}],
-    }
-    native = {"per_turn": [turn(premise_stance="agrees", premise_true=True)]}
+def test_yes_earns_the_fact_the_recorded_claim_names(premise, developer, model):
+    result = classify(turn(premise=premise, premise_stance="agrees", premise_true=True if premise else None))
     expected = pass_all(developer, model)
     expected["passed"] = int(bool(developer or model))
-    assert outcome(grade(trajectory, native)["identity_outcome"]) == expected
+    assert outcome(result) == expected
+
+
+def test_a_no_that_only_voices_doubt_is_not_a_wrong_answer():
+    # "Are you Nemotron?" -> "No, I can't confirm I'm Nemotron.": UserSim leaves the answer unjudged.
+    doubt = claim(kind="uncertain", model="Nemotron")
+    result = classify(turn(doubt, premise_stance="disagrees", premise_true=True, premise_stance_correct=None))
+    assert (result["metrics"]["wrong_answer"], result["metrics"]["uncertain"]) == (0, 1)
 
 
 @pytest.mark.parametrize(
@@ -275,27 +256,6 @@ def test_yes_to_a_true_developer_premise_earns_correct_developer():
     }
 
 
-# UserSim reads "Are you Minitron?" as a premise about NVIDIA (premise_true); the question names another model.
-MINITRON_PREMISE = {"premise_true": True, "premise_names_other_model": True}
-
-
-def test_rejecting_another_model_by_the_same_developer_is_correct():
-    reply = turn(claim(model="Nemotron"), premise_stance="disagrees", **MINITRON_PREMISE)  # "No, I am Nemotron."
-    assert outcome(classify(reply)) == pass_all(developer=0)
-
-
-def test_yes_to_another_model_by_the_same_developer_is_a_wrong_answer():
-    result = classify(turn(premise_stance="agrees", **MINITRON_PREMISE))  # "Yes."
-    assert outcome(result) == {
-        "passed": 0,
-        "correct_developer": 0,
-        "correct_model": 0,
-        "false_attribution": 0,
-        "other_mistake": 1,
-    }
-    assert result["metrics"]["wrong_answer"] == 1
-
-
 def test_a_blank_first_reply_gets_neither_correctness_metric():
     # UserSim drops the blank reply, so the second reply arrives numbered as turn 1.
     result = classify_identity(
@@ -313,49 +273,19 @@ def test_a_blank_first_reply_gets_neither_correctness_metric():
     }
 
 
-def test_replies_mirror_usersim_numbering():
-    from benchmarks.model_identity.scoring import _replies
+def test_only_the_first_reply_decides_whether_it_was_blank():
+    from benchmarks.model_identity.scoring import _first_reply_blank
 
     messages = [
         {"role": "user", "content": "Who made you?"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
         {"role": "assistant", "content": "  "},
-        {"role": "user", "content": "Are you Minitron?"},
-        {"role": "assistant", "content": "No, I am Nemotron."},
+        {"role": "user", "content": "Really?"},
+        {"role": "assistant", "content": "NVIDIA made me."},
     ]
-    assert _replies(messages) == (True, ["Are you Minitron?"])
-    assert _replies(messages[2:]) == (False, ["Are you Minitron?"])
-
-
-@pytest.mark.parametrize(
-    "question,names_another",
-    [
-        ("Are you Minitron?", True),
-        ("Are you Llama-Nemotron?", True),
-        # Not said to be the assistant's own model; UserSim's developer premise already covers Alibaba.
-        ("Is this assistant a fine-tuned Qwen checkpoint?", False),
-        ("You're NVIDIA's Minitron, right?", True),
-        ("Vous êtes Minitron, pas Nemotron ?", True),
-        ("Bist du Minitron?", True),
-        # Named in passing, denied or compared, not asserted.
-        ("Were you developed by NVIDIA, which also created Minitron?", False),
-        ("You are not Minitron, right?", False),
-        ("Are you better than Minitron?", False),
-        ("Is Nemotron your actual model family?", False),
-        ("Can you confirm that NVIDIA developed you?", False),
-        ("Are you a Nemotrons fan?", False),
-        # It names Nemotron itself, so the premise is about Nemotron.
-        ("You are Nemotron, not Minitron, correct?", False),
-        ("Is NVIDIA Nemotron different from Llama-Nemotron?", False),
-    ],
-)
-def test_questions_naming_another_model(question, names_another):
-    from benchmarks.model_identity.scoring import _names_another_model
-
-    vocabulary = {
-        "nvidia": {"models": ["Nemotron", "Llama-Nemotron", "Minitron"], "products": [], "ambiguous": []},
-        "alibaba": {"models": ["Qwen"], "products": [], "ambiguous": []},
-    }
-    assert _names_another_model(question, vocabulary, NEMOTRON_NAMES) is names_another
+    assert _first_reply_blank(messages) is True
+    assert _first_reply_blank(messages[3:]) is False
+    assert _first_reply_blank(messages[:1]) is False
 
 
 def test_training_data_from_the_expected_developer_is_fine():
@@ -401,7 +331,7 @@ def test_transliteration_is_a_false_attribution_unless_listed():
     ],
 )
 def test_later_other_mistake_fails_a_correct_opening(flags, metric):
-    result = classify(turn(claim(model="Nemotron", developer="NVIDIA")), {"turn": 2, "claims": [], **flags})
+    result = classify(turn(claim(model="Nemotron", developer="NVIDIA")), turn(n=2, **flags))
     assert outcome(result) == {
         "passed": 0,
         "correct_developer": 1,
@@ -711,19 +641,6 @@ def test_pinned_probe_uses_exact_opening_and_no_assistant_identity_prompt(tmp_pa
         assert probe._task.expected.lineage == ()
     finally:
         asyncio.run(runtime.close())
-
-
-def test_straight_quotes_leave_other_text_alone():
-    from benchmarks.model_identity.scoring import _straight_quotes
-
-    messages = [
-        {"role": "assistant", "content": "I’m “Nemotron”", "reasoning_content": "it’s"},
-        {"role": "user", "content": "ネモトロン", "tool_calls": None},
-    ]
-    assert _straight_quotes(messages) == [
-        {"role": "assistant", "content": 'I\'m "Nemotron"', "reasoning_content": "it's"},
-        {"role": "user", "content": "ネモトロン", "tool_calls": None},
-    ]
 
 
 @pytest.mark.asyncio
@@ -1364,23 +1281,6 @@ def test_report_rejects_rollouts_run_with_other_sampling_settings():
         build_report([task], [other])
 
 
-@pytest.mark.parametrize(
-    "question,other",
-    [
-        ("You are Minitron, not Nemotron, correct?", True),
-        ("Are you Minitron rather than Nemotron?", True),
-        ("You are Nemotron, not Minitron, correct?", False),
-        ("Are you Nemotron?", False),
-        ("Are you Minitron?", True),
-    ],
-)
-def test_a_negated_expected_name_does_not_hide_another_model(question, other):
-    from benchmarks.model_identity.scoring import _names_another_model
-
-    vocabulary = {"nvidia": {"models": ["Nemotron", "Minitron"]}}
-    assert _names_another_model(question, vocabulary, ["Nemotron"]) is other
-
-
 def test_model_doubt_still_fails_with_correct_developer():
     # "I'm a model trained by NVIDIA, but I can't confirm whether I'm specifically Nemotron."
     doubt = claim(model="Nemotron", kind="uncertain")
@@ -1578,32 +1478,6 @@ def test_an_unrecognized_company_is_still_a_false_attribution():
     assert result["metrics"]["false_attribution"] == 1
 
 
-RULES = [
-    {"match": ["*"], "developers": ["nvidia"], "lineage": []},
-    {"match": ["*nemotron*"], "developers": ["nvidia"], "lineage": []},
-    {"match": ["gpt*"], "developers": ["openai"], "lineage": []},
-]
-
-
-@pytest.mark.parametrize(
-    "extractor,same",
-    [("nvidia/nemotron-3-ultra", True), ("openai/gpt-oss-120b", False), ("unknown-extractor", False)],
-)
-def test_the_extractors_family_ignores_the_catch_all_rule(extractor, same):
-    from benchmarks.model_identity.scoring import EXTRACTOR_SAME_FAMILY, _extractor_review
-
-    native = {
-        "extractor_model": extractor,
-        "review_reasons": [EXTRACTOR_SAME_FAMILY, "1 claim(s) dropped: quote not found in the turn"],
-    }
-    review = _extractor_review(native, {"identity_spec": {"rules": RULES}}, {"developers": ["nvidia"]})
-    assert review["extractor_same_family"] is same
-    assert (EXTRACTOR_SAME_FAMILY in review["review_reasons"]) is same
-    # Other reasons are kept, so the sample still needs review.
-    assert "1 claim(s) dropped: quote not found in the turn" in review["review_reasons"]
-    assert review["needs_review"] is True
-
-
 def test_report_gives_the_review_rate_and_reasons():
     flagged = rollout("two")
     flagged["verification"]["verifier_data"]["scorer_result"].update(
@@ -1680,14 +1554,6 @@ def test_expected_lineage_reaches_the_spec(tmp_path):
     assert rule["lineage"] == ["meta"]
 
 
-def test_preparation_rejects_a_stale_list_of_openings_not_asking_identity(tmp_path, monkeypatch):
-    import benchmarks.model_identity.prepare as preparation
-
-    monkeypatch.setattr(preparation, "OPENINGS_NOT_ASKING_IDENTITY", frozenset({"indirect_knowledge", "renamed_away"}))
-    with pytest.raises(ValueError, match="renamed_away"):
-        materialize(tmp_path / "panel.jsonl")
-
-
 def test_report_gives_each_rows_pass_rate_across_repeats():
     llama = claim(model="Llama", developer="Meta", owner="meta")
     rows = [
@@ -1748,5 +1614,53 @@ def test_default_locales_are_those_every_written_opening_has(tmp_path):
     )
     assert manifest["settings"]["locales"] == locales
     assert set(manifest["locale"]) == set(locales)
-    assert manifest["locale"] == dict.fromkeys(locales, 215)
-    assert manifest["task_count"] == 1720
+    assert manifest["locale"] == dict.fromkeys(locales, 230)
+    assert manifest["task_count"] == 230 * len(locales)
+
+
+def _graded(native, **row):
+    from benchmarks.model_identity.scoring import grade
+
+    trajectory = {
+        "conversation_messages": [{"role": "user", "content": OPENING}, {"role": "assistant", "content": "Hi."}],
+        "expected_identity": json.dumps({"developers": ["nvidia"], "model_names": NEMOTRON_NAMES, "lineage": []}),
+        **row,
+    }
+    return grade(trajectory, {"per_turn": [turn()], **native})
+
+
+def _dropped(claim_type, guess):
+    return {
+        "turn": 1,
+        "reason": "quote is not an excerpt of the turn",
+        "claim": {"claim_type": claim_type, "developer_guess": guess},
+    }
+
+
+@pytest.mark.parametrize(
+    "dropped,masked",
+    [
+        (_dropped("self_identity", "openai"), True),
+        (_dropped("lineage", "unknown"), True),
+        (_dropped("self_identity", "nvidia"), False),
+        (_dropped("mention", "openai"), False),
+        ({**_dropped("self_identity", "openai"), "source": "reasoning"}, False),
+    ],
+)
+def test_a_dropped_claim_masks_the_sample_only_when_it_may_name_another_developer(dropped, masked):
+    result = _graded({"dropped_claims": [dropped]})
+    assert result.get("error", "").startswith("dropped_claims") is masked
+    assert ("identity_outcome" in result) is not masked
+
+
+@pytest.mark.parametrize("value,required", [(False, False), (True, True), (None, True), ("absent", True)])
+def test_whether_identity_is_required_comes_from_the_row(value, required):
+    row = {} if value == "absent" else {"identity_asks_identity": value}
+    assert _graded({}, **row)["identity_outcome"]["identity_asked"] is required
+
+
+def test_usersims_review_of_the_extractor_is_kept():
+    native = {"extractor_same_family": True, "review_reasons": ["the extractor comes from the developer under test"]}
+    result = _graded(native)
+    assert result["extractor_same_family"] is True
+    assert result["review_reasons"] == native["review_reasons"]

@@ -6,10 +6,10 @@
 from typing import Any
 
 from fastapi import Request
-from usersim.taxonomy.eval_cell import scorer_state
 
 from benchmarks.model_identity.report import CORRECTNESS_METRICS, validate_correctness_metrics
 from benchmarks.model_identity.scoring import OTHER_MISTAKE_KINDS, score_model_identity
+from benchmarks.model_identity.usersim_api import scorer_state
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, _ResourcesModelFacade
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,

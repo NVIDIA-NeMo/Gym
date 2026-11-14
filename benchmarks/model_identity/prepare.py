@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 import yaml
 
-from benchmarks.model_identity.report import DIMENSIONS, OPENINGS_NOT_ASKING_IDENTITY
+from benchmarks.model_identity.report import DIMENSIONS
 from environments.nemo_user_sim.prepare import ENVIRONMENT_DIR as PREPARE_PROJECT
 from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_SHA256, NEMOTRON_PERSONAS_VERSIONS, USERSIM_REVISION
 
@@ -124,9 +124,8 @@ def _write_spec(
         "bank_version": VERSION,
         "placeholder": True,
         # Endpoint model names can be arbitrary (e.g. "checkpoint-123"); "*" maps any name
-        # to the configured expected identity. UserSim also applies this rule to the judge's
-        # developer lookup, which scoring.py corrects when checking judge independence.
-        # TODO: Replace "*" if UserSim can set the tested model's expected identity without affecting the judge.
+        # to the configured expected identity. UserSim ignores such a catch-all when it
+        # looks up who made the judge.
         "expected_identities": [
             {
                 "match": "*",
@@ -253,9 +252,12 @@ def _build(
     expected_model_aliases: list[str] | None = None,
     expected_lineage: list[str] | None = None,
 ) -> dict:
-    from usersim.engine.config import ConversationSimulatorConfig
-    from usersim.engine.external import construct_probe_episode
-    from usersim.engine.probes.identity_disclosure.spec import load_identity_spec, reset_identity_spec_cache
+    from benchmarks.model_identity.usersim_api import (
+        ConversationSimulatorConfig,
+        construct_probe_episode,
+        load_identity_spec,
+        reset_identity_spec_cache,
+    )
 
     settings = _settings(
         single_per_tactic=single_per_tactic,
@@ -280,13 +282,6 @@ def _build(
         settings["locales"] = _written_locales(spec)
     _check_persona_assets(settings["locales"], synthetic=synthetic)
     by_id = {tactic.id: tactic for tactic in spec.tactics}
-    # The identity probe also tests indirect identity errors (e.g. knowledge-cutoff questions).
-    # These answers need not name the developer or model family, but any identity claims must be correct.
-    # Guard the list of these tactics: a renamed or removed id would silently require identity disclosure.
-    # TODO: Replace this list and guard if UserSim adds a flag indicating whether a tactic asks for identity.
-    stale = sorted(OPENINGS_NOT_ASKING_IDENTITY - set(by_id))
-    if stale:
-        raise ValueError(f"OPENINGS_NOT_ASKING_IDENTITY names tactics UserSim no longer has: {stale}")
     if settings["tactics"] is not None:
         unknown = sorted(set(settings["tactics"]) - set(by_id))
         if unknown:
