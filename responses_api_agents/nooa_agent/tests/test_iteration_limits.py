@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, IterationLimitExceeded
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -271,11 +271,14 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
 
 
-async def test_matching_generation_error_message_is_not_a_gradable_execution_limit() -> None:
+@pytest.mark.parametrize("error_type", [GenerationError, IterationLimitExceeded])
+async def test_matching_generation_error_message_is_not_a_gradable_execution_limit(
+    error_type: type[GenerationError],
+) -> None:
     instance, model_calls = iteration_agent()
 
     async def invoke_error(agent: object, request: object) -> object:
-        raise GenerationError("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
+        raise error_type("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
 
     req = await open_session(instance)
     instance._require_agent_session("session").runner._invocation_adapter = invoke_error

@@ -7,8 +7,8 @@ from enum import StrEnum
 from types import FrameType
 
 from aiohttp import ClientResponseError
-from nooa.errors import GenerationError, LoopDetectedError
-from nooa.strategies.codeact import CodeActSession, CodeActStrategy
+from nooa.errors import GenerationError, IterationLimitExceeded, LoopDetectedError
+from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 
 from responses_api_agents.nooa_agent.gym_llm import (
@@ -53,18 +53,9 @@ def _generation_error_frame(error: BaseException) -> FrameType | None:
 
 
 def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
-    # The pinned NOOA uses the same error type for iteration and retry exhaustion.
-    frame = _generation_error_frame(error)
-    if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
-        return False
-    session = frame.f_locals.get("session")
-    return (
-        isinstance(session, CodeActSession)
-        and session.max_iterations is not None
-        and session.iteration >= session.max_iterations
-        and session.error_count < session.max_retries
-        and str(error) == str(session.build_failure_error())
-    )
+    # Only the pinned CodeAct loop's own exhaustion stop is a gradable outcome.
+    frame = _raising_frame(error) if type(error) is IterationLimitExceeded else None
+    return frame is not None and frame.f_code is CodeActStrategy._run_generation.__code__
 
 
 def _is_codeact_loop_stop(error: BaseException) -> bool:
