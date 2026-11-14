@@ -1,0 +1,49 @@
+geobenchx_resources_server:
+  resources_servers:
+    geobenchx:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: GeoBenchX 202-task multistep geospatial tool-calling regression benchmark.
+      datasets:
+      - name: benchmark
+        type: example
+        jsonl_fpath: resources_servers/geobenchx/data/benchmark.jsonl
+        num_repeats: 1
+        license: MIT
+      # Fixed split from task_data.split_of(): 149 train, 53 validation tasks,
+      # with near-duplicate families kept on one side. Train only on `train`.
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/geobenchx/data/train.jsonl
+        license: MIT
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/geobenchx/data/validation.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/geobenchx/data/example.jsonl
+        license: MIT
+
+geobenchx_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # The paper's 25-tool-call limit. Rows disable parallel tool calls, so
+      # each model turn makes at most one call.
+      max_steps: 25
+      resources_server:
+        type: resources_servers
+        name: geobenchx_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+geobenchx_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: geobenchx_simple_agent
