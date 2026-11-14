@@ -20,7 +20,7 @@ There are two distinct integration shapes:
 | **Gym-owned tools, auto-exposed** | The tools *and* their verification live in Gym — the Resources Server serves them as plain `POST` routes | Set `expose_tools_over_mcp: true` in the server's YAML config — Gym turns the existing routes into MCP tools and mounts a Streamable-HTTP `/mcp` endpoint on the same app as `/seed_session` and `/verify`; typically no code change |
 | **Existing / external MCP server** | The MCP server already runs outside Gym (a third-party or shared service) | Point the agent at it directly with a static `mcp_config`; write a plain `SimpleResourcesServer.verify()` that scores the resulting trajectory |
 
-The rest of this page builds the **Gym-owned** flow, then explains the **external** flow at the end.
+The rest of this page builds the **Gym-owned** flow, then explains the **external** flow at the end. An Environment Server that serves its own episode tools, with no Resources Server, can also serve them over MCP; see [Environment Servers that serve their own tools](#environment-servers-that-serve-their-own-tools).
 
 <Info>
 **Why serve MCP from the Resources Server at all?** Mounting the MCP endpoint inside the Resources Server lets a tool call be bound to the *same per-rollout session* as `/seed_session` and `/verify`. That is what makes "was this tool actually used in this episode?" a verifiable, isolated question. An external MCP server can't offer that — Gym can't observe its calls — so external-server verification has to work off the agent's trajectory instead.
@@ -347,6 +347,47 @@ A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weath
 <Tip>
 To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie) — there is a copy-pasteable script in the [weather server's README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather). This is also the fastest way to confirm the endpoint is reachable from another host.
 </Tip>
+
+---
+
+## Environment Servers that serve their own tools
+
+An Environment Server built on `BaseEnvironmentServerWithTools` serves each episode's tools itself, with no Resources Server. Its config, `BaseEnvironmentServerWithToolsConfig`, selects the transports with `tool_transports`. This is a different field from `expose_tools_over_mcp`, which only a Resources Server has. Both classes are imported from `nemo_gym.server_runtime`.
+
+```yaml
+my_environment:
+  environment_servers:
+    my_environment:
+      entrypoint: app.py
+      tool_transports: [mcp]   # default [direct_http]
+```
+
+| `tool_transports` | Grants | For agents such as |
+|---|---|---|
+| `[direct_http]` (default) | `POST /<tool name>` on the server, required | `simple_agent` |
+| `[mcp]` | `/mcp` on the server, required | Codex, Pi, Hermes |
+| `[mcp, direct_http]` | Both, in that order, each optional | An agent takes the transport it supports |
+
+With one transport, the grant is required, so an agent that cannot use it rejects the seed. Use `[mcp]` for MCP-only agents.
+
+Leave `num_workers` unset or set it to `1`. The server refuses more workers, because a tool call cannot yet reach the worker that runs its episode.
+
+In `run`, `serve_tools` returns the grants. Pass them unchanged to the agent:
+
+```python
+from nemo_gym.agents import AgentSeedSessionRequest
+from nemo_gym.server_runtime import TypedToolset
+
+served = await self.serve_tools(request, TypedToolset(my_tools), cleanup)
+seed = AgentSeedSessionRequest(
+    agent_session_id=agent_session_id,
+    episode_id=request.episode_id,
+    task_id=request.task.task_id,
+    tool_accesses=served.tool_accesses,
+)
+```
+
+Each grant carries the episode's token in the `X-NeMo-Gym-Episode-Token` header. `/mcp` lists only that episode's tools, and the grant ends when the episode's cleanup runs. A tool that returns `ToolResult(is_error=True)` gives an MCP result with `isError: true`. Over direct HTTP, the reply carries `X-NeMo-Gym-Tool-Error: true` instead.
 
 ---
 
