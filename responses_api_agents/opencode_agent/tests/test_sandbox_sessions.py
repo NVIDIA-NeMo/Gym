@@ -1167,9 +1167,10 @@ def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, pass
     ("opencode_config", "detail"),
     [
         ({"provider": {"other": {}}}, "unsupported: ['provider']"),
-        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto"),
+        ({"compaction": {"unknown": True}}, "compaction supports only auto and prune"),
+        ({"compaction": {"prune": "false"}}, "compaction.prune must be true or false"),
         ({"compaction": {"auto": "false"}}, "compaction.auto must be true or false"),
-        ({"compaction": None}, "compaction supports only auto"),
+        ({"compaction": None}, "compaction supports only auto and prune"),
         ({"agent": {"plan": {"steps": 4}}}, "agent supports only build"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),
@@ -1224,6 +1225,23 @@ def test_with_token_capture_a_seed_accepts_build_steps(setup):
     agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+
+
+def test_training_compaction_settings_pass_seed_and_reach_the_sandbox(setup):
+    agent, sandbox = setup
+    agent.config.context_window = 32768
+    agent.config.max_output_tokens = 1024
+    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}}
+    with TestClient(agent.setup_webserver()) as client:
+        seeded = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["compaction"] == {"auto": False, "prune": False}
+        model = config["provider"]["nemo_gym"]["models"][agent.config.sandbox_model_id]
+        assert model["limit"] == {"context": 32768, "input": 32768, "output": 1024}
+        assert config["enabled_providers"] == ["nemo_gym"]
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):

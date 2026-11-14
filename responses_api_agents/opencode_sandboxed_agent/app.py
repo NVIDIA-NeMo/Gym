@@ -24,8 +24,10 @@ import sqlite3
 import sys
 import tempfile
 from asyncio import Semaphore
-from contextlib import nullcontext
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from random import uniform
@@ -37,9 +39,9 @@ from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
-from fastapi import Request
+from fastapi import FastAPI, HTTPException, Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field, FilePath
+from pydantic import ConfigDict, Field, FilePath, JsonValue
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -86,6 +88,7 @@ from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    SandboxProvider,
     SandboxResources,
     SandboxSpec,
     cpu_cap_env,
@@ -562,6 +565,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
+    local_opencode_binary_path: FilePath | None = Field(
+        default=None,
+        description="Host binary matching the task platform and opencode_version; uploaded instead of downloading in the task.",
+    )
     local_ripgrep_binary_path: FilePath | None = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
@@ -737,6 +744,16 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
+@dataclass
+class _RunSandboxState:
+    resources_cookies: dict[str, str] | None
+    active: bool = True
+    borrowed: bool = True
+    sandbox: AsyncSandbox | None = None
+    provider: SandboxProvider | None = None
+    close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
@@ -751,19 +768,32 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._ripgrep_upload_sem = Semaphore(_RIPGREP_UPLOAD_MAX_CONCURRENT)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
+        self._run_sandbox_states: dict[str, _RunSandboxState] = {}
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(
+        self,
+        sandbox_id: Optional[str] = None,
+        workdir: Optional[str] = None,
+        *,
+        descriptor: dict[str, JsonValue] | None = None,
+        state: _RunSandboxState | None = None,
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         )
+        if state is not None:
+            state.provider = resolved_sandbox_provider
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
-        if sandbox_id:
+        if descriptor is not None or sandbox_id:
             if self.config.network_access != "inherit":
                 raise ValueError("Cannot verify network policy on an externally supplied sandbox")
             sandbox = await AsyncSandbox.connect(
-                {"sandbox_id": sandbox_id, "workdir": workdir}, provider=resolved_sandbox_provider
+                {"sandbox_id": sandbox_id, "workdir": workdir}
+                if descriptor is None
+                else descriptor | ({"workdir": workdir} if workdir is not None else {}),
+                provider=resolved_sandbox_provider,
             )
             return sandbox
 
@@ -805,6 +835,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 resolved_sandbox_provider.name, urls
             )
         sandbox = AsyncSandbox(resolved_sandbox_provider)
+        if state is not None:
+            state.sandbox = sandbox
         await sandbox.start(sandbox_spec)
 
         return sandbox
@@ -1256,7 +1288,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         install_str = ":"
         if not self.config.preinstalled_opencode:
-            if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+            if self.config.local_opencode_binary_path is not None:
+                remote_binary = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
+                await sandbox.upload(self.config.local_opencode_binary_path, remote_binary)
+                install_str = (
+                    'mkdir -p "$HOME/.opencode/bin" '
+                    f'&& cp {quote(remote_binary)} "$HOME/.opencode/bin/opencode" '
+                    '&& chmod 755 "$HOME/.opencode/bin/opencode" '
+                    f"&& rm -f {quote(remote_binary)}"
+                )
+            elif self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
                 if self.config.remote_opencode_musl_binary_path:
                     install_str = _build_remote_opencode_install_command(
                         install_script_path=self.config.remote_opencode_install_script_path,
@@ -1863,40 +1904,148 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         async with self._sem:
             return await self._run(request, body)
 
+    async def _close_run_sandbox(self, session_key: str) -> None:
+        """Release each successful cleanup obligation; retain failed ones for retry or shutdown."""
+        state = self._run_sandbox_states.get(session_key)
+        if state is None:
+            return
+        # A separate task protects the lock and bounded cleanup from repeated
+        # asyncio Task.cancel(), which bypasses AnyIO's request-cancellation shield.
+        with CancelScope(shield=True):
+            cleanup = asyncio.create_task(self._close_run_sandbox_state(session_key, state))
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _close_run_sandbox_state(self, session_key: str, state: _RunSandboxState) -> None:
+        async with asyncio.timeout(self.config.session_close_timeout_seconds):
+            await state.close_lock.acquire()
+        try:
+            if self._run_sandbox_states.get(session_key) is state:
+                await self._release_run_sandbox(session_key, state)
+        finally:
+            state.close_lock.release()
+
+    async def _release_run_sandbox(self, session_key: str, state: _RunSandboxState) -> None:
+        errors = []
+        with CancelScope(shield=True):
+            if state.resources_cookies is not None:
+                try:
+                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                        response = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/close_session",
+                            json={},
+                            cookies=state.resources_cookies,
+                        )
+                        await raise_for_status(response)
+                    state.resources_cookies = None
+                except Exception as error:
+                    errors.append(error)
+            try:
+                async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                    if state.sandbox is not None:
+                        if state.borrowed:
+                            await state.sandbox.disconnect()
+                        else:
+                            await state.sandbox.stop()
+                    elif state.provider is not None:
+                        await state.provider.aclose()
+                state.sandbox = state.provider = None
+                self._sandbox_id_to_sandbox.pop(session_key, None)
+            except Exception as error:
+                errors.append(error)
+            if not errors:
+                self._run_sandbox_states.pop(session_key, None)
+                self._sandbox_id_to_run_result.pop(session_key, None)
+            elif len(errors) == 1:
+                raise errors[0]
+            else:
+                raise ExceptionGroup("OpenCode resource and sandbox cleanup failed", errors)
+
+    @asynccontextmanager
+    async def _drain_sessions_on_shutdown(self, app: FastAPI) -> AsyncIterator[None]:
+        async with super()._drain_sessions_on_shutdown(app):
+            try:
+                yield
+            finally:
+                with CancelScope(shield=True):
+                    try:
+                        async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                            results = await asyncio.gather(
+                                *(self._close_run_sandbox(key) for key in list(self._run_sandbox_states)),
+                                return_exceptions=True,
+                            )
+                        for result in results:
+                            if isinstance(result, BaseException):
+                                LOGGER.error("OpenCode sandbox cleanup failed during shutdown", exc_info=result)
+                    except TimeoutError:
+                        LOGGER.error("OpenCode sandbox cleanup exceeded the shutdown budget")
+
+    @asynccontextmanager
+    async def _run_sandbox(
+        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
+    ) -> AsyncIterator[dict[str, str]]:
+        session_key = request.session[SESSION_ID_KEY]
+        pending = self._run_sandbox_states.get(session_key)
+        if pending is not None and pending.active:
+            raise HTTPException(409, "OpenCode session already has an active run")
+        await self._close_run_sandbox(session_key)
+        if session_key in self._run_sandbox_states:
+            raise HTTPException(409, "OpenCode session already has an active run")
+        cookies = dict(request.cookies)
+        state = _RunSandboxState(resources_cookies=None)
+        self._run_sandbox_states[session_key] = state
+        try:
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/seed_session",
+                json=body.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(response)
+            cookies.update(response.cookies)
+            state.resources_cookies = cookies.copy()
+            seed = await response.json()
+            if not isinstance(seed, dict):
+                raise ValueError("OpenCode seed response must be a JSON object")
+            descriptor, sandbox_id = seed.get("sandbox_descriptor"), seed.get("sandbox_handle")
+            descriptor = descriptor if isinstance(descriptor, dict) and descriptor else None
+            sandbox_id = sandbox_id if isinstance(sandbox_id, str) and sandbox_id.strip() else None
+            state.borrowed = "sandbox_descriptor" in seed or "sandbox_handle" in seed
+            if state.borrowed and descriptor is None and sandbox_id is None:
+                raise ValueError("OpenCode seed must supply a usable sandbox_descriptor or sandbox_handle")
+            if not state.borrowed:
+                state.resources_cookies = None
+            request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
+            state.sandbox = await self._start_sandbox(
+                sandbox_id=sandbox_id, workdir=seed.get("workdir"), descriptor=descriptor, state=state
+            )
+            self._sandbox_id_to_sandbox[session_key] = state.sandbox
+            cookies["sandbox_id"] = session_key
+            request._cookies = cookies
+            request.state._ng_observation_invocation_id = self.rollout_id_from_run(body)
+            yield cookies
+        finally:
+            state.active = False
+            for name in ("_ng_observation_invocation_id", "_ng_opencode_mcp"):
+                if hasattr(request.state, name):
+                    delattr(request.state, name)
+            await self._close_run_sandbox(session_key)
+
     async def _run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
-        cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
-
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = cookies | seed_session_response.cookies
-
-        request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
-
-        # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
-        # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
-        seed_session_result = await seed_session_response.json()
-        sandbox = await self._start_sandbox(
-            sandbox_id=seed_session_result.get("sandbox_handle"),
-            workdir=seed_session_result.get("workdir"),
-        )
-        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
-
-        # Propagating the sandbox handle
-        cookies["sandbox_id"] = session_key
-
-        request._cookies = cookies
-        request.state._ng_observation_invocation_id = rollout_id
         observations = None
-        try:
+        async with self._run_sandbox(request, body) as cookies:
             response = await self.responses(request, body.responses_create_params)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
@@ -1943,22 +2092,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     and not confirmed_agent_oom
                 ),
             )
-        finally:
-            del request.state._ng_observation_invocation_id
-            del request.state._ng_opencode_mcp
-            # A server cancels its handler when the caller disconnects, and OpenCode keeps running
-            # in its pod regardless: only stopping the sandbox ends it. Shielded because the
-            # cancellation is re-delivered at every await until the handler exits, so an unshielded
-            # stop would itself be cancelled and leave the pod generating until its TTL.
-            with CancelScope(shield=True):
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-                finally:
-                    self._sandbox_id_to_sandbox.pop(session_key, None)
-                    self._sandbox_id_to_run_result.pop(session_key, None)
-
         response_dict |= run_result
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)

@@ -375,7 +375,16 @@ class SandboxPythonRuntime:
         scratch = Path(tempfile.mkdtemp(prefix=".build-", dir=destination.parent))
         try:
             constraints = scratch / "constraints.txt"
-            constraints.write_text("".join(f"{pin}\n" for pin in self.pins))
+            # uv overrides replace dependency requirements, but not separate constraints.
+            # An unconditional adapter override must also replace the corresponding host pin.
+            overridden = {
+                canonicalize_name(requirement.name)
+                for line in self.overrides
+                if (requirement := Requirement(line)).marker is None
+            }
+            constraints.write_text(
+                "".join(f"{pin}\n" for pin in self.pins if canonicalize_name(Requirement(pin).name) not in overridden)
+            )
             argv = [
                 uv,
                 "pip",

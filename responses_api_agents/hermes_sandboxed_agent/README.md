@@ -38,6 +38,26 @@ The runner checks the mounted manifest against the checkout before calling the
 model. This check runs inside each task container: the agent server cannot check
 a remote mount or choose the task's libc at server startup.
 
+For an existing `/run` baseline paired with `hermes_agent`, set `runtime_python: null`.
+This selects the exact Hermes commit declared in `hermes_agent/pyproject.toml` and its
+existing execution shim. Gym builds and uploads an isolated Python runtime during
+resource setup, reuses it after a successful health check, and leaves the task's
+`HOME` and Python environment unchanged. `sandbox_install_timeout_seconds` bounds setup
+(default 600 seconds). The Agent Server needs package-index and Python-release access;
+the task sandbox needs no package downloads. The default mounted-runtime path above
+is unchanged.
+
+This mode maps `context_length`, per-call `max_tokens`, `compression_enabled`, tools,
+and prompts to the session shim. It retains reasoning history by default;
+`chat_template_kwargs` supports only `truncate_history_thinking`. Model thinking is
+configured on the Model Server. Resource seeding, verification, and cleanup still use
+this adapter's `/run` flow. In managed mode, an incomplete or masked verifier result
+retains its actual reward, response, mask, and failure fields, even when the harness
+response failed. RL applies its configured masking and denominator policy. Seed,
+connection, installation, and verification-request errors that produce no verifier
+result remain unscored failures. A failed, unmasked harness response also remains
+unscored. The mounted-runtime mode keeps the failure policy below.
+
 ## Launch with Pro
 
 Compose the same four components used by the OpenCode sandboxed agent: model,
@@ -129,8 +149,12 @@ The supervisor runs with the task image's bash; this adapter does not install it
 Supervisor diagnostics retain at most the last 1 MiB, including a truncation marker.
 Missing termination confirmation skips verification and stops
 the task sandbox. Resources cleanup retains failed handles for retry; final agent
-cleanup is bounded by `cleanup_timeout` (default 120 seconds per attempt) and does
-not replace a received verifier result. Cleanup is cooperative, not a security
+cleanup is bounded by `cleanup_timeout` (default 120 seconds per attempt) and shielded
+from request cancellation. A failed owner close or transport release fails the run;
+it cannot silently return a received verifier result. The agent disconnects its
+borrowed client; the Resources Server stops the sandbox. Only mounted-runtime mode
+falls back to stopping it directly when `/close_session` returns 404 or 405, and a
+lease that forbids stopping still fails visibly. Cleanup is cooperative, not a security
 boundary. Empty reports with an explicit DNS failure remain inconclusive; model
 compile failures without infrastructure evidence keep their zero score.
 
