@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shlex
 import tarfile
 import tempfile
@@ -193,6 +194,28 @@ def _compose_workspace_links(compose_volumes: List[Any], workspace: str = "/code
         if uploaded_source != target:
             links.append((uploaded_source, target))
     return links
+
+
+_TAR_RACE_LINE = re.compile(r"^tar: .+: (file changed as we read it|file removed before we read it)$")
+
+
+def _snapshot_only_raced(snapshot: Any) -> bool:
+    """Whether a failed workspace snapshot only lost a race with a file that was still being written.
+
+    A simulator can keep writing a waveform (``sim_build/*.fst``) while the snapshot reads it. GNU tar then exits 1
+    with ``file changed as we read it`` but still writes the whole archive; the changed file is a volatile artifact,
+    not an input of the next service. The snapshot command merges tar's diagnostics into ``stdout`` (``2>&1``), so the
+    check does not depend on how a provider lays out its streams. ``stderr`` is then only the provider's own status
+    summary (``exit status 1``) and is accepted only in that form. Any other message, any other exit code and any
+    other diagnostic stays a snapshot failure.
+    """
+    if snapshot.return_code != 1:
+        return False
+    stderr = (snapshot.stderr or "").strip()
+    if stderr and stderr != f"exit status {snapshot.return_code}":
+        return False
+    lines = [line.strip() for line in (snapshot.stdout or "").splitlines() if line.strip()]
+    return bool(lines) and all(_TAR_RACE_LINE.match(line) for line in lines)
 
 
 def _pack_workspace(workdir: Path, archive: Path) -> None:
@@ -536,10 +559,10 @@ class TestbenchRunner:
                 )
 
                 snapshot = await sandbox.exec(
-                    f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} .",
+                    f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} . 2>&1",
                     timeout_s=self.config.container_timeout,
                 )
-                if snapshot.return_code == 0:
+                if snapshot.return_code == 0 or _snapshot_only_raced(snapshot):
                     next_archive = workspace_archive.with_name(f"{workspace_archive.name}.next")
                     await sandbox.download(output_archive, next_archive)
                     next_archive.replace(workspace_archive)

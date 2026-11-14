@@ -849,6 +849,51 @@ class TestRunServiceProvider:
         assert "disk full" in output
 
     @pytest.mark.asyncio
+    async def test_snapshot_command_merges_tar_diagnostics_into_stdout(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="hi\n", stderr="", return_code=0))
+        await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        snapshot = next(item for item in fake.execs if "tar -czf" in item["command"] and "-xzf" not in item["command"])
+        assert snapshot["command"].endswith(" . 2>&1")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stderr", [None, "", "exit status 1"])
+    async def test_snapshot_that_only_raced_a_waveform_write_keeps_the_verdict(self, tmp_path, stderr):
+        # OpenSandbox background execution: both streams arrive in stdout, stderr holds at most a status summary.
+        raced = "tar: ./rundir/sim_build/dump.fst: file changed as we read it\n"
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout=raced, stderr=stderr, return_code=1),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 0
+        assert output == "hi\n"
+        assert fake.downloads[0][0] == "/sandbox/cvdp-workspace-out.tar.gz"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stdout, stderr, return_code",
+        [
+            ("tar: a.fst: file changed as we read it\ntar: b: Cannot open: Permission denied\n", None, 1),
+            ("tar: a.fst: file changed as we read it\n", "tar: b: Cannot open: Permission denied", 1),
+            ("tar: a.fst: file changed as we read it\n", "exit status 1\ntar: b: Cannot open: Permission denied", 1),
+            ("tar: a.fst: file changed as we read it\n", "exit status 2", 1),
+            ("tar: a.fst: file changed as we read it\n", None, 2),
+            ("", "exit status 1", 1),
+            ("", None, 1),
+            ("tar: write error: No space left on device\n", "exit status 1", 1),
+        ],
+    )
+    async def test_snapshot_with_a_race_and_a_real_error_still_fails(self, tmp_path, stdout, stderr, return_code):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 1
+        assert "workspace snapshot failed" in output
+        assert fake.downloads == []
+
+    @pytest.mark.asyncio
     async def test_tmp_bind_path_added(self, tmp_path):
         self.server.config.container_tmp_bind_path = "/container/tmp"
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
