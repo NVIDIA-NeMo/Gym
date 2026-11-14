@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 import pytest
 from omegaconf import DictConfig, OmegaConf
+from pydantic import ValidationError
 
 from environment_servers.single_agent_turn.app import SessionHandles
 from environment_servers.single_agent_turn_legacy.app import (
@@ -213,3 +214,19 @@ async def check_hle_seed(agent: str, transports: list[str] | None, monkeypatch: 
         ]
         assert reply is not None and reply.status_code == 422, reply and reply.text
         assert not created_sandbox
+
+
+def check_misspelled_setting_is_refused(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A misspelled network_access on the composed profile fails validation instead of leaving the sandbox open."""
+    composed = f"hle_equivalence_llm_judge_{agent}"
+    # Under the composed name an unknown key already fails at resolve ("not in struct"); under the profile's own
+    # instance name, where the READMEs put other settings, it reaches the composed agent.
+    config = compose_profile_on_hle(
+        agent, monkeypatch, cli_args=(f"++{agent}.responses_api_agents.{agent}.network_acess=model_only",)
+    )
+    config_class = getattr(importlib.import_module(f"responses_api_agents.{agent}.app"), HARNESSES[agent][1])
+    # The profile as shipped validates; only the undeclared key is refused.
+    settings = server_config(config, composed)
+    config_class.model_validate({key: value for key, value in settings.items() if key != "network_acess"})
+    with pytest.raises(ValidationError, match="network_acess"):
+        config_class.model_validate(settings)

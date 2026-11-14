@@ -22,6 +22,7 @@ from pydantic import Field, field_validator
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -323,6 +324,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             assert_model_url_reachable_from_sandbox(
                 self._model_base_url(), provider_name=next(iter(provider_config), None)
             )
+        except AgentSeedRejectedError:
+            raise
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         provider = create_provider(provider_config)

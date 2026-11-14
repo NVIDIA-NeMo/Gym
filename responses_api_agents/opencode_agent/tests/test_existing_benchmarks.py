@@ -173,3 +173,12 @@ def test_nemotron_overlays_bind_deepswe_opencode_sessions(staged: bool, monkeypa
     )
     environment = get_first_server_config_dict(config, "deepswe_environment_server")
     assert environment.agent_server.name == "deepswe_opencode_agent"
+
+
+@pytest.mark.parametrize("environment", ["opencode_math", "opencode_reasoning_gym"])
+def test_host_run_presets_deny_web_fetches(environment: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # These presets run OpenCode on the Gym host through /run, where network_access does not apply, and grade
+    # what the model knows, so OpenCode is not given its webfetch tool. Bash keeps the host's network.
+    config = _resolve_config(f"environments/{environment}/config.yaml", monkeypatch)
+    agent = get_first_server_config_dict(config, f"{environment}_agent")
+    assert agent.opencode_config.permission.webfetch == "deny"

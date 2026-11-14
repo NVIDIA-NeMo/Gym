@@ -45,11 +45,11 @@ from nemo_gym.agents import (
     AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
@@ -599,7 +599,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+class CodexAgentConfig(StrictResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).

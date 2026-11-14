@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         Body,
         RolloutStopRequest,
         SimpleResponsesAPIAgent,
+        StrictResponsesAPIAgentConfig,
         assert_model_url_reachable_from_sandbox,
     )
     from nemo_gym.agents.skills import stage_skills
@@ -114,6 +115,7 @@ _PUBLIC_API = {
     "AgentSessionSetupError": "base_responses_api_agent",
     "AgentSessionState": "base_responses_api_agent",
     "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
+    "StrictResponsesAPIAgentConfig": "base_responses_api_agent",
     "Body": "base_responses_api_agent",
     "CLEANUP_PHASE_COUNT": "utils.supervisor_client",
     "CleanupReceipt": "utils.supervisor_client",

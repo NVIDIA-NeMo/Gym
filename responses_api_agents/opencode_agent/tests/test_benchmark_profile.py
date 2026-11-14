@@ -17,7 +17,12 @@
 import pytest
 
 from nemo_gym.config import get_first_server_config_dict
-from tests.session_harness_profiles import REQUIRED_SETTING_VALUES, check_hle_seed, compose_profile_on_hle
+from tests.session_harness_profiles import (
+    REQUIRED_SETTING_VALUES,
+    check_hle_seed,
+    check_misspelled_setting_is_refused,
+    compose_profile_on_hle,
+)
 
 
 @pytest.mark.parametrize("transports", [None, ["direct_http"]], ids=["as_shipped", "direct_http_granted"])
@@ -36,3 +41,7 @@ def test_profile_restricts_the_sandbox_to_the_model_server(monkeypatch: pytest.M
     # OpenCode cannot download its binary through that policy, so the profile requires one in the image.
     assert settings.sandbox_executable_path == REQUIRED_SETTING_VALUES["sandbox_executable_path"]
     assert settings.sandbox_executable_sha256 == REQUIRED_SETTING_VALUES["sandbox_executable_sha256"]
+
+
+def test_a_misspelled_setting_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    check_misspelled_setting_is_refused("opencode_agent", monkeypatch)

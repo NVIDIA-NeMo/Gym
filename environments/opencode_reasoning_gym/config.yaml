@@ -19,7 +19,6 @@ opencode_reasoning_gym_agent:
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
       opencode_version: 1.17.11
       thinking: false
-      setup_timeout: 900
       timeout: 900
       system_prompt: |
         You are a precise reasoning assistant with a bash tool. Use Python to calculate or verify results when helpful.
@@ -28,7 +27,9 @@ opencode_reasoning_gym_agent:
         permission:
           bash: allow
           edit: allow
-          webfetch: allow
+          # The harness runs on the Gym host with its network. This removes OpenCode's webfetch tool; bash can
+          # still reach the network, which only a sandbox with network_access closes.
+          webfetch: deny
         provider:
           nvinf:
             npm: "@ai-sdk/openai-compatible"

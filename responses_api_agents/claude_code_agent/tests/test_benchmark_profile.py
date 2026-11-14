@@ -17,7 +17,12 @@
 import pytest
 
 from nemo_gym.config import get_first_server_config_dict
-from tests.session_harness_profiles import REQUIRED_SETTING_VALUES, check_hle_seed, compose_profile_on_hle
+from tests.session_harness_profiles import (
+    REQUIRED_SETTING_VALUES,
+    check_hle_seed,
+    check_misspelled_setting_is_refused,
+    compose_profile_on_hle,
+)
 
 
 @pytest.mark.parametrize("transports", [None, ["direct_http"]], ids=["as_shipped", "direct_http_granted"])
@@ -35,3 +40,7 @@ def test_profile_restricts_the_sandbox_to_the_model_server(monkeypatch: pytest.M
     assert settings.network_access == "model_only"
     # The Claude Code CLI is uploaded from the Agent Server, so it needs no sandbox network.
     assert all(settings.get(key) is None for key in REQUIRED_SETTING_VALUES)
+
+
+def test_a_misspelled_setting_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    check_misspelled_setting_is_refused("claude_code_agent", monkeypatch)

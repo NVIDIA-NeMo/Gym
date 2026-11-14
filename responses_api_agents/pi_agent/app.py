@@ -41,11 +41,11 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     resolve_agent_timeout,
     restrict_sandbox_network,
 )
@@ -630,7 +630,7 @@ class PiMCPServerConfig(BaseModel):
     timeout: int = Field(default=60000, gt=0)
 
 
-class PiAgentConfig(BaseResponsesAPIAgentConfig):
+class PiAgentConfig(StrictResponsesAPIAgentConfig):
     # Only the direct /run compatibility path calls Resources. Sandbox sessions
     # receive SandboxAccess from EnvironmentServer instead.
     resources_server: Optional[ResourcesServerRef] = None

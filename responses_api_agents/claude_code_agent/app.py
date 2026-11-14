@@ -42,11 +42,11 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
@@ -114,7 +114,7 @@ fi
 _HEADLESS_RUN_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 
-class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
+class ClaudeCodeAgentConfig(StrictResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
     # server's URL (requires the server to expose POST /v1/messages).
