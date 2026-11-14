@@ -204,7 +204,7 @@ def _inspect_oom_evidence(inspect: str) -> str | None:
     return None
 
 
-# Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/run).
+# Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/cluster/run).
 # Per-attempt metadata key (under the attribution prefix): the only handle on a sandbox whose create
 # request never returned, so a timed-out attempt can find and delete what it started.
 CREATE_ATTEMPT_KEY = "create-attempt"
@@ -2299,7 +2299,7 @@ class OpenSandboxProvider:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path.
 
-        Job attribution keys (``team`` / ``user`` / ``workload`` / ``run``) are merged into the
+        Job attribution keys (``team`` / ``user`` / ``workload`` / ``cluster`` / ``run``) are merged into the
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
         spec = replace(spec, metadata={**self._attribution.metadata(), **spec.metadata})
