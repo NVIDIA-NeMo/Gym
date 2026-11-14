@@ -69,7 +69,7 @@ Per-harness policy stays in the adapter:
 
 ## Check it
 
-`nemo_gym.testing.checkpoint_conformance.check_harness_adapter` runs your adapter with its real supervisor on this
+`check_harness_adapter` (from `nemo_gym.server_runtime`) runs your adapter with its real supervisor on this
 machine (`LocalExecProvider`) and a test harness in place of the CLI. It checks pause → park → continue, a re-sent
 activation, the stop fallback and relaunch, the close of a restored session that was never re-bound, re-bind and resume
 after a crash, and a close while the harness runs. `responses_api_agents/opencode_agent/tests/test_checkpoint.py` shows
