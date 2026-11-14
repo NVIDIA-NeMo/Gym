@@ -770,7 +770,9 @@ class TestNativeSessions:
             GlobalConfigDictParserConfig(
                 initial_global_config_dict=OmegaConf.merge(
                     GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                    DictConfig({"config_paths": [str(root / "benchmarks/terminal_bench_2_1/terminus_2.yaml")]}),
+                    DictConfig(
+                        {"config_paths": [str(root / "benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml")]}
+                    ),
                 ),
                 skip_load_from_cli=True,
                 skip_load_from_dotenv=True,

@@ -119,6 +119,7 @@ non-default config in that directory.
 gym eval run \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
+    --sandbox opensandbox \
     --model-type vllm_model
 ```
 
@@ -137,12 +138,12 @@ renaming is involved, and the dataset's `[gym] allowed_agents` is the compatibil
 
 **The composed server instance is renamed after the agent that runs it**, so metrics and `gym env status`
 report the harness actually used: composing `terminus_2_sandboxed_agent` onto
-`terminal_bench_2_1_opencode_sandboxed_agent` produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
+`terminal_bench_2_1_opencode_sandboxed_agent` (the relay recipe `terminal_bench_2_1/opencode_legacy_agent`) produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
 `gym env start` prints the instance list, which matters for the two-step flow:
 
 ```bash
 gym env start \
-    --benchmark terminal_bench_2_1/opencode \
+    --benchmark terminal_bench_2_1/opencode_legacy_agent \
     --agent-type terminus_2_sandboxed_agent \
     --model-type vllm_model
 gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl

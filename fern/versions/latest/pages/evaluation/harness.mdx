@@ -15,14 +15,18 @@ gym list agents
 gym eval run \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
+    --sandbox opensandbox \
     --model-type vllm_model
 ```
+
+`terminal_bench_2_1/opencode` runs on the [`harbor` Environment Server](/main/agent-interactions/harbor), so
+`--agent-type` selects the harness that server binds for the same tasks; nothing is composed or renamed.
 
 Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Comparing those across harnesses *is* the ablation — for example (illustrative, not real output):
 
 | Harness | Pass rate |
 |---|---|
-| `opencode_sandboxed_agent` | 41% |
+| `opencode_agent` | 41% |
 | `terminus_2_sandboxed_agent` | 68% |
 
 A spread this size, with the model and dataset held identical, means the harness — not the model — is the lever to pull. Refer to [Diagnose Results](/evaluation/diagnose-results) to have an agent explain *why* the harnesses diverged, or [Aggregate Metrics](/evaluation/aggregate-metrics) to build your own comparison across shards. For the flag reference itself, see
@@ -30,7 +34,8 @@ A spread this size, with the model and dataset held identical, means the harness
 
 ## The composed instance is renamed
 
-Composition replaces the environment's agent and renames the server instance after the harness that
+For a benchmark that composes its own servers, such as the relay recipe `terminal_bench_2_1/opencode_legacy_agent`,
+composition replaces the environment's agent and renames the server instance after the harness that
 runs it, so metrics and `gym env status` report what actually ran. Composing
 `terminus_2_sandboxed_agent` onto `terminal_bench_2_1_opencode_sandboxed_agent` produces
 `terminal_bench_2_1_terminus_2_sandboxed_agent`.
@@ -39,7 +44,7 @@ That name is what you use to route rollouts when the servers are already up:
 
 ```bash
 gym env start \
-    --benchmark terminal_bench_2_1/opencode \
+    --benchmark terminal_bench_2_1/opencode_legacy_agent \
     --agent-type terminus_2_sandboxed_agent \
     --model-type vllm_model
 gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl

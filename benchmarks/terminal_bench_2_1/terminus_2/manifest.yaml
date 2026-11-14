@@ -1,11 +1,11 @@
 name: terminal_bench_2_1/terminus_2
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: Terminal-Bench 2.1 tasks with prepared instruction messages, sandboxed
-  agent execution, and task-provided verification.
+description: The 89 pinned Terminal-Bench 2.1 task folders in their Harbor format, run by Terminus 2 agent
+  sessions through the Harbor environment server and graded by each task's own tests.
 modality: text
 licensing: unknown
 authors:
@@ -17,14 +17,10 @@ reward:
   higher_is_better: true
 determinism: unknown
 config_path: ../terminus_2.yaml
-resources_server: terminal_bench_2_1
+harbor_target: terminal_bench_2_1
+resources_server: null
 agent_server: terminus_2_sandboxed_agent
-datasets:
-- name: terminal_bench_2_1
-  type: benchmark
-  jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
-  prepare_script: benchmarks/terminal_bench_2_1/prepare.py
-  num_repeats: 8
+datasets: []
 model_server: policy_model
 canonical_split: benchmark
 prompt_source: prepared
