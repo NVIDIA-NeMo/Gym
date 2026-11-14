@@ -326,8 +326,8 @@ class HarborTaskStep(HarborSettings):
     The loader pairs it with its ``steps/<name>/`` folder into a ``HarborTurn``, as ``HarborTaskConfig`` pairs
     with its folder into a ``HarborTask``. The step has its own instruction (``steps/<name>/instruction.md``)
     and verifier (the task's ``tests/`` with ``steps/<name>/tests/`` on top). ``min_reward`` stops the episode
-    after this step when its rewards fall short: a number gates the ``reward`` key, a mapping gates each named
-    key, and a step without a verifier result fails every gate.
+    after this step when its rewards fall short: a number gates the dataset's ``reward_key`` when set, else the
+    ``reward`` key, a mapping gates each named key, and a step without a verifier result fails every gate.
     """
 
     name: str

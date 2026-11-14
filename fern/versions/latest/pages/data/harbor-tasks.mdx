@@ -99,17 +99,18 @@ dataset digest covers the file that holds it). The generated run config's `datas
 as declared, its top-level `num_repeats` is `[gym.defaults].num_repeats`, and `gym eval run` starts from that split
 and repeat count (`+split=` and `+num_repeats=` on the command line replace them); `gym dataset validate` plays each
 reference solution once unless `+num_repeats=` says otherwise. None of these keys enters a task's `_ng_digest`; only
-`[gym.defaults]` scaling and `[gym.tasks]` overrides do. Every materialized row carries
+`[gym.defaults]` scaling and `reward_key`, and `[gym.tasks]` overrides, do. Every materialized row carries
 `task_source` (the dataset folder's name: the parent's for a single task folder target inside a dataset, one whose
 parent holds a `dataset.toml` or a `manifest.toml`; a standalone task folder is labelled by its own name) and
 `_ng_digest` (the task
-folder's digest), and every results row carries them too, with `reward` and, when the verifier's `reward.json`
-named no `reward` key, `reward_components`:
+folder's digest), and every results row carries them too, with `reward` and, when `reward_key` is unset and the
+verifier's `reward.json` named no `reward` key, `reward_components`:
 the keys that sum to the reward. That mapping is Harbor's optional, task-specific reading of the file, not the shared
 multi-reward contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same objective keys on every
 task): tasks of one dataset may name different keys and a measured row may name none, so a trainer reads it row by
 row and takes the scalar `reward` alone where a row has none; a dataset meant for a fixed-objective trainer such as
-GDPO must have every task write the same keys without a `reward` key, which Gym does not pad or check across tasks.
+GDPO must leave `reward_key` unset and have every task write the same keys without a `reward` key, which Gym does
+not pad or check across tasks.
 `gym eval run` with a harness outside `allowed_agents` fails before any image is
 recorded or built or any server started, naming the harness and the admitted list, and a run config edited to
 another harness afterwards is refused at dispatch by the collector's pairing guard. An `example` dataset is not

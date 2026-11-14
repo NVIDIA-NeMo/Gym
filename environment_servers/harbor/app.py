@@ -184,7 +184,8 @@ class HarborTurnResult(BaseModel):
     name: str
     reward: float
     verifier_rewards: dict[str, float] | None = None
-    # The keys of reward.json that sum to `reward`, when the file names no `reward` key (see verifier.py).
+    # The keys of reward.json that sum to `reward`, when `reward_key` is unset and the file names no `reward` key
+    # (see verifier.py).
     reward_components: dict[str, float] | None = Field(default=None, exclude_if=lambda value: value is None)
     mask_sample: bool = False
     failure_kind: str | None = None
@@ -235,19 +236,20 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     """The episode's verify response plus what the Harbor verifier produced.
 
     ``verifier_rewards`` is the parsed ``reward.json`` (``reward.txt`` becomes ``{"reward": value}``).
-    ``reward_components`` names the keys that sum to ``reward``, present only when the file named no
-    ``reward`` key (every key is then a component); with a ``reward`` key the other keys are metrics and
-    stay in ``verifier_rewards`` alone. The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
+    ``reward_components`` names the keys that sum to ``reward``, present only when ``reward_key`` is unset and
+    the file named no ``reward`` key (every key is then a component); with a ``reward`` key, or with the dataset's
+    ``reward_key`` (that key is then the reward), the other keys are metrics and stay in ``verifier_rewards``
+    alone. The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
 
     That mapping is Harbor's optional, task-specific reading of ``reward.json``, not the shared multi-reward
     contract of :class:`~nemo_gym.server_runtime.base_resources_server.BaseMultiRewardVerifyResponse` (a required mapping whose
     objective keys are the same on every task of an environment): a task names whatever keys its ``test.sh``
-    wrote, two tasks of one dataset may name different ones, and a measured episode names none when the file
-    had a ``reward`` key, was missing or invalid (a measured 0), or its components did not sum to the roll-up.
-    Its consumers are per-row inspection and a trainer that reads the mapping row by row and takes the scalar
-    ``reward`` alone where it is absent. Gym pads no missing component and renames no key: a dataset meant for
-    a fixed-objective trainer (GDPO and the like) must have every task write the same keys without a ``reward``
-    key, which is the dataset's contract to keep, not this server's.
+    wrote, two tasks of one dataset may name different ones, and a measured episode names none when
+    ``reward_key`` was set, the file had a ``reward`` key, was missing or invalid (a measured 0), or its components
+    did not sum to the roll-up. Its consumers are per-row inspection and a trainer that reads the mapping row by row
+    and takes the scalar ``reward`` alone where it is absent. Gym pads no missing component and renames no key: a
+    dataset meant for a fixed-objective trainer (GDPO and the like) must leave ``reward_key`` unset and have every
+    task write the same keys without a ``reward`` key, which is the dataset's contract to keep, not this server's.
 
     A multi-step task fills ``turns`` in order. The top-level reward follows
     ``turn_reward_strategy`` over them (Harbor's ``multi_step_reward_strategy``), and ``response`` and

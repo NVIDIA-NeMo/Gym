@@ -51,11 +51,12 @@ Diagnostic logs are best effort: unsafe archive entries are skipped securely, an
 transfer failure cannot discard an already measured reward. Verifier timeouts score zero and retain
 available logs. An existing `reward.json`
 takes precedence even if malformed; `reward.txt` is read only when JSON is absent. Boolean JSON rewards
-are numeric, as in Harbor. In `reward.json` a `reward` key is the score and the other keys are metrics, kept in
-`verifier_rewards`; without one every key is a component of the score, which is their sum, and the result names
-them as `reward_components` (only keys that sum to `reward`, the contract a trainer asserts; a `reward` key with
-other keys names none, since those do not sum to it). Components whose sum is not a finite number are an invalid
-reward file: measured 0 with `harbor:invalid_reward`. A multi-step task averages components as it averages rewards
+are numeric, as in Harbor. With `reward_key` unset (see below), in `reward.json` a `reward` key is the score and
+the other keys are metrics, kept in `verifier_rewards`; without one every key is a component of the score, which
+is their sum, and the result names them as `reward_components` (only keys that sum to `reward`, the contract a
+trainer asserts; a `reward` key with other keys names none, since those do not sum to it). Components whose sum
+is not a finite number are an invalid reward file: measured 0 with `harbor:invalid_reward`. A multi-step task
+averages components as it averages rewards
 when every measured turn named some, else names none. On the single-turn path the check cannot fail (the reward is
 the sum of the same keys); when a roll-up's components do not sum to its reward, the episode names none and the
 server logs a warning naming the task, the keys and both numbers.
@@ -74,8 +75,8 @@ contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same ob
 environment): a task names whatever keys its `test.sh` wrote, two tasks of one dataset may name different ones, and a
 measured row may name none. It is for per-row inspection and for a trainer that reads the mapping row by row and
 takes the scalar `reward` alone where a row has none. Gym pads no missing component and renames no key, so a dataset
-meant for a fixed-objective trainer (GDPO and the like) must have every task write the same keys without a `reward`
-key; that is the dataset's contract to keep, not the server's.
+meant for a fixed-objective trainer (GDPO and the like) must leave `reward_key` unset and have every task write the
+same keys without a `reward` key; that is the dataset's contract to keep, not the server's.
 
 ## Supported task behavior
 
@@ -280,8 +281,9 @@ verify separately (a shared turn cannot be restricted); per-step `[steps.verifie
 refused.
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
-`min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
-turns up: `mean` (the default) averages every turn that ran, a turn whose `test.sh` produced no result counting 0
+`min_reward` (a number gates `reward_key` when the dataset sets it, else `reward`; a table gates each named key).
+`multi_step_reward_strategy` rolls the turns up: `mean` (the default) averages every turn that ran, a turn whose
+`test.sh` produced no result counting 0
 with its failure kind on the episode (Harbor leaves such a step out of its denominator; Gym scores a verifier run
 that produced nothing, so a broken later verifier cannot lift the mean), and `final` takes the last turn that
 ran. The pre-1.3 spellings `version` and `multi_step_reward_mode` (what older multi-step generators such as the
@@ -1047,8 +1049,9 @@ split and repeat count: `+split=` and `+num_repeats=` on the command line replac
 inherits the split but plays each reference solution once (it adds `+num_repeats=1` unless the command line sets
 a count): validation is not an evaluation, and the oracle's result does not vary. None of these keys enters a
 task's `_ng_digest`: a table that declares only them leaves every task at its bare folder hash, exactly as no
-table does; only `[gym.defaults]` scaling and `[gym.tasks]` overrides fold a slice in. A `domain` outside Gym's
-values is refused with the values named, like a `license` outside Gym's, so the dataset does not load until it
+table does; only `[gym.defaults]` scaling and `reward_key`, and `[gym.tasks]` overrides, fold a slice in. A
+`domain` outside Gym's values is refused with the values named, like a `license` outside Gym's, so the dataset
+does not load until it
 is fixed (the generated entry carries the same enum). A benchmark entry names no `prepare_script`; the rows are
 written by the run that generates the entry. Gym's data preparation records the entry, with the rows' metrics,
 in a sidecar beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under

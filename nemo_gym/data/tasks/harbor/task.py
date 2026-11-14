@@ -314,6 +314,22 @@ def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
 
 
+def read_task_toml(path: Path) -> tuple[dict[str, Any], bool]:
+    """The ``task.toml`` at ``path`` parsed, without a ``[verifier].reward_key``, and whether it held one.
+
+    ``reward_key`` changes the score and Harbor ignores it, so it comes from ``dataset.toml`` alone: in the task's
+    own file it stays an unknown key, and the folder scores the same under Gym and under Harbor. Every reader that
+    validates a ``task.toml`` (the loader, the base-image scan and the build plan) drops it here first, so a value
+    the field would refuse never leaves the task out of one of them.
+    """
+    data = tomllib.loads(Path(path).read_text())
+    verifier_table = data.get("verifier")
+    if not isinstance(verifier_table, dict) or "reward_key" not in verifier_table:
+        return data, False
+    data["verifier"] = {key: value for key, value in verifier_table.items() if key != "reward_key"}
+    return data, True
+
+
 def built_service_images(task_folder: Path, root: Path | None = None) -> dict[str, str]:
     """The images prepare built for the task's ``environment/`` context, by Compose service name (``{}`` when none
     are recorded): ``main`` for the task's own Dockerfile, each built sidecar under its service name.
@@ -411,15 +427,11 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     if not is_task_folder(path):
         raise HarborTaskError(f"{path} has no {TASK_FILE}")
     try:
-        data = tomllib.loads((path / TASK_FILE).read_text())
+        data, had_reward_key = read_task_toml(path / TASK_FILE)
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
-        # `[verifier].reward_key` changes the score and Harbor ignores it, so it comes from dataset.toml alone: in the
-        # task's own file it stays an unknown key, and the folder scores the same under Gym and under Harbor.
-        verifier_table = data.get("verifier")
-        if isinstance(verifier_table, dict) and "reward_key" in verifier_table:
+        if had_reward_key:
             logger.warning("%s: ignoring unknown key `verifier.reward_key` (set it in dataset.toml)", path / TASK_FILE)
-            data["verifier"] = {key: value for key, value in verifier_table.items() if key != "reward_key"}
         legacy_mode = data.get("multi_step_reward_mode")
         if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
             # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own

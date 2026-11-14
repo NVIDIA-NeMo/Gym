@@ -2655,6 +2655,29 @@ def test_reward_key_in_a_task_toml_is_ignored_as_harbor_ignores_it(tmp_path, cap
     assert load_task(folder / "a").config.verifier.reward_key == "score"
 
 
+@pytest.mark.parametrize("value", ['""', "1"])
+def test_a_task_local_reward_key_does_not_drop_the_task_from_preparation(tmp_path, caplog, value):
+    """The base-image scan and the build plan read task.toml too, and validated it with a task-local `reward_key`
+    still in place: a value the field refuses (empty, not a string) left the task out of both, so discovery then
+    refused it for the missing records. They ignore the key as the loader does."""
+    from nemo_gym.data.tasks.harbor.build_plan import plan_builds
+    from nemo_gym.data.tasks.harbor.image_configs import dockerfile_base_images
+
+    toml = HELLO_TOML.replace("[verifier]\n", f"[verifier]\nreward_key = {value}\n", 1)
+    workdir = write_task(tmp_path / "workdir" / "a", dockerfile="FROM ubuntu:24.04\nWORKDIR src\n", toml=toml)
+    copy = write_task(tmp_path / "copy" / "a", dockerfile="FROM ubuntu:24.04\nCOPY . /app\n", toml=toml)
+    plain = write_task(tmp_path / "plain" / "a", toml=toml)
+    for dataset_toml in ("", '[gym.defaults]\nreward_key = "overall"\n'):
+        for task in (workdir, copy, plain):
+            (task.parent / "dataset.toml").write_text(dataset_toml)
+        assert dockerfile_base_images(workdir.parent) == {"ubuntu:24.04": ["a"]}
+        assert [entry.tasks for entry in plan_builds(copy.parent)] == [("a",)]
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert load_task(plain).config.verifier.reward_key == ("overall" if dataset_toml else None)
+        assert "ignoring unknown key `verifier.reward_key`" in caplog.text
+
+
 def test_reward_key_is_refused_for_a_dataset_python_verifier(tmp_path):
     folder = tmp_path / "ds"
     write_task(folder / "a")
