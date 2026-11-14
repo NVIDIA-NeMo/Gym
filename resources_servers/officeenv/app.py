@@ -38,6 +38,9 @@ row whose artifacts cannot be read (400).
 For training, ``length_penalty`` (off by default) deducts AutomationBench's training length
 penalty from the reward and reports the two terms as ``reward_components``, so a trainer can
 schedule the penalty on its own (NeMo RL ``grpo.phasic_reward_components``).
+
+Sandboxed harnesses run these episodes on ``resources_servers/officeenv_sandbox``, a subclass of this
+server that lends each episode session a sandbox.
 """
 
 import contextvars
