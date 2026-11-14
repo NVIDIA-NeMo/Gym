@@ -63,6 +63,7 @@ class Deployment:
                 num_workers=WORKERS,
                 cleanup_timeout_seconds=5,
                 tool_transports=["direct_http", "mcp"],
+                sandbox_provider={"local": {}},
             ),
         }
         self.proc: subprocess.Popen | None = None
