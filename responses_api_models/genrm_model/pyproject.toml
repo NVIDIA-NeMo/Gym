@@ -38,12 +38,12 @@ include = ["genrm_model"]
 override-dependencies = [
     "spacy>=3.8.13",
     "wcwidth; sys_platform == 'never'",
-    "opencv-python-headless; sys_platform == 'never'",
-    "pynvvideocodec; sys_platform == 'never'",
-    "torchcodec; sys_platform == 'never'",
-    "torchvision; sys_platform == 'never'",
-    "torchaudio; sys_platform == 'never'",
-    "pycountry; sys_platform == 'never'",
+    "opencv-python-headless>=4.13.0; sys_platform != 'darwin'",
+    "pynvvideocodec==2.0.4; sys_platform != 'darwin'",
+    "torchcodec>=0.14; sys_platform != 'darwin'",
+    "torchvision==0.28.0; sys_platform != 'darwin'",
+    "torchaudio==2.11.0; sys_platform != 'darwin'",
+    "pycountry",
     "gprof2dot; sys_platform == 'never'",
     "pathspec",
 ]

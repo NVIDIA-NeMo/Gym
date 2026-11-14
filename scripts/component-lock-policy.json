@@ -163,7 +163,13 @@
       "prometheus-fastapi-instrumentator>=8.0.2"
     ],
     "override-dependencies": [
-      "pathspec"
+      "pathspec",
+      "opencv-python-headless>=4.13.0; sys_platform != 'darwin'",
+      "pynvvideocodec==2.0.4; sys_platform != 'darwin'",
+      "torchcodec>=0.14; sys_platform != 'darwin'",
+      "torchvision==0.28.0; sys_platform != 'darwin'",
+      "torchaudio==2.11.0; sys_platform != 'darwin'",
+      "pycountry"
     ]
   },
   "responses_api_models/local_vllm_model": {
@@ -171,7 +177,13 @@
       "prometheus-fastapi-instrumentator>=8.0.2"
     ],
     "override-dependencies": [
-      "pathspec"
+      "pathspec",
+      "opencv-python-headless>=4.13.0; sys_platform != 'darwin'",
+      "pynvvideocodec==2.0.4; sys_platform != 'darwin'",
+      "torchcodec>=0.14; sys_platform != 'darwin'",
+      "torchvision==0.28.0; sys_platform != 'darwin'",
+      "torchaudio==2.11.0; sys_platform != 'darwin'",
+      "pycountry"
     ]
   },
   "responses_api_models/switchyard_model": {
