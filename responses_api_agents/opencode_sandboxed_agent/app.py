@@ -715,13 +715,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             if collect_observations
             else None
         )
-        xdg_home_str = ""
+        xdg_env: Dict[str, str] = {}
         remote_data_home = None
         # Observations read OpenCode's session database, so it goes to a known /tmp path; opencode_data_home_in_tmp does
-        # the same for images whose user has no writable home (see the config field).
+        # the same for images whose user has no writable home (see the config field), and also moves OpenCode's state,
+        # cache and config dirs there: with only XDG_DATA_HOME moved, it next fails on mkdir $HOME/.local/state.
         if collect_observations or self.config.opencode_data_home_in_tmp:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
-            xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
+            xdg_env["XDG_DATA_HOME"] = remote_data_home
+            if self.config.opencode_data_home_in_tmp:
+                for name in ("STATE", "CACHE", "CONFIG"):
+                    xdg_env[f"XDG_{name}_HOME"] = f"{remote_data_home}-{name.lower()}"
+        xdg_home_str = " ".join(f"{key}={value}" for key, value in xdg_env.items())
 
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
@@ -763,7 +768,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
-            session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
+            session_env = dict(xdg_env) or None
             session_list_result = await sandbox.exec(
                 command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
                 env=session_env,

@@ -366,10 +366,18 @@ class TestOpenCodeSandboxedAgent:
         )
 
         run_call, session_list_call, export_call = sandbox_mock.exec.await_args_list[:3]
-        assert "XDG_DATA_HOME=/tmp/nemo-gym-opencode-abc" in run_call.kwargs["command"]
-        # the session list/export must read the same data dir the run wrote to
-        assert session_list_call.kwargs["env"] == {"XDG_DATA_HOME": "/tmp/nemo-gym-opencode-abc"}
-        assert export_call.kwargs["env"] == {"XDG_DATA_HOME": "/tmp/nemo-gym-opencode-abc"}
+        # data, state, cache and config all move off $HOME (pyautogui's image failed on ~/.local/state otherwise)
+        expected = {
+            "XDG_DATA_HOME": "/tmp/nemo-gym-opencode-abc",
+            "XDG_STATE_HOME": "/tmp/nemo-gym-opencode-abc-state",
+            "XDG_CACHE_HOME": "/tmp/nemo-gym-opencode-abc-cache",
+            "XDG_CONFIG_HOME": "/tmp/nemo-gym-opencode-abc-config",
+        }
+        for key, value in expected.items():
+            assert f"{key}={value}" in run_call.kwargs["command"]
+        # the session list/export must read the same dirs the run wrote to
+        assert session_list_call.kwargs["env"] == expected
+        assert export_call.kwargs["env"] == expected
 
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(
