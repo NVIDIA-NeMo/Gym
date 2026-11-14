@@ -6,11 +6,11 @@ config_paths:
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
 - benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
-- benchmarks/swebench/verified/opencode.yaml
-- benchmarks/swebench/multilingual/opencode.yaml
+- benchmarks/swebench/verified/opencode_legacy_agent.yaml
+- benchmarks/swebench/multilingual/opencode_legacy_agent.yaml
 - benchmarks/deepswe/opencode.yaml
 - benchmarks/terminal_bench_2_1/terminus_2.yaml
-- benchmarks/swebench/pro/opencode.yaml
+- benchmarks/swebench/pro/opencode_legacy_agent.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - benchmarks/nemotron_3.5_super/sandbox_utils.yaml
 - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml

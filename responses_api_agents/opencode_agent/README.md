@@ -3,7 +3,8 @@
 `configs/opencode_agent.yaml` uses a Gym model server and supports sandbox
 EnvironmentServer sessions and local CLI calls. An agent session selects the
 sandbox; without one, requests run locally. Invalid or closed sessions fail.
-Local `/run` requires a Resources binding; direct `/v1/responses` does not.
+Episodes use an Environment Server; the default agent `/run` returns HTTP 422.
+Direct local `/v1/responses` remains available without a Resources binding.
 
 Training token-ID capture is off by default. Enable the agent's `token_id_capture`
 only when explicitly collecting training data; evaluation observability remains independent.
@@ -31,6 +32,22 @@ Resources-owned lifecycle. HLE and APEX Shortlist run this agent from their plai
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
 quoting is fixed for directories containing spaces.
+
+## Deprecated local episodes
+
+Existing callers of the agent's local `/run` can select
+`configs/opencode_legacy_agent.yaml` in place of `configs/opencode_agent.yaml`.
+It keeps the `opencode_agent` instance name and selects `legacy_app.py`.
+For a custom instance that sets its own entry point, set
+`responses_api_agents.opencode_agent.entrypoint: legacy_app.py` on that instance.
+Keep its Resources binding and `legacy_agent` Environment Server routing.
+
+This entry point preserves local seed → responses → verify orchestration,
+including cookies, rollout identity, observations and trajectory metadata.
+It requires `resources_server` and refuses sandbox-session `/run` calls.
+New configurations should use the default `app.py` and agent sessions below.
+The SWE `*_legacy_agent` recipes use the separate `opencode_sandboxed_agent`
+package and do not need this local compatibility entry point.
 
 ## EnvironmentServer sessions
 

@@ -60,7 +60,6 @@ from nemo_gym.agents import (
     restrict_sandbox_network,
     verification_failure_fields,
 )
-from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
@@ -110,7 +109,6 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
-from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.pinned import (
     COPY_PINNED,
     REJECTED,
@@ -514,10 +512,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class OpenCodeAgentRunRequest(BaseRunRequest):
+    """Request for the deprecated local episode entry point in ``legacy_app.py``."""
+
     model_config = ConfigDict(extra="allow")
 
 
 class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
+    """Result from the deprecated local episode entry point in ``legacy_app.py``."""
+
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
@@ -931,73 +933,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return episode.response.model_copy(
             update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
         )
-
-    async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
-        if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "OpenCode sandbox sessions must use EnvironmentServer /run")
-        if self.config.resources_server is None:
-            raise HTTPException(422, "Local OpenCode /run requires resources_server")
-        async with self.sem:
-            cookies = request.cookies
-
-            seed_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=cookies,
-            )
-            await raise_for_status(seed_resp)
-            cookies = seed_resp.cookies
-
-            rollout_id = self.rollout_id_from_run(body)
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
-            raw_trajectory = agent_resp_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
-            trajectory = (
-                scope_opencode_trajectory(TrajectoryRecord.model_validate(raw_trajectory), body, rollout_id)
-                if isinstance(raw_trajectory, dict) and rollout_id is not None
-                else None
-            )
-            raw_observations = (
-                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
-            )
-            observations = (
-                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
-            )
-
-            verify_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump()
-                | {"response": agent_resp_json}
-                | verification_failure_fields(NeMoGymResponse.model_validate(agent_resp_json)),
-                cookies=cookies,
-            )
-            await raise_for_status(verify_resp)
-            verify_json = await get_response_json(verify_resp)
-
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
-            turns = sum(
-                1
-                for item in gym_resp.output
-                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            )
-            last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-
-            return OpenCodeAgentVerifyResponse.model_validate(
-                verify_json
-                | {"turns_used": turns, "finished_naturally": naturally}
-                | ({"ng_agent_observations": observations} if observations is not None else {})
-                | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
-            )
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""

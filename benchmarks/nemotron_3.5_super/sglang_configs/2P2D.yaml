@@ -82,7 +82,7 @@ benchmark:
     node: last_decode
   stream_output: true
   env:
-    GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
+    GYM_CONFIG: benchmarks/swebench/verified/opencode_legacy_agent.yaml
     POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
     EXPERIMENT_NAME: sglang-2p2d-hicache-gym
     EXPORT_TO_CSV: '0'

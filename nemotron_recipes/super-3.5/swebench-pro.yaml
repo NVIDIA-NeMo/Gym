@@ -33,7 +33,7 @@
 gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
 # Gym benchmark config this recipe builds on.
 benchmark_config:
-  - benchmarks/swebench/pro/opencode.yaml
+  - benchmarks/swebench/pro/opencode_legacy_agent.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 policy_model:

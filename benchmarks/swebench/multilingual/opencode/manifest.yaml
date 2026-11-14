@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
 description: SWE-bench multilingual test-split software engineering tasks using prepared
-  repair prompts, a sandboxed OpenCode agent, and binary patch-resolution scoring.
+  repair prompts, OpenCode agent sessions in the benchmark's task sandbox, and binary
+  patch-resolution scoring.
 modality: text
 licensing: unknown
 authors:
@@ -18,7 +19,7 @@ reward:
 determinism: unknown
 config_path: ../opencode.yaml
 resources_server: swebench
-agent_server: opencode_sandboxed_agent
+agent_server: opencode_agent
 datasets:
 - name: swebench_multilingual
   type: benchmark
