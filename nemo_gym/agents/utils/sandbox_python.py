@@ -59,8 +59,7 @@ _PYTHON_SHA256 = {
     "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
     "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
 }
-# Other CPython builds of the same release, for a harness that does not run on PYTHON_VERSION. Hermes v0.22.2, for
-# example, declares its dependencies only for Python 3.14.
+# Other CPython builds of the same release, for a harness whose dependencies do not support PYTHON_VERSION.
 _OTHER_PYTHON_SHA256 = {
     "3.14.7": {
         "x86_64/gnu": "a3a4e4b81b138960c7c546694df8a77578c0b6aa46d47e96f49b9e10e8f860c9",  # pragma: allowlist secret
@@ -289,7 +288,9 @@ class SandboxPythonRuntime:
     such as the lines of its ``overrides.txt``. ``constraints`` pins the runtime's packages instead of this Agent
     Server's environment, for a harness whose versions differ from the ones the server itself runs, such as the lines
     of a ``uv pip compile`` lock of ``requirements``. ``python_version`` selects another pinned CPython build of the
-    same python-build-standalone release, for a harness that does not run on this server's ``PYTHON_VERSION``.
+    same python-build-standalone release, for a harness that does not run on this server's ``PYTHON_VERSION``; such a
+    runtime passes ``constraints`` locked for its own version, since this server's versions were resolved for
+    ``PYTHON_VERSION``.
     """
 
     harness: str
@@ -301,6 +302,11 @@ class SandboxPythonRuntime:
 
     def __post_init__(self) -> None:
         _python_checksums(self.python_version)
+        if self.python_version != PYTHON_VERSION and self.constraints is None:
+            raise ValueError(
+                f"A {self.harness} runtime on Python {self.python_version} needs constraints locked for that version: "
+                f"this server's own versions were resolved for {PYTHON_VERSION}"
+            )
 
     @property
     def pins(self) -> tuple[str, ...]:
