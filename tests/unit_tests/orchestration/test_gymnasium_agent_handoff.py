@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_verdict
 from nemo_gym.rollouts.rollout_collection import enrich_run_result
