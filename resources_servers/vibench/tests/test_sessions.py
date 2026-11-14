@@ -645,7 +645,7 @@ def test_close_follows_the_session_contract(server, root, graded):
         app,
         _seed(session_id="contract"),
         keeps_state=True,
-        holds_state=lambda resources_session_id: resources_session_id in server._sessions,
+        holds_state=server.keeps_session_state,
         verify_body=_verify_body(),
     )
 
@@ -664,11 +664,14 @@ def test_failed_setup_retains_cleanup_until_close(server, root, monkeypatch, ope
     assert _post_seed(client, seed).status_code == 500
     session = server._sessions[seed.resources_session_id]
     assert session.sandbox is not None and not session.ready
+    keeps_state = server.owned_session_routing()["keeps_session_state"]
+    assert keeps_state(seed.resources_session_id)  # Routing keeps the owner for the close that retries the stop.
     assert _post_seed(client, seed).status_code == 409
     assert _verify(client)["mask_sample"] is True
     assert _close(client, seed).status_code == 200
     assert stop.await_count == 2
     assert server._sessions == {}
+    assert not keeps_state(seed.resources_session_id)
     assert not session.scratch_dir.exists()
 
 

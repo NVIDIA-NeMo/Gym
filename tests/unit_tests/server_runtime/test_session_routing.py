@@ -191,6 +191,13 @@ class StateServer(SimpleResourcesServer):
         return {"worker": self.label, "value": self.store.get(request.session[SESSION_ID_KEY])}
 
 
+class StateKeepingServer(StateServer):
+    """Reports the sessions it keeps, including one a failed seed left partly set up for its close to release."""
+
+    def keeps_session_state(self, session_id: str) -> bool:
+        return session_id in self.sessions
+
+
 class SessionIgnoringSeedServer(StateServer):
     """Seeds with the default ``seed_session``, which never reads the session, as an agent's own ``/run`` seeds."""
 
@@ -910,6 +917,64 @@ class TestOwnershipLifetime:
         assert lifetimes.holds("s")
         clock[0] += 10
         assert lifetimes.sweep() == ["s"] and not lifetimes.holds("s")
+
+    def test_lifetimes_keep_ownership_a_window_past_the_servers_last_state(self, monkeypatch) -> None:
+        clock = [0.0]
+        kept = {"s"}
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(
+            10, starts=("/seed_session",), ends=("/close_session",), keeps_session_state=kept.__contains__
+        )
+        # A failed seed whose teardown also failed: the session is not open, but the server keeps its state.
+        lifetimes.served("s", {"path": "/seed_session", "headers": []}, 500)
+
+        for clock[0] in (10, 20, 1000):
+            assert lifetimes.sweep() == [] and lifetimes.holds("s")
+        lifetimes.served("s", {"path": "/ping", "headers": []}, 200)  # A request inside a kept window adds no entry.
+        assert len(lifetimes._expiries) == 1 and len(lifetimes) == 1
+
+        kept.clear()  # Released some other way than a request here, so only the sweep can notice.
+        assert lifetimes.sweep() == [] and lifetimes.holds("s")
+        clock[0] = 1010
+        assert lifetimes.sweep() == ["s"] and not lifetimes._expiries and len(lifetimes) == 0
+
+    def test_lifetimes_release_ownership_when_the_state_check_fails(self, monkeypatch, caplog) -> None:
+        clock = [0.0]
+
+        def keeps(session_id: str) -> bool:
+            raise AttributeError("a buggy override fails for every session")
+
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(
+            10, starts=("/seed_session",), ends=("/close_session",), keeps_session_state=keeps
+        )
+        for session_id in ("s1", "s2"):
+            lifetimes.served(session_id, {"path": "/close_session", "headers": []}, 200)
+
+        clock[0] = 10
+        with caplog.at_level(logging.WARNING):
+            # Released as without the hook, so a hook that always fails cannot keep every session owned.
+            assert sorted(lifetimes.sweep()) == ["s1", "s2"] and len(lifetimes) == 0
+        warnings = [record for record in caplog.records if "could not tell" in record.getMessage()]
+        assert sorted(record.args[0] for record in warnings) == ["s1", "s2"]
+        # One traceback per worker, not one per session per window.
+        assert sum(bool(record.exc_info) for record in warnings) == 1
+
+    def test_a_failed_seeds_late_close_reaches_the_worker_that_kept_its_state(self, socket_dir: str) -> None:
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.2, server_class=StateKeepingServer)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.2, server_class=StateKeepingServer)
+        with a.client, b.client:
+            a.server.fail_seed = True
+            assert a.seed().status_code == 500
+            # Well past the window, as when the caller's cleanup close is delayed.
+            time.sleep(0.6)
+            owned_after_window = _owner(socket_dir, "s")
+            closed = b.close()
+            _wait_until(lambda: _owner(socket_dir, "s") is None)
+
+        assert owned_after_window == a.routing_id
+        assert closed.json()["resources_session_id"] == "s@a"
+        assert a.server.sessions == {} and b.server.closes == []
 
     def test_an_agent_session_owner_is_released_once_it_drops_the_closed_record(self, socket_dir: str) -> None:
         a = AgentWorker("a", socket_dir, close_retry_window_seconds=0.1)

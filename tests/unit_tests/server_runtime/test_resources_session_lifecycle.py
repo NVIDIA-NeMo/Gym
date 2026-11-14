@@ -491,6 +491,15 @@ def test_async_has_state_hook_is_rejected_before_instantiation() -> None:
                 return True
 
 
+def test_async_keeps_state_hook_is_rejected_before_instantiation() -> None:
+    # Checked for every server, since one that keeps sessions in its own map overrides only this hook.
+    with pytest.raises(TypeError, match="keeps_session_state must be synchronous"):
+
+        class AsyncKeepsState(StatelessResourceServer):
+            async def keeps_session_state(self, session_id: str) -> bool:
+                return True
+
+
 class RequestFirstSeedServer(StatelessResourceServer):
     seeded: dict[str, dict] = Field(default_factory=dict)
 
@@ -1035,3 +1044,67 @@ async def test_a_failed_cookie_reseed_does_not_leave_released_cleanup_pending() 
     assert not server.session_release_pending("caller-cookie")  # Nothing is left to release.
     async with server.verifying("caller-cookie") as verification:
         assert verification.retained == "finished run"  # The receipt stays for its window.
+
+
+async def test_server_wiring_keeps_worker_ownership_while_a_failed_seeds_cleanup_is_left_for_close(
+    monkeypatch, tmp_path
+) -> None:
+    from fastapi import FastAPI
+
+    from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
+
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+    config = _server().config.model_copy(update={"session_close_retry_window_seconds": 10})
+    server = FlakyInitializationServer(config=config, server_client=MagicMock(spec=ServerClient))
+    app = FastAPI()
+    install_session_routing(
+        app, socket_dir=str(tmp_path), session_cookie="key", secret_key="key", **server.owned_session_routing()
+    )
+    lifetimes = app.state.nemo_gym_resources_session_lifetimes
+
+    server._fail_release = True
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await server.seed_session(SEED, request=_request())
+    lifetimes.served("session", {"path": "/seed_session", "headers": []}, 500)
+    # Only the base's record of the failed initialization remains: no live state, no pending verification.
+    assert not server.has_session_state("session") and not server.session_release_pending("session")
+    clock[0] = 1000
+    assert lifetimes.sweep() == [] and lifetimes.holds("session")  # The close that retries cleanup must land here.
+
+    server._fail_release = False
+    await server.close_resources_session(CLOSE)
+    lifetimes.served("session", {"path": "/close_session", "headers": []}, 200)
+    clock[0] += 10
+    assert lifetimes.sweep() == ["session"] and len(lifetimes) == 0
+
+
+async def test_server_wiring_keeps_worker_ownership_while_live_state_outlives_the_session(
+    monkeypatch, tmp_path
+) -> None:
+    from fastapi import FastAPI
+
+    from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
+
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+    config = _server().config.model_copy(update={"session_close_retry_window_seconds": 10})
+    server = AsyncResourceServer(config=config, server_client=MagicMock(spec=ServerClient))
+    app = FastAPI()
+    install_session_routing(
+        app, socket_dir=str(tmp_path), session_cookie="key", secret_key="key", **server.owned_session_routing()
+    )
+    lifetimes = app.state.nemo_gym_resources_session_lifetimes
+
+    await server.seed_session(SEED, request=_request())
+    lifetimes.served("session", {"path": "/seed_session", "headers": []}, 200)
+    lifetimes.ended("session")  # As a checkpoint end does, while the server still holds the session's state.
+    # Only live state remains: no initialization in flight, no pending verification.
+    assert server.has_session_state("session") and "session" not in server._initializing_sessions
+    clock[0] = 1000
+    assert lifetimes.sweep() == [] and lifetimes.holds("session")  # The close that releases it must land here.
+
+    await server.close_resources_session(CLOSE)
+    lifetimes.served("session", {"path": "/close_session", "headers": []}, 200)
+    clock[0] += 10
+    assert lifetimes.sweep() == ["session"] and len(lifetimes) == 0

@@ -577,7 +577,7 @@ def test_episode_session_follows_the_session_contract(monkeypatch: MonkeyPatch) 
             task_data=task_data,
         ),
         keeps_state=True,
-        holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_sandbox,
+        holds_state=server.keeps_session_state,
         verify_body=request_body(),
     )
 
@@ -621,7 +621,7 @@ async def test_episode_seed_rolls_back_sandbox_when_handoff_fails(monkeypatch: M
 @pytest.mark.asyncio
 async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
     server = make_server(golden=False)
-    sandbox = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("stop failed")))
+    sandbox = SimpleNamespace(stop=AsyncMock(side_effect=[RuntimeError("stop failed"), None]))
     identity = (
         EpisodeId(rollout_id="rollout"),
         TaskId(taskset="swebench_pro", task_id="instance_example"),
@@ -641,6 +641,15 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
 
     assert server._session_id_to_sandbox["session"] is sandbox
     assert server._session_id_to_identity["session"] == identity
+    # With several workers, routing keeps the session on this worker for the close that retries the stop.
+    assert server.keeps_session_state("session")
+
+    await server.close_resources_session(
+        request,
+        ResourcesCloseSessionRequest(resources_session_id="session", episode_id=identity[0]).model_dump(mode="json"),
+    )
+    assert sandbox.stop.await_count == 2
+    assert not server.keeps_session_state("session")
 
 
 @pytest.mark.parametrize("verdict", ["resolved", "unresolved", "infrastructure_failure"])
