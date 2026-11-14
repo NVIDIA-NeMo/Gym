@@ -148,7 +148,7 @@ def test_example_rows_are_prepared_single_container_tasks_from_every_domain():
 def benchmark_config(**overrides):
     config = OmegaConf.merge(
         OmegaConf.load(BENCHMARK_DIR / "resources.yaml"),
-        OmegaConf.load(BENCHMARK_DIR / "miniswe.yaml"),
+        OmegaConf.load(BENCHMARK_DIR / "miniswe_legacy_agent.yaml"),
         overrides,
     )
     del config["config_paths"]
@@ -905,6 +905,26 @@ def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_se
     assert agent.inherit_sandbox_environment is True
     assert (agent.timeout, agent.codex_version) == (28800, "0.155.1")
     assert (agent.verify_after_agent_error, agent.raise_oom_score_adj) == (True, True)
+
+
+def test_miniswe_profile_runs_the_harbor_entry_with_mini_swe():
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    benchmark = harbor_benchmark(BENCHMARK_DIR / "miniswe.yaml")
+    assert benchmark.target == "terminal_bench_science"
+    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent",) * 2
+    settings = OmegaConf.create(benchmark.agent.benchmark_settings)
+    harbor = settings.harbor_environment_server.environment_servers.harbor
+    # Harness setup, the 8-hour agent budget, the separate verifier's start and the 12000-second verifier.
+    assert harbor.default_episode_timeout_seconds > harbor.harness_setup_allowance_s + 28800 + 1200 + 12000
+    assert harbor.sandbox_metadata["nemo.nvidia.com/oom-kill"] == "process"
+    assert harbor.sandbox_metadata["nemo.nvidia.com/s3-hostpath"] == "false"
+    # The harness settings travel with the preset's mini_swe_agent block and take the tbsci_* overrides.
+    capped = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / "miniswe.yaml"), {"tbsci_max_steps": 3, "tbsci_agent_max_timeout_sec": 900}
+    )
+    agent = capped.mini_swe_agent.responses_api_agents.mini_swe_agent
+    assert (agent.step_limit, agent.step_timeout, agent.sandbox_runner_timeout_seconds) == (3, 30, 900)
 
 
 # The README's vllm_model settings for Codex in front of a chat-completions server.

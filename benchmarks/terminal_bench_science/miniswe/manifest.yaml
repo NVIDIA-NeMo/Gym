@@ -1,11 +1,13 @@
 name: terminal_bench_science/miniswe
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: The pinned 70-task Terminal-Bench-Science v0.1 dataset with the mini-SWE 2.4.6 native loop owned by the
-  agent server and separate offline official verification.
+description: The pinned 70-task Terminal-Bench-Science v0.1 dataset in its Harbor task folders, run by mini-SWE 2.4.6
+  agent sessions through the Harbor environment server with separate no-network official verification. Three
+  Compose tasks are skipped during preparation and two tasks whose working directory is / are refused at seed.
+  Use terminal_bench_science/miniswe_legacy_agent for full task coverage.
 modality: text
 licensing: Apache-2.0
 authors:
@@ -17,18 +19,10 @@ reward:
   higher_is_better: true
 determinism: unknown
 config_path: ../miniswe.yaml
-resources_server: terminal_bench_4
-agent_server: miniswe_sandboxed_agent
-datasets:
-- name: terminal_bench_science
-  type: benchmark
-  jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark.jsonl
-  prepare_script: benchmarks/terminal_bench_science/prepare.py
-  num_repeats: 1
-- name: example
-  type: example
-  jsonl_fpath: benchmarks/terminal_bench_science/data/example.jsonl
-  num_repeats: 1
+harbor_target: terminal_bench_science
+resources_server: null
+agent_server: mini_swe_agent
+datasets: []
 model_server: policy_model
 canonical_split: benchmark
 prompt_source: agent
