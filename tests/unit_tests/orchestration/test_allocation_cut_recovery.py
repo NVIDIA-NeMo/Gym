@@ -37,6 +37,7 @@ from nemo_gym.orchestration.recovery import (
     chain_accounting,
     decide_from_collected,
     select_managed_evidence,
+    store_writer_cut_from_accounting,
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -256,6 +257,35 @@ def test_only_masked_results_left_stop_and_say_they_are_kept(tmp_path):
 )
 def test_the_cut_is_read_from_the_allocation_that_last_wrote_the_store(accounting, allocation, cut):
     assert allocation_cut_from_accounting(chain_accounting(accounting), allocation) is cut
+
+
+@pytest.mark.parametrize(
+    "accounting,allocation,unrecorded,chain,cut",
+    [
+        # The named writer decides, whatever else the chain holds.
+        ("100|TIMEOUT|14400|0\n101|RUNNING|60|0", "100", False, ["100", "101"], True),
+        # No allocation_id key (a worker older than it): every allocation of the chain must have ended.
+        ("100|TIMEOUT|14400|0\n101|FAILED|60|0", None, True, ["100", "101"], True),
+        ("100|PREEMPTED|15000|0\n100|FAILED|14|1\n101|FAILED|16|0", None, True, ["100", "101"], True),
+        ("100|TIMEOUT|14400|0\n101|RUNNING|60|0", None, True, ["100", "101"], False),
+        ("100|TIMEOUT|14400|0", None, True, ["100", "101"], False),
+        ("100|TIMEOUT|14400|0", None, True, [], False),
+        # A recorded null (a writer outside Slurm) is not in the chain: unknown, however the chain ended.
+        ("100|TIMEOUT|14400|0\n101|FAILED|60|0", None, False, ["100", "101"], False),
+    ],
+)
+def test_a_store_without_a_named_writer_is_cut_once_every_allocation_of_the_chain_ended(
+    accounting, allocation, unrecorded, chain, cut
+):
+    collected = CollectedEvidence(
+        materialized=None,
+        results=None,
+        failures=[],
+        job_chain=chain,
+        coverage_allocation_id=allocation,
+        coverage_writer_unrecorded=unrecorded,
+    )
+    assert store_writer_cut_from_accounting(chain_accounting(accounting), collected) is cut
 
 
 @pytest.mark.parametrize("accounting", ["malformed", "100|TIMEOUT|14400", "100|TIMEOUT|x|0"])
@@ -725,6 +755,36 @@ def test_reservations_without_a_known_ending_never_read_as_failures_nobody_owns(
         "2 reservation(s) have no saved outcome and the allocation that made them is not known to have ended"
     )
     assert "nobody owns them" not in reason
+
+
+def _without_named_writer(job):
+    """The coverage report as a worker older than allocation_id writes it: no allocation_id key."""
+    report_path = job / "artifacts" / "rollouts_coverage.json"
+    report = json.loads(report_path.read_text())
+    del report["allocation_id"]
+    report_path.write_text(json.dumps(report))
+
+
+def test_the_inspect_resumes_reservations_when_the_coverage_names_no_writer_and_the_chain_ended(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    job, _ = _inspected_cut(tmp_path, slurm_bin, "100|TIMEOUT|7200|0\n101|FAILED|60|0\n")
+    _without_named_writer(job)
+    inspected = inspect_recovery(*_handle(job))
+    assert inspected.decision.action.value == "resubmit", inspected.decision.reason
+    assert inspected.decision.counts == {"scored": 2, "missing": 4}
+
+
+def test_reservations_stay_unknown_when_the_coverage_names_no_writer_and_a_chain_record_is_missing(
+    tmp_path, slurm_bin
+):
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    job, _ = _inspected_cut(tmp_path, slurm_bin, "100|TIMEOUT|7200|0\n")
+    _without_named_writer(job)
+    inspected = inspect_recovery(*_handle(job))
+    assert inspected.decision.action.value == "stop"
+    assert inspected.decision.counts["unknown"] == 2
 
 
 def test_an_installer_error_with_a_credential_never_leaves_the_run_host(tmp_path):

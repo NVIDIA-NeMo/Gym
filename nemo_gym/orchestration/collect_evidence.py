@@ -849,12 +849,15 @@ if len(sys.argv) > 2:
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
 coverage_allocation_id = None
+coverage_writer_unrecorded = False
 coverage_scored = None
 try:
     # The allocation that last opened the Store for writing; only its id leaves the run host.
     report = json.load(open(os.path.join(a, "rollouts_coverage.json")))
     value = report.get("allocation_id")
     coverage_allocation_id = value if isinstance(value, str) and value.isascii() and value.isdecimal() else None
+    # A worker older than allocation_id leaves the key out; a writer outside Slurm records null.
+    coverage_writer_unrecorded = "allocation_id" not in report
     # Collection's own count of the rollouts whose score entered the metrics, and its expected count.
     if all(type(report.get(k)) is int and report[k] >= 0 for k in ("scored", "expected")):
         coverage_scored = [report["scored"], report["expected"]]
@@ -882,7 +885,8 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
-                  "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
+                  "coverage_allocation_id": coverage_allocation_id, "coverage_writer_unrecorded": coverage_writer_unrecorded,
+                  "coverage_scored": coverage_scored,
                   "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
