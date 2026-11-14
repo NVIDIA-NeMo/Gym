@@ -500,6 +500,11 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # image ships the reference repo under /workspace (the verifier extracts the agent workspace over /workspace without
     # wiping it). Off by default. Added 2026-10-24.
     verify_with_override_image: bool = False
+    # Per-task grading image, resolved like task_image_registry_template ("map:<json path>" or a "{name}" template), in
+    # every mode, ahead of verify_image_override. For task sets whose grading image is not the agent's image: e.g. the
+    # NL2Repo "grading twins" (the task's grading image + a self-contained grader under /nl2repo/; the agent keeps the
+    # rollout image, which has no tests). None (default): unchanged. Added 2026-11-06.
+    verify_image_registry_template: str | None = None
     # "gym_strict" (default, original behavior): grade the agent's workspace as-is - its own setup.py/pyproject.toml and any
     # files it wrote at the held-out test paths stay, and the first failing non-final command zeroes the row.
     # "upstream": grade the way NL2RepoBench itself does (see _UPSTREAM_PACKAGE_FILES). Added 2026-10-27, after finding
@@ -766,7 +771,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # deciding factor exactly as before - this keeps block_target/official verify behavior
         # byte-identical to already-reported eval baselines, since those don't touch this branch.
         verify_image = (
-            task_image(task, registry_template=self.config.task_image_registry_template)
+            task_image(task, registry_template=self.config.verify_image_registry_template)
+            if self.config.verify_image_registry_template
+            else task_image(task, registry_template=self.config.task_image_registry_template)
             if mode == "no_internet_preinstalled" and not (self.config.verify_with_override_image and self.config.verify_image_override)
             else self.config.verify_image_override
             or task_image(task, registry_template=self.config.task_image_registry_template)

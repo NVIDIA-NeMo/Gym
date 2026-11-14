@@ -508,3 +508,28 @@ async def test_sandbox_metadata_from_config_reaches_the_spec(task_assets: Path, 
     request.session = {SESSION_ID_KEY: "s1"}
     await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
     assert sandbox.start.await_args.args[0].metadata["nemo.nvidia.com/oom-kill"] == "process"
+
+
+async def test_verify_image_registry_template_picks_the_grading_image(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """verify_image_registry_template (map:<json>) grades in the per-task image it names; the agent image is unchanged."""
+    verify_map = tmp_path / "verify_images.json"
+    verify_map.write_text('{"example-task": "registry.example/twins/example-task@sha256:abc"}')
+    config = _config(task_assets).model_copy(
+        update={"agent_network_mode": "no_internet_preinstalled", "verify_image_registry_template": f"map:{verify_map}"}
+    )
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    created = MagicMock(return_value=sandbox)
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", created)
+    task = _resolve_task(NL2RepoBenchVerifyRequest.model_validate(_request()), server._task_store)
+    await server._create_sandbox(task, phase="verify")
+    await server._create_sandbox(task, phase="agent")
+    specs = [call.args[0] for call in sandbox.start.await_args_list]
+    assert specs[0].image == "registry.example/twins/example-task@sha256:abc"
+    assert specs[1].image == UPSTREAM_IMAGE
