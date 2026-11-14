@@ -608,6 +608,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
     from nemo_gym.orchestration.executors.slurm import RemoteReaderInterrupted
+    from nemo_gym.orchestration.recovery import operator_verdict_line
     from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
 
     _raise_keyboard_interrupt_on_sigterm()
@@ -770,6 +771,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 print(json.dumps(payload))
             else:
                 print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
+            if outcome.operator_verdict is not None:
+                print(operator_verdict_line(outcome.operator_verdict), file=sys.stderr)
             requested_gate = inspect_only or any(
                 getattr(args, name, None) is not None
                 for name in (
