@@ -486,7 +486,8 @@ async def test_sandbox_output_and_failures(
         assert config["provider"]["nemo"]["models"]["m"]["interleaved"]["field"] == "reasoning_content"
         # --pure would skip config plugins, including the one that gives tool shells the task's HOME.
         assert "--pure" not in staged["command"]
-        assert config["plugin"] == [session.task_environment_plugin]
+        # Kilo has no setting that keeps it from resending a 409 or bounds Retry-After; the shared plugin does.
+        assert config["plugin"] == [session.task_environment_plugin, session.model_retry_plugin]
 
 
 CONNECT_ERROR = 'level=ERROR message="stream error" error.error="AI_APICallError: Cannot connect to API"'
@@ -519,6 +520,44 @@ async def test_model_http_error_reaches_environment(status_code: int, exit_code:
         "status_code": status_code,
     }
     assert response.metadata["harness_execution"] == "sandbox"
+
+
+@pytest.mark.parametrize(
+    ("message", "outcome"),
+    [
+        (
+            "NeMo Gym model retry limit: HTTP 503 after 3 attempts",
+            {"failure_kind": "model_request_error", "status_code": 503},
+        ),
+        (
+            "NeMo Gym model retry limit: HTTP 409 is not sent again",
+            {"failure_kind": "model_request_error", "status_code": 409},
+        ),
+        ("NeMo Gym model retry limit: no model response after 3 attempts", {"failure_kind": "model_transport_error"}),
+    ],
+)
+async def test_retry_limit_plugin_error_reaches_environment(message: str, outcome: dict) -> None:
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = receipt(return_code=1)
+    error = {"name": "UnknownError", "data": {"message": message}}
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(
+            task_environment_ready=True, stdout=json.dumps({"type": "error", "error": error}), stderr="", exit_code=1
+        )
+    )
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+    )
+    assert response.status == "failed"
+    assert message in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
+
+
+def test_other_unknown_errors_stay_unclassified() -> None:
+    agent = _make_model_server_agent(model="m")
+    error = {"name": "UnknownError", "data": {"message": "HTTP 503 from somewhere else"}}
+    assert agent.classify_outcome(error).failure_kind == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -839,6 +878,9 @@ async def test_install_uploads_the_task_environment_plugin() -> None:
     plugin = f"{session.session.session_dir}/task_environment.mjs"
     assert uploaded[plugin] == "task_environment.mjs"
     assert session.task_environment_plugin == f"file://{plugin}"
+    retry_plugin = f"{session.session.session_dir}/model_retry_limit.mjs"
+    assert uploaded[retry_plugin] == "model_retry_limit.mjs"
+    assert session.model_retry_plugin == f"file://{retry_plugin}"
 
 
 async def test_owned_sandbox_whose_start_cleanup_fails_is_retained_for_close() -> None:

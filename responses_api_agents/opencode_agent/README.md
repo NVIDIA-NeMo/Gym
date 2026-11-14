@@ -205,6 +205,17 @@ training token-ID/logprob support or benchmark accuracy. Sandbox observations us
 `FailureStage` vocabulary: execution is `agent`, while OpenCode’s own setup failure events use `seed`.
 An existing failure stage is preserved when forwarded; scoring and retries belong to the caller’s outcome policy.
 
+OpenCode 1.17.11 resends a failed model request with no attempt or time limit, also after a 409, and waits
+exactly as long as `Retry-After` says, so `Retry-After: 0` makes a hot loop; it has no setting for this.
+`model_retry_limit.mjs` therefore wraps the fetch of every provider in the config, locally (with `model_server`)
+and in sandbox sessions: a 408, 425, 429 or 5xx reaches OpenCode with `retry-after-ms` set to the server's
+`Retry-After` capped at 10 seconds (else 1 and 2 seconds), and the third such failure in a row, a 409, or a third
+failed connection ends the turn with `NeMo Gym model retry limit: HTTP <status> after 3 attempts` (or `no model
+response after 3 attempts`). OpenCode saves that as an `UnknownError`; the adapter reports it as
+`model_request_error` with that status (or `model_transport_error`), so the Environment Server's outcome policy
+applies as for an API error. Other 4xx reach OpenCode unchanged and are not resent. A direct provider call
+(`openai_base_url`, no `model_server`) defines no provider in the config and keeps OpenCode's own retries.
+
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
 preserved; otherwise the temporary workspace is removed after the call. A local

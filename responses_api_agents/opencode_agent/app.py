@@ -122,6 +122,8 @@ from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
     IMAGE_INPUT_MODEL_OPTIONS,
+    MODEL_RETRY_PLUGIN_FILE,
+    MODEL_RETRY_PLUGIN_SOURCE,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     RUNTIME_INSTALLER_FILE,
@@ -131,6 +133,7 @@ from responses_api_agents.opencode_agent.runtime import (
     UNRESTRICTED_IMAGE_ATTACHMENT,
     apply_observability_patch,
     command_failure_reason,
+    retry_limit_outcome,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
@@ -537,6 +540,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """
         finishes = {_API_ERROR: None, _CONTEXT_OVERFLOW_ERROR: "error"}
         name = (native_result.get("error") or {}).get("name")
+        if retry_limit_outcome(native_result.get("error")) is not None:
+            # The model retry limit plugin's error ends the turn like an API error.
+            finishes["UnknownError"] = None
         return (
             cleanup is not None
             and cleanup["return_code"] == 1
@@ -557,6 +563,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         error = native_result.get("error") or {}
         if error.get("name") == _CONTEXT_OVERFLOW_ERROR:
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if (limit := retry_limit_outcome(error)) is not None:
+            return limit
         if error.get("name") != _API_ERROR:
             return AgentOutcome(failure_kind="unknown")
         data = error.get("data") or {}
@@ -657,6 +665,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 },
             )
             nemo["models"] = {self.config.model: model}
+            config.setdefault("plugin", []).append(MODEL_RETRY_PLUGIN_SOURCE.as_uri())
         if self._model_call_capture_enabled():
             apply_observability_patch(config)
         return config
@@ -1207,6 +1216,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     what="plugin dependency archive",
                 )
             await sandbox.upload(TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{directory}/{TASK_ENVIRONMENT_PLUGIN_FILE}")
+            await sandbox.upload(MODEL_RETRY_PLUGIN_SOURCE, f"{directory}/{MODEL_RETRY_PLUGIN_FILE}")
             if self._model_call_capture_enabled():
                 await sandbox.upload(ASSISTANT_MESSAGE_PLUGIN_SOURCE, f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}")
             if self.config.session_import_path is not None:
@@ -1801,8 +1811,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             apply_observability_patch(
                 config, plugin_path=Path(state.persistent_directory) / ASSISTANT_MESSAGE_PLUGIN_FILE
             )
-        config.setdefault("plugin", []).append(
-            (Path(state.session.session_dir) / TASK_ENVIRONMENT_PLUGIN_FILE).as_uri()
+        config.setdefault("plugin", []).extend(
+            (Path(state.session.session_dir) / name).as_uri()
+            for name in (TASK_ENVIRONMENT_PLUGIN_FILE, MODEL_RETRY_PLUGIN_FILE)
         )
         if mcp_servers:
             config["plugin"].append((Path(state.session.session_dir) / REQUIRED_MCP_PLUGIN_FILE).as_uri())

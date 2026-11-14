@@ -48,6 +48,7 @@ PLUGIN_CHECK = 'for path in "$@"'
 EXPORT_SESSION = '"$1" export "$3"'
 EVENT_LOG = ".events.jsonl"
 PINNED_COPY = "sha256sum"
+GYM_PLUGINS = ("task_environment.mjs", "model_retry_limit.mjs")
 VERSION_PROBE = "--version"
 UNPACK = "tar -x"
 IMPORT_CHECK = "test -f"
@@ -194,7 +195,8 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
         "limit": {"context": 32000, "input": 32000, "output": 4096},
     }
     assert set(config) == {"model", "small_model", "enabled_providers", "autoupdate", "share", "provider", "plugin"}
-    assert config["plugin"] == [Path(f"{directory}/task_environment.mjs").as_uri()]
+    # Gym's own plugins: the task environment, and the model retry limit OpenCode has no setting for.
+    assert config["plugin"] == [Path(f"{directory}/{name}").as_uri() for name in GYM_PLUGINS]
     assert response.status == "completed"
     assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)
 
@@ -213,7 +215,7 @@ async def test_owner_plugins_are_checked_at_seed_and_load_after_gym_plugins_in_o
     directory = sandbox.directory
     _, config = launch_config(sandbox)
     gym_plugins = [Path(f"{directory}/{OBSERVABILITY_PATCH.name}").as_uri()] if capture else []
-    gym_plugins.append(Path(f"{directory}/task_environment.mjs").as_uri())
+    gym_plugins.extend(Path(f"{directory}/{name}").as_uri() for name in GYM_PLUGINS)
     assert config["plugin"] == [*gym_plugins, "file:///opt/owner/z-last.mjs", "file:///opt/owner/a%20first.mjs"]
 
 

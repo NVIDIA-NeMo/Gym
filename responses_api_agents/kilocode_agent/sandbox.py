@@ -29,6 +29,9 @@ from responses_api_agents.kilocode_agent.observability import read_kilo_snapshot
 from responses_api_agents.kilocode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+    MODEL_RETRY_LIMIT_ENV,
+    MODEL_RETRY_PLUGIN_FILE,
+    MODEL_RETRY_PLUGIN_SOURCE,
     RUNTIME_INSTALLER_FILE,
     RUNTIME_INSTALLER_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
@@ -169,6 +172,11 @@ class KiloSandboxSession(AgentSessionState):
         """The plugin, as a kilo.json entry, that restores the task's HOME and XDG directories for tools."""
         return PurePosixPath(self.directory, TASK_ENVIRONMENT_PLUGIN_FILE).as_uri()
 
+    @property
+    def model_retry_plugin(self) -> str:
+        """The plugin, as a kilo.json entry, that holds Kilo to Gym's model retry rule."""
+        return PurePosixPath(self.directory, MODEL_RETRY_PLUGIN_FILE).as_uri()
+
     async def install_runtime(self, *, version: str, timeout: float) -> None:
         """Install pinned Node and Kilo into the session directory with the bundled installer."""
         directory = self.directory
@@ -199,6 +207,7 @@ class KiloSandboxSession(AgentSessionState):
             f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}",
         )
         await sandbox.upload(TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{directory}/{TASK_ENVIRONMENT_PLUGIN_FILE}")
+        await sandbox.upload(MODEL_RETRY_PLUGIN_SOURCE, f"{directory}/{MODEL_RETRY_PLUGIN_FILE}")
 
     async def stage_activation(
         self, *, command: list[str], config: str, output_token_max: int | None = None, mcp_preflight: bool = False
@@ -233,6 +242,7 @@ class KiloSandboxSession(AgentSessionState):
                     else {}
                 ),
                 "KILO_NO_DAEMON": "1",
+                **MODEL_RETRY_LIMIT_ENV,
                 "KILO_DB": f"{directory}/kilo.db",
                 "KILO_CONFIG": f"{directory}/kilo.json",
                 "KILO_DISABLE_PROJECT_CONFIG": "1",

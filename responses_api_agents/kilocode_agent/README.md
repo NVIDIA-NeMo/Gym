@@ -221,7 +221,12 @@ CLI/API errors and nonzero exits raise, so the episode fails instead of scoring 
 mark them `failed` instead; see Quick start). A killed run
 or a `length` stop returns an `incomplete` response, except a run that times out before any model
 call completes: Kilo retries an unreachable model server without reporting it, so that run raises
-with the end of Kilo's log instead. Observations come from a snapshot of Kilo's
+with the end of Kilo's log instead. Kilo 7.4.15 resends a failed model request with no time limit, also
+after a 409, and waits exactly as long as `Retry-After` says. Runs set `KILO_SESSION_RETRY_LIMIT=2`, Kilo's only
+setting for this, and sandbox sessions also load OpenCode's `model_retry_limit.mjs` (see the OpenCode Agent README):
+only a 408, 425, 429, 5xx or failed connection is resent, at most twice in a row, at most 10 seconds apart, and a
+409 is not resent. The local run starts Kilo with `--pure`, which loads no plugins, so there only the count applies:
+a 409 is still resent twice and a server `Retry-After` is followed in full. Observations come from a snapshot of Kilo's
 SQLite database, taken on the agent server after the run (root and child sessions, tool calls with timing and bash exit status, usage),
 annotated with the root outcome and a sandbox record; if the snapshot is unavailable, a coverage gap
 is reported. The response metadata records the sandbox runner's hostname and PID, the Kilo

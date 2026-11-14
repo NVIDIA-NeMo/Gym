@@ -52,7 +52,7 @@ from responses_api_agents.opencode_agent.app import (
 )
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_export
 from responses_api_agents.opencode_agent.observability import split_gym_reasoning
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.runtime import MODEL_RETRY_PLUGIN_SOURCE, OBSERVABILITY_PATCH
 
 
 def _config(**kwargs) -> OpenCodeAgentConfig:
@@ -748,6 +748,13 @@ class TestEnv:
         assert env["OPENAI_BASE_URL"] == "http://model/v1"
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
+
+    def test_model_server_loads_the_retry_limit_plugin(self) -> None:
+        # OpenCode resends a failed model request without limit and has no setting for it.
+        agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            assert agent._build_opencode_config()["plugin"] == [MODEL_RETRY_PLUGIN_SOURCE.as_uri()]
+        assert "plugin" not in _make_agent(openai_base_url="https://x/v1")._build_opencode_config()
 
     def test_model_server_replayed_reasoning_is_accepted_by_gym_chat_completions(self) -> None:
         agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))

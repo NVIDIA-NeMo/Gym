@@ -2575,6 +2575,37 @@ async def test_statusless_transient_provider_failure_stays_retryable(setup, mess
     assert closed.agent_observations is not None
 
 
+@pytest.mark.parametrize(
+    ("message", "outcome"),
+    [
+        (
+            "NeMo Gym model retry limit: HTTP 503 after 3 attempts",
+            {"failure_kind": "model_request_error", "status_code": 503},
+        ),
+        (
+            "NeMo Gym model retry limit: HTTP 409 is not sent again",
+            {"failure_kind": "model_request_error", "status_code": 409},
+        ),
+        ("NeMo Gym model retry limit: no model response after 3 attempts", {"failure_kind": "model_transport_error"}),
+    ],
+)
+async def test_retry_limit_plugin_error_is_reported_as_the_model_failure(setup, message, outcome):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {"name": "UnknownError", "data": {"message": message}}
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert message in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations is not None
+
+
 @pytest.mark.parametrize("retryable", [None, False, "true", 1])
 def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retryable):
     agent, _ = setup

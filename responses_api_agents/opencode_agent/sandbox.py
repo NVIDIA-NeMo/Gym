@@ -32,6 +32,8 @@ from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, Observa
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
 from responses_api_agents.opencode_agent.runtime import (
+    MODEL_RETRY_PLUGIN_FILE,
+    MODEL_RETRY_PLUGIN_SOURCE,
     REQUIRED_MCP_PLUGIN_FILE,
     REQUIRED_MCP_PLUGIN_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
@@ -351,9 +353,11 @@ class OpenCodeSandboxSession(AgentSessionState):
                 self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
         if self.is_continuation:
-            await self.session.sandbox.upload(
-                TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
-            )
+            for source, name in (
+                (TASK_ENVIRONMENT_PLUGIN_SOURCE, TASK_ENVIRONMENT_PLUGIN_FILE),
+                (MODEL_RETRY_PLUGIN_SOURCE, MODEL_RETRY_PLUGIN_FILE),
+            ):
+                await self.session.sandbox.upload(source, f"{self.session.session_dir}/{name}")
         directory = self.session.session_dir
         if payload.get("mcp_grants") is not None:
             await self.session.sandbox.upload(REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}")

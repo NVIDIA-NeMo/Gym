@@ -53,6 +53,7 @@ from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -83,6 +84,7 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
+from responses_api_agents.kilocode_agent.runtime import MODEL_RETRY_LIMIT_ENV, retry_limit_outcome
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
 
@@ -393,7 +395,9 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     """
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
-        """Preserve the HTTP status carried by the pinned CLI's APIError event."""
+        """Preserve the HTTP status carried by the pinned CLI's APIError event or the retry limit plugin's error."""
+        if (limit := retry_limit_outcome(native_result)) is not None:
+            return limit
         data = native_result.get("data")
         status = data.get("statusCode") if isinstance(data, dict) else None
         if native_result.get("name") == "APIError" and type(status) is int and 400 <= status <= 599:
@@ -539,7 +543,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                     "enabled": True,
                     "oauth": False,
                 }
-        config.setdefault("plugin", []).append(state.task_environment_plugin)
+        config.setdefault("plugin", []).extend([state.task_environment_plugin, state.model_retry_plugin])
         return config
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
@@ -683,6 +687,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         env = {
             **os.environ,
             "KILO_NO_DAEMON": "1",
+            **MODEL_RETRY_LIMIT_ENV,
             "KILO_DB": db,
             "XDG_DATA_HOME": data_home,
             "XDG_CONFIG_HOME": config_home,
@@ -871,7 +876,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         response = self._build_response(
             body, output_items, usage, self.config.model, incomplete=timed_out or length_stop
         )
-        if isinstance(error, dict) and self.classify_outcome(error).failure_kind == MODEL_REQUEST_ERROR:
+        if isinstance(error, dict) and self.classify_outcome(error).failure_kind in (
+            MODEL_REQUEST_ERROR,
+            MODEL_TRANSPORT_ERROR,
+        ):
             response.status = "failed"
             response.error = ResponseError(code="server_error", message=problem[:2000])
             response = self.report_outcome(response, error)
