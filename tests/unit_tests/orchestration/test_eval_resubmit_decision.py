@@ -2055,6 +2055,22 @@ def test_review_same_saved_answer_judge_failure_verifies_or_fails_by_configurati
     assert {p.name: p.read_bytes() for p in (job / "artifacts").iterdir()} == before
 
 
+def test_multistage_judge_failure_resumes_instead_of_reverifying(tmp_path):
+    """`reverify --judge-failed-only` refuses multi-stage rows, so recovery must resume the collection for them."""
+    results = [ident(0, reward=1.0)]
+    failure = _judge_failure(1, response=SAVED_ANSWER, stage_index=1)
+    job = write_job_dir(tmp_path / "job", n=2, results=results, failures=[failure])
+    d = _decide(job)
+    assert d.action == RecoveryAction.RESUBMIT, d.reason
+    assert d.identities["retryable"] == [(1, 0)]
+    assert d.identities.get("judge_recoverable") is None
+    # A single-stage judge failure keeps the judge-only path.
+    plain = write_job_dir(
+        tmp_path / "plain", n=2, results=results, failures=[_judge_failure(1, response=SAVED_ANSWER)]
+    )
+    assert _decide(plain).action == RecoveryAction.REVERIFY
+
+
 def test_review_verify_without_a_saved_answer_stops(tmp_path):
     job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[_judge_failure(0)])
     d = _decide(job)

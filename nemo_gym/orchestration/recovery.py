@@ -1325,6 +1325,10 @@ def decide_recovery(
             state = _judge_state(last, policy)
             quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
             policy_stopped |= state == IdentityState.TERMINAL and not quota_wait
+            if state == IdentityState.JUDGE_RECOVERABLE and "stage_index" in last:
+                # `reverify --judge-failed-only` refuses multi-stage rows (it would lose stage identity and the adaptive
+                # references), so a resume of the multi-stage collection re-judges the saved deliverable instead.
+                state = IdentityState.RETRYABLE if spent < cap else IdentityState.EXHAUSTED
         elif is_answered_agent_deadline(last, classification=policy.classification):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
             # Collection's metrics score it only when its producer marked it a counted zero.
