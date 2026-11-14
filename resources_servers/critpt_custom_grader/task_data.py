@@ -49,8 +49,11 @@ DECIMAL_PATTERN = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?
 IDENTIFIER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 
 
-def bounded_json(value: Any, *, max_bytes: int = MAX_WIRE_BYTES, max_depth: int = 3 * MAX_DEPTH + 8) -> None:
-    """Check exact JSON types and limits before allocating a serialized copy."""
+def bounded_json(value: Any, *, max_bytes: int | None = MAX_WIRE_BYTES, max_depth: int = 3 * MAX_DEPTH + 8) -> None:
+    """Check exact JSON types and limits; ``max_bytes=None`` keeps only structure/type checks.
+
+    Prompt/response envelopes use the standard HTTP transport policy. Task and wire values keep their own bounds.
+    """
     pending = [(value, 0)]
     nodes = size = 0
     while pending:
@@ -60,7 +63,7 @@ def bounded_json(value: Any, *, max_bytes: int = MAX_WIRE_BYTES, max_depth: int 
             raise ValueError("JSON structure limit")
         kind = type(item)
         if kind is str:
-            if len(item) > max_bytes:
+            if max_bytes is not None and len(item) > max_bytes:
                 raise ValueError("JSON byte limit")
             size += len(item.encode("utf-8"))
         elif kind is dict:
@@ -69,10 +72,10 @@ def bounded_json(value: Any, *, max_bytes: int = MAX_WIRE_BYTES, max_depth: int 
             for key, child in item.items():
                 if type(key) is not str:
                     raise ValueError("JSON keys must be strings")
-                if len(key) > max_bytes:
+                if max_bytes is not None and len(key) > max_bytes:
                     raise ValueError("JSON byte limit")
                 size += len(key.encode("utf-8")) + 3
-                if size > max_bytes:
+                if max_bytes is not None and size > max_bytes:
                     raise ValueError("JSON byte limit")
                 pending.append((child, depth + 1))
         elif kind is list:
@@ -91,9 +94,13 @@ def bounded_json(value: Any, *, max_bytes: int = MAX_WIRE_BYTES, max_depth: int 
             size += 5
         else:
             raise ValueError("unsupported JSON type")
-        if size > max_bytes or len(pending) > MAX_JSON_NODES:
+        if (max_bytes is not None and size > max_bytes) or len(pending) > MAX_JSON_NODES:
             raise ValueError("JSON byte or structure limit")
-    if len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
+    if (
+        max_bytes is not None
+        and len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        > max_bytes
+    ):
         raise ValueError("JSON byte limit")
 
 
