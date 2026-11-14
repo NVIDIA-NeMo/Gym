@@ -21,6 +21,8 @@ An environment is the complete system an agent interacts with to complete a task
 
 If you're scoring model outputs with a stateless check and don't need scale or training, a script is probably sufficient.
 
+To download original benchmark datasets and rerun selected failed attempts with their existing agents and graders, see [Rerun selected failures](scripts/rerun-failed-tasks.md).
+
 ## 🏆 What NeMo Gym Provides
 
 - Modular, extensible interfaces for agents, environments, tasks, and verifiers

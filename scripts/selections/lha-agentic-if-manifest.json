@@ -1,0 +1,65 @@
+{
+  "schema_version": "original-task-rerun/selection-manifest/v1",
+  "selection_file": "lha-agentic-if-attempts.jsonl",
+  "selection_sha256": "99fe07f3231464d90d92976563dab81ea5c1af5be4623261cba5b8a6d6c7204c",
+  "source_model": "nemotron3.5-super-vl-ga",
+  "selection_basis": "All recorded original attempts for the 558 tasks selected by 988 zero-reward Agent-IF failure traces.",
+  "original_failure_attempts_included": 988,
+  "unique_tasks": 558,
+  "selected_attempts": 1494,
+  "attempt_count_distribution": {
+    "1": 90,
+    "3": 468
+  },
+  "original_reward_distribution": {
+    "0.0": 1174,
+    "1.0": 320
+  },
+  "unrecorded_attempts_to_reach_three_per_task": 180,
+  "benchmarks": {
+    "big_law_bench_agentic": {
+      "unique_tasks": 6,
+      "selected_attempts": 6
+    },
+    "dassault_enterprise": {
+      "unique_tasks": 5,
+      "selected_attempts": 5
+    },
+    "dassault_scaled": {
+      "unique_tasks": 31,
+      "selected_attempts": 31
+    },
+    "legal_agent_bench": {
+      "unique_tasks": 5,
+      "selected_attempts": 5
+    },
+    "palantir_fde": {
+      "unique_tasks": 6,
+      "selected_attempts": 6
+    },
+    "perplexity_abstention": {
+      "unique_tasks": 42,
+      "selected_attempts": 126
+    },
+    "perplexity_facts": {
+      "unique_tasks": 17,
+      "selected_attempts": 17
+    },
+    "perplexity_frames": {
+      "unique_tasks": 20,
+      "selected_attempts": 20
+    },
+    "perplexity_language_mismatch": {
+      "unique_tasks": 2,
+      "selected_attempts": 6
+    },
+    "perplexity_search": {
+      "unique_tasks": 387,
+      "selected_attempts": 1161
+    },
+    "perplexity_user_if": {
+      "unique_tasks": 37,
+      "selected_attempts": 111
+    }
+  }
+}
