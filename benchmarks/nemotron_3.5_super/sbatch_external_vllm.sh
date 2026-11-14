@@ -143,7 +143,7 @@ if (( ENABLE_MOONCAKE_DISK_OFFLOAD )); then
             exit 1
         fi
     done
-    worker_mounts="$MOUNTS,$MOONCAKE_SSD_PATH:/mooncake-ssd"
+    worker_mounts="$MOUNTS"
     mooncake_mode=standalone-store
     mooncake_global_segment_size=0
     mooncake_enable_offload=true
@@ -752,21 +752,21 @@ MOONCAKE_CONFIG
 
     if (( $ENABLE_MOONCAKE_DISK_OFFLOAD )); then
         # Fail before allocating the owner pool if the bind mount is not disk-backed.
-        disk_fs=\$(findmnt -n -T /mooncake-ssd -o FSTYPE)
+        disk_fs=\$(findmnt -n -T $MOONCAKE_SSD_PATH -o FSTYPE)
         if [[ "\$disk_fs" =~ ^(tmpfs|ramfs|overlay|nfs|nfs4|lustre)\$ ]]; then
-            echo "ERROR: /mooncake-ssd must be node-local disk storage; found \$disk_fs." >&2
+            echo "ERROR: $MOONCAKE_SSD_PATH must be node-local disk storage; found \$disk_fs." >&2
             exit 1
         fi
         disk_quota_bytes=\$(($MOONCAKE_DISK_QUOTA_GIB * 1024 * 1024 * 1024))
         python3 - "\$disk_quota_bytes" <<'DISK_CHECK'
 import shutil
 import sys
-free = shutil.disk_usage('/mooncake-ssd').free
+free = shutil.disk_usage('$MOONCAKE_SSD_PATH').free
 quota = int(sys.argv[1])
 if quota > free:
     raise SystemExit(f'Mooncake SSD quota {quota} bytes exceeds free space {free}; lower MOONCAKE_DISK_QUOTA_GIB')
 DISK_CHECK
-        mooncake_disk_dir=\$(mktemp -d "/mooncake-ssd/mooncake-\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}.XXXXXX")
+        mooncake_disk_dir=\$(mktemp -d "$MOONCAKE_SSD_PATH/mooncake-\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}.XXXXXX")
         export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH="\$mooncake_disk_dir"
         export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=bucket_storage_backend
         # Drain pending SSD persistence promptly so RAM replicas become evictable.
