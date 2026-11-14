@@ -984,6 +984,7 @@ Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
 | `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
 | `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
 | `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. Masking is a precaution (it also covers the password in a URL's user info), not a guarantee: keep secrets out of the config with `${oc.env:NAME}` or `env.yaml`. |
+| `<stem>_provenance.json` | What produced the run, written just before the first rollout is dispatched: Gym version and commit, model, dataset and sampling identifiers (credentials and query strings dropped from URLs), fingerprints of the inputs, prompts and templates, the seed, each model server's served models as its backends report them at `GET <base_url>/models` (the served `id` and, for vLLM, the loaded checkpoint `root`), and `efb_config_ref` when passed. Unknown values are recorded with the reason; `status: unavailable` when it cannot be written. |
 
 #### Resume interrupted runs
 

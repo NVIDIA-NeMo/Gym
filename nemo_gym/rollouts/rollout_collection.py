@@ -4299,8 +4299,18 @@ executions → not run again (left to recovery)
                 config.num_samples_in_parallel, component="rollout_driver", limit_name="rollouts"
             )
 
-        # Resolve capture dirs once so each rollout's captured model calls can be folded
-        # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        from nemo_gym.rollouts.provenance import write_run_provenance
+
+        # Recorded before dispatch from the config resolved above.
+
+        await asyncio.to_thread(
+            write_run_provenance,
+            output_fpath,
+            global_config,
+            prompt_config=config.prompt_config,
+            input_jsonl_fpath=config.input_jsonl_fpath,
+            model_server_config=lambda: identity_client.global_config_dict,
+        )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         # The post-run health check times failed rollouts from the same captures.
         self._health_capture_dirs = capture_dirs
