@@ -57,6 +57,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
+    _tools_pending_load: bool = False
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        if not any(self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools):
+            return None
+        return (
+            "the HTTP PythonTool starts a sidecar on the fixed python_tool_port in every worker, "
+            "so a second worker cannot bind it"
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -288,6 +298,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         @asynccontextmanager
         async def lifespan_wrapper(app):
             try:
+                if self._tools_pending_load:
+                    await self._load_nemo_skills_tools()
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
             finally:
@@ -429,15 +441,18 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             context=context,
         )
 
-        # Load tools and build name mapping
-        async def _load_tools():
-            tools = await self.tool_manager.list_all_tools()
-            for tool in tools:
-                self._tool_name_map[tool["name"]] = tool["name"]
-            logger.info(f"Loaded {len(tools)} nemo_skills tools: {list(self._tool_name_map.keys())}")
-
-        asyncio.get_event_loop().run_until_complete(_load_tools())
+        # The lifespan loads the tools on the loop that serves them. setup_webserver cannot run a loop itself:
+        # a uvicorn worker imports the module from inside its running loop.
+        self._tools_pending_load = True
         logger.info("NeMo Skills ToolManager initialized successfully")
+
+    async def _load_nemo_skills_tools(self) -> None:
+        """List the configured tools and build the name mapping."""
+        tools = await self.tool_manager.list_all_tools()
+        for tool in tools:
+            self._tool_name_map[tool["name"]] = tool["name"]
+        self._tools_pending_load = False
+        logger.info(f"Loaded {len(tools)} nemo_skills tools: {list(self._tool_name_map.keys())}")
 
     async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """Run the tool before close can acknowledge releasing its Python session."""
@@ -674,3 +689,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     NSToolsResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NSToolsResourcesServer.run_webserver()  # noqa: F401
