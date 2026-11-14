@@ -169,6 +169,38 @@ def test_nooa_recipe_prepares_and_routes_canonical_terminal_tasks(
     assert source.read_bytes() == original
 
 
+def test_nooa_sandboxed_profile_can_be_bound_to_harbor(tmp_path: Path) -> None:
+    from nemo_gym.data.tasks.harbor.materialize import agent_instance, environment_server_instance, run_config
+    from nemo_gym.data.tasks.harbor.prepare import resolve_agent
+
+    selection = resolve_agent("nooa_agent/nooa_sandboxed")
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths(
+        [str(selection.config_path), str(ROOT / "environment_servers/harbor/configs/harbor.yaml")]
+    )
+    taskset = "terminal_bench_4"
+    generated = run_config(
+        taskset=taskset,
+        folder=tmp_path,
+        tasks=[],
+        rows_path=tmp_path / "tasks.jsonl",
+        agent_instance_name=selection.instance_name,
+        agent_impl=selection.impl_name,
+    )
+    config = OmegaConf.merge(*configs, generated, {"policy_model_name": "test-model"})
+    parser._recursively_swap_keys(config)
+    bound_agent = agent_instance(taskset)
+    assert bound_agent in config
+    agent = config[bound_agent].responses_api_agents.nooa_agent
+    assert agent.entrypoint == "app.py"
+    assert agent.nooa.execution_mode == "sandboxed"
+    assert agent.model_server.name == "policy_model"
+    assert agent.sandbox_runner_timeout_seconds == 21600
+    assert agent.session_close_timeout_seconds == 30
+    assert config[environment_server_instance(taskset)].environment_servers.harbor.agent_server.name == bound_agent
+    assert selection.instance_name not in config
+
+
 def test_nooa_sandboxed_profile_preserves_runtime_limits() -> None:
     pytest.importorskip("nooa")
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig

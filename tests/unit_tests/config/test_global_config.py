@@ -37,6 +37,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritCycleError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -1239,6 +1240,43 @@ contested: second_inner
         parser._recursively_swap_keys(config)
         with raises(ConfigMissingValuesError):
             parser.raise_on_missing_values(config)
+
+    @mark.parametrize("target_first", [False, True])
+    def test_inherit_chain_resolves_every_link(self, target_first: bool) -> None:
+        # target -> profile -> base: the target gets the base's fields, then the profile's overrides,
+        # then its own. Both moved sources are gone, whichever order the entries are listed in.
+        entries = {
+            "base": {"server": {"entrypoint": "app.py", "mode": "embedded"}, "extra": 1},
+            "profile": {"_inherit_from": "base", "_delete_key": "extra", "server": {"mode": "sandboxed"}},
+            "target": {"_inherit_from": "profile", "server": {"datasets": ["rows.jsonl"]}},
+        }
+        order = ["target", "profile", "base"] if target_first else ["base", "profile", "target"]
+        config = DictConfig({name: entries[name] for name in order})
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {
+            "target": {"server": {"entrypoint": "app.py", "mode": "sandboxed", "datasets": ["rows.jsonl"]}}
+        }
+
+    def test_copy_of_an_inheriting_source_keeps_the_source(self) -> None:
+        config = DictConfig(
+            {
+                "base": {"a": 1},
+                "profile": {"_inherit_from": "base", "b": 2},
+                "clone": {"_copy": "profile", "c": 3},
+            }
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {"profile": {"a": 1, "b": 2}, "clone": {"a": 1, "b": 2, "c": 3}}
+
+    def test_inherit_cycle_is_reported(self) -> None:
+        config = DictConfig({"first": {"_inherit_from": "second"}, "second": {"_inherit_from": "first"}})
+
+        with raises(InheritCycleError, match="second -> first -> second"):
+            GlobalConfigDictParser()._recursively_swap_keys(config)
 
     def test_missing_value_in_list_is_reported_not_crash(self) -> None:
         # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
