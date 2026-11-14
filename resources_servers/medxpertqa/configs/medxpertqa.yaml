@@ -1,0 +1,37 @@
+medxpertqa:
+  resources_servers:
+    medxpertqa:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      # trigger: the paper's answer cleansing; boxed: the upstream DeepSeek-R1 variant.
+      answer_format: trigger
+      domain: knowledge
+      description: MedXpertQA expert-level medical multiple choice with the official two-round zero-shot CoT protocol
+      value: Measure expert-level medical reasoning and knowledge
+      verified: false
+medxpertqa_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: medxpertqa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Turn 1: the CoT reply. Turn 2: the reply to the answer trigger.
+      max_steps: 2
+      # The upstream harness replays only the visible reply as the assistant turn.
+      text_only_history: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/medxpertqa/data/example.jsonl
+
+medxpertqa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: medxpertqa_gymnasium_agent
