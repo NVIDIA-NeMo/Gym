@@ -63,6 +63,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.config.renamed_keys import RENAMED_SERVER_INSTANCE_KEYS
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
@@ -3641,6 +3642,31 @@ class TestComposeUnboundAgent:
         renamed = self._composed_name("gpqa_mcqa_simple_agent")
 
         resolved = self._parse_with_cli(self._config(), self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
+
+    def test_applies_command_line_override_with_a_renamed_key_to_the_composed_agent(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(RENAMED_SERVER_INSTANCE_KEYS, "responses_api_agents", {"old_turns": "max_turns"})
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(self._config(), self._cli_override(renamed, old_turns=99), monkeypatch)
+
+        assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
+
+    def test_applies_command_line_override_to_a_composed_agent_that_sets_a_renamed_key(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(RENAMED_SERVER_INSTANCE_KEYS, "responses_api_agents", {"old_turns": "max_turns"})
+        harness = self._harness()
+        block = harness["responses_api_agents"]["hermes_agent"]
+        block["old_turns"] = block.pop("max_turns")
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(
+            self._config(**{self.HARNESS_INSTANCE: harness}), self._cli_override(renamed, max_turns=99), monkeypatch
+        )
 
         assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
 

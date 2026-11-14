@@ -68,6 +68,11 @@ from nemo_gym.config.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.config.renamed_keys import (
+    RENAMED_SERVER_INSTANCE_KEYS,
+    RENAMED_TOP_LEVEL_KEYS,
+    rename_deprecated_keys,
+)
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
@@ -1336,6 +1341,26 @@ For example, on the command line:
 {override_examples}"""
         )
 
+    def _rename_deprecated_keys(self, global_config_dict: DictConfig) -> None:
+        """Move config keys set under their names from before a rename to their current names, with a warning."""
+        with open_dict(global_config_dict):
+            rename_deprecated_keys(global_config_dict, RENAMED_TOP_LEVEL_KEYS)
+            # Nodes rather than values, so an interpolation is not resolved here.
+            for server_name in global_config_dict.keys():
+                server_type_config_dict = global_config_dict._get_node(server_name)
+                if not isinstance(server_type_config_dict, DictConfig):
+                    continue
+                for server_type, renamed in RENAMED_SERVER_INSTANCE_KEYS.items():
+                    instances = server_type_config_dict._get_node(server_type)
+                    if not isinstance(instances, DictConfig):
+                        continue
+                    for instance_name in instances.keys():
+                        instance_config = instances._get_node(instance_name)
+                        if isinstance(instance_config, DictConfig):
+                            rename_deprecated_keys(
+                                instance_config, renamed, where=f"{server_name}.{server_type}.{instance_name}"
+                            )
+
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
@@ -1591,6 +1616,10 @@ For example, on the command line:
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
+        # Each source is renamed on its own, before any merge, so an old key in one source and the new key in another
+        # are decided by precedence like any other key, rather than meeting in the merged config as a conflict.
+        self._rename_deprecated_keys(cli_global_config_dict)
+        self._rename_deprecated_keys(initial_global_config_dict)
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
@@ -1622,6 +1651,8 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
+        for extra_config in extra_configs:
+            self._rename_deprecated_keys(extra_config)
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.
@@ -1656,6 +1687,9 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # Each source was renamed before the merge. This catches an old key that only appears in the merged config,
+        # such as one copied in by `${copy:...}` from a block that is not a server instance.
+        self._rename_deprecated_keys(global_config_dict)
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
 
