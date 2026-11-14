@@ -89,6 +89,56 @@ def test_infrastructure_failures_are_runtime_ineligible(reason: str) -> None:
     assert outcome.runtime_admission_reason == reason
 
 
+@pytest.mark.parametrize(
+    ("facts", "termination_reason"),
+    [
+        (RolloutOutcomeFacts(evaluation_completed=True, horizon_reached=True, mask_unterminated=True), "max_steps"),
+        (
+            RolloutOutcomeFacts(
+                evaluation_completed=True,
+                policy_stop_reason="context_limit_reached",
+                mask_unterminated=True,
+            ),
+            "context_limit_reached",
+        ),
+        (
+            RolloutOutcomeFacts(
+                evaluation_completed=True,
+                policy_stop_reason="model_response_invalid",
+                mask_unterminated=True,
+            ),
+            "model_response_invalid",
+        ),
+    ],
+)
+def test_mask_unterminated_masks_rollouts_without_terminal_signal(
+    facts: RolloutOutcomeFacts,
+    termination_reason: str,
+) -> None:
+    outcome = classify_rollout_outcome(facts)
+
+    assert outcome.termination_reason == termination_reason
+    assert outcome.evaluation_completed is True
+    assert outcome.runtime_eligible is False
+    assert outcome.mask_sample is True
+    assert outcome.runtime_admission_reason == "unterminated_masked"
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        RolloutOutcomeFacts(evaluation_completed=True, terminal_action="DONE", mask_unterminated=True),
+        RolloutOutcomeFacts(evaluation_completed=True, terminal_action="FAIL", mask_unterminated=True),
+        RolloutOutcomeFacts(evaluation_completed=True, environment_done=True, mask_unterminated=True),
+    ],
+)
+def test_mask_unterminated_keeps_terminated_rollouts_eligible(facts: RolloutOutcomeFacts) -> None:
+    outcome = classify_rollout_outcome(facts)
+
+    assert outcome.runtime_eligible is True
+    assert outcome.runtime_admission_reason == "valid_evaluated_outcome"
+
+
 def test_unclassified_or_unevaluated_rollouts_fail_closed() -> None:
     unevaluated = classify_rollout_outcome(RolloutOutcomeFacts(evaluation_completed=False, horizon_reached=True))
     unclassified = classify_rollout_outcome(RolloutOutcomeFacts(evaluation_completed=True))

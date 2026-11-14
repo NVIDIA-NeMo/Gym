@@ -1,0 +1,81 @@
+# NeMo RL training profile for Nemotron Nano Omni on an OpenSandbox OSWorld
+# KVM pool. The policy server is injected by NeMo RL at runtime.
+
+config_paths:
+  - benchmarks/osworld/configs/osworld_agent_nano_omni.yaml
+  - benchmarks/osworld/configs/osworld_opensandbox.yaml
+
+osworld_nano_omni_agent:
+  responses_api_agents:
+    osworld_agent:
+      concurrency: ${oc.decode:${oc.env:OSWORLD_MAX_PARALLEL_ROLLOUTS,8}}
+      setup_cache_dir: ${oc.env:OSWORLD_CACHE_ROOT}/osworld-assets
+      asset_input_jsonl: ${oc.env:OSWORLD_GRPO_TRAIN_DATA}
+      sandbox_provider: osworld_opensandbox
+      # The base OSWorld profile caps create at 180s, but this pool spec allows
+      # 1200s for SDK readiness after the 180s request phase.
+      sandbox_provider_overrides:
+        opensandbox:
+          create:
+            request_timeout_s: 180
+            timeout_s: 1380
+      vm_path: /opensandbox/Ubuntu.qcow2
+      sandbox_require_kvm: false
+      sandbox_ready_timeout_s: 600.0
+      sandbox_spec:
+        # OpenSandbox requires an SDK-compatible image value even though the
+        # warm pool supplies the actual OSWorld VM.
+        image: ${oc.env:OPENSANDBOX_COMPAT_IMAGE,busybox:1.36}
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        provider_options:
+          skip_health_check: true
+          extensions:
+            poolRef: ${oc.env:OSWORLD_POOL_REF,osworld-kvm}
+      max_steps: ${oc.decode:${oc.env:OSWORLD_MAX_STEPS,150}}
+      max_tokens: ${oc.decode:${oc.env:OSWORLD_MAX_NEW_TOKENS,16384}}
+      temperature: ${oc.decode:${oc.env:OSWORLD_TEMPERATURE,1.0}}
+      top_p: ${oc.decode:${oc.env:OSWORLD_TOP_P,1.0}}
+      history_policy:
+        name: hysteresis
+        params:
+          _delete_key: keep_images
+          low_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_LOW_WATER,3}}
+          high_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_HIGH_WATER,10}}
+      agent_kwargs:
+        # Preserve the exact served completion between live turns, and keep
+        # each turn's Code when the 3->10->3 policy compacts older turns.
+        assistant_history_replay: ${oc.env:OSWORLD_ASSISTANT_HISTORY_REPLAY,raw_full}
+        # End a rollout at its first context overflow and train on what it
+        # did; the limit reserves output room below the server's window.
+        context_overflow_policy: ${oc.env:OSWORLD_CONTEXT_OVERFLOW_POLICY,stop}
+        context_prompt_token_limit: ${oc.decode:${oc.env:OSWORLD_CONTEXT_PROMPT_TOKEN_LIMIT,null}}
+        # Match the reference Nemotron agent: without computer.terminate the
+        # episode ends in FAIL, so success requires the policy to declare it.
+        unterminated_episode_policy: ${oc.env:OSWORLD_UNTERMINATED_EPISODE_POLICY,fail}
+        parse_retries: ${oc.decode:${oc.env:OSWORLD_PARSE_RETRIES,5}}
+        # cc_chat: chat-style history (every turn kept, omission markers,
+        # protected first screenshot, 3-to-10 image sawtooth); it ignores
+        # history_policy.
+        history_layout: ${oc.env:OSWORLD_HISTORY_LAYOUT,osworld}
+        cc_keep_last_groups: ${oc.decode:${oc.env:OSWORLD_CC_KEEP_LAST_GROUPS,2}}
+        cc_max_active_images: ${oc.decode:${oc.env:OSWORLD_CC_MAX_ACTIVE_IMAGES,10}}
+        cc_actions_per_chunk: ${oc.decode:${oc.env:OSWORLD_CC_ACTIONS_PER_CHUNK,100}}
+        cc_chunk_turns_as_generated: ${oc.decode:${oc.env:OSWORLD_CC_CHUNK_TURNS_AS_GENERATED,false}}
+        # Optional token guard: re-base a non-empty chunk before a prompt
+        # would exceed this many tokens.
+        cc_prompt_token_guard: ${oc.decode:${oc.env:OSWORLD_CC_PROMPT_TOKEN_GUARD,null}}
+        # Response handling switches: skip the compile check, parse
+        # length-truncated text, and train the rejected generation that ends
+        # an episode in FAIL with the episode reward.
+        validate_python_syntax: ${oc.decode:${oc.env:OSWORLD_VALIDATE_PYTHON_SYNTAX,true}}
+        require_clean_finish: ${oc.decode:${oc.env:OSWORLD_REQUIRE_CLEAN_FINISH,true}}
+        train_invalid_terminal_call: ${oc.decode:${oc.env:OSWORLD_TRAIN_INVALID_TERMINAL_CALL,false}}
+        # Parse with the pinned OSWorld mm_agents parser.
+        legacy_response_parser: ${oc.decode:${oc.env:OSWORLD_LEGACY_RESPONSE_PARSER,false}}
+        mask_context_limit: ${oc.decode:${oc.env:OSWORLD_MASK_CONTEXT_LIMIT,false}}
+      task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
+      # raw keeps OSWorld partial scores; binary rewards only a full score.
+      reward_mode: ${oc.env:OSWORLD_REWARD_MODE,binary}
+      rollout_timeout_s: ${oc.decode:${oc.env:OSWORLD_ROLLOUT_TIMEOUT_S,null}}
+      exact_trace_transport_version: 3

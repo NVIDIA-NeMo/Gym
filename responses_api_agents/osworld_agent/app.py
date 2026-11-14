@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
@@ -114,7 +115,12 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
 _MODEL_LOG_CONTEXT_HEADERS = {
     field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
 }
-_ROLLOUT_DIAGNOSTIC_ENV_VARS = (
+_ROLLOUT_CHILD_ENV_VARS = (
+    # The OpenSandbox aiohttp transport consults Gym's injected global config.
+    # Without these, a Ray child falls back to Hydra and tries to parse Ray's
+    # default_worker.py flags as Gym CLI overrides.
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     "NEMO_GYM_RESPONSE_LOGGING",
     "OSWORLD_MODEL_IO_LOG",
     "OSWORLD_RUN_ID",
@@ -374,6 +380,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # receives this value as a cooperative deadline so model/step boundaries
     # can stop cleanly before the parent has to cancel the Ray task.
     task_timeout: int = 1800
+    # Agent-loop budget counted from the first step; reaching it ends the
+    # rollout as a timeout.
+    rollout_timeout_s: Optional[float] = Field(default=None, gt=0)
     task_cancel_grace_s: float = Field(default=30.0, gt=0)
     # Optional semantic Ray resources for each OSWorld rollout task. This lets
     # an embedding scheduler keep image-heavy environment work off trainer
@@ -883,6 +892,12 @@ def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
     response_id = getattr(resp, "id", None)
     if isinstance(response_id, str) and response_id:
         normalized["response_id"] = response_id
+    prompt_tokens = getattr(getattr(resp, "usage", None), "prompt_tokens", None)
+    if type(prompt_tokens) is int:
+        normalized["prompt_tokens"] = prompt_tokens
+    completion_tokens = getattr(getattr(resp, "usage", None), "completion_tokens", None)
+    if type(completion_tokens) is int:
+        normalized["completion_tokens"] = completion_tokens
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1202,6 +1217,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
+        "episode_end": result.episode_end,
         "agent_contract": result.agent_contract,
         # Set only by the built-in rollout; a runner's own result type need not have it.
         "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
@@ -1569,6 +1585,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "step_timeout": self.config.step_timeout,
                 "model_timeout": self.config.model_timeout,
                 "task_timeout": self.config.task_timeout,
+                "rollout_timeout_s": self.config.rollout_timeout_s,
                 "docker_port_lock_timeout": self.config.docker_port_lock_timeout,
                 "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
                 "reward_mode": self.config.reward_mode,
@@ -1599,9 +1616,9 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             future = None
             try:
                 # Child Ray tasks do not reliably inherit the NemoGym actor's
-                # runtime environment. Forward diagnostic paths explicitly so
-                # parse failures retain their model I/O and task trajectory.
-                rollout_env = {name: os.environ[name] for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS if os.environ.get(name)}
+                # runtime environment. Forward both Gym's injected service
+                # config and diagnostic paths explicitly.
+                rollout_env = {name: os.environ[name] for name in _ROLLOUT_CHILD_ENV_VARS if os.environ.get(name)}
                 runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
                 if rollout_env:
                     runtime_env["env_vars"] = rollout_env
@@ -1822,8 +1839,9 @@ def _build_response(
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
         exact_fields.pop("media_assets")
-        # Exact model calls, including parser retries, are the trainable units.
-        # Semantic step messages remain available through trajectory_transitions.
+        # Ordinary output is the loss-membership carrier. Exact sidecars retain
+        # every model call, including parser retries, while output contains only
+        # calls the agent accepted as executable actions.
         output = exact_fields.pop("model_call_output")
         if exact_trace_transport_version == 3:
             # The schema-3 sidecar and canonical output arrays retain all
@@ -1831,10 +1849,12 @@ def _build_response(
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
     terminal_response_id: Optional[str] = None
+    accepted_call_references: List[Dict[str, str]] = []
     if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
         # An empty accepted history is meaningful; never replace it with
         # parser-normalized step text that cannot identify captured calls.
         output, terminal_response_id = _served_model_call_output(model_calls)
+        accepted_call_references = _accepted_call_references(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1895,15 +1915,33 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    episode_end = result.get("episode_end")
+    if episode_end is not None:
+        from responses_api_agents.osworld_agent.client import EPISODE_END_KINDS  # noqa: PLC0415
+
+        metadata["osworld_episode_end"] = episode_end
+        # Scalar top-level fields become per-step trainer metrics.
+        for kind in EPISODE_END_KINDS:
+            response_fields[f"episode_end_{kind}"] = float(episode_end == kind)
     if terminal_response_id is not None:
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id
+    if accepted_call_references:
+        # The trainer resolves these served response IDs against capture records.
+        # Keeping membership separate from response.output means rejected
+        # retries remain in the capture manifest as exact context evidence.
+        response_fields["ng_trajectory"] = {"turns": [{"model_calls": accepted_call_references}]}
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")
     if isinstance(sandbox_start_failure, Mapping):
         response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _is_loss_member(model_call: Mapping[str, Any]) -> bool:
+    """Accepted calls train; ``loss_member`` overrides that, e.g. for a trained invalid terminal call."""
+    return model_call.get("loss_member", model_call.get("accepted")) is True
 
 
 def _served_model_call_output(
@@ -1937,7 +1975,7 @@ def _served_model_call_output(
             continue
         response_id = response.get("response_id")
         terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
-        terminal_accepted = model_call.get("accepted") is True
+        terminal_accepted = _is_loss_member(model_call)
         if not terminal_accepted:
             continue
         output.append(
@@ -1952,6 +1990,31 @@ def _served_model_call_output(
     if not terminal_accepted and terminal_response_id is None:
         raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
     return output, terminal_response_id
+
+
+def _accepted_call_references(model_calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Served response IDs of the generations ``_served_model_call_output`` returns, in call order.
+
+    The trainer joins these against capture records, which stays unambiguous even
+    when parser retries have identical content. Partial references would be
+    rejected, so a member without a served ID leaves content matching in charge.
+    """
+
+    references: List[Dict[str, str]] = []
+    for model_call in model_calls:
+        if not _is_loss_member(model_call):
+            continue
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        if not isinstance(response_id, str) or not response_id:
+            return []
+        references.append({"response_id": response_id})
+    return references
 
 
 # Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest

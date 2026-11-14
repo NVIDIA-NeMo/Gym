@@ -900,6 +900,30 @@ def test_build_response_preserves_evaluated_horizon_without_runtime_mask(score: 
     assert response.verifier_metadata["osworld_horizon_reached"] is True
 
 
+@pytest.mark.parametrize("episode_end", ["done", "agent_fail", "forced_fail", "unterminated"])
+def test_build_response_exposes_episode_end_as_one_hot_scalars(episode_end: str) -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {**DEFAULT_RUN_RESULT, "episode_end": episode_end}
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+    dumped = response.model_dump()
+
+    assert response.verifier_metadata["osworld_episode_end"] == episode_end
+    assert {key: value for key, value in dumped.items() if key.startswith("episode_end_")} == {
+        f"episode_end_{kind}": float(kind == episode_end)
+        for kind in ("done", "agent_fail", "forced_fail", "unterminated")
+    }
+
+
+def test_build_response_without_episode_end_adds_no_scalars() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+
+    response = _build_response(request, dict(DEFAULT_RUN_RESULT), "test-policy", 1.0, 0.9)
+
+    assert "osworld_episode_end" not in response.verifier_metadata
+    assert not any(key.startswith("episode_end_") for key in response.model_dump())
+
+
 def test_build_response_rejects_inconsistent_legacy_runtime_mask() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     result = {**DEFAULT_RUN_RESULT, "mask_sample": True}
@@ -1464,7 +1488,10 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls(served_call_ou
 
     response = _build_response(request, result, "test-policy", 1.0, 0.9, served_call_output=served_call_output)
 
-    assert len(response.response.output) == 2
+    # Rejected retries remain exact evidence, but ordinary output carries only
+    # accepted-call loss membership.
+    assert len(response.response.output) == 1
+    assert response.response.output[0].content[0].text == "sample 2"
     assert [item["accepted"] for item in response.response.completion_evidence or []] == [
         False,
         True,
@@ -1875,13 +1902,15 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
-    async def test_run_forwards_rollout_diagnostic_paths_to_ray_child(
+    async def test_run_forwards_required_rollout_env_to_ray_child(
         self,
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
         monkeypatch,
     ) -> None:
+        monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "global_aiohttp_connector_limit: 64")
+        monkeypatch.setenv("NEMO_GYM_CONFIG_PATH", "osworld_nano_omni_agent")
         monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", "/workspace/output/r6f/osworld-model-io.jsonl")
         monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", "/workspace/output/r6f/osworld-tasks")
         monkeypatch.setenv("OSWORLD_VM_EXEC_LOG", "/workspace/output/r6f/osworld-vm-exec.jsonl")
@@ -1893,6 +1922,8 @@ class TestApp:
 
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         expected_env = {
+            "NEMO_GYM_CONFIG_DICT": "global_aiohttp_connector_limit: 64",
+            "NEMO_GYM_CONFIG_PATH": "osworld_nano_omni_agent",
             "OSWORLD_MODEL_IO_LOG": "/workspace/output/r6f/osworld-model-io.jsonl",
             "OSWORLD_TASK_ARTIFACT_ROOT": "/workspace/output/r6f/osworld-tasks",
             "OSWORLD_VM_EXEC_LOG": "/workspace/output/r6f/osworld-vm-exec.jsonl",
@@ -2260,7 +2291,9 @@ def _chat_usage(prompt: int, cached: int, completion: int, reasoning: int) -> Di
 def _child_result(**fields: Any) -> SimpleNamespace:
     steps = [SimpleNamespace(**step, state=None, next_state=None) for step in DEFAULT_RUN_RESULT["steps"]]
     values = {k: v for k, v in DEFAULT_RUN_RESULT.items() if k != "steps"}
-    return SimpleNamespace(**values, termination_reason="done", agent_contract=None, steps=steps, **fields)
+    return SimpleNamespace(
+        **values, termination_reason="done", agent_contract=None, episode_end=None, steps=steps, **fields
+    )
 
 
 def _run_child(fake_run_osworld_task: Any, completions: list[Any]) -> Dict[str, Any]:
