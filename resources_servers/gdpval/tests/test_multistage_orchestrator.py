@@ -47,7 +47,6 @@ from nemo_gym.rollouts import (
     SharedRolloutCollectionConfig,
     is_terminal_failure,
 )
-from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline
 from nemo_gym.server_runtime import lost_session_verification
 from nemo_gym.utils import aggregation_sources_path_for, failures_path_for
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
@@ -4820,14 +4819,15 @@ def test_a_resume_does_not_dispatch_an_agent_timeout_that_kept_the_answer(tmp_pa
     assert load_retryable_failure_stages(out, load_gated_keys(out, {}), {}) == set()
 
 
-async def _stirrup_wall_time_verify_result(row: Mapping[str, Any]) -> Dict[str, Any]:
+async def _stirrup_wall_time_verify_result(row: Mapping[str, Any], reference_root: Path) -> Dict[str, Any]:
     """What GDPVal's /verify returns for a Stirrup run stopped by its wall time, serialised as the server sends it.
 
     The response is the one Stirrup builds from the runner's partial report: ``incomplete``, the tool turns completed
     so far, and ``stop_reason: wall_time``. The verify result comes from the server's own wall-time branch.
     """
+    from nemo_gym.client import ServerClient
     from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from resources_servers.gdpval.app import GDPValResourcesServer, GDPValVerifyRequest
+    from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
     response = NeMoGymResponse(
         id=f"stirrup-{row[TASK_INDEX_KEY_NAME]}",
@@ -4852,17 +4852,41 @@ async def _stirrup_wall_time_verify_result(row: Mapping[str, Any]) -> Dict[str, 
         reference_ids=row["reference_ids"],
         stage_index=row["stage_index"],
     )
-    server = SimpleNamespace(config=SimpleNamespace(reward_mode="comparison"))
-    verified = await GDPValResourcesServer.verify(server, SimpleNamespace(session={}), body)
+    for reference_id in ("a", "b"):
+        finished = reference_root / reference_id / f"task_{row['task_id']}" / "repeat_1"
+        finished.mkdir(parents=True, exist_ok=True)
+        (finished / "finish_params.json").write_text("{}")
+    server = GDPValResourcesServer(
+        config=GDPValResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="gdpval_resources_server",
+            judge_model_server={"type": "responses_api_models", "name": "judge"},
+            preconvert_office_to_pdf=False,
+            tavily_api_key="test-key",
+            sandbox_provider="sandbox",
+            sandbox_config={"image": "unused"},
+            persist_deliverables_dir=str(reference_root / "persist"),
+            reward_mode="comparison",
+            num_comparison_trials=2,
+            reference_models={
+                reference_id: {"deliverables_dir": str(reference_root / reference_id), "elo": elo}
+                for reference_id, elo in (("a", 1000.0), ("b", 1200.0))
+            },
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    verified = await server.verify(SimpleNamespace(session={}), body)
     return verified.model_dump(mode="json", by_alias=True)
 
 
-async def test_a_strict_stage_with_an_answered_agent_timeout_stops_with_nothing_to_retry(
+async def test_a_strict_stage_scores_an_agent_timeout_as_a_lost_battle_and_goes_on(
     tmp_path: Path, monkeypatch
 ) -> None:
-    # The answered deadline is the model's result, so it is never run again, and it holds no battle. A strict
-    # non-final stage (no partial_completion) needs a battle for every planned row, so the stage is coverage-blocked
-    # with nothing a resume could retry: the next stage is never planned and the run fails rather than resumes.
+    # The answered deadline is the model's result, so it is never run again. It is scored as a battle the model lost
+    # against every reference, so a strict non-final stage (no partial_completion), which needs a battle for every
+    # planned row, is complete and the next stage is planned.
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
     task_ids = [f"t{i}" for i in range(4)]
     config = parse_multistage_config(
@@ -4881,7 +4905,12 @@ async def test_a_strict_stage_with_an_answered_agent_timeout_stops_with_nothing_
         dispatched.extend(dict(row) for row in rows_in)
         pairs = await successful_run(rows_in)
         return [
-            (row, await _stirrup_wall_time_verify_result(row) if row[TASK_INDEX_KEY_NAME] == 0 else result)
+            (
+                row,
+                await _stirrup_wall_time_verify_result(row, tmp_path / "refs")
+                if row[TASK_INDEX_KEY_NAME] == 0
+                else result,
+            )
             for row, result in pairs
         ]
 
@@ -4889,25 +4918,17 @@ async def test_a_strict_stage_with_an_answered_agent_timeout_stops_with_nothing_
         config, {"a": 1000.0, "b": 1200.0}, _distribution(task_ids), _materialized_rows(task_ids), run, resume=resume
     )
 
-    # Dispatched once, never retried in process, and the second stage is never planned.
+    # Never retried in process, and the second stage is planned.
     assert [row[TASK_INDEX_KEY_NAME] for row in dispatched if row.get(ATTEMPT_INDEX_KEY_NAME)] == []
-    assert {row["stage_index"] for row in dispatched} == {0}
-    assert len(dispatched) == 4
-    [summary] = summaries
-    assert summary["incomplete"] is True and summary["coverage_blocked"] is True
-    assert resume.completed == []
-    # Persisted, the row is gated and leaves no retryable stage, so a resume has nothing to run.
+    assert {row["stage_index"] for row in dispatched} == {0, 1}
+    assert not any(summary.get("coverage_blocked") for summary in summaries)
+    # The timeout row is a scored success: unmasked, typed with model attribution, and it holds lost battles.
     [timeout_row] = [row for row in resume.appended[0] if row[TASK_INDEX_KEY_NAME] == 0]
-    assert timeout_row[NG_FAILURE_CLASS_KEY] == "agent_timeout" and is_answered_agent_deadline(timeout_row)
-    out = tmp_path / "rollouts.jsonl"
-    out.write_bytes(b"")
-    failures_path_for(out).write_text(json.dumps(timeout_row) + "\n")
-    gated = load_gated_keys(out, {})
-    assert gated[0] == {(0, 0)}
-    assert load_retryable_failure_stages(out, gated, {}) == set()
-    # The declared final stage has no rows, so the run fails instead of reporting a finished calibration.
-    with pytest.raises(RuntimeError, match="produced no rows for it"):
-        _require_final_stage_rows(all_results, 2, summaries)
+    assert NG_FAILURE_CLASS_KEY not in timeout_row and not timeout_row["mask_sample"]
+    assert (timeout_row["failure_kind"], timeout_row["failure_outcome_attribution"]) == ("agent_timeout", "model")
+    assert timeout_row["total_wins"] == 0 and timeout_row["total_losses"] > 0
+    assert all(counts["wins"] == 0 and counts["losses"] > 0 for counts in timeout_row["per_reference"].values())
+    _require_final_stage_rows(all_results, 2, summaries)
 
 
 class TestTolerateUnresolved:
