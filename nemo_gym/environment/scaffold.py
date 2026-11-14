@@ -987,13 +987,6 @@ def _reused_environment_server(
             f"found: {names}{manual}"
         )
     server = fronting[0]
-    # Gym resolves `_inherit_from` against the configs as written, so inheriting a server that is itself
-    # inherited or copied would leave its own source unresolved.
-    if raw[server.instance].keys() & {"_inherit_from", "_copy"}:
-        raise ScaffoldError(
-            f"reused verifier {selector!r} environment server {server.instance!r} is itself derived with "
-            f"_inherit_from or _copy and cannot be inherited again{manual}"
-        )
     # Inheriting retires the server's name, so a taskset route to that name would stop resolving.
     routes = raw.get("environment_server_routes")
     if isinstance(routes, Mapping) and server.instance in routes.values():

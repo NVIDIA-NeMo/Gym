@@ -1466,13 +1466,22 @@ For example, on the command line:
                         )
 
     def _recursively_swap_keys_helper(
-        self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
+        self,
+        dict_config: DictConfig,
+        original_dict_config: DictConfig,
+        frozen_dict_config: DictConfig,
+        resolving: Tuple[str, ...] = (),
     ) -> None:
         # items_ex(resolve=False) yields raw values: directive strings like "${inherit_from:...}"
         # come back unresolved (so the swap detection below still matches), and a missing ('???')
         # leaf is returned as-is instead of raising MissingMandatoryValue mid-swap. Any genuinely
         # unset values are reported together by raise_on_missing_values, which runs after this pass.
         for k, v in list(dict_config.items_ex(resolve=False)):
+            # An earlier `_inherit_from` in this loop moved this key away. Its value now lives in the
+            # destination, so swapping it here would bring the moved key back.
+            if k not in dict_config.keys():
+                continue
+
             is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
 
             if is_delete_property:
@@ -1487,7 +1496,7 @@ For example, on the command line:
                 keys_to_delete -= existing_keys
 
             if isinstance(v, (DictConfig, dict)):
-                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
+                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config, resolving)
             elif isinstance(v, (ListConfig, list)):
                 # Iterate without resolving so a missing ('???') element doesn't raise mid-swap (it's
                 # a scalar, so it's skipped here and reported later by raise_on_missing_values).
@@ -1496,7 +1505,9 @@ For example, on the command line:
                         continue
                     inner_v = v[i]
                     if isinstance(inner_v, (DictConfig, dict)):
-                        self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
+                        self._recursively_swap_keys_helper(
+                            inner_v, original_dict_config, frozen_dict_config, resolving
+                        )
 
             # e.g. ${inherit_from:grpo.num_prompts_per_step}
             is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
@@ -1531,7 +1542,9 @@ For example, on the command line:
                 # We don't want to pop if it's just a copy
                 dict_containing_key_to_swap.pop(path_to_swap[-1], None)
 
-            swapped_value = self._recursive_index_dict_using_path(frozen_dict_config, path_to_swap)
+            swapped_value = self._resolved_swap_source(
+                path_to_swap, original_dict_config, frozen_dict_config, resolving
+            )
 
             # If the source (leaf or an ancestor) is unset, the target inherits MISSING; skip the
             # property-merge and _delete_key handling and let raise_on_missing_values report it.
@@ -1544,12 +1557,41 @@ For example, on the command line:
 
             dict_config[k] = swapped_value
 
-            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
-
             if is_delete_property:
                 # Enforce that every key-to-delete exists
                 for key in keys_to_delete:
                     dict_config[k].pop(key)
+
+    def _resolved_swap_source(
+        self,
+        path: List[str],
+        original_dict_config: DictConfig,
+        frozen_dict_config: DictConfig,
+        resolving: Tuple[str, ...],
+    ) -> "DictConfig | object":
+        """The value at `path` as written, with its own `_inherit_from`, `_copy` and `_delete_key` applied.
+
+        A source can itself be derived (`a` inherits `b`, which inherits `c`). Resolving it here, on a copy,
+        gives the same result whichever of the two the swap reaches first. `resolving` holds the sources
+        being resolved, so a source that leads back to itself is reported instead of recursing forever.
+        """
+        value = self._recursive_index_dict_using_path(frozen_dict_config, path)
+        if value is _MISSING_REF:
+            return value
+        source = ".".join(path)
+        if source in resolving:
+            raise InheritPathNotFoundError(
+                f"`_inherit_from` / `_copy` sources form a cycle: {' -> '.join((*resolving, source))}. "
+                "Point one of them at a config that does not derive from the others."
+            )
+        holder = OmegaConf.create({"value": deepcopy(value)})
+        with open_dict(holder):
+            self._recursively_swap_keys_helper(holder, original_dict_config, frozen_dict_config, (*resolving, source))
+        if OmegaConf.is_missing(holder, "value"):
+            return _MISSING_REF
+        # Read the node without resolving it: a scalar can still hold an interpolation such as `${policy_model}`.
+        node = holder._get_node("value")
+        return node if isinstance(node, (DictConfig, ListConfig)) else node._value()
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> "DictConfig | object":
         for k in path:

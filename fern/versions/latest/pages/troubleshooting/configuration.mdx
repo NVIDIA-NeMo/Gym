@@ -241,6 +241,7 @@ my_environment_server:
 
 For a top-level `_inherit_from` rename with one destination that still defines exactly one agent, Gym automatically points environment server references at the new name.
 The server keeps its name, so `environment_server_routes` still resolve.
+The source can itself be derived with `_inherit_from` or `_copy`, as when a Harbor taskset agent inherits a harness flavor that inherits the base agent: Gym resolves each link before merging it and reports a chain that leads back to itself as `InheritPathNotFoundError`.
 The migration script leaves these renames alone.
 If several destinations inherit the same source and remain agents, and an environment server still references the old name, Gym reports `AmbiguousAgentRenameError` with the destinations and the field to update.
 Give each new agent its own environment server by inheriting the original server and naming that agent, for example:

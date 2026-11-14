@@ -204,7 +204,7 @@ class ServerRefNotFoundError(ConfigError, ValueError):
 
 
 class InheritPathNotFoundError(ConfigError, ValueError):
-    """An `_inherit_from` / swap / copy directive references a config path that does not exist."""
+    """An `_inherit_from` / swap / copy directive references a missing config path or one that derives from itself."""
 
 
 class AlmostServerError(ConfigError, ValueError):

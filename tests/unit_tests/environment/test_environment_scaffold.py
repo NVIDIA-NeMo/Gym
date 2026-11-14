@@ -725,30 +725,38 @@ def test_reuse_rejects_a_bundled_agent_behind_several_environment_servers(tmp_pa
     assert not (tmp_path / "environments/reused").exists()
 
 
-@pytest.mark.parametrize("directive", ["_inherit_from", "_copy"])
-def test_reuse_rejects_a_bundled_environment_server_that_is_itself_derived(tmp_path: Path, directive: str) -> None:
-    derived_server = f"""
-shared_environment_server:
-  {directive}: base_environment_server
+def test_reuse_inherits_a_bundled_environment_server_that_is_itself_inherited(tmp_path: Path) -> None:
+    # The workload inherits shared_environment_server, which inherits base_environment_server: a chain the
+    # configuration resolves link by link.
+    derived_server = """
+base_environment_server:
   environment_servers:
     legacy_agent:
-      agent_server: {{type: responses_api_agents, name: shared_agent}}
+      entrypoint: app.py
+shared_environment_server:
+  _inherit_from: base_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server: {type: responses_api_agents, name: shared_agent}
 """
     _synthetic_verifier(tmp_path, extra_config=_BUNDLED_AGENT + derived_server)
 
-    with pytest.raises(
-        ScaffoldError, match="'shared_environment_server' is itself derived with _inherit_from or _copy"
-    ):
-        scaffold_environment(
-            root=tmp_path,
-            kind="environment",
-            name="reused",
-            reuse_verifier="shared",
-            reward_range=(0, 1),
-            higher_is_better=True,
-        )
+    result = scaffold_environment(
+        root=tmp_path,
+        kind="environment",
+        name="reused",
+        reuse_verifier="shared",
+        reward_range=(0, 1),
+        higher_is_better=True,
+    )
 
-    assert not (tmp_path / "environments/reused").exists()
+    config = yaml.safe_load(result.asset_dir.joinpath("config.yaml").read_text(encoding="utf-8"))
+    assert config["reused_environment_server"]["_inherit_from"] == "shared_environment_server"
+    resolved = _resolve_workloads(tmp_path, result.asset_dir)
+    assert _environment_servers_by_agent(resolved) == {"reused_agent": ["reused_environment_server"]}
+    assert "shared_environment_server" not in resolved
+    assert "base_environment_server" not in resolved
+    assert resolved.reused_environment_server.environment_servers.legacy_agent.entrypoint == "app.py"
 
 
 @pytest.mark.parametrize("name", ["reused", "shared"])
