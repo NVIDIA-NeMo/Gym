@@ -277,6 +277,9 @@ def _assemble_agent_instance(
         )
         for entries in groups
     ]
+    if not builds:
+        # Every call of this agent instance was lost, so there is nothing to build.
+        return _failed_build(rollout_id, builder, "capture contains no token records")
     if len(builds) == 1:
         return builds[0]
     delivered = [
@@ -318,6 +321,10 @@ def _build_snapshot(
         _apply_snapshot_outcome(built, snapshot, None, always=mask_incomplete_when_attributed)
         return built
     agents = by_agent_instance(group_entries(snapshot.entries).items(), key=lambda item: item[0])
+    # An agent instance that lost every call has no entry. It still takes part in choosing the primary and gets
+    # a failed build, so another agent instance's chain is never delivered in its place.
+    for lost in sorted(snapshot.incomplete_agent_instances, key=lambda name: name or ""):
+        agents.setdefault(lost, [])
     try:
         primary: str | None = primary_agent_instance(agents)
         has_primary = True

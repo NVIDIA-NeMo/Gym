@@ -298,6 +298,7 @@ class TokenCaptureStore:
                         self._write_state(rollout_id, state)
                     return
                 state["incomplete"] = True
+                state["incomplete_episode"] = True
                 state["version"] = int(state.get("version", 0)) + 1
                 self._write_state(rollout_id, state)
                 raise ValueError(
@@ -407,10 +408,10 @@ class TokenCaptureStore:
             self._record_engine_refusal, rollout_id, model_call_id, code, parent_call_id, parent_resolution
         )
 
-    def _call_lines(self, path: Path) -> list[dict[str, Any]]:
+    def _call_lines(self, path: Path, *, keep_blank: bool = False) -> list[dict[str, Any]]:
         if not path.exists():
             return []
-        return [_read_call_line(line) for line in path.read_bytes().splitlines() if line.strip()]
+        return [_read_call_line(line) for line in path.read_bytes().splitlines() if keep_blank or line.strip()]
 
     def _dangling_intents(
         self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]
@@ -425,7 +426,8 @@ class TokenCaptureStore:
     def _outcomes(self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]) -> OutcomeAttribution:
         """Attribute the rollout's lost calls and incomplete marks to agent instances."""
         intents = self._call_lines(self.intents_path_for(rollout_id))
-        marks = self._call_lines(self.incomplete_path_for(rollout_id))
+        # A mark that names no call and no identity is a blank line. It applies to the whole episode, so keep it.
+        marks = self._call_lines(self.incomplete_path_for(rollout_id), keep_blank=True)
         named_episode = any(entry.agent_instance is not None for entry in entries) or any(
             "agent_instance" in intent for intent in intents
         )
@@ -437,8 +439,8 @@ class TokenCaptureStore:
                 outcomes.add(row["model_call_id"], columns, named_episode=named_episode)
         for intent in self._dangling_intents(rollout_id, entries, state):
             outcomes.add(intent["model_call_id"], intent, named_episode=named_episode)
-        if state.get("incomplete", False) and not marks:
-            # Marked without a record of which call, as a conflicting write is: the whole episode.
+        if state.get("incomplete_episode", False) or (state.get("incomplete", False) and not marks):
+            # A conflicting write, or a state marked without a record of which call: the whole episode.
             outcomes.episode_wide = True
         return outcomes
 

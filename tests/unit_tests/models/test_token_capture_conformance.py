@@ -20,7 +20,7 @@ from nemo_gym.models.token_capture.protocols import (
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
 )
-from nemo_gym.models.token_capture.records import TokenEntry
+from nemo_gym.models.token_capture.records import CallIdentity, TokenEntry
 from nemo_gym.models.token_capture.store import TokenCaptureStore
 
 
@@ -137,7 +137,7 @@ class _MemoryLineage:
         self.backend = backend
 
     async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None):
-        return await self.backend.lineage.resolve(rollout_id, request_items)
+        return await self.backend.lineage.resolve(rollout_id, request_items, identity=identity)
 
     def is_process_shared(self) -> bool:
         return False
@@ -364,3 +364,41 @@ def test_kit_rejects_a_sink_whose_mark_incomplete_takes_no_identity(tmp_path):
             run_conformance(lambda: _MarkIncompleteWithoutIdentity(tmp_path), lambda: TokenCaptureStore(tmp_path))
         )
     assert info.value.check_name == "mark_incomplete_durability"
+
+
+def test_kit_rejects_a_lineage_resolver_whose_resolve_takes_no_identity(tmp_path):
+    class _ResolveWithoutIdentity(FileLineageStore):
+        async def resolve(self, rollout_id: str, request_items: list[dict]):
+            return await super().resolve(rollout_id, request_items)
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(
+            run_conformance(
+                lambda: TokenCaptureStore(tmp_path),
+                lambda: TokenCaptureStore(tmp_path),
+                lambda: _ResolveWithoutIdentity(tmp_path),
+            )
+        )
+    assert info.value.check_name == "lineage_visibility"
+    assert "TypeError" in info.value.detail
+
+
+def test_kit_rejects_a_lineage_resolver_that_resolves_across_agent_instances(tmp_path):
+    class _ResolveIgnoringTheRequester(FileLineageStore):
+        """Search the calls of whichever agent instance made the rollout's first call."""
+
+        async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None):
+            entries = TokenCaptureStore(tmp_path).read_entries(rollout_id)
+            pooled = CallIdentity(agent_instance=entries[0].agent_instance, model_ref=entries[0].model_ref)
+            return await super().resolve(rollout_id, request_items, identity=pooled)
+
+    with pytest.raises(ConformanceError) as info:
+        asyncio.run(
+            run_conformance(
+                lambda: TokenCaptureStore(tmp_path),
+                lambda: TokenCaptureStore(tmp_path),
+                lambda: _ResolveIgnoringTheRequester(tmp_path),
+            )
+        )
+    assert info.value.check_name == "lineage_visibility"
+    assert "another agent instance" in info.value.detail
