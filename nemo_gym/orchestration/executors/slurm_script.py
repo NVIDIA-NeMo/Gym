@@ -1197,6 +1197,7 @@ def build_sbatch_script(
         record_install_failure=resume is not None,
         extras=extras,
         export_tail=export_tail,
+        private_uv=config.driver.container is None,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
@@ -1220,9 +1221,14 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    driver_flags = (
+        f" --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f" --container-image={shlex.quote(config.driver.container)}"
+        if config.driver.container is not None
+        else driver_node_flags
+    )
     driver_srun = (
-        f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f" --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_env_prefix}{failure_file}srun --overlap{driver_flags} "
         f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if resume and benchmark.command is None:
@@ -1242,6 +1248,7 @@ def build_sbatch_script(
             repo=gi.repo if gi else None,
             ref=gi.ref if gi else None,
             prepare_cmd=None,
+            private_uv=config.driver.container is None,
             command=f"python -c {shlex.quote(admission_python)} {shlex.quote(str(remote_bench_dir))} "
             # The configured cap: the reader adds the recorded extension itself.
             f'{resume.max_retries} {cap} "$GYM_PREVIOUS_EXIT_CODE" "$GYM_PREVIOUS_JOB_ID" "$GYM_PREVIOUS_STATE"'
@@ -1249,8 +1256,7 @@ def build_sbatch_script(
         )
         admission_command = (
             f'{driver_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '
-            f"--no-container-mount-home{driver_mounts_flag} "
-            f"--container-image={shlex.quote(config.driver.container)} {admission_entrypoint}"
+            f"{driver_flags} {admission_entrypoint}"
         )
         resume_prologue = render_resume_prologue(resume, admission_command=admission_command)
 
