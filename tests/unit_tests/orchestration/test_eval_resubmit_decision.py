@@ -56,7 +56,7 @@ class _StartsWith:
 
 
 # A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
-HEALTH_UNKNOWN = _StartsWith('response/trial health unknown: ["trial: UNOBSERVED')
+HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['")
 
 
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
@@ -1292,6 +1292,7 @@ def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_bel
     assert task["status"] == ("FAILED" if failed else "UNVERIFIED")
     assert task["scored_samples"] == 100 and task["score"] == 0.5
     [health] = [e for e in task["errors"] + task["warnings"] if e.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     rate = f"evaluation-side faults: {final_zeros} of 100 ({final_zeros / 100:.2%}) is not below 2%"
     if failed:
         assert health.startswith("response/trial health failed") and f"trial: {rate}" in health
@@ -1326,6 +1327,7 @@ def test_the_response_gate_reads_the_reported_population_strictly_below_two_perc
     )
     assert d.action == RecoveryAction.NOOP and task["status"] == "UNVERIFIED"
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     # Whatever the reported response population, it never decides health: only the unobserved trials do.
     assert health.startswith("response/trial health unknown") and "response:" not in health, state
     assert not any("response:" in w for w in task["warnings"])
@@ -1335,6 +1337,7 @@ def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
     d, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0, missing=1))
     assert d.action == RecoveryAction.RESUBMIT and not d.complete
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert "trial: not evaluated, the run is not complete" in health
 
 
@@ -1359,6 +1362,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
     )
     d, task = gate_of(job, quality=quality)
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
     assert "trial: UNOBSERVED 99 of 100 expected trials" in health and "route_failures_to_sidecar None" in health
     assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
@@ -1403,6 +1407,7 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
     job = gate_job(tmp_path, expected=100, final_zeros=0)
     d, task = gate_of(job, quality=unit_quality(expected=100, context_window_exceeded=counts))
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert d.action == RecoveryAction.NOOP and task["score"] == 0.5 and task["status"] == "UNVERIFIED"
     # A context-window signal is never read as proven clipping: the trial gate stays unknown, not failed.
     assert health.startswith("response/trial health unknown")
@@ -2715,6 +2720,7 @@ def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_
         "unobserved_reason": "no completed grading operation or grading record was recorded by the verifier (demo_verifier)",
     }
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert health.startswith("response/trial health unknown")
     assert (
         "trial: UNOBSERVED 6 of 6 expected trials: no completed grading operation or grading record was recorded "
@@ -2738,6 +2744,7 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
         "unobserved": 50,
     }
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert "trial: UNOBSERVED 50 of 100 expected trials" in health
     assert "observed healthy 49, unhealthy 1" in health
 
@@ -2751,8 +2758,11 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
         "unobserved": 99,
     }
     [health] = [w for w in unowned["warnings"] if w.startswith("response/trial health")]
-    assert "trial: UNOBSERVED 99 of 100 expected trials" in health
-    assert "observed healthy 0, unhealthy 1" in health
+    # The warning names the cause; the full trial reason stays in the health detail.
+    assert "99 of 100 rows have no recorded grading" in health
+    detail = unowned["evaluation_health"]["detail"]
+    assert "trial: UNOBSERVED 99 of 100 expected trials" in detail
+    assert "observed healthy 0, unhealthy 1" in detail
 
 
 _CURRENT_RECEIPT = {
@@ -3178,6 +3188,23 @@ def test_inspect_prints_the_unverified_reading_of_an_all_skipped_run(tmp_path, f
     assert out.gate_task["status"] == "UNVERIFIED" and out.gate_task["score"] is None
     assert any("not graded by configuration (judge_skipped)" in w for w in out.gate_task["warnings"])
     assert out.gate_task["errors"] == [] and out.dispatched is None
+
+
+def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuration_and_its_delivery_state(
+    tmp_path, fake_executor
+) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.inspect_recovery("gym-job-skip3", "bench")
+    assert out.gate_task["status"] == "UNVERIFIED"
+    assert out.operator_verdict == {
+        "state": "unknown",
+        "reason": "unverified by configuration: 5 of 5 rows were not verified (verification skipped by configuration)",
+        # Nothing to recover; its provenance does not say MLflow was configured, so a recovery would not export it.
+        "action": "none: report the run as unverified by configuration; report the MLflow delivery as not evidenced: "
+        "the run's saved provenance does not say MLflow was configured (provenance.mlflow.configured), so a recovery "
+        "does not export it and its results stand without an export; if MLflow was meant to be used, export them "
+        "with the tracking tooling and inspect again with --mlflow-run-id and --mlflow-status",
+    }
 
 
 def test_a_masked_result_of_any_other_kind_still_stops_the_run(tmp_path) -> None:
