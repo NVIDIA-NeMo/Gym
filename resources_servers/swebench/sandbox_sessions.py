@@ -41,7 +41,7 @@ from typing import Any, cast
 
 import anyio
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId
@@ -73,6 +73,12 @@ STOP_TIMEOUT_S = 120.0
 EXPIRY_RETRY_INTERVAL_S = 60.0
 # Sandbox stops that shutdown runs at once, so a server with thousands of open sessions does not flood the provider.
 SHUTDOWN_STOP_CONCURRENCY = 64
+
+
+class AgentRunCloseSessionRequest(BaseModel):
+    """Close an agent-run sandbox using the request's session cookie."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass
@@ -281,12 +287,23 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         )
 
     async def close_resources_session(
-        self, request: Request, body: ResourcesCloseSessionRequest
+        self, request: Request, body: ResourcesCloseSessionRequest | AgentRunCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
-        """Stop the session's task sandbox unless verify already did, and fence later seeds.
+        """Stop the session's sandboxes after an episode or a cookie-scoped agent run.
 
         A failed stop raises without fencing, and keeps the sandbox so a retried close stops it.
+        Cookie-scoped close cannot close an episode session, which requires its explicit identity.
         """
+        if isinstance(body, AgentRunCloseSessionRequest):
+            session_id = request.session[SESSION_ID_KEY]
+            async with self._locked_task_session(session_id) as record:
+                if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                    raise ResourcesSessionConflictError("An episode session requires its explicit close request")
+                await self._stop_session_sandboxes(session_id)
+                self._task_sessions.pop(session_id, None)
+                self._open_task_sessions.pop(session_id, None)
+                request.session.pop(SESSION_ID_KEY, None)
+                return ResourcesCloseSessionResponse(resources_session_id=session_id)
         session_id = body.resources_session_id
         async with self._locked_task_session(session_id) as record:
             fenced_episode = self._task_session_fences.get(session_id)

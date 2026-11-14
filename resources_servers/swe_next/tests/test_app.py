@@ -204,7 +204,7 @@ class TestGrade:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=None)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -350,7 +350,7 @@ class TestAntiCheating:
 class _ShellSandbox:
     async def exec(self, command: str, timeout_s=None):
         proc = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
-        return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, return_code=proc.returncode)
+        return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, return_code=proc.returncode, error_type=None)
 
 
 class TestHidesGradingArtifacts:
