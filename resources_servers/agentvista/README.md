@@ -17,3 +17,10 @@ and library caches remain under `output_root`.
 Run focused tests with `pytest resources_servers/agentvista/tests`. This server
 uses the same separately pinned AgentVista source and native runtime as the agent;
 see its README for provisioning and source/license provenance.
+
+The manifest-native `VERIFIER_FIXTURE` exercises the production judge adapter with
+only the external provider/module replaced. It requires no private environment,
+dataset downloads or model calls. Run the full CI path, including fixtures, with
+`gym env test +entrypoint=resources_servers/agentvista +should_validate_data=true`.
+Prepared metadata is validated by `task_data.py`; the benchmark's agent reference
+binds that schema during dataset collation.

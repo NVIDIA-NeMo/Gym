@@ -1,20 +1,23 @@
 agentvista_dataset_path: ${oc.env:AGENTVISTA_GYM_DATASET,benchmarks/agentvista/data/agentvista_benchmark.jsonl}
-agentvista_output_root: ${oc.env:AGENTVISTA_OUTPUT_ROOT}
+agentvista_output_root: ${oc.env:AGENTVISTA_OUTPUT_ROOT,outputs/agentvista}
 
 agentvista_agent:
   responses_api_agents:
     agentvista_agent:
       entrypoint: app.py
-      source_root: ${oc.env:AGENTVISTA_ROOT}
-      dataset: ${oc.env:AGENTVISTA_DATASET}
-      image_folder: ${oc.env:AGENTVISTA_IMAGES}
+      resources_server:
+        type: resources_servers
+        name: agentvista_resources
+      source_root: ${oc.env:AGENTVISTA_ROOT,/opt/agentvista/source}
+      dataset: ${oc.env:AGENTVISTA_DATASET,/data/agentvista/datasets/val.json}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES,/data/agentvista/datasets}
       task_selector: ${oc.env:AGENTVISTA_TASKS,all}
       model_server:
         type: responses_api_models
         name: policy_model
       model_name: ${policy_model_name}
       output_root: ${agentvista_output_root}
-      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON}
+      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON,/opt/agentvista-worker/bin/python}
       harness: ${oc.select:agentvista_harness,opencode}
       default_max_turns: ${oc.select:agentvista_default_max_turns,30}
       default_max_images: ${oc.select:agentvista_default_max_images,100}
@@ -38,11 +41,11 @@ agentvista_resources:
   resources_servers:
     agentvista:
       entrypoint: app.py
-      source_root: ${oc.env:AGENTVISTA_ROOT}
-      dataset: ${oc.env:AGENTVISTA_DATASET}
-      image_folder: ${oc.env:AGENTVISTA_IMAGES}
+      source_root: ${oc.env:AGENTVISTA_ROOT,/opt/agentvista/source}
+      dataset: ${oc.env:AGENTVISTA_DATASET,/data/agentvista/datasets/val.json}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES,/data/agentvista/datasets}
       output_root: ${agentvista_output_root}
-      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON}
+      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON,/opt/agentvista-worker/bin/python}
       harness: ${oc.select:agentvista_harness,opencode}
       domain: agent
       verified: false

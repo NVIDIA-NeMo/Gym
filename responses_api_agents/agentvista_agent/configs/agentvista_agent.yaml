@@ -3,10 +3,10 @@ agentvista_agent:
     agentvista_agent:
       entrypoint: app.py
       resources_server: null
-      source_root: ${oc.env:AGENTVISTA_ROOT}
-      dataset: ${oc.env:AGENTVISTA_DATASET}
-      image_folder: ${oc.env:AGENTVISTA_IMAGES}
-      output_root: ${oc.env:AGENTVISTA_OUTPUT_ROOT}
+      source_root: ${oc.env:AGENTVISTA_ROOT,/opt/agentvista/source}
+      dataset: ${oc.env:AGENTVISTA_DATASET,/data/agentvista/datasets/val.json}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES,/data/agentvista/datasets}
+      output_root: ${oc.env:AGENTVISTA_OUTPUT_ROOT,outputs/agentvista}
       model_name: ${policy_model_name}
       model_server:
         type: responses_api_models

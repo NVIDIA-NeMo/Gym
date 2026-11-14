@@ -14,6 +14,7 @@ from pydantic import Field, PrivateAttr
 
 from nemo_gym.server_runtime import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.agentvista.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.results import (
     AgentVistaResults,

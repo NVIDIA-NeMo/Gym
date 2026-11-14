@@ -25,7 +25,7 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -38,7 +38,7 @@ from responses_api_agents.agentvista_agent.runtime.paths import output_path
 
 
 class AgentVistaConfig(BaseResponsesAPIAgentConfig):
-    resources_server: None = None
+    resources_server: ResourcesServerRef | None = None
     source_root: str
     dataset: str
     image_folder: str

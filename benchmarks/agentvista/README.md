@@ -89,8 +89,8 @@ Use a private environment file outside Git for policy/search/visit/judge setting
   `AGENTVISTA_VISIT_MODEL_NAME`: fixed webpage summarizer; endpoint is a full
   chat-completions URL.
 - `VERIFIER_API_KEY`, `VERIFIER_END_POINT`, `VERIFIER_MODEL_NAME`: fixed answer
-  judge; endpoint is a base URL ending in `/v1`. Both workers check these before
-  any policy calls.
+  judge; endpoint is a base URL ending in `/v1`. The Resources Server owns these
+  credentials; Gym removes them from its policy workers.
 
 Both harnesses now run `code_interpreter` in a mandatory Bubblewrap namespace
 sandbox supervised through NeMo Gym's sandbox lifecycle API. The boundary
@@ -180,3 +180,28 @@ the original answer judge and aggregates scores. Re-run preparation when moving
 from version 4 so each row has the task's agent seed context. Factory's agent
 selector and the two harness configuration names are unchanged. Existing frozen
 cluster campaigns retain their pinned code/configuration.
+
+## Offline CI validation
+
+The manifest names the `agentvista` verifier implementation; the runtime instance
+is `agentvista_resources`. The agent's Resources reference also lets dataset
+collation select `resources_servers/agentvista/task_data.py` for its prepared rows.
+The schema records the legacy `verifier_metadata` placement and excludes answers.
+
+Configs resolve without cluster environment variables for offline validation.
+The defaults match the runtime image: source `/opt/agentvista/source` and worker
+`/opt/agentvista-worker/bin/python`. Mount the external dataset at
+`/data/agentvista/datasets/val.json` with images under `/data/agentvista/datasets`,
+or override the corresponding `AGENTVISTA_*` variables. Outputs default to
+`outputs/agentvista` relative to the launch directory; cluster jobs should keep
+setting `AGENTVISTA_OUTPUT_ROOT` to their mounted workspace. Assets are not
+provisioned by these defaults, and runtime source/task hash checks remain required.
+
+CI runs the four offline verifier cases (positive, negative, missing reference,
+unparseable provider) through the production score adapter with a stub provider
+and upstream prompt module. These are parser/contract checks; real model/judge
+qualification is recorded separately in the smoke receipts.
+
+```bash
+gym env test +entrypoint=resources_servers/agentvista +should_validate_data=true
+```
