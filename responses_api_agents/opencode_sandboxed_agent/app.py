@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -397,6 +399,9 @@ class IdleNudgeConfig(BaseModel):
     text: str
     max_nudges: int = Field(default=3, ge=1)
     stop_on_text: Optional[str] = None
+    # Put LENGTH_NOTE before `text` when the stopped turn hit the output token limit. False sends `text` alone every
+    # time, as OpenHands' headless auto-continue does.
+    length_note: bool = True
 
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -420,6 +425,14 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     # corrective message. Without this, a turn cut off at max_tokens mid-reasoning ends the task with an empty workspace
     # (NL2RepoBench, Super 3.5 at max_tokens 32000: 5 of 63 rollouts, 2026-11-02). Off unless configured.
     idle_nudge: Optional["IdleNudgeConfig"] = None
+    # OpenHands 0.56's StuckDetector (NL2RepoBench's harness ends a run when its agent loops): stuck_detector.mjs, an
+    # OpenCode plugin, checks the repeat/error/alternation/compaction scenarios after every tool call and ends the run
+    # when one fires; the monologue scenario (3 identical replies with no tool call between) is checked here before a
+    # nudge. The row's `opencode_stuck` names the scenario. Off by default.
+    stuck_detector: bool = False
+    # Where each session's raw OpenCode export (and observations database) is saved, one subdirectory per session.
+    # Default: this agent's own results/ directory, shared by every run; a launcher points it into the run's directory.
+    opencode_results_dir: Optional[str] = None
 
     # Sandbox config
     sandbox_provider: str
@@ -467,6 +480,17 @@ LENGTH_NOTE = (
 )
 
 
+def _steps_used(opencode_export: Dict[str, Any]) -> int:
+    """Agentic steps the session has taken: one `step-finish` part per step, as OpenCode records them."""
+    return sum(
+        1
+        for m in opencode_export.get("messages") or []
+        if (m.get("info") or {}).get("role") == "assistant"
+        for p in m.get("parts") or []
+        if p.get("type") == "step-finish"
+    )
+
+
 def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = None) -> Optional[str]:
     """Why the session should be continued, or None.
 
@@ -495,6 +519,100 @@ def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = 
     return "idle"
 
 
+_SESSION_ID_RE = re.compile(r"\bses_[A-Za-z0-9]+")
+MAX_CHILD_SESSIONS = 500
+
+
+def _child_session_ids(opencode_export: Dict[str, Any]) -> List[str]:
+    """Sessions this one started with the `task` tool (subagents), in call order. The task tool records the child in
+    its metadata (`sessionId`); a resumed child is named by the call's `task_id`, and its output names it too
+    (`<task id="ses_...">`). `opencode session list` shows only top-level sessions, so this is how children are found."""
+    ids: List[str] = []
+    own = (opencode_export.get("info") or {}).get("id")
+    for message in opencode_export.get("messages") or []:
+        for part in message.get("parts") or []:
+            if part.get("type") != "tool" or part.get("tool") != "task":
+                continue
+            state = part.get("state") or {}
+            found = [(state.get("metadata") or {}).get("sessionId"), (state.get("input") or {}).get("task_id")]
+            found += _SESSION_ID_RE.findall(str(state.get("output") or ""))
+            for sid in found:
+                if isinstance(sid, str) and sid.startswith("ses_") and sid != own and sid not in ids:
+                    ids.append(sid)
+    return ids
+
+
+def _token_totals(opencode_export: Dict[str, Any]) -> Dict[str, int]:
+    """Token use summed over a session's model calls, as OpenCode records them per assistant message."""
+    totals = {"calls": 0, "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+    for message in opencode_export.get("messages") or []:
+        info = message.get("info") or {}
+        tokens = info.get("tokens")
+        if info.get("role") != "assistant" or not tokens:
+            continue
+        cache = tokens.get("cache") or {}
+        totals["calls"] += 1
+        totals["input"] += int(tokens.get("input") or 0)
+        totals["output"] += int(tokens.get("output") or 0)
+        totals["reasoning"] += int(tokens.get("reasoning") or 0)
+        totals["cache_read"] += int(cache.get("read") or 0)
+        totals["cache_write"] += int(cache.get("write") or 0)
+    return totals
+
+
+def _token_breakdown(main: Dict[str, Any], children: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Main agent vs subagents: {"main": totals, "subagents": totals summed, "per_subagent": {id: totals}}."""
+    per = {sid: _token_totals(export) for sid, export in children.items()}
+    summed = _token_totals({})
+    for totals in per.values():
+        for key in summed:
+            summed[key] += totals[key]
+    return {"main": _token_totals(main), "subagents": summed, "per_subagent": per}
+
+
+STUCK_DIR = "/tmp/nemo_gym_stuck"
+STUCK_PLUGIN = Path(__file__).with_name("stuck_detector.mjs")
+
+
+def _monologue_stuck(opencode_export: Dict[str, Any]) -> bool:
+    """OpenHands' monologue scenario: the last 3 agent messages (steps with no tool call) are identical, with nothing
+    observed (no tool call, no compaction) between them. User messages (the nudges) are left out, as OpenHands does."""
+    history: List[Optional[str]] = []  # an agent message's text, or None for an observation
+    for message in opencode_export.get("messages") or []:
+        parts = message.get("parts") or []
+        if (message.get("info") or {}).get("role") != "assistant":
+            history.extend(None for p in parts if p.get("type") == "compaction")
+            continue
+        step: Optional[List[Dict[str, Any]]] = None
+        for part in parts + [{"type": "step-finish"}]:
+            if part.get("type") == "step-start":
+                step = []
+            elif part.get("type") == "step-finish":
+                if step is not None:
+                    if any(p.get("type") == "tool" for p in step):
+                        history.append(None)
+                    else:
+                        history.append("".join(str(p.get("text") or "") for p in step if p.get("type") == "text"))
+                step = None
+            elif step is not None:
+                step.append(part)
+    agent = [i for i, h in enumerate(history) if h is not None]
+    if len(agent) < 3:
+        return False
+    first, *_, last = agent[-3:]
+    return len({history[i] for i in agent[-3:]}) == 1 and all(h is not None for h in history[first:last])
+
+
+async def _read_stuck_marker(sandbox: Any) -> Optional[str]:
+    """The scenario stuck_detector.mjs recorded, or None."""
+    try:
+        res = await sandbox.exec(command=f"cat {STUCK_DIR}/stuck.json 2>/dev/null || true")
+        return json.loads(res.stdout).get("scenario") if (res.stdout or "").strip() else None
+    except Exception:
+        print("Reading the stuck marker failed", format_exc(), file=sys.stderr)
+        return None
+
+
 class _CombinedExecResult:
     """Stdout/stderr of several `opencode run` execs (the first run plus nudged resumes), shaped like an exec result."""
 
@@ -503,6 +621,7 @@ class _CombinedExecResult:
         self.stderr = getattr(first, "stderr", "") or ""
         self.return_code = getattr(first, "return_code", None)
         self.error_type = getattr(first, "error_type", None)
+        self.stuck: Optional[str] = None  # the OpenHands stuck scenario that ended the session, if any
 
     def add(self, nxt: Any) -> None:
         self.stdout += "\n" + (getattr(nxt, "stdout", "") or "")
@@ -656,7 +775,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         *,
         sandbox: Any,
         first_result: Any,
-        env_prefix: str,
+        config_content: str,
+        env_suffix: str,
         run_flags: str,
         session_env: Optional[Dict[str, str]],
         deadline: float,
@@ -664,8 +784,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         """Continue the session per ``idle_nudge`` while its last assistant turn made no tool call.
 
         Returns the combined exec result and the number of nudges sent. Stops at the configured limit, when an
-        `opencode run` does not exit cleanly, when the session cannot be read, or when under a minute of the
-        sandbox_timeout budget is left."""
+        `opencode run` does not exit cleanly, when the session cannot be read, when under a minute of the
+        sandbox_timeout budget is left, or when the session has used OpenCode's step cap (`agent.build.steps` in
+        `config_content`): each `opencode run --session` would otherwise start a fresh cap, so a resume gets only the
+        steps left, which makes the cap one budget for the whole task (as OpenHands' max_iterations is)."""
+        base_config = json.loads(config_content)
+        step_cap = ((base_config.get("agent") or {}).get("build") or {}).get("steps")
         combined = _CombinedExecResult(first_result)
         latest_stdout = combined.stdout
         nudges = 0
@@ -673,6 +797,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         nudge_config = self.config.idle_nudge
         assert nudge_config is not None
         while nudges < nudge_config.max_nudges:
+            if self.config.stuck_detector:
+                combined.stuck = await _read_stuck_marker(sandbox)
+                if combined.stuck:
+                    break  # the plugin ended the run, as OpenHands ends a stuck agent
             if "OpenCode run finished" not in latest_stdout:
                 break
             remaining = deadline - time()
@@ -703,15 +831,30 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             reason = _idle_reason(session_export, nudge_config.stop_on_text)
             if reason is None:
                 break
+            if self.config.stuck_detector and _monologue_stuck(session_export):
+                combined.stuck = "monologue"
+                break
+            config = base_config
+            if isinstance(step_cap, int) and step_cap > 0:
+                used = _steps_used(session_export)
+                if used >= step_cap:
+                    break  # the whole-task step budget is spent, as OpenHands stops at max_iterations
+                config = json.loads(config_content)
+                config.setdefault("agent", {}).setdefault("build", {})["steps"] = step_cap - used
             nudges += 1
             print(
                 f"OpenCode session {session_id} stopped without a tool call ({reason}); nudge {nudges}",
                 file=sys.stderr,
             )
-            nudge = f"{LENGTH_NOTE}\n{nudge_config.text}" if reason == "length" else nudge_config.text
+            nudge = (
+                f"{LENGTH_NOTE}\n{nudge_config.text}"
+                if reason == "length" and nudge_config.length_note
+                else nudge_config.text
+            )
             resume = (
                 f"export PATH=$HOME/.opencode/bin:$PATH "
-                f"&& {env_prefix} opencode run --session {quote(session_id)} {run_flags} -- {quote(nudge)} "
+                f"&& OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
+                f"opencode run --session {quote(session_id)} {run_flags} -- {quote(nudge)} "
                 f'&& echo "OpenCode run finished"'
             )
             try:
@@ -848,7 +991,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Downloaded OpenCode installer to $installer" \
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
-        opencode_config_content = json.dumps(await self._create_opencode_config(request))
+        opencode_config = await self._create_opencode_config(request)
+        stuck_setup = ""
+        if self.config.stuck_detector:
+            # No upload API here: the plugin rides in the run command (base64), and loads from a file:// URL
+            plugin_b64 = base64.b64encode(STUCK_PLUGIN.read_bytes()).decode()
+            stuck_setup = (
+                f"mkdir -p {STUCK_DIR} && rm -f {STUCK_DIR}/stuck.json "
+                f"&& echo {plugin_b64} | base64 -d > {STUCK_DIR}/stuck_detector.mjs && "
+            )
+            opencode_config = {
+                **opencode_config,
+                "plugin": [*opencode_config.get("plugin", []), f"file://{STUCK_DIR}/stuck_detector.mjs"],
+            }
+        opencode_config_content = json.dumps(opencode_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
@@ -877,7 +1033,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
         command = f"""
         echo "Shell: $SHELL" \
-        && {install_str} \
+        && {stuck_setup}{install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
         && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
@@ -902,18 +1058,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
 
         idle_nudges = 0
+        stuck = None
         if result is not None and self.config.idle_nudge is not None:
             result, idle_nudges = await self._nudge_idle_turns(
                 sandbox=sandbox,
                 first_result=result,
-                env_prefix=(
-                    f"OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} "
-                    f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str}"
-                ),
+                config_content=opencode_config_content,
+                env_suffix=f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str}",
                 run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
                 session_env=dict(xdg_env) or None,
                 deadline=run_started + self.config.sandbox_timeout,
             )
+            stuck = result.stuck
+        if result is not None and self.config.stuck_detector and stuck is None:
+            stuck = await _read_stuck_marker(sandbox)
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -947,7 +1105,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
+        results_root = Path(self.config.opencode_results_dir) if self.config.opencode_results_dir else Path(__file__).parent / "results"
+        results_dir: Path = results_root / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
         if export_result is not None and export_result.return_code == 0:
@@ -959,6 +1118,39 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
                 print("Export stdout:\n", export_result.stdout, file=sys.stderr)
                 print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+
+        # Subagent sessions (the `task` tool), recursively: exported next to the main one, children/<session id>.json
+        child_exports: Dict[str, Dict[str, Any]] = {}
+        if results_local_fpath.exists():
+            try:
+                pending = _child_session_ids(json.loads(results_local_fpath.read_text().strip() or "{}"))
+            except Exception:
+                pending = []
+            while pending and len(child_exports) < MAX_CHILD_SESSIONS:
+                child_id = pending.pop(0)
+                if child_id in child_exports:
+                    continue
+                child_remote = f"/tmp/opencode_child_{child_id}.json"
+                child_local = results_dir / "children" / f"{child_id}.json"
+                try:
+                    exported = await sandbox.exec(
+                        command=(
+                            "export PATH=$HOME/.opencode/bin:$PATH "
+                            f"&& opencode export {quote(child_id)} > {quote(child_remote)}"
+                        ),
+                        env=dict(xdg_env) or None,
+                    )
+                    if exported.return_code != 0:
+                        print(f"Failed to export subagent session {child_id}: {exported.stderr}", file=sys.stderr)
+                        continue
+                    child_local.parent.mkdir(parents=True, exist_ok=True)
+                    await sandbox.download(child_remote, child_local)
+                    child_export = json.loads(child_local.read_text().strip() or "{}")
+                except Exception:
+                    print(f"Failed to export subagent session {child_id}", format_exc(), file=sys.stderr)
+                    continue
+                child_exports[child_id] = child_export
+                pending.extend(c for c in _child_session_ids(child_export) if c not in child_exports)
 
         observations = None
         if collect_observations:
@@ -1052,6 +1244,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
             "opencode_idle_nudges": idle_nudges,
+            "opencode_stuck": stuck,
+            # Token use of the main agent vs its subagents (`usage` and the trajectory are the main session only)
+            "opencode_tokens": _token_breakdown(opencode_export, child_exports),
+            "opencode_subagent_sessions": list(child_exports),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations

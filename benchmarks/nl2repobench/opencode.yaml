@@ -63,19 +63,33 @@ nl2repobench_opencode_sandboxed_agent:
       # other opencode_sandboxed_agent benchmarks keep today's 262144 behavior.
       opencode_max_context_window: 524288
 
-      # mini-swe-agent answers a reply without a command with a correction, and OpenHands a reasoning-only reply with
-      # a corrective message; `opencode run` instead ends on ANY reply without a tool call. So a turn cut off at the
-      # output token limit mid-reasoning, or a model that announces its next step and stops, ended the task: Super 3.5
-      # at max_tokens 32000 lost 5 of 63 rollouts that way on 2026-11-02, each scored 0 on an empty workspace. Continue
-      # the session a few times unless the model says it is done -- the same rule and limit as the ProgramBench
-      # OpenCode arm (benchmarks/programbench/opencode.yaml idle_nudge), with NL2RepoBench's finish line.
+      # Termination, faithful to NL2RepoBench's own harness (OpenHands 0.56, headless `openhands.core.main -t`):
+      # - a reply without an action is answered by OpenHands' auto_continue_response, every time, with no count;
+      #   `opencode run` instead exits on it, so idle_nudge continues the session with that same message;
+      # - the run ends when the agent calls the `finish` tool. OpenCode has none, so the message adds how to finish
+      #   here (reply TASK_COMPLETE), and that reply is the stop;
+      # - OpenHands' max_iterations default of 500 (NL2RepoBench never sets it; headless mode never raises it) is
+      #   OpenCode's agent.build.steps below, held as ONE budget across resumes;
+      # - max_nudges is only a safety bound (OpenHands has none; its 500-step cap bounds it there, and here too).
+      # Before 2026-11-03 this was ProgramBench's rule instead (3 nudges, its own wording): those runs differ.
+      # OpenHands' default max_iterations (500): OpenCode's cap on agentic steps, merged into the agent's own
+      # opencode_config (permissions etc. are kept). idle_nudge holds it as one budget across resumes.
+      opencode_config:
+        agent:
+          build:
+            steps: 500
+      # OpenHands' StuckDetector (it ends a run whose agent repeats itself: same action and result 4 times, same
+      # failing action 3 times, an A-B-A-B-A-B alternation, 3 identical replies, 10 compactions in a row).
+      stuck_detector: true
       idle_nudge:
-        max_nudges: 3
+        max_nudges: 100
         stop_on_text: TASK_COMPLETE
+        length_note: false
         text: |-
-          Your previous response did not run any tool, so nothing happened and the task is not finished.
-          Every response must use a tool to make progress until the entire project described in /workspace/start.md is implemented in /workspace.
-          Continue working now. If that is already true and nothing is left to do, reply with exactly TASK_COMPLETE.
+          Please continue on whatever approach you think is suitable.
+          If you think you have solved the task, please finish the interaction.
+          IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN RESPONSE.
+          To finish the interaction, reply with exactly TASK_COMPLETE.
 
       # The agent sandbox denies all egress except the policy model host
       # (enforce_agent_no_network: true), so the default `curl
