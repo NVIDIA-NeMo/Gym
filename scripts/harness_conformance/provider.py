@@ -259,6 +259,24 @@ class Probe:
                             "content": [{"type": "output_text", "text": self.compaction_summary, "annotations": []}],
                         }
                     ]
+                elif self.scenario.tool_call_as_text:
+                    # What a wrong chat template or tool parser produces: the call stays in the answer text.
+                    markup = (
+                        f"<tool_call>\n{json.dumps({'name': 'bash', 'arguments': {'command': 'ls'}})}\n</tool_call>"
+                    )
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {"type": "output_text", "text": markup, "annotations": []},
+                                {"type": "output_text", "text": ANSWER, "annotations": []},
+                            ],
+                        }
+                    ]
+                    self.finished = True
                 elif len(self.tool_calls) < self.scenario.tool_steps:
                     name, arguments, namespaces = self._tool(body)
                     call = self.tool_calls[-1]
@@ -312,7 +330,7 @@ class Probe:
                 if request.url.path.endswith("/chat/completions"):
                     message = {
                         "role": "assistant",
-                        "content": None if calls_tool else output[0]["content"][0]["text"],
+                        "content": None if calls_tool else "\n".join(part["text"] for part in output[0]["content"]),
                     }
                     if not compacting:
                         message["reasoning_content"] = "Perform the prescribed check."

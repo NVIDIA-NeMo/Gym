@@ -266,7 +266,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             environment_cls = LegacyAgentEnvironmentServer
             environment_config_cls = LegacyAgentEnvironmentServerConfig
         from nemo_gym.client import get_global_aiohttp_client, setup_server_client
-        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionConfig, RolloutCollectionHelper
 
         client = setup_server_client()
         agent = agent_cls(
@@ -324,20 +324,28 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                     }
                 ]
             inputs.write_text(json.dumps(task) + "\n")
-            async with asyncio.timeout(timeout + 10):
-                await RolloutCollectionHelper().run_from_config(
-                    RolloutCollectionConfig(
-                        agent_name="probe_agent",
-                        input_jsonl_fpath=str(inputs),
-                        output_jsonl_fpath=str(directory / "rollouts.jsonl"),
-                        num_samples_in_parallel=1,
-                        num_repeats=1,
-                        resume_from_cache=False,
-                        disable_aggregation=True,
-                        disable_health_check=True,
-                        route_failures_to_sidecar=True,
+            try:
+                async with asyncio.timeout(timeout + 10):
+                    await RolloutCollectionHelper().run_from_config(
+                        RolloutCollectionConfig(
+                            agent_name="probe_agent",
+                            input_jsonl_fpath=str(inputs),
+                            output_jsonl_fpath=str(directory / "rollouts.jsonl"),
+                            num_samples_in_parallel=1,
+                            num_repeats=1,
+                            resume_from_cache=False,
+                            disable_aggregation=True,
+                            disable_health_check=True,
+                            route_failures_to_sidecar=True,
+                        )
                     )
-                )
+            except IncompleteEvaluationError:
+                # An infrastructure failure must leave the run without a score, never a zero.
+                if not scenario.expect_incomplete:
+                    raise
+            else:
+                if scenario.expect_incomplete:
+                    raise RuntimeError("expected the run to stop without a score")
         finally:
             for server in servers:
                 server.should_exit = True

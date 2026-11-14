@@ -29,6 +29,10 @@ class Scenario:
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
     tier: PriorityTier = "P0"
     compaction: bool | None = None
+    # The deployment's tool parser does not match the model: tool calls arrive as plain text.
+    tool_call_as_text: bool = False
+    # Every rollout fails on infrastructure, so collection must stop without a score.
+    expect_incomplete: bool = False
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -88,6 +92,30 @@ SCENARIOS = (
         "A model-backed verifier grades the final answer; judge calls have verifier ownership, not policy steps.",
         tool_steps=0,
         judge_verifier=True,
+    ),
+    Scenario(
+        "unavailable_503",
+        "Every model request receives 503: the deployment behind the model server is down.",
+        evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
+        tool_steps=0,
+        http_errors=(503,),
+        terminal_error=True,
+        expected_reward=0.0,
+        steps=False,
+        expect_incomplete=True,
+        health_expectations={
+            "rollout_ended_on_failed_model_call": "unhealthy",
+            # The failure row keeps no finished response to reconcile counts against.
+            "rollout_token_count_mismatch": "unobserved",
+        },
+    ),
+    Scenario(
+        "tool_call_as_text",
+        "A mismatched tool parser returns the model's tool call as plain assistant text.",
+        tool_steps=0,
+        expected_reward=0.0,
+        tool_call_as_text=True,
+        health_expectations={"model_call_unparsed_tool_call": "unhealthy"},
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
     Scenario(
