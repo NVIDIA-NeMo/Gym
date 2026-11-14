@@ -3041,6 +3041,9 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(
     ("reported", "return_code", "error_type", "outcome"),
     [
         ("codex-cli 0.144.4", 0, None, "accepted"),
+        ("WARNING: could not create PATH aliases\ncodex-cli 0.144.4", 0, None, "accepted"),
+        ("WARNING: could not create PATH aliases\ncodex-cli 0.143.0", 0, None, "refused"),
+        ("codex-cli 0.144.4\ncodex-cli 0.143.0", 0, None, "refused"),
         ("codex-cli 0.143.0", 0, None, "refused"),
         # The check is exact: a version that only starts with the pinned one is another version.
         ("codex-cli 0.144.40", 0, None, "refused"),
@@ -3048,7 +3051,16 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(
         # A transport failure or timeout may pass on another attempt, so it stays retryable.
         ("", None, "timeout", "retried"),
     ],
-    ids=["pinned", "other_version", "version_prefix", "failed_run", "timeout"],
+    ids=[
+        "pinned",
+        "warning",
+        "warning_wrong_version",
+        "ambiguous",
+        "other_version",
+        "version_prefix",
+        "failed_run",
+        "timeout",
+    ],
 )
 def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
     agent, sandbox = setup
