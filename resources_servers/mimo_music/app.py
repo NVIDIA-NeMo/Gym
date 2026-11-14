@@ -15,7 +15,7 @@ from typing import ClassVar
 
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import JUDGE_FAILED, FailureClass, NeMoGymResponse, OutcomeAction
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -64,6 +64,10 @@ def assistant_text(response: NeMoGymResponse) -> str:
         text = re.split(r"</(?:think|thinking)>", text)[-1]
         return re.split(r"<(?:think|thinking)>", text)[0].strip()
     return ""
+
+
+class _TransientScorerFault(Exception):
+    """The scorer process could not run to a verdict for a reason of the machine."""
 
 
 class MimoMusicResourcesServer(SimpleResourcesServer):
@@ -130,7 +134,11 @@ class MimoMusicResourcesServer(SimpleResourcesServer):
                         await proc.wait()
                         raise
                 if proc.returncode:
-                    raise RuntimeError(stderr.decode(errors="replace")[-1500:])
+                    tail = stderr.decode(errors="replace")[-1500:]
+                    # Killed by a signal, or the renderer process itself failed: the machine, not the scorer's logic.
+                    if proc.returncode < 0 or "RuntimeError: abc2midi:" in tail:
+                        raise _TransientScorerFault(tail)
+                    raise RuntimeError(tail)
                 scored = json.loads(stdout.decode(errors="replace"))
                 result.scorer_details = scored["scorer_details"]
                 reward = float(scored["reward"])
@@ -138,16 +146,29 @@ class MimoMusicResourcesServer(SimpleResourcesServer):
                     raise ValueError("Scorer returned a reward outside [0, 1]")
                 result.reward = reward
             except TimeoutError:
-                result.mask_sample = True
-                result.failure_kind = "mimo_music:scorer_timeout"
-                result.failure_reason = f"Scorer exceeded {self.config.score_timeout_seconds}s"
+                self._regrade(result, f"Scorer exceeded {self.config.score_timeout_seconds}s")
+            except (_TransientScorerFault, OSError) as error:
+                logger.exception("Music scorer could not run")
+                self._regrade(result, f"{type(error).__name__}: {error}")
             except Exception as error:
-                # This is the process boundary, not a bad-composition rejection.
-                logger.exception("Music scorer failed")
+                # A missing renderer, an unparseable or out-of-range scorer result, a scorer exception: the same
+                # input fails the same way, so a rerun cannot help. End it as a failure the owner must fix.
+                logger.exception("Music scorer is broken")
                 result.mask_sample = True
-                result.failure_kind = "mimo_music:scorer_error"
+                result.failure_kind = "mimo_music:scorer_invalid"
+                result.failure_outcome_action = OutcomeAction.FAIL
+                result.failure_outcome_attribution = FailureClass.EVALUATION
                 result.failure_reason = f"{type(error).__name__}: {error}"
         return result
+
+    @staticmethod
+    def _regrade(result: "MimoMusicVerifyResponse", reason: str) -> None:
+        """Mask a verdict the scorer could not produce this time. The answer is the model's and is kept, so the kind
+        is ``judge_failed``: recovery grades the saved answer again with ``/verify`` and never samples it again."""
+        result.mask_sample = True
+        result.failure_kind = JUDGE_FAILED
+        result.failure_outcome_attribution = FailureClass.EVALUATION
+        result.failure_reason = reason
 
 
 if __name__ == "__main__":

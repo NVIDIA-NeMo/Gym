@@ -30,9 +30,11 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    FailureClass,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NgFailureEvent,
+    OutcomeAction,
     failure_kinds,
 )
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
@@ -321,8 +323,18 @@ def _row_system_prompt(body: AgenticTurnSimulationRunRequest, prefix: list[dict[
     return "\n\n".join(parts + ([text] if text else []))
 
 
-def _masked(failure_kind: str, reason: str) -> dict[str, Any]:
-    return {MASK_SAMPLE_FIELD: True, "failure_kind": failure_kind, "failure_reason": reason}
+def _masked(failure_kind: str, reason: str, *, retry: bool = False) -> dict[str, Any]:
+    """A masked outcome. With ``retry`` the environment owns a fault of the episode itself (the simulator is part of
+    it, and the wall-clock cap is its serving speed), so the row records the agent stage: its partial answer is not
+    kept and recovery runs the rollout again."""
+    masked = {MASK_SAMPLE_FIELD: True, "failure_kind": failure_kind, "failure_reason": reason}
+    if retry:
+        masked.update(
+            failure_outcome_action=OutcomeAction.RETRY,
+            failure_outcome_attribution=FailureClass.EVALUATION,
+            _ng_failure_stage="agent",
+        )
+    return masked
 
 
 def _grow_max_tokens(params: dict[str, Any], default: int, cap: int) -> None:
@@ -665,7 +677,12 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
                 "the conversation history does not fit the policy's context (overflow before the first step)",
             )
         if stop_reason in self.config.masked_stop_reasons:
-            return _masked(f"{FAILURE_KIND_PREFIX}:{stop_reason}", f"the turn was cut off ({stop_reason})")
+            # The wall-clock cap tracks serving speed, so a time_cap is retried; other cut-offs stay masked.
+            return _masked(
+                f"{FAILURE_KIND_PREFIX}:{stop_reason}",
+                f"the turn was cut off ({stop_reason})",
+                retry=stop_reason == "time_cap",
+            )
         for item in items:
             if item.get("type") == "function_call_output":
                 text = str(item.get("output") or "")
@@ -675,7 +692,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             else:
                 continue
             if holds_simulator_failure(text):
-                return _masked(f"{FAILURE_KIND_PREFIX}:simulator_failed", text[:300])
+                return _masked(f"{FAILURE_KIND_PREFIX}:simulator_failed", text[:300], retry=True)
         return None
 
     def _response_fields(

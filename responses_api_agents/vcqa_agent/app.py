@@ -57,12 +57,14 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    FailureClass,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    OutcomeAction,
     accumulate_response_usage,
     failure_kinds,
 )
@@ -597,6 +599,9 @@ class VcqaAgent(SimpleResponsesAPIAgent):
             failure_stage=failure_stage,
             failure_kind=failure_kind,
             failure_reason=run_error if not evaluation_completed else None,
+            # The task's artifacts could not be materialized before the model ran: rerun the rollout.
+            failure_outcome_action=OutcomeAction.RETRY if failure_stage == "materialize" else None,
+            failure_outcome_attribution=FailureClass.EVALUATION if failure_stage == "materialize" else None,
             judge_errors=judge_errors,
         )
 

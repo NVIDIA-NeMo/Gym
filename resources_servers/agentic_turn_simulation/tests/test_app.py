@@ -564,6 +564,8 @@ class TestVerifyMasks:
         out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
         assert out.failure_kind == f"{SERVER}:time_cap" and "time_cap" in out.failure_reason
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("retry", "evaluation")
+        assert out.model_extra["_ng_failure_stage"] == "agent"
         assert (out.reward, out.stop_reason, out.steps) == (0.0, "time_cap", 12)
         assert out.correct is None and out.judge_verdicts == []
         server.server_client.post.assert_not_called()
@@ -700,6 +702,8 @@ class TestVerifyMasks:
         out = await server.verify(req(), _verify_body(items))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
         assert out.failure_kind == f"{SERVER}:simulator_failed" and out.failure_reason == failed
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("retry", "evaluation")
+        assert out.model_extra["_ng_failure_stage"] == "agent"
         server.server_client.post.assert_not_called()
 
     async def test_a_tool_result_that_only_mentions_the_failure_phrase_is_judged(self) -> None:

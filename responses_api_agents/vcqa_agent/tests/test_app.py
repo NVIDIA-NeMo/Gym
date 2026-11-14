@@ -690,6 +690,8 @@ class TestRunFailureIsolation:
         assert "RuntimeError" in (result.error or "")
         assert "download failed" in (result.error or "")
         assert result.must_total is None or result.must_total == 0
+        assert result.failure_kind == "vcqa_agent:artifact_unavailable"
+        assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("retry", "evaluation")
 
 
 ########################################

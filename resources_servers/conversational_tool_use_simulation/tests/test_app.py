@@ -1018,6 +1018,8 @@ async def test_user_generation_error_records_invalid_reason_when_fallback_disabl
     assert verified.failure_labels == [VerificationFailureLabel.USER_FAILURE]
     assert verified.mask_sample is True
     assert verified.failure_kind == "conversational_tool_use:simulator_call_failed"
+    assert (verified.failure_outcome_action, verified.failure_outcome_attribution) == ("retry", "evaluation")
+    assert verified.model_extra["_ng_failure_stage"] == "agent"
     assert "user simulator call failed: model server returned no text" in verified.failure_reason
 
 

@@ -163,7 +163,9 @@ async def test_missing_renderer_masked():
     result = await music_server.verify(request(ABC))
     assert result.reward == 0
     assert result.mask_sample
-    assert result.failure_kind == "mimo_music:scorer_error"
+    # A missing renderer fails every rollout the same way: a broken evaluation, not a transient fault.
+    assert result.failure_kind == "mimo_music:scorer_invalid"
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("fail", "evaluation")
     assert "Abc2MidiMissing" in result.failure_reason
 
 
@@ -183,7 +185,11 @@ async def test_process_group_cleanup(cancel, already_exited):
         else:
             result = await server().verify(request(ABC))
             assert result.mask_sample
-            assert result.failure_kind == "mimo_music:scorer_timeout"
+            # The answer is the model's and is kept: the saved answer is graded again, never sampled again.
+            assert result.failure_kind == "judge_failed"
+            assert result.failure_outcome_action is None
+            assert result.failure_outcome_attribution == "evaluation"
+            assert "exceeded" in result.failure_reason
         kill.assert_called_once_with(123, signal.SIGKILL)
         proc.wait.assert_awaited_once()
 
@@ -192,13 +198,47 @@ async def test_process_group_cleanup(cancel, already_exited):
     "output", [b"not json", b'{"reward": 2, "scorer_details": {}}', b'{"reward": NaN, "scorer_details": {}}']
 )
 @pytest.mark.asyncio
-async def test_bad_worker_output_masked(output):
+async def test_bad_worker_output_fails(output):
     proc = MagicMock(returncode=0, communicate=AsyncMock(return_value=(output, b"")))
     with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
         result = await server().verify(request(ABC))
     assert result.reward == 0
     assert result.mask_sample
-    assert result.failure_kind == "mimo_music:scorer_error"
+    assert result.failure_kind == "mimo_music:scorer_invalid"
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("fail", "evaluation")
+
+
+@pytest.mark.asyncio
+async def test_a_scorer_traceback_fails():
+    proc = MagicMock(returncode=1, communicate=AsyncMock(return_value=(b"", b"ZeroDivisionError: division by zero")))
+    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+        result = await server().verify(request(ABC))
+    assert result.failure_kind == "mimo_music:scorer_invalid"
+    assert result.failure_outcome_action == "fail"
+
+
+@pytest.mark.parametrize(
+    "returncode,stderr",
+    [(-9, b""), (1, b"Traceback...\nRuntimeError: abc2midi:terminated by signal 9 (return code -9)")],
+    ids=["killed_by_signal", "renderer_process_failed"],
+)
+@pytest.mark.asyncio
+async def test_a_scorer_the_machine_could_not_run_is_regraded(returncode, stderr):
+    proc = MagicMock(returncode=returncode, communicate=AsyncMock(return_value=(b"", stderr)))
+    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+        result = await server().verify(request(ABC))
+    assert result.reward == 0
+    assert result.mask_sample
+    assert result.failure_kind == "judge_failed"
+    assert result.failure_outcome_action is None
+
+
+@pytest.mark.asyncio
+async def test_a_scorer_process_that_cannot_start_is_regraded():
+    with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=OSError("Cannot allocate memory"))):
+        result = await server().verify(request(ABC))
+    assert result.mask_sample
+    assert result.failure_kind == "judge_failed"
 
 
 @pytest.mark.asyncio
@@ -257,7 +297,7 @@ async def test_real_timeout_reaps_renderer(tmp_path):
     deadline = asyncio.get_running_loop().time() + 5
     try:
         assert result.mask_sample
-        assert result.failure_kind == "mimo_music:scorer_timeout"
+        assert result.failure_kind == "judge_failed"
         # Waiting for the scorer does not synchronize its renderer's SIGKILL exit.
         while (stat := renderer_stat()) and stat[19] == start_time and stat[0] != "Z":
             assert asyncio.get_running_loop().time() < deadline, f"Renderer {pid} is still {stat[0]}"
