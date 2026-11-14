@@ -1426,6 +1426,16 @@ class _UpstreamIdModel(_EchoModel):
         return False
 
 
+class _SlowUnstoredRenamingModel(_SlowFixedIdModel):
+    """Serves an upstream's ``resp_backend`` and may rename it for a ``store: false`` request, as openai_model does."""
+
+    def _mints_response_ids(self) -> bool:
+        return False
+
+    def _renames_unstored_responses(self) -> bool:
+        return True
+
+
 class _SlowUnknownUsageModel(_UnknownUsageModel):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         await asyncio.sleep(_SLOW_CALL_S)
@@ -1499,6 +1509,34 @@ class TestResponsesStreamKeepalive:
     def test_refused_on_a_server_that_serves_upstream_ids(self) -> None:
         with pytest.raises(ValueError, match="stream_keepalive_s"):
             _keepalive_client(_UpstreamIdModel)
+
+    def test_upstream_id_server_keeps_a_store_false_request_alive(self) -> None:
+        client, _ = _keepalive_client(_SlowUnstoredRenamingModel)
+        with patch("nemo_gym.models.base_responses_api_model.capture_tokens", new=AsyncMock()) as capture:
+            resp = client.post("/v1/responses", json=self.STREAM_BODY | {"store": False})
+
+        events = _sse_payloads(resp.text)
+        assert [event["type"] for event in events[:2]] == ["response.created", "response.in_progress"]
+        assert events[-1]["type"] == "response.completed"
+        # The upstream keeps nothing under resp_backend, so the stream serves the id it announced.
+        [served_id] = {event["response"]["id"] for event in events if "response" in event}
+        assert served_id != "resp_backend"
+        [call] = capture.await_args_list
+        assert call.args[0].id == served_id
+
+    @pytest.mark.parametrize("stored", [{}, {"store": True}, {"store": None}])
+    def test_upstream_id_server_keeps_a_stored_response_buffered(self, stored: dict) -> None:
+        client, _ = _keepalive_client(_SlowUnstoredRenamingModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY | stored)
+
+        # A later request may name a stored response, so no keepalive announces another id for it.
+        events = _sse_payloads(resp.text)
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert {event["response"]["id"] for event in events if "response" in event} == {"resp_backend"}
 
     def test_long_call_sends_keepalives_then_the_unchanged_response(self) -> None:
         client, server = _keepalive_client(_SlowEchoModel)

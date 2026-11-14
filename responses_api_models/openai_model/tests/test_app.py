@@ -582,6 +582,39 @@ class TestApp:
         assert res.status_code == 200
         assert called_args["input"][1] == reasoning
 
+    @pytest.mark.parametrize("store", [False, True, None])
+    def test_stream_keepalive_renames_only_an_unstored_response(self, store: bool | None) -> None:
+        server = self._setup_server(stream_keepalive_s=0.02)
+        client = TestClient(server.setup_webserver())
+        sent = {}
+
+        async def slow_create_response(**kwargs):
+            sent.update(kwargs)
+            # The provider call outlasts several keepalive intervals.
+            await asyncio.sleep(0.3)
+            return _response_data()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=slow_create_response)
+        body = {"input": "hello", "stream": True} | ({} if store is None else {"store": store})
+
+        res = client.post("/v1/responses", json=body)
+
+        assert res.status_code == 200
+        assert sent.get("store") == store
+        events = [json.loads(line[len("data: ") :]) for line in res.text.splitlines() if line.startswith("data: ")]
+        types = [event["type"] for event in events]
+        ids = {event["response"]["id"] for event in events if "response" in event}
+        assert types[0] == "response.created" and types[-1] == "response.completed"
+        if store is False:
+            # The provider keeps nothing under its id, so the stream opens early and serves the id it announced.
+            assert types[1] == "response.in_progress"
+            assert len(ids) == 1 and _response_data()["id"] not in ids
+        else:
+            # A later request may name a stored response, so it stays buffered under the provider's id.
+            assert "response.in_progress" not in types
+            assert ids == {_response_data()["id"]}
+
     @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
         self, replacement, expected_effort
