@@ -383,6 +383,12 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # a separate verifier's sandbox) is retried here before the failure is reported as retryable. Bounded,
     # jittered and gated per server.
     image_pull_retries: int = Field(default=2, ge=0)
+    # How many times a separate verifier's sandbox start that failed for another reason (a GPU pool with no free
+    # node, a provider readiness timeout) is started again, `verifier_start_retry_delay_s` apart, before the turn is
+    # masked. Every attempt runs under the one `sandbox_ready_timeout_s` deadline of the verifier's start, which the
+    # episode budget already counts.
+    verifier_start_retries: int = Field(default=0, ge=0)
+    verifier_start_retry_delay_s: float = Field(default=60, ge=0)
     # Verify tasks that declare `artifacts` in a fresh sandbox even when `task.toml` keeps Harbor's shared
     # mode: the agent cannot tamper with the grader. Tasks without artifacts keep their declared mode.
     separate_verifier_for_artifacts: bool = False

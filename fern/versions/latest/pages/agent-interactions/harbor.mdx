@@ -171,6 +171,8 @@ Pass the file with `--config <file>`, or set one key with
 | `request_gpu_type` | `false` | Send the first of a task's `gpu_types` as the GPU type of each GPU sandbox; providers without that filter reject it. |
 | `sandbox_ready_timeout_s` | `900` | Bound on one sandbox start. |
 | `image_pull_retries` | `2` | Retries of a sandbox start that failed on an image pull. |
+| `verifier_start_retries` | `0` | Retries of a separate verifier's sandbox start that failed for a reason other than an image pull (for example no free node); image pulls use `image_pull_retries`. |
+| `verifier_start_retry_delay_s` | `60` | Seconds between those verifier start retries. |
 | `sandbox_provider_options` | `{}` | Provider options for every sandbox. |
 | `sandbox_metadata` | `{benchmark: harbor}` | Metadata added to every sandbox. |
 | `sandbox_resources_override` | none | Replaces only the task resources it names (`cpu`, `memory_mib`, `disk_gib`), except in Compose sidecars. |

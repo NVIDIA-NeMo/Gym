@@ -4077,6 +4077,8 @@ def test_server_config_holds_only_deployment_settings():
         "harness_setup_allowance_s",
         "step_setup_timeout_s",
         "image_pull_retries",
+        "verifier_start_retries",
+        "verifier_start_retry_delay_s",
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
         "turn_sessions",
@@ -5127,13 +5129,14 @@ class TestGeneralization:
         assert len(groups) == 2 and [g.stopped for g in groups] == [1, 1]
         assert response.result.reward == 1.0 and not server._sandboxes
 
-    def verifier_retrying_server(self, tmp_path, monkeypatch, failures):
+    def verifier_retrying_server(self, tmp_path, monkeypatch, failures, stop_failures=0, **config):
         """A separate-mode server whose real `_create_verifier_sandbox` runs against a provider that fails
-        `failures` verifier starts in turn; the agent's sandbox is the usual fake."""
+        `failures` verifier starts in turn, and its first `stop_failures` stops; the agent's sandbox is the usual
+        fake."""
         from nemo_gym.sandbox import SandboxCreateError
 
         agent = AgentSandbox()
-        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, image_pull_retries=2)
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, image_pull_retries=2, **config)
         (task.path / "task.toml").write_text(SEPARATE_TOML)
         server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
         monkeypatch.setattr(
@@ -5163,6 +5166,8 @@ class TestGeneralization:
 
             async def stop(self):
                 self.stopped += 1
+                if self.stopped <= stop_failures:
+                    raise RuntimeError("stop refused")
                 verifier.stopped = True
 
             def __getattr__(self, name):
@@ -5197,6 +5202,37 @@ class TestGeneralization:
         assert [p.stopped for p in providers] == [1, 1, 1]
         assert not server._sandboxes and server._pull_retry_gate._value == 4
 
+    async def test_verifier_start_retries_do_not_multiply_image_pull_retries(self, tmp_path, monkeypatch):
+        # Pull failures are retried only by the gated pull loop: 1 + image_pull_retries starts, not that times
+        # (1 + verifier_start_retries), and no outer attempt makes an ungated first start again.
+        server, task, starts, gates, providers = self.verifier_retrying_server(
+            tmp_path, monkeypatch, ["ErrImagePull"] * 9, verifier_start_retries=2, verifier_start_retry_delay_s=0
+        )
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and "ErrImagePull" in result.failure_reason
+        assert len(starts) == 3 and gates == [4, 3, 3]
+        assert not server._sandboxes and server._pull_retry_gate._value == 4
+
+    async def test_a_verifier_start_failure_whose_stop_fails_keeps_its_cause(self, tmp_path, monkeypatch):
+        server, task, _, _, _ = self.verifier_retrying_server(
+            tmp_path, monkeypatch, [], verifier_start_retries=2, verifier_start_retry_delay_s=0
+        )
+        root = ValueError("provider said no")
+        failure = RuntimeError("could not start")
+        failure.__cause__ = root
+
+        async def failing_start(*args, **kwargs):
+            raise failure
+
+        async def failing_stop(key):
+            raise RuntimeError("stop refused")
+
+        monkeypatch.setattr(server, "_start_with_pull_retries", failing_start)
+        monkeypatch.setattr(server, "_stop_sandbox", failing_stop)
+        with pytest.raises(RuntimeError, match="could not start") as caught:
+            await server._create_verifier_sandbox(task, episode_key="ep")
+        assert caught.value is failure and caught.value.__cause__ is root and caught.value.__suppress_context__
+
     async def test_verifier_sandbox_other_start_failures_are_not_retried(self, tmp_path, monkeypatch):
         server, task, starts, _, _ = self.verifier_retrying_server(
             tmp_path, monkeypatch, ["quota exceeded for namespace"]
@@ -5205,6 +5241,69 @@ class TestGeneralization:
         result = response.result
         assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
         assert len(starts) == 1 and not server._sandboxes and server._pull_retry_gate._value == 4
+
+    # A provider's answer when no GPU node frees up while the sandbox waits to be scheduled.
+    NO_FREE_NODE = (
+        'Create sandbox failed: HTTP 504: {"code":"KUBERNETES::POD_READY_TIMEOUT","message":"Timeout waiting for '
+        'sandbox to be Running with IP. Elapsed: 60.4s, Last state: Pending"}'
+    )
+
+    async def test_a_verifier_that_finds_no_free_node_is_started_again(self, tmp_path, monkeypatch, caplog):
+        server, task, starts, gates, providers = self.verifier_retrying_server(
+            tmp_path, monkeypatch, [self.NO_FREE_NODE] * 2, verifier_start_retries=2, verifier_start_retry_delay_s=0
+        )
+        with caplog.at_level("WARNING"):
+            response = await run_episode(server, task)
+        result = response.result
+        assert response.failure is None, response.failure
+        assert result.reward == 1.0 and not result.mask_sample and result.verifier_mode == "separate"
+        # Each attempt is a fresh sandbox, and the one that did not start is stopped before the next starts.
+        assert len(starts) == 3 and [p.stopped for p in providers] == [1, 1, 1]
+        assert caplog.text.count("did not start (attempt") == 2 and "POD_READY_TIMEOUT" in caplog.text
+        assert not server._sandboxes and server._pull_retry_gate._value == 4
+
+    async def test_a_verifier_that_never_finds_a_free_node_masks_once_the_attempts_run_out(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, starts, _, providers = self.verifier_retrying_server(
+            tmp_path, monkeypatch, [self.NO_FREE_NODE] * 3, verifier_start_retries=2, verifier_start_retry_delay_s=0
+        )
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "POD_READY_TIMEOUT" in result.failure_reason
+        assert len(starts) == 3 and [p.stopped for p in providers] == [1, 1, 1] and not server._sandboxes
+
+    async def test_a_verifier_whose_stop_fails_is_not_started_twice(self, tmp_path, monkeypatch):
+        # A second start under the same key would leave the first sandbox, still owned, beside it.
+        server, task, starts, _, providers = self.verifier_retrying_server(
+            tmp_path,
+            monkeypatch,
+            [self.NO_FREE_NODE] * 2,
+            stop_failures=1,
+            verifier_start_retries=2,
+            verifier_start_retry_delay_s=0,
+        )
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "POD_READY_TIMEOUT" in result.failure_reason
+        # The refused stop keeps the sandbox owned; the episode's own close stops it.
+        assert len(starts) == 1 and [p.stopped for p in providers] == [2] and not server._sandboxes
+
+    async def test_verifier_start_retries_stay_within_the_ready_deadline(self, tmp_path, monkeypatch):
+        # The episode budget counts one sandbox_ready_timeout_s for the verifier's start, so the retries share it.
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.SEED_CREATE_GRACE_S", 0)
+        server, task, starts, _, _ = self.verifier_retrying_server(
+            tmp_path,
+            monkeypatch,
+            [self.NO_FREE_NODE] * 5,
+            verifier_start_retries=4,
+            verifier_start_retry_delay_s=30,
+            sandbox_ready_timeout_s=0.2,
+        )
+        started = asyncio.get_running_loop().time()
+        result = (await run_episode(server, task)).result
+        assert asyncio.get_running_loop().time() - started < 10
+        assert result.mask_sample is True and len(starts) == 1 and not server._sandboxes
 
     def test_nested_compose_task_reads_image_configs_from_the_dataset_root(self, tmp_path, monkeypatch):
         """prepare records compose-images.json at the dataset root; the snapshot of a nested task finds it there."""

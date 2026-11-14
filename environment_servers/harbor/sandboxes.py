@@ -853,15 +853,42 @@ class HarborSandboxMixin:
             return sandbox
         # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried;
         # a start that failed on an image pull is retried like the agent's, under the same ready deadline.
-        return await self._within_ready_deadline(
-            self._start_with_pull_retries(
-                task,
-                key=_verifier_key(episode_key),
-                what=f"verifier {spec.image!r}",
-                make=lambda: AsyncSandbox(provider_config),
-                start=lambda sandbox: sandbox.start(spec),
-            )
-        )
+        key = _verifier_key(episode_key)
+        what = f"verifier {spec.image!r}"
+        attempts = self.config.verifier_start_retries + 1
+
+        async def start_with_retries() -> AsyncSandbox:
+            for attempt in range(1, attempts + 1):
+                try:
+                    return await self._start_with_pull_retries(
+                        task,
+                        key=key,
+                        what=what,
+                        make=lambda: AsyncSandbox(provider_config),
+                        start=lambda sandbox: sandbox.start(spec),
+                    )
+                except Exception as exc:  # any start failure; the episode masks the turn once the attempts run out
+                    # An image-pull failure already had its bounded, gated retries in `_start_with_pull_retries`;
+                    # starting again here would multiply them and make each first inner attempt ungated.
+                    if attempt >= attempts or _is_image_pull_failure(exc):
+                        raise
+                    delay_s = self.config.verifier_start_retry_delay_s
+                    LOGGER.warning(
+                        f"{task.task_id}: the {what} did not start (attempt {attempt}/{attempts}), "
+                        f"starting it again in {delay_s:g}s: {type(exc).__name__}: {exc}"
+                    )
+                    try:
+                        await self._stop_sandbox(key)
+                    except Exception:
+                        # Still owned: shutdown retries the stop. Do not start a second sandbox under the same key.
+                        LOGGER.exception(f"{task.task_id}: could not stop the {what} that did not start")
+                        # Hide cleanup context without erasing the start failure's existing cause.
+                        exc.__suppress_context__ = True
+                        raise exc
+                    await asyncio.sleep(delay_s)
+            raise AssertionError("unreachable")  # pragma: no cover
+
+        return await self._within_ready_deadline(start_with_retries())
 
     async def _start_with_pull_retries(
         self,
