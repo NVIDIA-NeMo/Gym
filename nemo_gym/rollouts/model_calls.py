@@ -6,8 +6,10 @@
 import asyncio
 import logging
 import time
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import orjson
 
@@ -128,6 +130,12 @@ def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
 def observability_enabled_from_config(global_config_dict: Any) -> bool:
     """Return the run-wide ``observability_enabled`` flag directly, without going through capture dirs."""
     return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
+
+
+def retire_covered_model_call_captures_from_config(global_config_dict: Any) -> bool:
+    """Return whether capture files are deleted once the persisted rollout fully covers them."""
+    config = ModelCallCaptureConfig.model_validate(global_config_dict)
+    return config.observability_enabled and config.retire_covered_model_call_captures
 
 
 # How long a reader waits for writes already claimed by the model server to land. A claimed
@@ -300,3 +308,142 @@ def merge_model_call_capture_into_record(
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
 __getattr__ = moved_names_getattr(__name__)
+
+
+_PAYLOAD_OMISSION_GAPS = frozenset({"multimodal_history_redacted", "trajectory_projection_failed"})
+
+
+def model_call_capture_uncovered_reasons(result: Mapping[str, Any]) -> list[str]:
+    """Return why a rollout record does not fully cover its capture file; empty when it does.
+
+    A record covers its capture file when collection read the file without a gap and every captured
+    call has its request and response in ``ng_trajectory.model_calls``.
+    """
+    capture = result.get("ng_model_call_capture")
+    if not isinstance(capture, Mapping):
+        return ["no_capture_attachment"]
+    reasons = [f"capture_gap:{gap.get('code')}" for gap in capture.get("gaps") or [] if isinstance(gap, Mapping)]
+
+    trajectory = result.get("ng_trajectory")
+    if not isinstance(trajectory, Mapping):
+        return [*reasons, "no_trajectory"]
+    payload_gaps = []
+    for source in (trajectory, result.get(NG_AGENT_OBSERVATIONS_KEY)):
+        gaps = source.get("gaps") if isinstance(source, Mapping) else None
+        for gap in gaps or []:
+            if isinstance(gap, Mapping) and gap.get("code") in _PAYLOAD_OMISSION_GAPS:
+                payload_gaps.append(f"payload_gap:{gap['code']}")
+    if payload_gaps:
+        # The gap already says the payloads were left out, so each call lacking one adds nothing.
+        return [*reasons, *payload_gaps]
+
+    with_payload = {
+        call.get("model_call_id")
+        for call in trajectory.get("model_calls") or []
+        if isinstance(call, Mapping) and call.get("request") is not None and call.get("response") is not None
+    }
+    for call in capture.get("calls") or []:
+        call_id = call.get("model_call_id") if isinstance(call, Mapping) else None
+        if call_id is None:
+            reasons.append("call_without_id")
+        elif call_id not in with_payload:
+            reasons.append(f"call_without_payload:{call_id}")
+    return reasons
+
+
+@dataclass(frozen=True)
+class CaptureSnapshot:
+    """Where a rollout's capture file was and how large it was just before collection read it."""
+
+    directory: Path
+    size: int
+
+
+def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureSnapshot]:
+    """Record the capture file's size; take it before merging, so a row appended later changes the size."""
+    for directory in capture_dirs:
+        size = CaptureStore(directory).size(rollout_id)
+        if size is not None:
+            return CaptureSnapshot(directory=directory, size=size)
+    return None
+
+
+class CaptureRetirementBatch:
+    """Deletes a rollout's capture file once the persisted rollout holds everything in it.
+
+    ``add`` judges each rollout from the rollout itself (``model_call_capture_uncovered_reasons``) and
+    queues it. ``flush`` makes the queued rollouts durable with one sync, then deletes the capture file of
+    every rollout that covers it. A file stays when the rollout does not cover it, when it grew since its
+    snapshot, or when a call of the rollout still holds a pending write. An unflushed queue deletes nothing.
+
+    Unlike ``enrich_run_result(delete_capture=True)``, collection must keep captures until the JSONL
+    rows are durable, not just attached to an in-memory result. RolloutStore rejects duplicate logical
+    identities before dispatch, and retries have distinct capture keys.
+    """
+
+    def __init__(self, *, max_size: int = 100, max_age_s: float = 5.0) -> None:
+        self._max_size = max_size
+        self._max_age_s = max_age_s
+        self._pending: list[tuple[str, Optional[CaptureSnapshot], list[str]]] = []
+        self._last_flush = time.monotonic()
+        self.retired = 0
+        self.kept: Counter = Counter()
+
+    def add(
+        self,
+        rollout_id: str,
+        result: Mapping[str, Any],
+        snapshot: Optional[CaptureSnapshot],
+    ) -> None:
+        """Queue a persisted rollout; only its keep-or-delete verdict is retained, not the rollout."""
+        reasons = model_call_capture_uncovered_reasons(result)
+        if snapshot is None:
+            reasons.append("no_capture_file")
+        self._pending.append((rollout_id, snapshot, reasons))
+
+    def due(self) -> bool:
+        return bool(self._pending) and (
+            len(self._pending) >= self._max_size or time.monotonic() - self._last_flush >= self._max_age_s
+        )
+
+    async def flush_async(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Flush off the event loop, finishing before cancellation can close the output files."""
+        task = asyncio.create_task(asyncio.to_thread(self.flush, make_rollouts_durable))
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancelling to_thread cannot stop its worker. Keep its files open until it finishes,
+                # including when shutdown sends more than one cancellation request.
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def flush(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Make the queued rollouts durable, then delete the capture files that nothing keeps."""
+        if not self._pending:
+            return
+        make_rollouts_durable()
+        # One scan per capture directory answers "is a write pending?" for every file in the batch.
+        pending_by_directory: dict[Path, set[str]] = {}
+        for rollout_id, snapshot, keep_reasons in self._pending:
+            if not keep_reasons:
+                try:
+                    store = CaptureStore(snapshot.directory)
+                    if snapshot.directory not in pending_by_directory:
+                        pending_by_directory[snapshot.directory] = store.pending_rollout_ids()
+                    kept = store.delete_if_unchanged(
+                        rollout_id, snapshot.size, pending_rollout_ids=pending_by_directory[snapshot.directory]
+                    )
+                except OSError:
+                    logger.warning("Could not delete the model-call capture of rollout %s.", rollout_id, exc_info=True)
+                    kept = "delete_failed"
+                keep_reasons = [kept] if kept else []
+            if keep_reasons:
+                self.kept.update({reason.partition(":")[0] for reason in keep_reasons})
+            else:
+                self.retired += 1
+        self._pending.clear()
+        self._last_flush = time.monotonic()
