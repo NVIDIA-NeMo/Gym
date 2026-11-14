@@ -1,0 +1,25 @@
+name: pdf_analyst_qa
+version: 0.1.0
+kind: environment
+config_path: example.yaml
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: Synthetic document QA training with isolated OpenSandbox workspaces and format-aware outcome rewards.
+modality: multimodal
+licensing: Apache-2.0
+authors: [Jarno Seppänen]
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+resources_server: pdf_analyst_qa
+agent_server: opencode_agent
+model_server: policy_model
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/pdf_analyst_qa/data/example_bundle/gym_input.jsonl
+  num_repeats: 1
+session_model: episode
+state: per_session
+lifecycle: active
