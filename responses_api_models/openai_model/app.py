@@ -39,7 +39,11 @@ ResponseT = TypeVar("ResponseT")
 
 
 def _normalize_reasoning_content(response: Any) -> Any:
-    """Correct the known provider text shape without relaxing native validation."""
+    """Correct known provider reasoning-item shapes before strict response validation.
+
+    Fills a missing or null ``summary`` with ``[]`` and relabels plain ``output_text`` reasoning content as
+    ``reasoning_text``. Other shapes are left for validation unchanged.
+    """
     if not isinstance(response, dict) or not isinstance(response.get("output"), list):
         return response
     output = response["output"]

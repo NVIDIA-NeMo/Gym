@@ -366,7 +366,7 @@ class TestApp:
         assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
 
     @pytest.mark.parametrize("summary", [pytest.param(None, id="null"), pytest.param("missing", id="missing")])
-    async def test_responses_normalizes_missing_reasoning_summary(self, summary) -> None:
+    async def test_responses_normalizes_missing_reasoning_summary(self, summary: object) -> None:
         server = self._setup_server()
         client = TestClient(server.setup_webserver())
         response_data = {
