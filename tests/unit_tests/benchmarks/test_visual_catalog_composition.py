@@ -15,7 +15,7 @@ CATALOG = "benchmarks/opencode_multimodal_benchmarks"
 
 
 @pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
-@pytest.mark.parametrize("mode", ["default", "openai", "vllm", "qwen", "training"])
+@pytest.mark.parametrize("mode", ["default", "openai", "vllm", "default_eval", "training"])
 def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypatch):
     monkeypatch.setenv("GYM_JUDGE_API_KEY", "test-only")
     monkeypatch.setenv("GYM_JUDGE_BASE_URL", "https://judge.invalid/v1")
@@ -34,15 +34,15 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
         paths[-1] = f"{CATALOG}/{benchmark}/opencode.yaml"
     if mode == "vllm":
         paths.append(f"{CATALOG}/opencode_eval_vllm.yaml")
-    if mode == "qwen":
-        paths[0] = f"{CATALOG}/qwen_eval.yaml"
+    if mode == "default_eval":
+        paths[0] = f"{CATALOG}/default_eval.yaml"
     parser = GlobalConfigDictParser()
     config = parser.parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.create(
                 {
                     "config_paths": [str(ROOT / p) for p in paths],
-                    **({"policy_model_name": "test-model"} if mode != "qwen" else {}),
+                    "policy_model_name": "test-model",
                     "policy_base_url": "http://127.0.0.1:9999/v1",
                     "policy_api_key": "test-only",
                     **overrides,
@@ -90,7 +90,7 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     else:
         assert resources.judge_model is None
         assert "visual_judge" not in config
-    if mode in {"vllm", "qwen"}:
+    if mode in {"vllm", "default_eval"}:
         model = config.policy_model.responses_api_models.vllm_model
         assert not agent.opencode_agent.token_id_capture
         assert not model.return_token_id_information
@@ -99,13 +99,13 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
         assert model.sampling_overrides.max_tokens is None
         assert model.sampling_overrides.max_completion_tokens is None
         assert model.extra_body is None and model.propagate_context_overflow_errors
-    if mode == "qwen":
+    if mode == "default_eval":
         from responses_api_models.vllm_model.app import VLLMModelConfig
 
         model = config.policy_model.responses_api_models.vllm_model
         parsed = VLLMModelConfig.model_validate(OmegaConf.to_container(model, resolve=True) | {"name": "policy_model"})
         assert parsed.reasoning_field == "both"
-        assert parsed.model == "nvidia/qwen/qwen3.8-flash-next"
+        assert parsed.model == "test-model"
         assert parsed.sampling_overrides["temperature"] == 0.6
         assert parsed.sampling_overrides["top_p"] == 0.95
     if mode == "training":

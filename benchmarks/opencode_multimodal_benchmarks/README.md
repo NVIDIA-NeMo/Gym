@@ -88,13 +88,13 @@ coverage and judge failures. Enable model-call capture when collecting evidence.
 A valid manifest and passing verifier fixtures do not establish score parity or
 harness conformance.
 
-For Qwen3.8, add `--config benchmarks/opencode_multimodal_benchmarks/qwen_eval.yaml`
-to preparation and evaluation. This committed model profile selects
-`nvidia/qwen/qwen3.8-flash-next` through the vLLM adapter, preserves history thinking
+For vLLM-compatible model endpoints, add
+`--config benchmarks/opencode_multimodal_benchmarks/default_eval.yaml` to preparation
+and evaluation. This model-independent profile uses the vLLM adapter, preserves history thinking
 (`truncate_history_thinking: false`), propagates context-overflow errors and pins
 temperature 0.6/top-p 0.95. Reasoning serialization retains the adapter default;
-no `reasoning_field` override is applied. Supply `POLICY_BASE_URL` and
-`POLICY_API_KEY`, plus the sandbox deployment settings. With this profile, omit
+no `reasoning_field` override is applied. Supply `policy_model_name` in `run.yaml`,
+`POLICY_BASE_URL` and `POLICY_API_KEY` in the environment, plus the sandbox deployment settings. With this profile, omit
 the OpenAI adapter from `run.yaml` and omit `--model-type openai_model` from the
 run command. Other policy adapters remain supported.
 

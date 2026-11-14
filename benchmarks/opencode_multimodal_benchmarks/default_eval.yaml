@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Model profile for the four visual catalogs; endpoints and credentials are deployment inputs.
+# Evaluation profile for vLLM-compatible endpoints; supply model identity and deployment settings separately.
 config_paths:
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - benchmarks/opencode_multimodal_benchmarks/opencode_eval_vllm.yaml
-policy_model_name: nvidia/qwen/qwen3.8-flash-next
 policy_base_url: ${oc.env:POLICY_BASE_URL}
 policy_api_key: ${oc.env:POLICY_API_KEY}
 policy_model:
