@@ -628,6 +628,58 @@ class TestSamplingOverrides:
         client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2})
         assert seen["temperature"] == 0.2
 
+    def _upstream_limits(self, monkeypatch: MonkeyPatch, server: SwitchyardModel, path: str, body: dict) -> dict:
+        """POST ``body`` to ``path`` and return the output-token limits the upstream Chat call carries, by name."""
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        response = TestClient(server.setup_webserver()).post(path, json=body)
+        assert response.status_code == 200, response.text
+        names = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+        return {name: seen[name] for name in names if name in seen}
+
+    @pytest.mark.parametrize(
+        ("pin", "request_limit", "sent"),
+        [
+            # vLLM reads max_completion_tokens first, so the caller's 500 would beat a max_tokens pin.
+            ({"max_tokens": 100}, {"max_completion_tokens": 500}, {"max_tokens": 100}),
+            ({"max_completion_tokens": 100}, {"max_tokens": 500}, {"max_completion_tokens": 100}),
+            # Chat ignores max_output_tokens, so the pin goes out as max_tokens.
+            ({"max_output_tokens": 100}, {"max_tokens": 500}, {"max_tokens": 100}),
+            # A null pin clears an agent's blanket limit whichever name the agent used.
+            ({"max_tokens": None}, {"max_completion_tokens": 131072}, {"max_tokens": None}),
+        ],
+        ids=["max_tokens_pin", "max_completion_tokens_pin", "max_output_tokens_pin", "null_pin"],
+    )
+    def test_a_limit_pin_replaces_the_callers_limit_under_every_name(
+        self, monkeypatch: MonkeyPatch, pin: dict, request_limit: dict, sent: dict
+    ) -> None:
+        """The upstream gets only the pinned limit, under one Chat name, whatever name the caller used."""
+        server = self._setup_server(sampling_overrides=pin)
+        body = {"messages": [{"role": "user", "content": "hi"}], **request_limit}
+        assert self._upstream_limits(monkeypatch, server, "/v1/chat/completions", body) == sent
+
+    @pytest.mark.parametrize(
+        ("pin", "sent"),
+        [
+            # Chat ignores max_output_tokens, so the caller's 500 would win.
+            ({"max_output_tokens": 100}, {"max_tokens": 100}),
+            ({"max_completion_tokens": 100}, {"max_completion_tokens": 100}),
+        ],
+        ids=["max_output_tokens_pin", "max_completion_tokens_pin"],
+    )
+    def test_a_limit_pin_on_a_responses_call_replaces_the_callers_limit(
+        self, monkeypatch: MonkeyPatch, pin: dict, sent: dict
+    ) -> None:
+        """A pin sends a Responses call in Chat format, where the caller's max_output_tokens becomes max_tokens."""
+        server = self._setup_server(sampling_overrides=pin)
+        body = {"input": [{"role": "user", "content": "hi"}], "max_output_tokens": 500}
+        assert self._upstream_limits(monkeypatch, server, "/v1/responses", body) == sent
+
 
 class TestProxyLifecycle:
     def _launch_config(self, **overrides) -> SwitchyardModelConfig:
@@ -1372,19 +1424,20 @@ target = "policy"
             stats = json.loads(stats_response.read())
         assert json.dumps(stats).count("upstream/model"), stats
 
-    @pytest.mark.parametrize("max_tokens", [16, None])
-    def test_responses_sampling_pins_reach_chat_upstream(self, gym_app, monkeypatch, max_tokens) -> None:
+    @pytest.mark.parametrize("limit_name", ["max_tokens", "max_output_tokens"])
+    @pytest.mark.parametrize("limit", [16, None])
+    def test_responses_sampling_pins_reach_chat_upstream(self, gym_app, monkeypatch, limit_name, limit) -> None:
         client, _ = gym_app
         server = client.app.state.switchyard_server
-        monkeypatch.setattr(server.config, "sampling_overrides", {"max_tokens": max_tokens, "top_k": 5})
+        monkeypatch.setattr(server.config, "sampling_overrides", {limit_name: limit, "top_k": 5})
         response = client.post(
             "/v1/responses",
             json={"input": "hi", "max_output_tokens": 99, "temperature": 0.3},
         )
         assert response.status_code == 200, response.text
         upstream_body = _StubUpstream.requests[-1][2]
-        assert upstream_body.get("max_tokens") == max_tokens
-        assert upstream_body.get("max_completion_tokens") is None
+        names = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+        assert {name: upstream_body[name] for name in names if name in upstream_body} == {"max_tokens": limit}
         assert upstream_body["top_k"] == 5
         assert upstream_body["temperature"] == 0.3
         assert response.json()["model"] == "upstream/model"

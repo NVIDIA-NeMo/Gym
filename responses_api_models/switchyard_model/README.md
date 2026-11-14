@@ -105,6 +105,11 @@ semantics: a pinned value wins over what the agent sent, and a null value clears
 set (typically an agent's blanket `max_tokens`). The route id is applied last and is not pinnable,
 so an override cannot silently benchmark a different route.
 
+A pinned output-token limit replaces the agent's limit under every name (`max_tokens`,
+`max_completion_tokens` and `max_output_tokens`), so a `max_tokens: null` pin also clears an agent's
+`max_completion_tokens`. A pin sends requests in Chat format, so the limit goes out under the Chat
+name the pin uses, or as `max_tokens` when the pin uses `max_output_tokens`.
+
 ```bash
 ++policy_model.responses_api_models.switchyard_model.uses_reasoning_parser=true \
 ++policy_model.responses_api_models.switchyard_model.sampling_overrides.temperature=1.0 \

@@ -38,7 +38,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
 from fastapi import HTTPException
@@ -61,6 +61,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_models.vllm_model.app import apply_sampling_overrides
 
 
 logger = logging.getLogger(__name__)
@@ -578,21 +579,23 @@ class SwitchyardModel(SimpleResponsesAPIModel):
                 responses_create_params=body.model_copy(update={"model": completion.model}),
                 chat_completion=completion,
             )
-        body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True))
+        body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True), api="responses")
         async with self._semaphore:
             response_dict = await self.client_for_request().create_response(**body_dict)
         return NeMoGymResponse.model_validate(response_dict)
 
-    def _finalize_body(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def _finalize_body(self, body_dict: Dict[str, Any], *, api: Literal["chat", "responses"]) -> Dict[str, Any]:
         """Pin sampling, then name the route, in that order.
 
-        The pin is applied after the caller's body so it wins, matching
-        vllm_model. The route id is set last and deliberately not pinnable: it
-        is what selects the Switchyard route, so a stray override there would
-        silently benchmark a different one.
+        The pin is applied after the caller's body so it wins, with vllm_model's
+        helper: a pinned output-token limit replaces the caller's limit under
+        every name and is sent under the name the ``api`` endpoint reads. The
+        route id is set last and deliberately not pinnable: it is what selects
+        the Switchyard route, so a stray override there would silently
+        benchmark a different one.
         """
         if self.config.sampling_overrides:
-            body_dict.update(self.config.sampling_overrides)
+            apply_sampling_overrides(body_dict, sampling_overrides=self.config.sampling_overrides, api=api)
         body_dict["model"] = self.config.switchyard_model
         return body_dict
 
@@ -619,7 +622,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True))
+        body_dict = self._finalize_body(self.config.extra_body | body.model_dump(exclude_unset=True), api="chat")
         if self.config.uses_reasoning_parser:
             _reasoning_to_fields(body_dict.get("messages") or [], interleaved=self.config.uses_interleaved_reasoning)
         async with self._semaphore:
