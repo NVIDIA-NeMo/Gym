@@ -334,6 +334,22 @@ def _mcp_result_text(item: dict[str, Any]) -> str:
     return "" if result is None else str(result)
 
 
+def _model_command(command: str) -> str:
+    """The ``cmd`` the model sent, from the command Codex reports it executed.
+
+    Codex runs an ``exec_command`` call as ``<shell> -lc <cmd>`` (``-c`` without a login shell) and
+    ``codex exec --json`` reports that argv shell-quoted, so the script is the third word. A command in
+    any other shape is returned as reported.
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return command
+    if len(argv) == 3 and PurePosixPath(argv[0]).name in {"bash", "zsh", "sh"} and argv[1] in {"-lc", "-c"}:
+        return argv[2]
+    return command
+
+
 def parse_exec_jsonl(
     stdout: str,
     *,
@@ -461,7 +477,7 @@ def parse_exec_jsonl(
             exit_code = item.get("exit_code")
             if exit_code not in (None, 0):
                 output = f"{output}\n[exit code: {exit_code}]"
-            _add_tool_pair(item, "exec_command", {"cmd": item.get("command") or ""}, output)
+            _add_tool_pair(item, "exec_command", {"cmd": _model_command(item.get("command") or "")}, output)
         elif itype == "mcp_tool_call":
             _add_tool_pair(item, str(item.get("tool") or ""), item.get("arguments") or {}, _mcp_result_text(item))
         elif itype == "file_change":
