@@ -89,7 +89,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 # The task repository in every DeepSWE image; the agent works and commits here.
 AGENT_WORKDIR = "/app"
-# Where agent_runtime_files land in the agent sandbox, readable by every user.
+# Where agent_runtime_files land in the agent sandbox, readable and executable by every user.
 AGENT_RUNTIME_DIR = "/tmp/nemo-gym-deepswe"
 
 
@@ -414,7 +414,7 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         return sandbox
 
     async def _stage_agent_runtime_files(self, sandbox: AsyncSandbox) -> None:
-        """Copy agent_runtime_files into AGENT_RUNTIME_DIR, readable by every user."""
+        """Copy agent_runtime_files into AGENT_RUNTIME_DIR, readable and executable by every user."""
         mkdir_result = await sandbox.exec(f"mkdir -p {AGENT_RUNTIME_DIR}", timeout_s=60)
         if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
             raise RuntimeError(f"DeepSWE could not create {AGENT_RUNTIME_DIR}: {mkdir_result.stderr or ''}")
@@ -422,9 +422,7 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         await asyncio.gather(
             *(sandbox.upload(path, target) for path, target in zip(self._agent_runtime_files, targets))
         )
-        mode_result = await sandbox.exec(
-            f"chmod 0755 {AGENT_RUNTIME_DIR} && chmod 0644 {' '.join(targets)}", timeout_s=60
-        )
+        mode_result = await sandbox.exec(f"chmod 0755 {AGENT_RUNTIME_DIR} {' '.join(targets)}", timeout_s=60)
         if mode_result.return_code != 0 or mode_result.error_type is not None:
             raise RuntimeError(f"DeepSWE could not stage agent_runtime_files: {mode_result.stderr or ''}")
 

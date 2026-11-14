@@ -1383,7 +1383,7 @@ async def test_agent_runtime_files_are_staged_readable_into_the_agent_sandbox(
     await setup(sandbox)
     sandbox.upload.assert_awaited_once_with(ripgrep, "/tmp/nemo-gym-deepswe/rg")
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    assert commands[-1] == "chmod 0755 /tmp/nemo-gym-deepswe && chmod 0644 /tmp/nemo-gym-deepswe/rg"
+    assert commands[-1] == "chmod 0755 /tmp/nemo-gym-deepswe /tmp/nemo-gym-deepswe/rg"
 
 
 async def test_the_verifier_sandbox_gets_no_agent_runtime_files(

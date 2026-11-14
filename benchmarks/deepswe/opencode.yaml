@@ -37,6 +37,8 @@ deepswe_opencode_agent:
       # As before, OpenCode reads the task repository's AGENTS.md or CLAUDE.md.
       session_project_config: true
       # ripgrep 15.1.0 (x86_64 musl), the build OpenCode 1.17.11 downloads, staged by the resources server above.
+      # On the PATH of OpenCode's tool subprocesses too, so `rg` also works in the shell, as on the previous recipe.
+      sandbox_path_prefix: [/tmp/nemo-gym-deepswe]
       sandbox_ripgrep_path: /tmp/nemo-gym-deepswe/rg
       sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2  # pragma: allowlist secret
       datasets:
