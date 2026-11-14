@@ -18,6 +18,7 @@ import pytest
 from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_DIR,
     ENTRYPOINT_FAILED_KIND,
+    entrypoint_script,
     entrypoint_to_run,
     image_healthcheck_settings,
     is_keepalive_entrypoint,
@@ -42,6 +43,34 @@ from environment_servers.harbor.verifier import _verifier_image, _verifier_runs_
 from nemo_gym.core import failure_kinds
 from nemo_gym.data.tasks.harbor import load_task
 from nemo_gym.sandbox import SandboxExecResult
+
+
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"])
+def test_bare_shell_entrypoint_executes_command_instead_of_opening_script(tmp_path, monkeypatch, shell):
+    # The failed pydantic-80175 image records Entrypoint=["/bin/sh"], Cmd=["bash"].
+    # Replace only the long-lived keepalive for this real shell execution test.
+    monkeypatch.setattr("environment_servers.harbor.entrypoint.ENTRYPOINT_ARGS", ("printf", "%s", "ready ; literal"))
+    result = subprocess.run(
+        [shell, "-c", entrypoint_script([shell], str(tmp_path))], capture_output=True, text=True, timeout=5
+    )
+    assert result.returncode == 0
+    assert result.stdout == "ready ; literal"
+    assert (tmp_path / "started").exists()
+    assert (tmp_path / "exit").read_text() == "0"
+
+
+def test_script_entrypoint_keeps_arguments_and_exit_status(tmp_path, monkeypatch):
+    script = tmp_path / "initialize.sh"
+    script.write_text("#!/bin/sh\nprintf '%s' \"$1\"\nexit 7\n")
+    monkeypatch.setattr("environment_servers.harbor.entrypoint.ENTRYPOINT_ARGS", ("keepalive argument",))
+    result = subprocess.run(
+        ["/bin/sh", "-c", entrypoint_script(["/bin/sh", str(script)], str(tmp_path))],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.stdout == "keepalive argument"
+    assert (tmp_path / "exit").read_text() == "7"
 
 
 BUILT_IMAGE = "registry.example/ds-hello:abc"

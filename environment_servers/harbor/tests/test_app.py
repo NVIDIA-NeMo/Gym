@@ -4071,6 +4071,8 @@ def test_server_config_holds_only_deployment_settings():
         "gpu_sandbox_provider",
         "request_gpu_type",
         "verifier_grace_s",
+        "verifier_completion_key",
+        "inconclusive_verification_retries",
         "artifacts_dir",
         "secrets",
         "enforce_task_timeouts",

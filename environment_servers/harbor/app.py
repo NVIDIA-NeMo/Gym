@@ -170,6 +170,17 @@ LOGGER = logging.getLogger(__name__)
 NO_TURN_RESULT_KIND = "harbor:no_turn_result"
 
 
+class HarborVerificationAttempt(BaseModel):
+    """One fresh verifier's verdict and diagnostic location, retained when verification retries are enabled."""
+
+    attempt: int
+    reward: float
+    mask_sample: bool
+    failure_kind: str | None = None
+    failure_reason: str | None = None
+    verifier_logs_dir: str
+
+
 class HarborTurnResult(BaseModel):
     """One turn of a multi-step task: what the agent returned and what the step's verifier wrote.
 
@@ -185,6 +196,10 @@ class HarborTurnResult(BaseModel):
     name: str
     reward: float
     verifier_rewards: dict[str, float] | None = None
+    evaluation_completed: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    verification_attempts: list[HarborVerificationAttempt] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     # The keys of reward.json that sum to `reward`, when the file names no `reward` key (see verifier.py).
     reward_components: dict[str, float] | None = Field(default=None, exclude_if=lambda value: value is None)
     mask_sample: bool = False
@@ -265,6 +280,10 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     """
 
     verifier_rewards: dict[str, float] | None = None
+    evaluation_completed: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    verification_attempts: list[HarborVerificationAttempt] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     reward_components: dict[str, float] | None = Field(default=None, exclude_if=lambda value: value is None)
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
@@ -358,6 +377,13 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Extra seconds the provider exec waits beyond `[verifier].timeout_sec` for the in-container `timeout` to
     # kill test.sh and return; it does not extend the tests' own deadline, which is the task's `timeout_sec`.
     verifier_grace_s: float = Field(default=30, ge=0)
+    # Optional reward.json metric that must equal 1 before a score is usable. A missing
+    # metric/reward or verifier timeout is inconclusive when this contract is enabled.
+    # Unset preserves Harbor's measured-zero behavior for missing/invalid rewards.
+    verifier_completion_key: str | None = Field(default=None, min_length=1)
+    # Retry masked outcomes in a fresh separate verifier using the same collected artifacts.
+    # Shared-sandbox verification cannot restart from an untouched task image and is not retried.
+    inconclusive_verification_retries: int = Field(default=0, ge=0)
     # Verifier logs are downloaded here, one fresh folder per verification.
     artifacts_dir: Path | None = None
     # Operator secrets (judge API keys and the like), by environment variable name. They reach the `test.sh`
@@ -762,8 +788,15 @@ class HarborEnvironmentServer(
             for turn in task.turns:
                 if self._turn_separate(task, turn):
                     budget += self.config.sandbox_ready_timeout_s
+                    retry_budget = (
+                        self.config.sandbox_ready_timeout_s
+                        + task.config.step_verifier_timeout_sec(turn.config)
+                        + self.config.verifier_grace_s
+                    )
                     if _verifier_gets_overlay(self._turn_verifier_view(task, turn), True):
                         budget += task.config.environment.build_timeout_sec
+                        retry_budget += task.config.environment.build_timeout_sec
+                    budget += self.config.inconclusive_verification_retries * retry_budget
             return budget
         budget = (
             self.config.harness_setup_allowance_s
@@ -775,8 +808,13 @@ class HarborEnvironmentServer(
         separate = self._separate_verifier(task)
         if separate:
             budget += self.config.sandbox_ready_timeout_s
+            retry_budget = (
+                self.config.sandbox_ready_timeout_s + task.config.verifier.timeout_sec + self.config.verifier_grace_s
+            )
             if _verifier_gets_overlay(task, separate):
                 budget += task.config.environment.build_timeout_sec
+                retry_budget += task.config.environment.build_timeout_sec
+            budget += self.config.inconclusive_verification_retries * retry_budget
         return budget
 
     def _seed_bound_s(self, task: HarborTask) -> float:

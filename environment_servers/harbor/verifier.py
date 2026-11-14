@@ -653,6 +653,7 @@ class HarborVerificationMixin:
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
             await session.stop_agent_side()
+            self._write_cleanup_receipt(logs_dir, "agent", session.sandbox)
             if died is not None:
                 return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
         except HTTPException:
@@ -665,6 +666,59 @@ class HarborVerificationMixin:
         )
 
     async def _verify_separately(
+        self,
+        session: HarborSession,
+        task: HarborTask,
+        settings: Any,
+        trajectory: bytes,
+        logs_dir: Path,
+        restored: list[tuple[Path, str, str]],
+        *,
+        started: float,
+        test_dirs: tuple[Path, ...] | None = None,
+        response: NeMoGymResponse | None = None,
+    ) -> dict[str, Any]:
+        """Retry an inconclusive verdict without recapturing the stopped agent's artifacts."""
+        attempts: list[dict[str, Any]] = []
+        try:
+            for attempt in range(self.config.inconclusive_verification_retries + 1):
+                # Downloaded diagnostics may contain arbitrary nested files. Reserve retries beside
+                # earlier attempts, never inside a tree populated by another verifier.
+                attempt_logs = logs_dir if attempt == 0 else self._reserve_logs_dir()
+                outcome = await self._verify_separately_once(
+                    session,
+                    task,
+                    settings,
+                    trajectory,
+                    attempt_logs,
+                    restored,
+                    started=started,
+                    test_dirs=test_dirs,
+                    response=response,
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "reward": outcome["reward"],
+                        "mask_sample": outcome.get("mask_sample", False),
+                        "failure_kind": outcome.get("failure_kind"),
+                        "failure_reason": outcome.get("failure_reason"),
+                        "verifier_logs_dir": str(attempt_logs.resolve()),
+                    }
+                )
+                if not outcome.get("mask_sample", False):
+                    break
+            if self.config.inconclusive_verification_retries:
+                outcome["verification_attempts"] = attempts
+            if self.config.verifier_completion_key is not None:
+                outcome["evaluation_completed"] = not outcome.get("mask_sample", False)
+            return outcome
+        finally:
+            # All attempts restore the same archives. The staged tree remains as a diagnostic.
+            for archive, _, _ in restored:
+                archive.unlink(missing_ok=True)
+
+    async def _verify_separately_once(
         self,
         session: HarborSession,
         task: HarborTask,
@@ -772,8 +826,6 @@ class HarborVerificationMixin:
             await self._upload_verifier_shim(verifier, session, response)
             for archive, kind, source in restored:
                 await self._restore_artifact(verifier, task, archive, kind, source)
-                # The staged tree stays as the diagnostic; the archive served its purpose.
-                archive.unlink(missing_ok=True)
             # An artifact that covers /logs/agent brought the agent's tree, planted entries included, into
             # this fresh sandbox: the transcript's destination is cleared again before it is written.
             await self._upload_trajectory(verifier, trajectory, logs_dir, restored=[source for *_, source in restored])
@@ -835,9 +887,24 @@ class HarborVerificationMixin:
                     # Still owned: the next separate turn retries the stop before it reuses the key (above), and
                     # the episode cleanup and shutdown retry it after.
                     LOGGER.exception(f"Could not stop the verifier sandbox for {task.task_id}")
+            if verifier is not None:
+                self._write_cleanup_receipt(logs_dir, "verifier", verifier)
         return self._score(
             task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
         )
+
+    @staticmethod
+    def _write_cleanup_receipt(logs_dir: Path, role: str, sandbox: AsyncSandbox) -> None:
+        """Preserve the provider's teardown acknowledgement beside the verifier artifacts."""
+        receipt = {
+            "sandbox_id": getattr(getattr(sandbox, "_handle", None), "sandbox_id", None),
+            "teardown_confirmed": getattr(sandbox, "teardown_confirmed", None),
+            "cleanup_errors": list(getattr(sandbox, "cleanup_errors", ())),
+        }
+        try:
+            (logs_dir / f"{role}-cleanup.json").write_text(json.dumps(receipt) + "\n")
+        except OSError:
+            LOGGER.exception("Could not record %s sandbox cleanup under %s", role, logs_dir)
 
     async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox, *, keep: Sequence[str] = ()) -> None:
         """Empty ``/tests`` and ``/logs/verifier`` and remove the server's ``/logs/agent/trajectory.json`` in the
@@ -912,6 +979,10 @@ class HarborVerificationMixin:
                 timeout_s=hook.timeout_sec + COLLECT_HOOK_GRACE_S,
                 user=hook.user,
             )
+            if self.config.verifier_completion_key is not None and (
+                result.error_type is not None or result.return_code is None
+            ):
+                raise SandboxProbeError(f"collect hook did not complete: {result.error_type or 'unknown exit status'}")
             if result.error_type == "timeout":
                 LOGGER.warning(f"{task.task_id}: collect hook timed out after {hook.timeout_sec:g}s: {hook.command!r}")
                 continue
@@ -1189,6 +1260,19 @@ class HarborVerificationMixin:
             rewards,
             extras["verifier_logs_dir"],
         )
+        completion_key = self.config.verifier_completion_key
+        if completion_key is not None and (
+            timed_out
+            or result.error_type is not None
+            or result.return_code is None
+            or rewards is None
+            or rewards.get(completion_key) != 1.0
+        ):
+            reason = (
+                f"test.sh did not produce a completed verification ({completion_key}=1); "
+                f"timed_out={timed_out}, error_type={result.error_type}, reward_problem={problem}"
+            )
+            return self._masked(failure_kinds.VERIFIER_ERROR, reason) | extras | {"evaluation_completed": False}
         if rewards is None and timed_out:
             # A reward written before the kill still counts; only a run that left none is the timeout.
             return (
@@ -1202,16 +1286,21 @@ class HarborVerificationMixin:
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
-        reward = select_reward(rewards)
+        scored_rewards = {key: value for key, value in rewards.items() if key != completion_key}
+        reward = select_reward(scored_rewards) if scored_rewards else None
         if reward is None:
             # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
             # invalid reward file.
             reason = (
                 f"reward.json keys {sorted(rewards)} do not sum to a finite reward; tail: {_stdout_tail(logs_dir)}"
             )
+            if completion_key is not None:
+                return self._masked(INVALID_REWARD_KIND, reason) | extras | {"evaluation_completed": False}
             return self._measured(0.0, INVALID_REWARD_KIND, reason) | extras
         outcome = {"reward": reward, "verifier_rewards": rewards}
-        components = summing_components(reward, reward_components(rewards))
+        if completion_key is not None:
+            outcome["evaluation_completed"] = True
+        components = summing_components(reward, reward_components(scored_rewards))
         if components is not None:
             outcome["reward_components"] = components
         return outcome | extras
@@ -1251,7 +1340,13 @@ class HarborVerificationMixin:
 
     @staticmethod
     def _masked(kind: str, reason: str) -> dict[str, Any]:
-        return {"reward": 0.0, "mask_sample": True, "failure_kind": kind, "failure_reason": reason[:2000]}
+        return {
+            "reward": 0.0,
+            "mask_sample": True,
+            "evaluation_completed": False,
+            "failure_kind": kind,
+            "failure_reason": reason[:2000],
+        }
 
     def _separate_verifier(self, task: HarborTask) -> bool:
         """Whether this episode verifies in a fresh sandbox: the task's mode, or forced for tasks with artifacts.
