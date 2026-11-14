@@ -44,6 +44,7 @@ from nemo_gym.agents import (
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    UnsupportedSandboxPlatformError,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
     restrict_sandbox_network,
@@ -586,6 +587,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
                 raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, UnsupportedSandboxPlatformError):
+                # The platform comes from the sandbox image, so a new sandbox would fail the same way.
+                raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
 

@@ -28,6 +28,7 @@ from nemo_gym.agents import (
     OutcomeAction,
     SandboxPythonRuntime,
     SandboxSession,
+    UnsupportedSandboxPlatformError,
     agent_outcome_policy,
     parse_cleanup_receipt,
 )
@@ -1534,6 +1535,29 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         sandbox.disconnect.assert_not_awaited()
     else:
         sandbox.stop.assert_not_awaited()
+
+
+async def test_seed_refuses_a_sandbox_platform_without_a_runtime_after_cleanup(agent, state, monkeypatch):
+    import responses_api_agents.hermes_agent.app as module
+
+    sandbox = state.session.sandbox
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=False))
+    unsupported = UnsupportedSandboxPlatformError("No sandbox Python runtime is available for Darwin on arm64")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=unsupported))
+
+    # A new sandbox from the same image fails the same way, so the seed is refused with a final 422.
+    with pytest.raises(AgentSeedRejectedError, match="Darwin on arm64") as refused:
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
+    assert refused.value.__cause__ is unsupported
+    sandbox.disconnect.assert_awaited_once()
+    assert all(record.state is None for record in agent._session_records.values())
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8000/ng-rollout/native-a1/v1", "http://[::1]:8000/v1"])

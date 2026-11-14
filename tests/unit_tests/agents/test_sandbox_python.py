@@ -18,7 +18,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agents.utils import sandbox_python
-from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
+from nemo_gym.agents.utils.sandbox_python import (
+    SandboxPlatform,
+    SandboxPythonRuntime,
+    UnsupportedSandboxPlatformError,
+    probe_sandbox_platform,
+)
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
@@ -101,18 +106,29 @@ async def test_probe_prefers_glibc_over_an_optional_musl_loader(getconf, ldd, mu
 
 
 @pytest.mark.parametrize(
-    "stdout, return_code, match",
+    "stdout, match",
+    [("Darwin\narm64\nglibc 2.35\n", "Darwin on arm64"), ("Linux\nriscv64\nglibc 2.35\n", "riscv64")],
+)
+async def test_the_probe_rejects_platforms_without_a_runtime(stdout: str, match: str) -> None:
+    sandbox = _ProbedSandbox(SandboxExecResult(stdout=stdout, stderr="", return_code=0))
+
+    with pytest.raises(UnsupportedSandboxPlatformError, match=match):
+        await probe_sandbox_platform(sandbox)
+
+
+@pytest.mark.parametrize(
+    "result",
     [
-        ("Darwin\narm64\nglibc 2.35\n", 0, "Darwin on arm64"),
-        ("Linux\nriscv64\nglibc 2.35\n", 0, "riscv64"),
-        ("", 127, "Could not determine the sandbox platform"),
+        SandboxExecResult(stdout="", stderr="sh: not found", return_code=127),
+        SandboxExecResult(stdout="Linux\n", stderr="", return_code=0),
+        SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout"),
     ],
 )
-async def test_the_probe_rejects_platforms_without_a_runtime(stdout: str, return_code: int, match: str) -> None:
-    sandbox = _ProbedSandbox(SandboxExecResult(stdout=stdout, stderr="", return_code=return_code))
-
-    with pytest.raises(RuntimeError, match=match):
-        await probe_sandbox_platform(sandbox)
+async def test_a_probe_that_gives_no_answer_is_not_an_unsupported_platform(result: SandboxExecResult) -> None:
+    # A seed refuses an unsupported platform for good; a probe that failed may answer on a new sandbox.
+    with pytest.raises(RuntimeError, match="Could not determine the sandbox platform") as failed:
+        await probe_sandbox_platform(_ProbedSandbox(result))
+    assert not isinstance(failed.value, UnsupportedSandboxPlatformError)
 
 
 @pytest.mark.parametrize(
@@ -131,8 +147,27 @@ def test_wheels_never_need_a_newer_glibc_than_the_sandbox_has(platform: SandboxP
 
 
 def test_a_glibc_older_than_the_python_build_needs_is_rejected() -> None:
-    with pytest.raises(RuntimeError, match="glibc 2.12"):
+    with pytest.raises(UnsupportedSandboxPlatformError, match="glibc 2.12"):
         SandboxPlatform("x86_64", "gnu", 12).wheel_platform
+
+
+@pytest.mark.parametrize(
+    "stdout, match",
+    [("Darwin\narm64\nunknown\n", "Darwin on arm64"), ("Linux\nx86_64\nglibc 2.12\n", "glibc 2.12")],
+)
+async def test_install_refuses_a_platform_without_a_runtime_before_downloading_it(monkeypatch, stdout, match) -> None:
+    download = AsyncMock(side_effect=RuntimeError("Python download unavailable"))
+    monkeypatch.setattr(sandbox_python, "_python_archive", download)
+    build = AsyncMock()
+    monkeypatch.setattr(SandboxPythonRuntime, "_build_site_packages", build)
+    sandbox = _ProbedSandbox(SandboxExecResult(stdout=stdout, stderr="", return_code=0))
+    runtime = SandboxPythonRuntime(harness="fake", requirements=("fake-harness==1",), import_check="import x")
+
+    with pytest.raises(UnsupportedSandboxPlatformError, match=match):
+        await runtime.install(sandbox, timeout_s=30)
+    download.assert_not_awaited()
+    build.assert_not_awaited()
+    assert sandbox.cwds == ["/"], "only the platform probe ran in the sandbox"
 
 
 def test_pins_cover_packages_installed_from_an_index(monkeypatch) -> None:
@@ -417,7 +452,7 @@ async def test_a_python_build_that_does_not_match_its_pin_is_not_cached(python_b
 
     with pytest.raises(RuntimeError, match="Checksum mismatch"):
         await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35))
-    with pytest.raises(RuntimeError, match="No pinned Python build for x86_64/musl"):
+    with pytest.raises(UnsupportedSandboxPlatformError, match="No pinned Python build for x86_64/musl"):
         await sandbox_python._python_archive(SandboxPlatform("x86_64", "musl"))
 
     assert list(tmp_path.iterdir()) == []
