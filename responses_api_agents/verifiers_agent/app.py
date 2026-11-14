@@ -540,6 +540,11 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
         description="Extra verifiers State keys (JSON-serializable) copied into response.exported_state, e.g. "
         "['assertion_results'] for AutomationBench per-assertion verdicts. Empty leaves rollouts unchanged.",
     )
+    mask_sample_metrics: list[str] = Field(
+        default_factory=list,
+        description="Rubric metrics that flag an environment or infrastructure failure, e.g. ['requester_failed']: "
+        "a rollout with any of them above 0 returns mask_sample=True, so its reward is not counted as a measurement.",
+    )
 
     max_tokens: int = Field(default=8192, description="Max tokens for generation")
 
@@ -951,6 +956,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         finally:
             _RUBRIC_FAILURES.reset(token)
             _MODEL_CALL_OUTCOME.reset(outcome_token)
+        failed = [m for m in self.config.mask_sample_metrics if (resp.metrics or {}).get(m, 0) > 0]
+        if failed:
+            logger.warning(f"Task {body.task_idx}: masked, the environment reported {failed}")
 
         async def scored() -> VerifiersAgentVerifyResponse:
             row: dict[str, Any] = {}
@@ -979,6 +987,13 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                     "failure_outcome_action": decision.action,
                     "failure_outcome_attribution": decision.attribution,
                     **FailureReportRow.fields(failure_report_for(call_failure)),
+                }
+            elif failed:
+                # namespaced kind ('<server>:<kind>'): the metric name says which environment failure it was
+                row = {
+                    "mask_sample": True,
+                    "failure_kind": f"verifiers_agent:{failed[0]}",
+                    "failure_reason": f"environment reported {', '.join(failed)}",
                 }
             return VerifiersAgentVerifyResponse(
                 ng_trajectory=resp.ng_trajectory,

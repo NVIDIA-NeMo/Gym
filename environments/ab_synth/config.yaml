@@ -1,0 +1,46 @@
+ab_synth:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Synthetic SaaS workflow tasks on the AutomationBench app simulator (single-day, multi-day with simulated time, multi-turn with a simulated requester).
+      value: Improve SaaS workflow execution, waiting for the right day, and asking or handing back what only the requester can do.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: ab_synth_env
+      vf_env_args:
+        # The Gym rows to run (verifiers builds its dataset from them). Required.
+        tasks_path: ???
+        max_turns: 80
+        # Multi-turn rows only: an OpenAI-compatible chat endpoint that plays the requester.
+        requester_base_url: null
+        requester_model: null
+        # Merged after the built-in sampling values (temperature 0.7, max_tokens 400 or 8192), so these keys win.
+        requester_body: {}
+        # For an endpoint that needs a key: an environment variable name or a key file path, never the key itself.
+        requester_api_key_env: null
+        requester_api_key_file: null
+        # Each requester try ends after this many seconds; after the last failed try the episode ends unscored.
+        requester_timeout_s: 300
+        unavailable_call_break: false
+      # A rollout whose requester failed is returned with mask_sample=true, so its reward is not counted.
+      mask_sample_metrics: [requester_failed]
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 131072
+      temperature: 1.0
+      top_p: 1.0
+      client_timeout_s: 3600
+      client_connect_timeout_s: 60
+      client_max_retries: 0
+
+ab_synth_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ab_synth

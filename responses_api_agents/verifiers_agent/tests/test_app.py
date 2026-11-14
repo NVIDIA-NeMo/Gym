@@ -691,6 +691,49 @@ class TestExportStateColumns:
         assert "['assertion_result'] not on the verifiers State" in caplog.text
 
 
+class TestMaskSampleMetrics:
+    """``mask_sample_metrics`` turns an environment-reported failure metric into ``mask_sample``."""
+
+    def _run(self, metrics: dict, **config_overrides) -> dict:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+            **config_overrides,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            return [{"reward": 0.0, "metrics": metrics, "completion": [], "trajectory": []}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_a_flagged_failure_metric_masks_the_sample(self) -> None:
+        body = self._run({"requester_failed": 1.0}, mask_sample_metrics=["requester_failed"])
+        assert body["mask_sample"] is True
+        assert body["failure_kind"] == "verifiers_agent:requester_failed"
+
+    def test_an_unflagged_or_zero_metric_leaves_the_sample_measured(self) -> None:
+        assert self._run({"requester_failed": 1.0})["mask_sample"] is False
+        assert self._run({"requester_failed": 0.0}, mask_sample_metrics=["requester_failed"])["mask_sample"] is False
+
+
 class TestSharedClientTraceContext:
     """The cached policy client is shared across rollouts, so its base URL must not name a span.
 

@@ -50,6 +50,17 @@ excludes = [
 ]
 
 [[package]]
+name = "ab-synth-env"
+version = "0.1.0"
+source = { editable = "../../environments/ab_synth" }
+dependencies = [
+    { name = "automationbench-env" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "automationbench-env" }]
+
+[[package]]
 name = "acereason-math"
 version = "0.1.8"
 source = { registry = "https://hub.primeintellect.ai/primeintellect/simple/" }
@@ -904,6 +915,7 @@ name = "gym-responses-api-agents-verifiers-agent"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "ab-synth-env" },
     { name = "acereason-math" },
     { name = "automationbench-env" },
     { name = "nemo-gym", extra = ["dev"] },
@@ -917,6 +929,7 @@ telemetry = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ab-synth-env", editable = "../../environments/ab_synth" },
     { name = "acereason-math", index = "https://hub.primeintellect.ai/primeintellect/simple/" },
     { name = "automationbench-env", editable = "../../benchmarks/automationbench" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
