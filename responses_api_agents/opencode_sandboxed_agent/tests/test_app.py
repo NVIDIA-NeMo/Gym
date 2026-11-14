@@ -760,6 +760,7 @@ class TestIdleNudge:
         assert nudges == 1
         [resume] = self._resumes(sandbox)
         assert "--session ses_1" in resume and shlex.quote(self.TEXT) in resume
+        assert f"printf '%s' {shlex.quote(self.TEXT)} |" in resume and " -- " not in resume  # nudge on stdin too
         assert "OPENCODE_CONFIG_CONTENT='{}'" in resume and "--thinking" in resume
         assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1" in resume
         assert result.stdout.endswith("OpenCode run finished")  # opencode_finished still detected after the resume
@@ -1044,3 +1045,5 @@ async def test_finish_instruction_is_appended_to_the_first_prompt(tmp_path: Path
         [first] = [c for c in commands if "opencode run --title" in c]
         expected = "build it\n\n" + instruction if instruction else "build it"
         assert shlex.quote(expected) in first
+        # on stdin, not as an argument: OpenCode would wrap an argument containing a space in literal double quotes
+        assert f"printf '%s' {shlex.quote(expected)} |" in first and " -- " not in first

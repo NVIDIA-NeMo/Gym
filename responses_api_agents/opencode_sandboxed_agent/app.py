@@ -861,8 +861,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
             resume = (
                 f"export PATH=$HOME/.opencode/bin:$PATH "
-                f"&& OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
-                f"opencode run --session {quote(session_id)} {run_flags} -- {quote(nudge)} "
+                f"&& printf '%s' {quote(nudge)} | OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
+                f"opencode run --session {quote(session_id)} {run_flags} "
                 f'&& echo "OpenCode run finished"'
             )
             try:
@@ -1041,13 +1041,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+        # The prompt goes to `opencode run` on STDIN, not as an argument: OpenCode wraps any argument containing a space
+        # in literal double quotes (and escapes inner quotes) before sending it, so the model saw `"According to ..."`
+        # (opencode cli/cmd/run.ts). Piped input is sent as is. Same for every nudge. Changed 2026-11-04.
         command = f"""
         echo "Shell: $SHELL" \
         && {stuck_setup}{install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        && printf '%s' {quote(query)} | OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} \
         && echo "OpenCode run finished"
         """
 
