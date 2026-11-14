@@ -1,0 +1,57 @@
+baxbench:
+  resources_servers:
+    baxbench:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Secure backend generation from an OpenAPI spec, graded by upstream BaxBench functional tests and exploits
+      value: Measure whether generated backends are both correct and secure
+      # Needs a sandbox provider block, such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+      sandbox_provider: sandbox
+      # The 14 framework images built from sandbox/images; {env} is the framework slug (python-flask, ...).
+      # Example: <registry>/baxbench-{env}:de885cd9
+      image_template: ${oc.env:BAXBENCH_IMAGE_TEMPLATE,null}
+      # One sandbox per upstream test; a sample needs 2 to 6.
+      max_concurrent_sandboxes: 32
+      test_timeout_s: 300
+      build_timeout_s: 600
+      memory_limit_mib: 1024
+      inconclusive_verification_retries: 2
+      sandbox_config:
+        python: /opt/baxbench/venv/bin/python
+        # Room for the test harness next to the app's 1 GiB limit, and for Rust and Rails builds.
+        resources:
+          cpu: 2
+          memory_mib: 4096
+          disk_gib: 10
+        metadata:
+          benchmark: baxbench
+        provider_options:
+          # The images carry every allowed package, so the generated app runs without network.
+          # Upstream builds with network: a sample that installs a package outside its allow list
+          # can fail here where it built upstream (see README).
+          network_policy:
+            defaultAction: deny
+            egress: []
+baxbench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: baxbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/baxbench/data/example.jsonl
+
+baxbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: baxbench_simple_agent

@@ -1,0 +1,30 @@
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - resources_servers/baxbench/configs/baxbench.yaml
+
+baxbench_benchmark_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: baxbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: baxbench
+        type: benchmark
+        jsonl_fpath: benchmarks/baxbench/data/baxbench_benchmark.jsonl
+        prompt_config: benchmarks/prompts/eval/baxbench/default.yaml
+        prepare_script: benchmarks/baxbench/prepare.py
+        license: MIT
+        num_repeats: 3
+
+baxbench_benchmark_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: baxbench_benchmark_simple_agent
