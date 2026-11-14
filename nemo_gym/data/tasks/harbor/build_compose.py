@@ -488,7 +488,9 @@ def resolve_task_env(env: dict[str, str], *, tasks: tuple[str, ...] = ()) -> dic
     return resolved
 
 
-def compose_build_env(entry: BuildPlanEntry, image: str, platform: str | None) -> dict[str, str]:
+def compose_build_env(
+    entry: BuildPlanEntry, image: str, platform: str | None, *, base_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """The environment of ``docker compose build``, merged as Harbor's ``_compose_env_vars`` merges it
     (https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/environments/docker/docker.py#L579):
     the process environment, then the task's ``[environment].env`` (:func:`resolve_task_env`), then Harbor's
@@ -500,7 +502,9 @@ def compose_build_env(entry: BuildPlanEntry, image: str, platform: str | None) -
     variable named like an infrastructure one is ignored with a warning, as ``merge_compose_env`` does.
     ``DOCKER_DEFAULT_PLATFORM`` carries ``builds.platform``, the one setting Harbor has no equivalent of.
     """
-    env = dict(os.environ)
+    # base_env: the docker CLI's environment for a remote daemon (the Docker provider block's client_env_file),
+    # else the process's.
+    env = dict(base_env if base_env is not None else os.environ)
     user = resolve_task_env(entry.env, tasks=entry.tasks)
     infra = {
         "MAIN_IMAGE_NAME": image,

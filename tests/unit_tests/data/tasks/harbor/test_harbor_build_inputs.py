@@ -657,7 +657,7 @@ class TestPrepare:
         folder = tmp_path / "ds"
         image = self._recorded_then_changed(folder)
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(tool="docker"))
-        assert fake_builder == [{"tool": "docker", "repository": None, "platform": None}]
+        assert fake_builder == [{"tool": "docker", "repository": None, "platform": None, "client_env": None}]
         assert [t.task_id for t in prepared.tasks] == ["a", "c"] and prepared.tasks[0].image == image
         out = capsys.readouterr().out
         assert f"Rebuilding {image} for a: {CHANGED}" in out and "Built 1 image(s) with docker, kept local" in out

@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -118,9 +118,17 @@ class ImageBuilder:
         platform: str | None = None,
         storage_root: Path | None = None,
         run: Runner | None = None,
+        client_env: Mapping[str, str] | None = None,
     ) -> None:
         self.repository = repository.rstrip("/") if repository else None
-        self.tool = tool or detect_tool(self.repository)
+        # A client environment names the Docker provider's daemon: docker builds there, so it is the default tool.
+        self.tool = tool or ("docker" if client_env is not None else detect_tool(self.repository))
+        if client_env is not None and self.tool != "docker":
+            LOGGER.warning(
+                "builds.tool %s builds on this host and pushes to builds.repository; the Docker provider's "
+                "client_env_file and cli_dir apply to docker builds only",
+                self.tool,
+            )
         if self.tool is None:
             wanted = (
                 ", ".join(BUILD_TOOLS) if self.repository else "docker (buildah and podman need builds.repository)"
@@ -146,6 +154,9 @@ class ImageBuilder:
             raise BuildError(f"builds.platform: {exc}") from exc
         self.storage_root = Path(storage_root) if storage_root is not None else default_storage_root()
         self._run = run or _run_default
+        # docker's environment for a remote daemon (the Docker provider block's client_env_file and cli_dir);
+        # None inherits.
+        self._client_env = dict(client_env) if client_env is not None else None
         self._compose_checked = False
         self._tool_env: dict[str, str] | None = None
         # The heredoc preflight's outcome: None until it ran, "" when the tool builds heredocs, else why it does not.
@@ -283,10 +294,11 @@ class ImageBuilder:
         storage root and hands it to the tool as ``CONTAINERS_REGISTRIES_CONF``. That file replaces the host's main
         ``registries.conf`` (the drop-ins under ``registries.conf.d``, short-name aliases included, still load), so a
         site whose main file carries mirrors or blocked registries exports its own ``CONTAINERS_REGISTRIES_CONF``,
-        which is left as it is. docker needs neither file and inherits the process environment.
+        which is left as it is. docker needs neither file: it inherits the process environment, or runs with
+        ``client_env`` (a remote daemon's ``DOCKER_HOST`` and the CLI's ``PATH``) when the builder was given one.
         """
         if self.tool == "docker":
-            return None
+            return dict(self._client_env) if self._client_env is not None else None
         if self._tool_env is None:
             env = dict(os.environ)
             self.storage_root.mkdir(parents=True, exist_ok=True)
@@ -382,18 +394,27 @@ class ImageBuilder:
         main_tag = self.tag_name(first.digest)
         if self.tool == "docker":
             self._ensure_compose_plugin()
-        env = compose_build_env(first, main_tag, self.platform)
+        env = compose_build_env(first, main_tag, self.platform, base_env=self._client_env)
+        # The remote daemon's client environment only adds docker's DOCKER_* and PATH; the file is checked and settled
+        # against the process environment, as build_inputs_mismatch settles it on a later run.
+        settle_env = env if self._client_env is None else compose_build_env(first, main_tag, self.platform)
         # Checked as docker compose will read it: interpolated against the build's own environment. On every tool:
         # a context the loader refuses is never built and pushed under the hb__ name.
-        document = validate_task_compose(
-            first.context,
-            env,
-            tasks=first.tasks,
-            builds_main=any(entry.compose_service == MAIN_SERVICE for entry in entries),
-        )
+        builds_main = any(entry.compose_service == MAIN_SERVICE for entry in entries)
+        document = validate_task_compose(first.context, settle_env, tasks=first.tasks, builds_main=builds_main)
+        # docker compose interpolates the file against the client environment it runs with: a file that reads one of
+        # its variables would build another document than the one checked and recorded, so it is refused.
+        if settle_env is not env and (
+            validate_task_compose(first.context, env, tasks=first.tasks, builds_main=builds_main) != document
+        ):
+            raise BuildError(
+                f"{first.context / HARBOR_COMPOSE_FILE} of task(s) {tasks} interpolates a variable the Docker "
+                "provider's client environment sets (client_env_file or cli_dir), so it would build another file "
+                "than the one checked; remove that variable from the file"
+            )
         # Settled as build_inputs_mismatch settles an entry it checks: the section's settings and the inputs digests
         # of the services the entry builds from, so the digest recorded below is the one a later run compares.
-        settled = [settle_with_document(entry, document, env) for entry in entries]
+        settled = [settle_with_document(entry, document, settle_env) for entry in entries]
         # Image names are lower-case (sanitize_docker_image_name, as Harbor sanitises its), so two services that
         # differ by case only (`Db` and `db`, both valid Compose names) would build under one tag, the second build
         # silently replacing the first on either tool path and both records naming one image. Refused before any
@@ -479,7 +500,7 @@ class ImageBuilder:
             with tempfile.TemporaryDirectory(prefix="nemo-gym-push-") as tmp:
                 digest_file = Path(tmp) / "digest"
                 completed = self._check(self.push_argv(tag, digest_file), f"Pushing {tag}", env=self.tool_env())
-                digest = _pushed_digest(self.tool, digest_file, completed, self._run, tag)
+                digest = _pushed_digest(self.tool, digest_file, completed, self._run, tag, env=self.tool_env())
             image = f"{tag}@{digest}"
         # The image's record says what it was built from, beside the config_digest of what came out.
         record = {**record, "image": image, "inputs_digest": build_inputs_digest(entry)}
@@ -501,7 +522,7 @@ class ImageBuilder:
             return
         argv = ["docker", "compose", "version"]
         try:
-            completed = self._run(argv)
+            completed = self._run(argv) if self._client_env is None else self._run(argv, env=self.tool_env())
         except OSError as exc:
             raise BuildError(
                 f"docker failed to start ({exc}); the docker backend needs docker and {COMPOSE_PLUGIN}"
@@ -595,7 +616,15 @@ def _proxy_note(output: str, env: dict[str, str]) -> str:
     )
 
 
-def _pushed_digest(tool: str, digest_file: Path, completed: subprocess.CompletedProcess, run: Runner, tag: str) -> str:
+def _pushed_digest(
+    tool: str,
+    digest_file: Path,
+    completed: subprocess.CompletedProcess,
+    run: Runner,
+    tag: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> str:
     """The manifest digest the registry assigned to the pushed image."""
     if tool in ("buildah", "podman"):
         if digest_file.is_file():
@@ -607,7 +636,9 @@ def _pushed_digest(tool: str, digest_file: Path, completed: subprocess.Completed
     for line in (completed.stdout or "").splitlines():
         if "digest: sha256:" in line:
             return "sha256:" + line.split("digest: sha256:", 1)[1].split()[0]
-    inspected = run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", tag])
+    argv = ["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", tag]
+    # On the daemon the image was pushed from: a remote one when the builder has a client environment.
+    inspected = run(argv) if env is None else run(argv, env=env)
     if inspected.returncode == 0:
         for repo_digest in json.loads(inspected.stdout or "[]"):
             if "@sha256:" in repo_digest:

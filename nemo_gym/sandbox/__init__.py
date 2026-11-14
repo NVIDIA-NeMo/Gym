@@ -118,7 +118,7 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.failures import sandbox_failure
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
-    from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
+    from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider, client_environment
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
     from nemo_gym.sandbox.transfer import (
@@ -167,6 +167,7 @@ _PUBLIC_API = {
     "SandboxUnavailableError": "transfer",
     "TRANSFER_USER": "transfer",
     "adapt_non_root_sidecars": "compose_config",
+    "client_environment": "providers.docker.provider",
     "cpu_cap_env": "utils",
     "deployment_platform": "compose_config",
     "document_volume_sources": "compose_config",

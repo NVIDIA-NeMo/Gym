@@ -461,6 +461,34 @@ async def test_facade_pty_exec_over_a_real_terminal(monkeypatch: pytest.MonkeyPa
     )
 
 
+async def test_pty_clients_get_the_client_environment_of_a_remote_daemon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The ``docker exec`` client of a PTY session, on pipes and on a terminal, talks to the client.env daemon."""
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    client_env = tmp_path / "client.env"
+    client_env.write_text("export DOCKER_HOST=tcp://backend:2376\n")
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"}, client_env_file=str(client_env))
+
+    async def spawn_local(argv, **kwargs):
+        return await docker_pty.spawn(local_program(argv, "nemo-gym-x", tmp_path), **kwargs)
+
+    monkeypatch.setattr(provider, "_spawn_pty", spawn_local)
+    inst = docker_provider._DockerContainer(name="nemo-gym-x", image="img", shell="sh")
+    sandbox = AsyncSandbox(provider)
+    sandbox._handle = SandboxHandle(sandbox_id="nemo-gym-x", provider_name="docker", raw=inst)
+    sandbox._stopped = False
+    piped = await sandbox.pty.exec('echo "$DOCKER_HOST"', pty=False, timeout_s=10)
+    assert piped.stdout == "tcp://backend:2376\n"
+    session = await sandbox.pty.create()
+    try:
+        on_terminal = await sandbox.pty.exec('echo "$DOCKER_HOST"', timeout_s=10)
+    finally:
+        await session.close()
+    assert on_terminal.stdout == "tcp://backend:2376\r\n"
+
+
 # --------------------------------------------------------------------------- #
 # The provider: the docker command line, signals, cleanup
 # --------------------------------------------------------------------------- #
@@ -486,7 +514,7 @@ def _provider(monkeypatch: pytest.MonkeyPatch, responder=None, **kwargs):
     provider = docker_provider.DockerProvider(**kwargs)
     runs: list[list[str]] = []
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, env_values=None):
         runs.append(list(argv))
         return responder(argv) if responder else (0, "", "")
 
@@ -540,11 +568,11 @@ async def test_create_pty_builds_the_exec_command_line(monkeypatch: pytest.Monke
         "-w",
         "/work",
         "--env",
-        "BASE=1",
+        "BASE",
         "--env",
-        "SHARED=pty",
+        "SHARED",
         "--env",
-        "X=2",
+        "X",
         "--env",
         f"NEMO_GYM_PTY_SESSION={fake.session_id}",
         "--user",
@@ -561,6 +589,12 @@ async def test_create_pty_builds_the_exec_command_line(monkeypatch: pytest.Monke
         "htop",
     ]
     assert (fake.kwargs["use_pty"], fake.kwargs["rows"], fake.kwargs["cols"]) == (True, 50, 200)
+    # The values reach the docker client's environment only, never its command line.
+    assert {key: fake.kwargs["env"][key] for key in ("BASE", "SHARED", "X")} == {
+        "BASE": "1",
+        "SHARED": "pty",
+        "X": "2",
+    }
     assert provider._pty_sessions == {"nemo-gym-abc": {fake}}
     # The marker is the session's identity for the root-side kill: a spec env cannot set or override it.
     forged = await provider.create_pty(handle, SandboxPtySpec(env={"NEMO_GYM_PTY_SESSION": "forged"}))
@@ -879,7 +913,7 @@ def _live_kill_provider(
     pid_dir = Path(pid_dir or tmp_path)
     fallback = fallback_pid_path(pid_dir)
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, env_values=None):
         command = argv[-1]
         commands.append(command)
         local = re.sub(r"/tmp/\.nemo-gym-pty-[0-9a-f]+\.pid", str(pid_dir / "pid"), command)
@@ -1331,7 +1365,7 @@ async def test_the_pid_read_exec_has_a_timeout_of_its_own(monkeypatch: pytest.Mo
         provider, _, spawned = _provider(monkeypatch, exec={"exec_shell": "bash", "default_timeout_s": default})
         timeouts: list[float | None] = []
 
-        async def run(argv, *, timeout_s, stdin=None):
+        async def run(argv, *, timeout_s, stdin=None, env_values=None):
             timeouts.append(timeout_s)
             return (0, "", "")
 
@@ -1706,7 +1740,7 @@ def _stand_in_provider(monkeypatch: pytest.MonkeyPatch, ns: StandInContainer):
     provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
     execs: list[list[str]] = []
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, env_values=None):
         execs.append(list(argv))
         user = exec_user(argv)
         return await ns.sh(argv[-1], user=None if user == "0" else int(user))

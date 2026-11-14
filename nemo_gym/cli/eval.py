@@ -129,6 +129,7 @@ from nemo_gym.eval.eval_plan import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.sandbox.providers.docker.provider import DockerClientEnvError, client_environment
 from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
 from nemo_gym.utils.path_utils import materialized_path_for
 
@@ -1453,6 +1454,37 @@ def registry_credentials_from_overrides(overrides: list[str], sandbox: str | Non
     return credentials_for_image_prefixes(_block_from_overrides(overrides, key, config_files=files), key)
 
 
+def docker_client_env_from_overrides(
+    overrides: list[str], sandbox: str | None
+) -> Callable[[], dict[str, str] | None] | None:
+    """A loader of the docker CLI environment of the ``sandbox:`` block's Docker provider when it reaches a remote
+    daemon (``client_env_file``, ``cli_dir``), so prepare builds images on the daemon the sandboxes start on.
+
+    The keys are read from the ``--sandbox`` provider file and the configuration the command names, like
+    :func:`registry_credentials_from_overrides`; ``client.env`` is read only when the loader is called, which prepare
+    does once something needs building, so a daemon may write it after the command starts, as the provider allows.
+    ``None`` when the block is not the Docker provider or sets neither key: docker then builds on the process
+    environment's daemon. The loader raises :class:`ValueError` naming a missing or malformed ``client.env``.
+    """
+    if sandbox_provider_from_overrides(overrides, sandbox) != "docker":
+        return None
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    settings = {
+        key: _block_from_overrides(overrides, f"{SANDBOX_BLOCK_KEY}.docker.{key}", config_files=files)
+        for key in ("client_env_file", "cli_dir")
+    }
+    if not settings["client_env_file"] and not settings["cli_dir"]:
+        return None
+
+    def load() -> dict[str, str] | None:
+        try:
+            return client_environment(settings["client_env_file"] or None, settings["cli_dir"] or None)
+        except DockerClientEnvError as exc:
+            raise ValueError(f"{SANDBOX_BLOCK_KEY}.docker.client_env_file: {exc}") from exc
+
+    return load
+
+
 def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
     """The provider name of the block GPU-declaring tasks and GPU sidecars run on: the environment server's
     ``gpu_sandbox_provider`` in the configuration the command names (``GPU_SANDBOX_PROVIDER_KEY``), read like
@@ -1743,6 +1775,7 @@ def _prepare_for_agent(
             compose_overlay=compose_overlay_from_overrides(overrides),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
+            docker_client_env=docker_client_env_from_overrides(overrides, sandbox),
             agent=agent.impl_name,
             allow_unsupported_pairing=pairing_override_from_overrides(overrides),
         )
@@ -2019,6 +2052,7 @@ def validate_target(
             compose_overlay=compose_overlay_from_overrides(preparation),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(preparation, sandbox),
+            docker_client_env=docker_client_env_from_overrides(preparation, sandbox),
         )
     except (
         HarborTaskError,

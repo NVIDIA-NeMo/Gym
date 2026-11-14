@@ -80,6 +80,31 @@ docker:
     deadline_s: 60
 ```
 
+### A remote daemon: `client_env_file` and `cli_dir`
+
+Two optional top-level keys point the CLI at a daemon other than the process environment's, so every
+process that uses the same provider block (a resources server that creates a sandbox and an agent that
+reconnects to it) reaches the same daemon:
+
+```yaml
+docker:
+  client_env_file: /shared/backend/client.env  # `export KEY=value` lines: DOCKER_HOST, DOCKER_TLS_VERIFY, ...
+  cli_dir: /shared/cache/docker-cli            # holds a `docker` binary
+```
+
+- `client_env_file` is merged over the process environment for every docker CLI call (exec, transfer,
+  status, close, PTY clients). It is read at each call, so the daemon may write it after the provider
+  starts, and a daemon restarted on another host during a run (a new `DOCKER_HOST` and certificates)
+  is reached without restarting the servers, which an environment exported once at launch cannot do.
+  An inherited `DOCKER_CONTEXT`, which would take precedence over `DOCKER_HOST`, is dropped unless the file sets one.
+  A file that is missing, unreadable, malformed or without `DOCKER_HOST` raises `DockerClientEnvError`
+  naming the file (`exec()` returns it as `error_type: sandbox`, `status()` as `UNKNOWN`). Lines are
+  `[export ]KEY=value` with shell quoting and `#` comments. A `DOCKER_CERT_PATH` that does not exist on
+  this host is replaced by the file's directory when that directory holds `ca.pem`, `cert.pem` and
+  `key.pem` (a daemon that writes the file beside its TLS material names that directory as its own host
+  mounts it).
+- `cli_dir` is put first on the CLI's `PATH`, and its `docker` is used when present.
+
 ### `create` — `DockerCreateConfig`
 
 | Field | Default | Meaning |
@@ -118,7 +143,7 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 | Field | Used for |
 |---|---|
 | `image` | Docker image ref (required). A `docker://` prefix is stripped. |
-| `env` | `--env KEY=VALUE` at `docker run` and re-applied on every `exec`. |
+| `env` | `--env KEY` at `docker run` and re-applied on every `exec` and PTY session; the value travels in the docker client's environment, never on its command line, so a credential stays out of the host's process list. Variables the client reads itself (`PATH`, `HOME`, `TMPDIR`, `SSL_CERT_*`, the proxy variables, `DOCKER_*`) go as `--env KEY=VALUE`. |
 | `workdir` | `-w` at `docker run` (created if absent) and default `exec` cwd. |
 | `files` | Seed files written in at `start()` (via the sandbox API's `upload`). |
 | `resources` | `cpu`→`--cpus`, `memory_mib`→`--memory` (+`--memory-swap`, hard cap), `gpu`→`--gpus <n>`. `disk_gib`/`gpu_type` ignored. |

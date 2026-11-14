@@ -88,6 +88,10 @@ class DockerCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a new container fails its readiness probe."""
 
 
+class DockerClientEnvError(RuntimeError):
+    """The configured ``client_env_file`` is missing or malformed."""
+
+
 def _require_docker() -> str:
     path = shutil.which("docker")
     if path is None:
@@ -96,6 +100,73 @@ def _require_docker() -> str:
             "ensure the daemon is running before selecting env.sandbox.provider.name=docker."
         )
     return path
+
+
+def _prefixed_path(cli_dir: str | None, path: str) -> str:
+    return os.pathsep.join(filter(None, [cli_dir, path]))
+
+
+def client_environment(client_env_file: str | Path | None, cli_dir: str | None) -> dict[str, str] | None:
+    """The docker CLI's environment for a remote daemon: the process environment with ``client_env_file``'s
+    ``KEY=value`` lines over it and ``cli_dir`` first on ``PATH``; ``None`` (inherit) when neither is set.
+
+    Read at each call, so the file may appear after start. Raises :class:`DockerClientEnvError` for a missing or
+    malformed file. The provider and an image build on the provider's daemon both use it.
+    """
+    if client_env_file is None and cli_dir is None:
+        return None
+    env = dict(os.environ)
+    if client_env_file is not None:
+        # An inherited DOCKER_CONTEXT takes precedence over DOCKER_HOST, so only the file may set one.
+        env.pop("DOCKER_CONTEXT", None)
+        env.update(_read_client_env(Path(client_env_file).expanduser()))
+    env["PATH"] = _prefixed_path(str(Path(cli_dir).expanduser()) if cli_dir else None, env.get("PATH", ""))
+    # docker finds plugins (compose) under $DOCKER_CONFIG/cli-plugins, never beside its binary.
+    if cli_dir and (Path(cli_dir).expanduser() / "cli-plugins").is_dir():
+        env["DOCKER_CONFIG"] = str(Path(cli_dir).expanduser())
+    return env
+
+
+def _read_client_env(path: Path) -> dict[str, str]:
+    """``[export ]KEY=value`` lines (shell-quoted values, ``#`` comments), as a remote daemon's ``client.env``.
+
+    A ``DOCKER_CERT_PATH`` that does not exist on this host becomes the file's directory when that directory holds
+    the TLS material (``ca.pem``, ``cert.pem``, ``key.pem``): a daemon that writes the file beside it names the
+    directory as its own host mounts it. Every other unreadable or malformed file raises DockerClientEnvError.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        raise DockerClientEnvError(
+            f"Docker client environment file {path} does not exist; start the daemon that writes it first"
+        ) from None
+    except (OSError, UnicodeDecodeError) as error:
+        raise DockerClientEnvError(f"Cannot read Docker client environment file {path}: {error}") from error
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.removeprefix("export ").strip().partition("=")
+        if not separator or not key.isidentifier():
+            raise DockerClientEnvError(f"Malformed line in {path}: {line!r}")
+        try:
+            parts = shlex.split(value, comments=True)
+        except ValueError as error:
+            raise DockerClientEnvError(f"Malformed line in {path}: {line!r} ({error})") from error
+        values[key] = parts[0] if parts else ""
+    cert_path = values.get("DOCKER_CERT_PATH")
+    if cert_path is not None and not Path(cert_path).is_dir():
+        if not all((path.parent / name).is_file() for name in ("ca.pem", "cert.pem", "key.pem")):
+            raise DockerClientEnvError(
+                f"DOCKER_CERT_PATH {cert_path} in {path} does not exist, and {path.parent} holds no ca.pem, "
+                "cert.pem and key.pem"
+            )
+        values["DOCKER_CERT_PATH"] = str(path.parent)
+    if not values.get("DOCKER_HOST"):
+        # Without it the CLI falls back to the local daemon, where a remote container looks missing.
+        raise DockerClientEnvError(f"Docker client environment file {path} sets no DOCKER_HOST")
+    return values
 
 
 def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -116,6 +187,37 @@ def _coerce_str_list(value: Any, what: str) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(v) for v in value]
     raise DockerCreateError(f"provider_options[{what!r}] must be a string or list, got {type(value).__name__}")
+
+
+# Variables the docker CLI reads itself. They go on the command line as KEY=VALUE, so a sandbox's own value (an
+# image's PATH or HOME) never reconfigures the CLI that runs the command.
+_DOCKER_CLI_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        *(name for proxy in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY") for name in (proxy, proxy.lower())),
+    }
+)
+
+
+def _env_flags(env: Mapping[str, str]) -> tuple[list[str], dict[str, str]]:
+    """The ``--env`` flags for ``env`` and the values the docker CLI's environment must carry for them.
+
+    Every variable is passed by name (``--env KEY``), its value only in the CLI's environment, so a credential
+    never shows in the host's process list; only the variables the CLI reads itself go as ``KEY=VALUE``.
+    """
+    flags: list[str] = []
+    values: dict[str, str] = {}
+    for key, value in env.items():
+        if key in _DOCKER_CLI_ENV or key.startswith("DOCKER_"):
+            flags += ["--env", f"{key}={value}"]
+        else:
+            flags += ["--env", key]
+            values[key] = value
+    return flags, values
 
 
 def _redact_argv(argv: list[str]) -> list[str]:
@@ -303,11 +405,19 @@ class DockerProvider:
         exec: DockerExecConfig | Mapping[str, Any] | None = None,
         create: DockerCreateConfig | Mapping[str, Any] | None = None,
         probe: DockerProbeConfig | Mapping[str, Any] | None = None,
+        client_env_file: str | None = None,
+        cli_dir: str | None = None,
     ) -> None:
+        """``client_env_file`` names a file of ``export KEY=value`` lines (a remote daemon's ``DOCKER_HOST``,
+        ``DOCKER_TLS_VERIFY``, ``DOCKER_CERT_PATH``...) merged over the process environment of every docker CLI call,
+        read at each call so the file may appear after start; ``cli_dir`` is put first on that ``PATH`` and is where
+        the ``docker`` binary is looked up first."""
         self._exec_config = _coerce_config(exec, DockerExecConfig)
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
-        self._binary = _require_docker()
+        self._client_env_file = Path(client_env_file).expanduser() if client_env_file else None
+        self._cli_dir = str(Path(cli_dir).expanduser()) if cli_dir else None
+        self._binary = (shutil.which("docker", path=self._cli_dir) if self._cli_dir else None) or _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
         # Live PTY sessions by container name; closed with their container and at provider shutdown.
         self._pty_sessions: dict[str, set[docker_pty.DockerPtySession]] = {}
@@ -343,10 +453,30 @@ class DockerProvider:
             raise ValueError(f"pull policy must be always, missing or never, got {policy!r}")
         return {"run_args": ["--pull", policy]}
 
+    def _client_environment(self) -> dict[str, str] | None:
+        """The docker CLI's environment: the process's (``None``) unless ``client_env_file``/``cli_dir`` are set."""
+        return client_environment(self._client_env_file, self._cli_dir)
+
+    def _cli_environment(self, env_values: Mapping[str, str] | None) -> dict[str, str] | None:
+        """The docker CLI's environment with the values of the ``--env KEY`` flags of :func:`_env_flags` over it."""
+        env = self._client_environment()
+        if not env_values:
+            return env
+        return {**(os.environ if env is None else env), **env_values}
+
     async def _run(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        env_values: Mapping[str, str] | None = None,
     ) -> tuple[int, str, str]:
-        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
+        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout.
+
+        ``env_values`` are the values of the command's ``--env KEY`` flags (:func:`_env_flags`).
+        """
+        env = self._cli_environment(env_values)
         async with self._semaphore:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -354,6 +484,7 @@ class DockerProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=env,
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
@@ -390,8 +521,8 @@ class DockerProvider:
             argv += ["-w", spec.workdir]
         # spec.user is not passed to `docker run`: in overlay mode the user may not exist in the base image
         # yet. The sandbox facade applies it to every exec instead (see AsyncSandbox.default_user).
-        for key, value in spec.env.items():
-            argv += ["--env", f"{key}={value}"]
+        env_flags, env_values = _env_flags(spec.env)
+        argv += env_flags
         if cfg.apply_resource_limits:
             argv += _resource_limit_flags(spec.resources)
         argv += _resource_passthrough_flags(spec.resources)
@@ -422,7 +553,7 @@ class DockerProvider:
             keepalive_cmd = f"sleep {max(1, math.ceil(spec.ttl_s))}" if enforce_ttl else cfg.keepalive_cmd
             argv += ["--entrypoint", cfg.keepalive_shell, image, "-c", keepalive_cmd]
 
-        await self._run_create_with_reconciliation(argv, name=name, image=image)
+        await self._run_create_with_reconciliation(argv, name=name, image=image, env_values=env_values)
 
         handle = SandboxHandle(
             sandbox_id=name,
@@ -442,7 +573,9 @@ class DockerProvider:
             raise
         return handle
 
-    async def _run_create_with_reconciliation(self, argv: list[str], *, name: str, image: str) -> None:
+    async def _run_create_with_reconciliation(
+        self, argv: list[str], *, name: str, image: str, env_values: Mapping[str, str] | None = None
+    ) -> None:
         """Run ``docker run`` without leaking a container when its response is lost.
 
         A fixed, random name makes retry idempotent. After a timeout, transport
@@ -455,7 +588,7 @@ class DockerProvider:
         last_cause: BaseException | None = None
         for attempt in range(cfg.transport_retries + 1):
             try:
-                code, _out, err = await self._run(argv, timeout_s=cfg.start_timeout_s)
+                code, _out, err = await self._run(argv, timeout_s=cfg.start_timeout_s, env_values=env_values)
             except TimeoutError as exc:
                 last_cause = exc
                 last_detail = f"docker run timed out for image={image!r}: {exc}"
@@ -723,8 +856,8 @@ class DockerProvider:
         merged_env = dict(getattr(inst, "env", {}))
         if env:
             merged_env.update(env)
-        for key, value in merged_env.items():
-            flags += ["--env", f"{key}={value}"]
+        env_flags, env_values = _env_flags(merged_env)
+        flags += env_flags
         if user is not None:
             flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
@@ -732,10 +865,15 @@ class DockerProvider:
         argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
         try:
-            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin, env_values=env_values)
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="timeout"
+            )
+        except DockerClientEnvError as e:
+            # The daemon is unreachable for now (no or a bad client.env): a sandbox failure, as a refused exec.
+            return SandboxExecResult(
+                stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
             )
         if code != 0 and _is_runtime_failure(err):
             return SandboxExecResult(
@@ -743,8 +881,11 @@ class DockerProvider:
             )
         return SandboxExecResult(stdout=out, stderr=err, return_code=code, error_type=None)
 
-    def _pty_argv(self, handle: SandboxHandle, spec: SandboxPtySpec, session_id: str) -> list[str]:
-        """The ``docker exec`` command line of one PTY session: interactive, with a terminal in PTY mode.
+    def _pty_argv(
+        self, handle: SandboxHandle, spec: SandboxPtySpec, session_id: str
+    ) -> tuple[list[str], dict[str, str]]:
+        """The ``docker exec`` command line of one PTY session (interactive, with a terminal in PTY mode) and the
+        values of its ``--env KEY`` flags (:func:`_env_flags`).
 
         The session's marker (``NEMO_GYM_PTY_SESSION=<session id>``) goes last among the ``--env`` flags so no
         spec env can override it: it is how the recorded pid is known to be this session's process.
@@ -759,8 +900,8 @@ class DockerProvider:
         if spec.env:
             merged_env.update(spec.env)
         merged_env.pop(docker_pty.SESSION_ENV, None)
-        for key, value in merged_env.items():
-            flags += ["--env", f"{key}={value}"]
+        env_flags, env_values = _env_flags(merged_env)
+        flags += env_flags
         flags += ["--env", docker_pty.session_marker(session_id)]
         if spec.user is not None:
             flags += ["--user", _user_flag(spec.user)]
@@ -768,7 +909,7 @@ class DockerProvider:
         launcher = docker_pty.launcher_argv(
             inst.shell, docker_pty.pid_file_for(session_id), docker_pty.fallback_pid_file_for(session_id), spec.command
         )
-        return [self._binary, "exec", *flags, inst.name, *launcher]
+        return [self._binary, "exec", *flags, inst.name, *launcher], env_values
 
     async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
         """Open an interactive terminal in the container: one ``docker exec -it`` client under a host pty.
@@ -818,8 +959,10 @@ class DockerProvider:
         sessions.difference_update(stale_sessions)
         for stale in stale_sessions:
             await self._release_pty_session(stale, name, abandon=False)
+        pty_argv, env_values = self._pty_argv(handle, spec, session_id)
         session = await self._spawn_pty(
-            self._pty_argv(handle, spec, session_id),
+            pty_argv,
+            env=self._cli_environment(env_values),
             use_pty=spec.pty,
             rows=spec.rows,
             cols=spec.cols,
@@ -894,7 +1037,7 @@ class DockerProvider:
                 [self._binary, "inspect", "-f", "{{.State.Status}}", inst.name],
                 timeout_s=self._exec_config.default_timeout_s,
             )
-        except TimeoutError:
+        except (TimeoutError, DockerClientEnvError):
             return SandboxStatus.UNKNOWN
         if code != 0:
             return SandboxStatus.STOPPED if _is_missing_container(err) else SandboxStatus.UNKNOWN

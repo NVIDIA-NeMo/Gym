@@ -25,7 +25,7 @@ import fnmatch
 import json
 import logging
 import shlex
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -205,6 +205,7 @@ def prepare_target(
     compose_overlay: HarborComposeOverlay | None = None,
     rows_name: str = "tasks.jsonl",
     registry_credentials: Mapping[str, tuple[str, str]] | None = None,
+    docker_client_env: Callable[[], Mapping[str, str] | None] | None = None,
     agent: str | None = None,
     allow_unsupported_pairing: bool = False,
 ) -> PreparedTaskset:
@@ -358,7 +359,9 @@ def prepare_target(
         print(f"Base image configurations recorded in {images}")
     unbuilt: dict[str, str] = {}
     if folder.is_dir():
-        unbuilt = _build_dockerfiles(folder, build, select=None if is_task_folder(folder) else selected)
+        unbuilt = _build_dockerfiles(
+            folder, build, select=None if is_task_folder(folder) else selected, client_env=docker_client_env
+        )
     output_dir = Path(output_root) / taskset
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: dict[str, HarborTaskError] = {}
