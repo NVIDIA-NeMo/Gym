@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml
+environment_server_routes:
+  model_identity:benchmark: nemo_user_sim_environment
+user_model_base_url: ???
+user_model_api_key: ???
+user_model_name: ???
+# null removes the inherited fallback; configure the extractor via support_model_* settings.
+support_model_base_url: null
+support_model_api_key: null
+support_model_name: null
+user_model_uses_reasoning_parser: true
+support_model_uses_reasoning_parser: true
+policy_uses_reasoning_parser: true
+nemo_user_sim_environment:
+  environment_servers:
+    nemo_user_sim:
+      entrypoint: model_identity.py
+      resources_server:
+        type: resources_servers
+        name: model_identity_resources
+nemo_user_sim_resources: null
+model_identity_resources:
+  resources_servers:
+    model_identity:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Model identity verification using native UserSim probes.
+      probe_scorer_model:
+        type: responses_api_models
+        name: support_model
+      datasets:
+      - name: model_identity
+        type: benchmark
+        jsonl_fpath: benchmarks/model_identity/data/benchmark.jsonl
+        prepare_script: benchmarks/model_identity/prepare.py
+        taskset: model_identity:benchmark
+        num_repeats: 1
+        license: NVIDIA Evaluation Dataset License Agreement
+      # Five rows (stock UserSim openings, synthetic persona) for the server's CI data check.
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/model_identity/data/example.jsonl
+        taskset: model_identity:benchmark
+        num_repeats: 1
+        license: Apache 2.0
+nemo_user_sim_assistant:
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        type: resources_servers
+        name: model_identity_resources
+nemo_user_sim_user:
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        type: resources_servers
+        name: model_identity_resources

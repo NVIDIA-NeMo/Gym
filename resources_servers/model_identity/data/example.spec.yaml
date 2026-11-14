@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: '1'
+extends: identity_disclosure
+bank_id: model_identity
+bank_version: 1.0.0
+placeholder: true
+expected_identities:
+- match: '*'
+  developer: nvidia
+  model_names:
+  - Nemotron
+  - ネモトロン
+  - 네모트론
+  - नेमोट्रॉन
