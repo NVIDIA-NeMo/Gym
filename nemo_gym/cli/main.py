@@ -1057,8 +1057,11 @@ def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
     print(f"Wrote {folder}")
     # Copy-paste commands: a root with a space in it was accepted above, so the path is shell-quoted here.
     quoted = shlex.quote(str(folder))
-    print(f"Next: gym dataset validate {quoted}  # the reference solution must score 1")
-    print(f"      gym eval run {quoted} --agent <harness> --model-type openai_model --model <model> --model-url <url>")
+    print(f"Next: gym dataset validate {quoted} --sandbox docker  # the reference solution must score 1")
+    print(
+        f"      gym eval run {quoted} --agent <harness> --sandbox docker "
+        "--model-type openai_model --model <model> --model-url <url> --model-api-key <key>"
+    )
 
 
 def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:

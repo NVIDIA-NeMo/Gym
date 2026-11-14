@@ -82,13 +82,12 @@ class TestDatasetInit:
         assert list((tmp_path / "my-dataset").iterdir()) == []
 
     @pytest.mark.parametrize("root", ["plain", "My Datasets"])
-    def test_cli_next_steps_quote_the_folder_the_shell_would_split(self, tmp_path, monkeypatch, capsys, root):
-        """`gym dataset init` accepts a root with a space in it, so the validate and eval commands it prints must
-        name that folder as one argument when pasted back; a plain path prints unquoted as before."""
+    def test_cli_next_steps_include_connection_options_and_quote_paths(self, tmp_path, monkeypatch, capsys, root):
+        """The printed commands include sandbox and model connection options and preserve paths with spaces."""
         import shlex
         import sys
 
-        from nemo_gym.cli.main import main
+        from nemo_gym.cli.main import build_parser, main
 
         (tmp_path / root).mkdir()
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "init", "my-dataset", "--root", str(tmp_path / root)])
@@ -98,10 +97,18 @@ class TestDatasetInit:
         validate_line, eval_line = (
             line for line in out.splitlines() if "gym dataset validate" in line or "gym eval run" in line
         )
-        assert shlex.split(validate_line.split("  #", 1)[0]) == ["Next:", "gym", "dataset", "validate", str(folder)]
-        assert shlex.split(eval_line)[:5] == ["gym", "eval", "run", str(folder), "--agent"]
+        parser = build_parser()
+        validate_args = parser.parse_args(shlex.split(validate_line.split("  #", 1)[0])[2:])
+        eval_args = parser.parse_args(shlex.split(eval_line)[1:])
+        assert validate_args.target == eval_args.target == str(folder)
+        assert validate_args.sandbox == eval_args.sandbox == "docker"
+        assert eval_args.agent == "<harness>"
+        assert eval_args.model_type == "openai_model"
+        assert eval_args.model == "<model>"
+        assert eval_args.model_url == "<url>"
+        assert eval_args.model_api_key == "<key>"
         if root == "plain":
-            assert f"Next: gym dataset validate {folder}  #" in out  # no quotes on a path that needs none
+            assert f"Next: gym dataset validate {folder} --sandbox" in out  # no quotes on a path that needs none
         else:
             assert f"'{folder}'" in validate_line and f"'{folder}'" in eval_line
 
