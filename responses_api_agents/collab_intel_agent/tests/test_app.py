@@ -29,6 +29,7 @@ from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from resources_servers.collab_intel.task_data import TaskData
 from responses_api_agents.collab_intel_agent import app as app_module
 from responses_api_agents.collab_intel_agent.app import CollabIntelAgent, CollabIntelRunRequest, split_reasoning
+from responses_api_agents.collab_intel_agent.boxed_exec import SandboxExecError
 
 
 DIMENSIONS = [f"d{i}" for i in range(8)]
@@ -132,7 +133,7 @@ def _agent_with_fake_cli(
     script.chmod(0o755)
     monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)  # no uv sync, no server
     agent = CollabIntelAgent.model_construct(config=SimpleNamespace(episode_timeout_s=timeout_s))
-    agent._python, agent._root = str(script), tmp_path
+    agent._python, agent._root, agent._boxes = str(script), tmp_path, None
     agent._env = lambda home, phase_key: {}
     return agent
 
@@ -234,7 +235,7 @@ def test_harness_env_is_an_allowlist(tmp_path, monkeypatch):
         name="a", judge_base_url="http://judge", judge_model="j", judge_extra={}, policy_model="p", policy_extra={}
     )
     agent = CollabIntelAgent.model_construct(config=config)
-    agent._tmp = tmp_path
+    agent._tmp, agent._boxes = tmp_path, None
     env = agent._env(tmp_path / "row", "k")
     assert "HF_TOKEN" not in env and env["PATH"] == "/usr/bin" and env["HOME"] == str(tmp_path / "row")
     assert {"CI_GYM_KEY", "HARNESS_OPENAI_COMPAT", "HARNESS_JUDGE_MODEL"} <= set(env)
@@ -351,3 +352,80 @@ def test_run_trajectory_keeps_only_evidence_that_exists(tmp_path, monkeypatch):
         ("solo", "failed", [])
     ]
     assert trajectory["turns"] == []
+
+
+def _argv_recorder(agent: CollabIntelAgent, tmp_path: Path) -> Path:
+    """Make the fake harness interpreter record its command line and exit without a transcript."""
+    argv_file = tmp_path / "argv.json"
+    Path(agent._python).write_text(
+        f"#!{sys.executable}\nimport json, sys\nopen({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\nsys.exit(1)\n"
+    )
+    return argv_file
+
+
+def test_the_harness_starts_through_boxed_cli_only_in_sandbox_mode(tmp_path, monkeypatch):
+    agent = _agent_with_fake_cli(tmp_path, None, 1, monkeypatch)
+    argv_file = _argv_recorder(agent, tmp_path)
+    asyncio.run(agent._run(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    assert json.loads(argv_file.read_text())[:2] == ["-m", "collab_intel.harness.cli"]
+    agent._boxes = object()
+    asyncio.run(agent._run(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    argv = json.loads(argv_file.read_text())
+    assert argv[0] == str(app_module.BOXED_CLI) and "-m" not in argv and argv[1] == str(tmp_path / "scenario")
+
+
+def test_the_sandbox_url_is_in_the_harness_env_only_in_sandbox_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "get_server_url", lambda name: "http://agent")
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    config = SimpleNamespace(
+        name="a", judge_base_url="http://judge", judge_model="j", judge_extra={}, policy_model="p", policy_extra={}
+    )
+    agent = CollabIntelAgent.model_construct(config=config)
+    agent._tmp, agent._boxes = tmp_path, None
+    assert "CI_EXEC_URL" not in agent._env(tmp_path / "row", "k")
+    agent._boxes = object()
+    assert agent._env(tmp_path / "row", "k")["CI_EXEC_URL"] == "http://agent/ci_exec/k/run"
+
+
+def test_each_phase_releases_its_sandbox(tmp_path, monkeypatch):
+    agent = _agent_with_fake_cli(tmp_path, None, 1, monkeypatch)
+    agent._response_ids, agent._boxes = {}, SimpleNamespace(release=AsyncMock())
+    asyncio.run(agent._phase(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    agent._boxes.release.assert_awaited_once()
+    assert isinstance(agent._boxes.release.await_args.args[0], str)
+
+
+def test_the_exec_route_runs_a_command_and_fails_closed(monkeypatch):
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    agent = CollabIntelAgent.model_construct(config=SimpleNamespace())
+    request = SimpleNamespace(path_params={"phase_key": "k"}, json=AsyncMock(return_value={"argv": []}))
+    agent._boxes = SimpleNamespace(run=AsyncMock(return_value={"rc": 0}))
+    assert asyncio.run(agent.exec_in_sandbox(request)) == {"rc": 0}
+    agent._boxes.run.assert_awaited_once_with("k", {"argv": []})
+    agent._boxes = SimpleNamespace(run=AsyncMock(side_effect=SandboxExecError("the sandbox has network egress")))
+    refused = asyncio.run(agent.exec_in_sandbox(request))
+    assert (refused.status_code, json.loads(refused.body)) == (502, {"error": "the sandbox has network egress"})
+    agent._boxes = None
+    assert asyncio.run(agent.exec_in_sandbox(request)).status_code == 404  # host mode has no sandbox to run in
+
+
+def test_sandbox_mode_is_the_default_and_builds_the_spec_from_the_config(monkeypatch):
+    fields = app_module.CollabIntelAgentConfig.model_fields
+    assert (fields["code_execution"].default, fields["sandbox_provider"].default) == ("sandbox", "sandbox")
+    with pytest.raises(ValidationError):
+        app_module.SandboxSpecConfig(unknown=1)
+    built = {}
+    monkeypatch.setattr(
+        app_module, "BoxedExec", lambda provider, spec, **kw: built.update(provider=provider, spec=spec, **kw)
+    )
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    spec = app_module.SandboxSpecConfig(
+        image="img:1", provider_options={"network_policy": {"defaultAction": "deny"}}, metadata={"k": "v"}
+    )
+    config = SimpleNamespace(name="ci", sandbox_provider={"opensandbox": {"connection": {}}}, sandbox_spec=spec)
+    CollabIntelAgent.model_construct(config=config)._start_boxes()
+    assert built["provider"] == {"opensandbox": {"connection": {}}}
+    assert (built["spec"].image, built["spec"].workdir) == ("img:1", "/tmp")
+    assert built["spec"].provider_options == {"network_policy": {"defaultAction": "deny"}}
+    assert built["require_no_egress"] is True
+    assert built["spec"].metadata == {"k": "v", "nemo_gym_server": "ci"}
