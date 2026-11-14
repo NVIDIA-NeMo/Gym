@@ -109,9 +109,17 @@ a missing final answer. Tests exercise the real converter and shared judge clien
 
 Each stage has `judge_max_retries + 1` attempts, each bounded by `judge_attempt_timeout_seconds` after
 admission to the `judge_endpoint_max_concurrency` semaphore; queue waiting does not consume the serving
-deadline. Transport errors, malformed responses and incomplete output retry within that budget with
-exponential backoff. Exhaustion raises `JudgeError`; Gym's verify wrapper returns reward zero and
+deadline. The server owns this budget: every attempt is one `call_judge(..., max_attempts=1)` HTTP request, so
+the shared client's own retries do not nest inside it. Transport failures (the `judge_failed` event
+`call_judge` raises), malformed responses and incomplete output all retry within that budget with exponential
+backoff. Exhaustion raises `JudgeError`; Gym's verify wrapper returns reward zero and
 `_ng_failure_class=judge_failed`, and no length bonus is added. Cancellation propagates without a retry.
+
+A row the verifier cannot score is never a 5xx (which would make the environment server replay the episode
+and spend another policy rollout): blank or missing `atomic_events.visual_events`, or a precision/F1 row
+without a nonempty `reference_caption`, returns `reward: 0.0` with `mask_sample: true`,
+`failure_kind: video_caption:unscorable_row` and a `failure_reason`, before any judge call. `task_data.py`
+rejects the same rows at data-validation time (`gym dataset validate`, the repo's row-drift test).
 
 ## Data
 
