@@ -72,10 +72,16 @@ agentic_turn_simulation_agent:
         type: example
         jsonl_fpath: resources_servers/agentic_turn_simulation/data/example.jsonl
 
+# Each row is one episode of the agent_arena Environment Server: it serves the turn's simulated tools to the agent and
+# scores the turn itself, with the resources server's settings above. agentic_turn_simulation_legacy_agent.yaml keeps
+# the deprecated legacy_agent relay.
 agentic_turn_simulation_environment_server:
   environment_servers:
-    legacy_agent:
+    agent_arena:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: agentic_turn_simulation_agent
+      resources_server:
+        type: resources_servers
+        name: agentic_turn_simulation_resources_server

@@ -23,9 +23,9 @@ from resources_servers.agentic_turn_simulation.app import (
     AgenticTurnSimulationResourcesServer,
     AgenticTurnSimulationResourcesServerConfig,
     AgenticTurnSimulationRunRequest,
-    JudgeSpec,
     SimulateToolCallRequest,
 )
+from resources_servers.agentic_turn_simulation.schemas import JudgeSpec
 from resources_servers.agentic_turn_simulation.workspace import FileToolSpec, FileToolWorkspace
 
 
