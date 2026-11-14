@@ -53,7 +53,9 @@ def expected_policy(project: Path, root: Path = ROOT) -> dict[str, list[str]]:
     local = exceptions.get(project.relative_to(root).as_posix(), {})
     result = {}
     for key in POLICY_KEYS:
-        values = {dependency_name(value): value for value in baseline.get(key, [])}
+        # Standalone evaluators inherit security floors, not Gym's runtime exclusions/overrides.
+        inherited = baseline.get(key, []) if not local.get("standalone") or key == "constraint-dependencies" else []
+        values = {dependency_name(value): value for value in inherited}
         values.update({dependency_name(value): value for value in local.get(key, [])})
         if key == "exclude-dependencies":
             for name in local.get("include-dependencies", []):
@@ -66,6 +68,13 @@ def uses_gym(project: Path) -> bool:
     """Identify projects that must inherit Gym's resolver policy."""
     metadata = tomllib.loads((project / "pyproject.toml").read_text())
     return any(dependency_name(value) == "nemo-gym" for value in metadata.get("project", {}).get("dependencies", []))
+
+
+def uses_shared_policy(project: Path, root: Path = ROOT) -> bool:
+    """Include explicitly registered standalone scorers in dependency policy checks."""
+    exceptions = json.loads((root / "scripts/component-lock-policy.json").read_text())
+    local = exceptions.get(project.relative_to(root).as_posix(), {})
+    return uses_gym(project) or local.get("standalone") is True
 
 
 def synchronize_policy(project: Path) -> None:
@@ -82,8 +91,9 @@ def synchronize_policy(project: Path) -> None:
     root_uv = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"]
     uv["required-version"] = root_uv["required-version"]
     sources = uv.setdefault("sources", {})
-    for name, source in root_uv.get("sources", {}).items():
-        sources[name] = source
+    if uses_gym(project):
+        for name, source in root_uv.get("sources", {}).items():
+            sources[name] = source
     path.write_text(tomlkit.dumps(metadata))
 
 
@@ -91,13 +101,15 @@ def check_project(project: Path, *, update: bool) -> tuple[Path, int, str]:
     """Run uv for one project and retain every failure's diagnostics."""
     if not (project / "pyproject.toml").is_file():
         return project, 1, "Missing pyproject.toml"
-    if project != ROOT and uses_gym(project):
+    if project != ROOT and uses_shared_policy(project):
         if update:
             synchronize_policy(project)
         else:
             actual = tomllib.loads((project / "pyproject.toml").read_text()).get("tool", {}).get("uv", {})
             root_sources = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"].get("sources", {})
-            source_drift = any(actual.get("sources", {}).get(name) != value for name, value in root_sources.items())
+            source_drift = uses_gym(project) and any(
+                actual.get("sources", {}).get(name) != value for name, value in root_sources.items()
+            )
             required = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"]["required-version"]
             if (
                 actual.get("required-version") != required

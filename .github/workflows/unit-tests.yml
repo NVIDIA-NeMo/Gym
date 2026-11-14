@@ -289,7 +289,7 @@ jobs:
   test-result:
     name: Test
     timeout-minutes: 45
-    needs: [detect, test, sandbox-tests, core-coverage, changed-server-tests]
+    needs: [detect, test, sandbox-tests, core-coverage, changed-server-tests, longmt-scoring]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -302,8 +302,15 @@ jobs:
           SANDBOX_RESULT: ${{ needs.sandbox-tests.result }}
           COVERAGE_RESULT: ${{ needs.core-coverage.result }}
           SERVERS_RESULT: ${{ needs.changed-server-tests.result }}
+          RUN_LONGMT: ${{ needs.detect.outputs.run_full == 'true' || contains(needs.detect.outputs.server_all_changed_files, 'resources_servers/longmt_eval/') }}
+          LONGMT_RESULT: ${{ needs.longmt-scoring.result }}
         run: |
           [[ "$DETECT_RESULT" == success ]] || exit 1
+          if [[ "$RUN_LONGMT" == true ]]; then
+            [[ "$LONGMT_RESULT" == success ]] || exit 1
+          else
+            [[ "$LONGMT_RESULT" == skipped ]] || exit 1
+          fi
           if [[ "$RUN_FULL" == true || "$RUN_SERVERS" == true ]]; then
             [[ "$CORE_RESULT" == success && "$SANDBOX_RESULT" == success && "$COVERAGE_RESULT" == success ]] || exit 1
           fi
@@ -421,3 +428,31 @@ jobs:
           fi
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
+
+  longmt-scoring:
+    name: LongMT Python 3.12 scoring tests
+    needs: detect
+    if: needs.detect.outputs.run_full == 'true' || contains(needs.detect.outputs.server_all_changed_files, 'resources_servers/longmt_eval/')
+    runs-on: nemo-ci-aws-cpu-4-16
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+      - name: Install system test dependencies
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh
+      - name: Test scoring dependencies on Python 3.12
+        env:
+          PYTHONPATH: ${{ github.workspace }}/resources_servers/longmt_eval
+          LONGMT_SCORER_TESTS_REQUIRED: '1'
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run --locked --project resources_servers/longmt_eval/scoring --managed-python --python 3.12 --with pytest==9.0.3 \
+            python -m pytest -c /dev/null -p no:cacheprovider --confcutdir=resources_servers/longmt_eval/tests \
+            resources_servers/longmt_eval/tests/test_scorer.py -v -rs
