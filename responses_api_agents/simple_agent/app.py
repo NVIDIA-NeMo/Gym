@@ -19,6 +19,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic, perf_counter, time
 from typing import Any, ClassVar
 from uuid import uuid4
@@ -382,7 +383,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
 
     def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
@@ -898,7 +901,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     trajectory,
                     model_server_cookies,
                     resources_server_cookies,
-                ) = await self._create_episode(
+                ) = await (self._create_episode if state is None else partial(self._create_session_episode, state))(
                     body,
                     model_url_path=self.url_path_for_request("/v1/responses", request),
                     resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
@@ -964,6 +967,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     else None
                 )
         return model_response
+
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        """Create a session activation's episode. A subclass whose task context lives in its session state, such as
+        a document to put in the request, overrides this; the agent loop stays ``_create_episode``'s."""
+        return await self._create_episode(body, **kwargs)
 
     @staticmethod
     def _saved_reply(loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str) -> JSONResponse:

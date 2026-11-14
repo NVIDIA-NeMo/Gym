@@ -88,12 +88,15 @@ from nemo_gym.data.tasks.harbor.materialize import (
 )
 from nemo_gym.data.tasks.harbor.prepare import (
     DEFAULT_OUTPUT_ROOT,
+    HARBOR_TARGET_KEY,
     ORACLE_AGENT,
     AgentSelection,
+    HarborBenchmark,
     PreparedTaskset,
     _has_override,
     _listed,
     build_run,
+    harbor_benchmark,
     prepare_target,
     resolve_agent,
     resolve_sandbox_config,
@@ -254,6 +257,11 @@ def prepare_benchmark() -> None:
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
+    if global_config_dict.get(HARBOR_TARGET_KEY) is not None:
+        raise ConfigError(
+            f"This config runs the Harbor target {global_config_dict[HARBOR_TARGET_KEY]!r}; select it with "
+            "`--benchmark <name>`, which prepares the target's tasks."
+        )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
     prepare_datasets(datasets_to_prepare(global_config_dict), prepare_benchmark_config)
 
@@ -286,6 +294,11 @@ def plan_benchmark() -> None:
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         )
     )
+    if global_config_dict.get(HARBOR_TARGET_KEY) is not None:
+        raise ConfigError(
+            f"This benchmark runs the Harbor target {global_config_dict[HARBOR_TARGET_KEY]!r}, whose tasks are "
+            "listed by `gym eval prepare --benchmark` (or `gym dataset validate`); `gym eval plan` does not plan it."
+        )
     plan_config = PlanBenchmarkConfig.model_validate(global_config_dict)
     if plan_config.print_plan_schema:
         print(eval_plan_json_schema(), end="")
@@ -1577,62 +1590,35 @@ def _patterns(args: argparse.Namespace, name: str) -> list[str]:
 
 
 @exit_cleanly_on_config_error
-def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
-    """Entry point for ``gym eval run <target> ...``."""
+def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: HarborBenchmark | None = None) -> None:
+    """Entry point for ``gym eval run <target> ...``, and for ``gym eval run --benchmark`` when the benchmark's
+    config names a Harbor target (``benchmark``, :func:`harbor_benchmark_from_args`)."""
     from nemo_gym.cli.main import _merge_config_paths, dispatch
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     if getattr(args, "no_serve", False):
         args._parser.error("A Harbor target starts its own servers; drop --no-serve")
-    agent_name = getattr(args, "agent", None)
-    if not agent_name:
-        args._parser.error("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
     sandbox = getattr(args, "sandbox", None)
+    preparation_overrides = None
     # Resolve selectors before preparation can download a registry dataset.
     try:
-        agent = resolve_agent(agent_name)
+        if benchmark is not None:
+            agent, overrides, preparation_overrides = _benchmark_agent(args, overrides, benchmark)
+        else:
+            agent_name = getattr(args, "agent", None)
+            if not agent_name:
+                args._parser.error("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
+            agent = resolve_agent(agent_name)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
-    except (ValueError, OSError, yaml.YAMLError) as exc:
+    except (ValueError, OSError, yaml.YAMLError, ConfigError) as exc:
         args._parser.error(str(exc))
     if agent.impl_name == ORACLE_AGENT:
         # The oracle runs the reference solution, not a model: its run is `gym dataset validate`, whose results
         # live under results/harbor/validation/ where no model run, resumed or not, can pick them up as its own.
-        validate_target(args, overrides, agent=agent)
+        validate_target(args, overrides, agent=agent, preparation_overrides=preparation_overrides)
         return
-    try:
-        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
-        # does not exist yet.
-        build = build_options_from_overrides(overrides)
-        prepared = prepare_target(
-            args.target,
-            exclude=_patterns(args, "exclude_tasks"),
-            only=_patterns(args, "only_tasks"),
-            build=build,
-            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
-            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
-            compose_platform=compose_platform_from_overrides(overrides),
-            volume_sources=volume_sources_from_overrides(overrides, sandbox),
-            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
-            shared_storage=shared_storage_from_overrides(overrides, sandbox),
-            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
-            compose_overlay=compose_overlay_from_overrides(overrides),
-            rows_name=_rows_name(agent),
-            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
-            agent=agent.impl_name,
-            allow_unsupported_pairing=pairing_override_from_overrides(overrides),
-        )
-    except (
-        HarborTaskError,
-        HubError,
-        BuildError,
-        ImageConfigError,
-        ManifestError,
-        ConfigError,
-        ValueError,
-        OSError,
-    ) as exc:
-        args._parser.error(str(exc))
+    prepared = _prepare_for_agent(args, preparation_overrides or overrides, agent, sandbox)
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
             f"{len(prepared.skipped)} task(s) could not load (see {prepared.output_dir / 'skipped.json'}):"
@@ -1743,9 +1729,175 @@ def _write_summary(
     print(f"Run summary written to {path}")
 
 
+def _prepare_for_agent(
+    args: argparse.Namespace, overrides: list[str], agent: AgentSelection, sandbox: str | None
+) -> PreparedTaskset:
+    """Fetch (for hub references) and load ``args.target`` and write its rows for ``agent``, as a run prepares them."""
+    try:
+        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
+        # does not exist yet.
+        build = build_options_from_overrides(overrides)
+        prepared = prepare_target(
+            args.target,
+            exclude=_patterns(args, "exclude_tasks"),
+            only=_patterns(args, "only_tasks"),
+            build=build,
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
+            volume_sources=volume_sources_from_overrides(overrides, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
+            shared_storage=shared_storage_from_overrides(overrides, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            compose_overlay=compose_overlay_from_overrides(overrides),
+            rows_name=_rows_name(agent),
+            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
+            agent=agent.impl_name,
+            allow_unsupported_pairing=pairing_override_from_overrides(overrides),
+        )
+    except (
+        HarborTaskError,
+        HubError,
+        BuildError,
+        ImageConfigError,
+        ManifestError,
+        ConfigError,
+        ValueError,
+        OSError,
+    ) as exc:
+        args._parser.error(str(exc))
+    return prepared
+
+
 def _rows_name(agent: AgentSelection) -> str:
     """The rows file of one agent's run on a taskset: ``tasks_<agent>.jsonl`` next to ``run_config_<agent>.yaml``."""
     return f"tasks_{agent.instance_name}.jsonl"
+
+
+def harbor_benchmark_from_args(args: argparse.Namespace) -> HarborBenchmark | None:
+    """The Harbor-backed benchmark that ``--benchmark`` selects (:func:`~nemo_gym.data.tasks.harbor.prepare.harbor_benchmark`),
+    or ``None`` when every selected benchmark composes its own servers.
+
+    A Harbor-backed benchmark runs alone: its run config binds one taskset to one harness, so combining it with
+    another benchmark is refused rather than running only one of them.
+    """
+    from nemo_gym.environment.assets import asset_config_path
+
+    names = getattr(args, "benchmark", None) or []
+    found = [
+        (name, benchmark)
+        for name in names
+        if (benchmark := harbor_benchmark(asset_config_path("benchmark", name))) is not None
+    ]
+    if not found:
+        return None
+    if len(names) > 1:
+        raise ValueError(
+            f"`--benchmark {found[0][0]}` runs the Harbor target {found[0][1].target!r}; select it on its own"
+        )
+    return found[0][1]
+
+
+def _benchmark_agent(
+    args: argparse.Namespace, overrides: list[str], benchmark: HarborBenchmark
+) -> tuple[AgentSelection, list[str], list[str]]:
+    """The harness a Harbor-backed benchmark runs, the collection overrides without the configs the CLI loaded to
+    choose it, and the overrides preparation reads.
+
+    By default the harness is the benchmark config's own agent instance: ``build_run`` loads the config for the run,
+    so its harness settings apply. ``--agent-type NAME[/FLAVOR]`` runs that harness's shipped config instead,
+    without the benchmark's harness settings but with its other settings (``benchmark_settings``, such as the
+    episode bound and the keys they interpolate); the dataset's ``allowed_agents`` still decides at prepare whether
+    it may run the tasks. ``--agent`` names the harness of a task TARGET and is refused, so it never silently loses
+    to the benchmark's. Sets ``args.target`` to the benchmark's target, which the run prepares and reports.
+
+    Preparation reads the ``builds:``, sandbox, Compose overlay and pairing settings before the run config exists,
+    so its overrides load the benchmark config first, below every ``--config`` overlay and command-line override;
+    it starts no server, so the benchmark's agent instance there is inert.
+    """
+    from nemo_gym.environment.assets import asset_config_path
+
+    if getattr(args, "agent", None):
+        raise ValueError(
+            f"`--benchmark` runs the Harbor target {benchmark.target!r} with the benchmark's harness; "
+            "pass `--agent-type <harness>` to run another one"
+        )
+    args.target = benchmark.target
+    loaded = {benchmark.config_path}
+    agent_type = getattr(args, "agent_type", None)
+    if agent_type:
+        agent = replace(resolve_agent(agent_type), benchmark_settings=benchmark.agent.benchmark_settings)
+        loaded.add(Path(asset_config_path("agent-type", agent_type)).resolve())
+        overrides = [token for token in overrides if not token.startswith("+_selected_langgraph_config=")]
+    else:
+        agent = benchmark.agent
+    collection = _without_config_paths(overrides, loaded)
+    return agent, collection, _with_config_path_first(collection, benchmark.config_path)
+
+
+def _without_config_paths(overrides: list[str], paths: set[Path]) -> list[str]:
+    """``overrides`` with ``paths`` taken out of its ``+config_paths=[...]`` tokens (and a token left empty dropped)."""
+    prefix = "+config_paths=["
+    kept: list[str] = []
+    for token in overrides:
+        if not (token.startswith(prefix) and token.endswith("]")):
+            kept.append(token)
+            continue
+        entries = [entry for entry in token[len(prefix) : -1].split(",") if entry]
+        rest = [entry for entry in entries if Path(entry.strip("\"'")).resolve() not in paths]
+        if rest:
+            kept.append(f"{prefix}{','.join(rest)}]")
+    return kept
+
+
+def harbor_config_from_overrides(overrides: list[str]) -> tuple[Path, str] | None:
+    """The first file a ``+config_paths=[...]`` token names that sets ``harbor_target`` itself, with its target.
+
+    Such a config (``--config <harbor-backed preset>``) runs only through ``--benchmark``, which composes the Harbor
+    environment server; plain collection would start its bare agent. Files that cannot be read are left to the
+    parser to report.
+    """
+    prefix = "+config_paths="
+    for token in overrides:
+        if not token.startswith(prefix):
+            continue
+        try:
+            entries = yaml.safe_load(token[len(prefix) :])
+        except yaml.YAMLError:
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            path = Path(str(entry))
+            try:
+                config = yaml.safe_load(path.read_text()) if path.is_file() else None
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(config, dict) and config.get(HARBOR_TARGET_KEY) is not None:
+                return path, str(config[HARBOR_TARGET_KEY])
+    return None
+
+
+def _with_config_path_first(overrides: list[str], path: Path) -> list[str]:
+    """``overrides`` with ``path`` loaded before every file their ``+config_paths=[...]`` token names."""
+    prefix = "+config_paths=["
+    entry = json.dumps(str(path), ensure_ascii=False)
+    for index, token in enumerate(overrides):
+        if token.startswith(prefix) and token.endswith("]"):
+            return [*overrides[:index], f"{prefix}{entry},{token[len(prefix) :]}", *overrides[index + 1 :]]
+    return [f"{prefix}{entry}]", *overrides]
+
+
+@exit_cleanly_on_config_error
+def prepare_harbor_benchmark(args: argparse.Namespace, overrides: list[str], benchmark: HarborBenchmark) -> None:
+    """``gym eval prepare --benchmark`` for a Harbor-backed benchmark: fetch its target when that is a hub reference
+    and write the rows its harness runs, as ``gym eval run --benchmark`` prepares them before starting servers."""
+    try:
+        agent, _, preparation_overrides = _benchmark_agent(args, overrides, benchmark)
+    except (ValueError, OSError, yaml.YAMLError, ConfigError) as exc:
+        args._parser.error(str(exc))
+    prepared = _prepare_for_agent(args, preparation_overrides, agent, sandbox=None)
+    print(f"Prepared {len(prepared.tasks)} task(s) of {benchmark.target} at {prepared.rows_path}")
+    if prepared.skipped:
+        print(f"{len(prepared.skipped)} task(s) could not load (see {prepared.output_dir / 'skipped.json'})")
 
 
 def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "RolloutCollectionConfig":
@@ -1834,11 +1986,18 @@ def _resume_conflict(materialized: Path, expected: list[dict[str, object]]) -> s
 
 
 @exit_cleanly_on_config_error
-def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: AgentSelection | None = None) -> None:
+def validate_target(
+    args: argparse.Namespace,
+    overrides: list[str],
+    *,
+    agent: AgentSelection | None = None,
+    preparation_overrides: list[str] | None = None,
+) -> None:
     """Entry point for ``gym dataset validate <target>``: run every task's reference solution and score it.
 
     ``gym eval run <target> --agent harbor_oracle`` lands here too, with its ``agent`` selection, so the oracle's
-    results never share a folder with a model's.
+    results never share a folder with a model's; a Harbor-backed benchmark's ``--agent-type harbor_oracle_agent``
+    also passes the ``preparation_overrides`` that load its settings (see ``_benchmark_agent``).
     """
     from nemo_gym.cli.main import _merge_config_paths, dispatch
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
@@ -1849,6 +2008,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sandbox = getattr(args, "sandbox", None)
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
+        preparation = preparation_overrides if preparation_overrides is not None else overrides
         prepared = prepare_target(
             args.target,
             output_root=DEFAULT_OUTPUT_ROOT / "validation",
@@ -1857,17 +2017,17 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
             render_root=DEFAULT_OUTPUT_ROOT,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
-            build=build_options_from_overrides(overrides),
-            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
-            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
-            compose_platform=compose_platform_from_overrides(overrides),
-            volume_sources=volume_sources_from_overrides(overrides, sandbox),
-            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
-            shared_storage=shared_storage_from_overrides(overrides, sandbox),
-            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
-            compose_overlay=compose_overlay_from_overrides(overrides),
+            build=build_options_from_overrides(preparation),
+            sandbox_provider=sandbox_provider_from_overrides(preparation, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(preparation, sandbox),
+            compose_platform=compose_platform_from_overrides(preparation),
+            volume_sources=volume_sources_from_overrides(preparation, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(preparation, sandbox),
+            shared_storage=shared_storage_from_overrides(preparation, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(preparation, sandbox),
+            compose_overlay=compose_overlay_from_overrides(preparation),
             rows_name=_rows_name(agent),
-            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
+            registry_credentials=registry_credentials_from_overrides(preparation, sandbox),
         )
     except (
         HarborTaskError,

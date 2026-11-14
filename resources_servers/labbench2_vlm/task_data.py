@@ -33,6 +33,11 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify", "metrics"], "legacy_location": "verifier_metadata"},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Task id for planning: the source item uuid with the tag suffix, same as id.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     id: Optional[str] = Field(
         default=None,
         description="Source item uuid (sometimes suffixed, e.g. '-img'); unused by verify().",

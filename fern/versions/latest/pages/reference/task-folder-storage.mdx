@@ -77,6 +77,7 @@ other's entries.
 | --- | --- |
 | `tasks_<agent>.jsonl` | The rows of a run with one harness. Each row carries `_ng_digest`, `_ng_dataset_digest` and `task_source`. |
 | `run_config_<agent>.yaml` | The generated run config: the task mapping, the dataset digests and the generated server instances. |
+| `benchmark_settings_<agent>.yaml` | For a benchmark config that names a Harbor target, its settings other than its agent instance; the run loads it after the server's and the provider's configs. |
 | `skipped.json` | Task ID to reason, for every selected task that did not load or build, or whose Compose file was refused. |
 | `images.json` | Every distinct image a run of the prepared tasks starts, for pre-pulling. |
 | `rendered/` | Rendered task folders of a parameterized dataset. |

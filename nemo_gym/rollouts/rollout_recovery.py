@@ -874,6 +874,37 @@ def _without_runtime_options(value: Any) -> Any:
     return result
 
 
+def _is_nested_interpolation(text: str, start: int) -> bool:
+    """Whether the match at ``start`` sits inside an unclosed ``${`` interpolation.
+
+    A reference nested in another interpolation (an ``oc.select`` default, a URL
+    template) must stay valid OmegaConf grammar when a marker replaces it.
+    """
+    depth = 0
+    index = 0
+    while index < start:
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+        elif text[index] == "}" and depth:
+            depth -= 1
+            index += 1
+        else:
+            index += 1
+    return depth > 0
+
+
+def _grammar_safe_marker(marker: str, match: re.Match[str]) -> str:
+    """``marker`` as-is at the top level, single-quoted when nested in an interpolation.
+
+    A bare ``<runtime:x>`` / ``<redacted>`` marker is a plain string on its own, but breaks
+    OmegaConf's grammar inside another ``${...}`` (``token recognition error at: '<'``).
+    Quoting makes the surrounding resolver read it as a string literal that resolves to the
+    same text. The top-level form is byte-identical, so already-persisted identities are unchanged.
+    """
+    return f"'{marker}'" if _is_nested_interpolation(match.string, match.start()) else marker
+
+
 def _normalize_runtime_references(value: Any) -> Any:
     """Keep recognized connection references stable wherever clients nest them.
 
@@ -892,7 +923,7 @@ def _normalize_runtime_references(value: Any) -> Any:
             operational = reference in _SERVER_RUNTIME_OPTIONS or (
                 len(parts) == 4 and parts[1] in _SERVER_KINDS and parts[3] in _SERVER_RUNTIME_OPTIONS
             )
-            return f"<runtime:{reference}>" if operational else match[0]
+            return _grammar_safe_marker(f"<runtime:{reference}>", match) if operational else match[0]
 
         return re.sub(r"\$\{([^{}]+)\}", normalize, value)
     return value
@@ -944,8 +975,12 @@ def _credential_safe(value: Any, *, secret: bool = False) -> Any:
         return _REDACTED
     if not isinstance(value, str):
         return value
-    value = _ENV_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1]) else m[0], value)
-    value = _CONFIG_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1].split(".")[-1]) else m[0], value)
+    value = _ENV_REFERENCE.sub(
+        lambda m: _grammar_safe_marker(_REDACTED, m) if _is_credential_name(m[1]) else m[0], value
+    )
+    value = _CONFIG_REFERENCE.sub(
+        lambda m: _grammar_safe_marker(_REDACTED, m) if _is_credential_name(m[1].split(".")[-1]) else m[0], value
+    )
     assignment = _ASSIGNMENT.match(value)
     if assignment and _is_credential_name(assignment[1]):
         return f"{assignment[1]}={_REDACTED}"
