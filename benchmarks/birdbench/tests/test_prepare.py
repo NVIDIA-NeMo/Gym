@@ -103,7 +103,7 @@ class TestPrepareDialect:
 
     def test_unsupported_dialect_raises(self, prepared):
         with pytest.raises(ValueError, match="Unsupported dialect"):
-            prepared([_entry()], dialect="postgres")
+            prepared([_entry()], dialect="mysql")
 
     def test_each_dialect_writes_its_own_file_named_by_dialect(self, prepared, tmp_path):
         prepared([_entry()])

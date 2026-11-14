@@ -1,0 +1,57 @@
+# Prompt used for text-to-SQL, PostgreSQL dialect. Same as benchmarks/birdbench/prompts/default_spark.yaml except for the
+# engine and one sentence: PostgreSQL folds unquoted names to lower case, so the prompt asks for every name double-quoted
+# exactly as shown (table names keep BIRD's case; column names are loaded in lower case).
+
+### Code provenance: part of this prompt is adapted from OmniSQL (RUCKBReasoning/OmniSQL), the `input_prompt_template` in
+### train_and_evaluate/process_dataset.py at commit a66d732010c89fac4353488d1c59e0b06f92b742:
+### https://github.com/RUCKBReasoning/OmniSQL/blob/a66d732010c89fac4353488d1c59e0b06f92b742/train_and_evaluate/process_dataset.py#L164
+### License: Apache-2.0. The OmniSQL repository has no LICENSE file; its maintainers state the code is Apache-2.0 in
+### https://github.com/RUCKBReasoning/OmniSQL/issues/25#issuecomment-2820187402
+
+system: You are a data science expert. Below, you are provided with a database schema and a natural
+        language question. Your task is to understand the schema and generate a valid SQL query to answer the question.
+
+user: |-
+
+  ### Database Engine:
+  PostgreSQL
+
+  ### Database Schema:
+  The database schema below is organized into two sections, "#### Tables" and "#### Foreign key".
+
+  The "#### Tables" section lists every table in the database as a list, where each table is followed by a list of its columns. Each table is
+  shown by its schema-qualified name in double quotes, e.g. "schema_name"."table_name". Identifiers are case-sensitive: write every
+  table and column name in double quotes exactly as shown. Each column entry has the structure:
+
+  "column_name":
+    data_type: data_type
+    description: column description
+    values:
+    - value1
+    - value2
+
+  where we have the column name followed by data type (e.g., TEXT), a free-form description about the column and its value, and a list of some values
+  from the given column. If the column is (part of) the table's primary key, "(primary key)" is appended to its data type, e.g. "TEXT (primary key)".
+
+  The "#### Foreign key" section lists foreign key relationships between one table's column and another table's column. E.g.,
+  "schema_name"."table1"."column1" = "schema_name"."table2"."column2" means the column 1 of table 1 has a foreign key relationship to column 2 of table 2.
+
+  {sql_context}
+
+  ### Question:
+  {question}
+
+  ### Instructions:
+  - Make sure you only output the information that is asked in the question. If the question asks for a specific column, make sure to only include that column in the SELECT clause, nothing more.
+  - The generated query should return all of the information asked in the question without any missing or extra information.
+  - Before generating the final SQL query, please think through the steps of how to write the query.
+
+  ### Output Format:
+  In your answer, please enclose the generated SQL query in a code block:
+  ```sql
+  -- Your SQL query
+  ```
+
+  Only put a single SQL query inside a code block. You can, however, generate many SQL code during your reasoning. We will only use the final one.
+
+  Take a deep breath and think step by step to find the correct SQL query.

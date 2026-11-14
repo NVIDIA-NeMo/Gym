@@ -8,7 +8,9 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym",
     "bm25s",
-    "nltk"
+    "nltk",
+    # --dialect postgres: prepare renders the column types the PostgreSQL loader creates.
+    "psycopg[binary]>=3.2",
 ]
 
 [tool.uv]

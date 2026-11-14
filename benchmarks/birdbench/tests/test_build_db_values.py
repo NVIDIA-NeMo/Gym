@@ -396,7 +396,7 @@ class TestAllForeignKeysColumnRef:
 class TestDbHandleDialect:
     def test_unsupported_dialect_raises(self, cur, tmp_path):
         with pytest.raises(ValueError, match="Unsupported dialect"):
-            build_db_values.DbHandle(cur, description_dir=tmp_path, dialect="postgres")
+            build_db_values.DbHandle(cur, description_dir=tmp_path, dialect="mysql")
 
     def test_spark_requires_db_id(self, cur, tmp_path):
         with pytest.raises(ValueError, match="requires db_id"):
@@ -430,6 +430,45 @@ class TestDbHandleSpark:
         assert "  - `name`:\n      data_type: STRING" in context
         assert "  - `dirty`:\n      data_type: STRING" in context  # fell back to string when loaded
         assert "- `school`.`notes`.`student_id` = `school`.`students`.`student_id`" in context
+
+
+@pytest.mark.skipif(
+    not all(importlib.util.find_spec(m) for m in ("bm25s", "nltk", "pandas", "psycopg")),
+    reason="requires bm25s, nltk, pandas and psycopg",
+)
+class TestDbHandlePostgres:
+    def test_sql_context_is_qualified_double_quoted_and_uses_loaded_postgres_names_and_types(self, tmp_path):
+        db_path = tmp_path / "school" / "school.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE Students (StudentID INTEGER PRIMARY KEY, Name TEXT, `Free Meal (K-12)` REAL)")
+        conn.execute(
+            "CREATE TABLE notes (StudentID INTEGER, dirty INTEGER, FOREIGN KEY (StudentID) REFERENCES Students(StudentID))"
+        )
+        # No referenced column: SQLite's foreign_key_list reports None for a key on the parent's primary key.
+        conn.execute("CREATE TABLE grades (StudentID INTEGER REFERENCES Students)")
+        conn.execute("INSERT INTO Students VALUES (1, 'Alice', 1.5)")
+        conn.execute("INSERT INTO notes VALUES (1, 'oops')")  # non-numeric data in an INTEGER column
+        conn.commit()
+        (tmp_path / "Students.csv").write_text(
+            "original_column_name,column_name,column_description,value_description\nName,,the student's name,\n"
+        )
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="postgres", db_id="school")
+        context = handle.sql_context_for_question("What is Alice's meal count?")
+        conn.close()
+
+        assert '- "school"."Students":' in context and '- "school"."notes":' in context  # table names keep their case
+        # Column names are lower-cased, as loaded; the primary key, description and values still line up with them.
+        assert '  - "studentid":\n      data_type: BIGINT (primary key)' in context
+        assert (
+            '  - "name":\n      data_type: TEXT\n      description: the student\'s name.\n      values:\n      - Alice'
+            in context
+        )
+        assert '  - "free meal (k-12)":\n      data_type: DOUBLE PRECISION' in context
+        assert '  - "dirty":\n      data_type: TEXT' in context  # fell back to text when loaded
+        assert '- "school"."notes"."studentid" = "school"."Students"."studentid"' in context
+        assert '- "school"."grades"."studentid" = "school"."Students".' in context
 
 
 def test_collect_column_values_limit_per_column_caps_the_scan(tmp_path):

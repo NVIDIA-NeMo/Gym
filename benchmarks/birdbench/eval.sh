@@ -29,13 +29,14 @@
 #                                         config that defines `policy_model`, referenced by
 #                                         birdbench_bird_sql_simple_agent's model_server field --
 #                                         required, same as `gym env start --model-type ...`)
-#   --dialect sqlite|spark                Default: sqlite. The SQL dialect the model writes. Selects the prepared
+#   --dialect sqlite|spark|postgres       Default: sqlite. The SQL dialect the model writes. Selects the prepared
 #                                           file (data/birdbench_<dialect>_<split>.jsonl), the prompt
 #                                           (prompts/default_<dialect>.yaml), what
 #                                           `prepare` renders, and the engine the server runs the model's SQL on.
 #                                           `spark` needs a JDK (JAVA_HOME or `java` on PATH) and pyspark + sqlglot in
 #                                           resources_servers/bird_sql/.venv -- see the "Installation" section of
-#                                           README.md.
+#                                           README.md. `postgres` needs a PostgreSQL server: BIRD_PG_DSN is the
+#                                           grader's (read-only) DSN, and BIRD_PG_ADMIN_DSN, if set, loads the data.
 #   --split dev|train                      Default: dev. Which BIRD split's questions and databases to use. `train` is the
 #                                            ReViSQL-verified "uberset" of BIRD train (~9 GB download on first use; see
 #                                            README.md, "Dialects and splits") and is meant for generating training
@@ -152,8 +153,14 @@ case "${DIALECT}" in
             exit 1
         fi
         ;;
+    postgres)
+        if [[ -z "${BIRD_PG_DSN:-}" ]]; then
+            echo "--dialect postgres needs BIRD_PG_DSN (and BIRD_PG_ADMIN_DSN to load the data; see README.md)." >&2
+            exit 1
+        fi
+        ;;
     *)
-        echo "Unsupported --dialect '${DIALECT}'; expected sqlite or spark." >&2
+        echo "Unsupported --dialect '${DIALECT}'; expected sqlite, spark or postgres." >&2
         exit 1
         ;;
 esac
@@ -165,6 +172,12 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
         "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.split=${SPLIT}"
         "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:${DATASET_NAME},type:benchmark,jsonl_fpath:${PREPARED_JSONL},prompt_config:${PROMPT_CONFIG},prepare_script:benchmarks/birdbench/prepare.py,prepare_project:benchmarks/birdbench,num_repeats:1}]"
     )
+    if [[ "${DIALECT}" == "postgres" ]]; then
+        DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_dsn='${BIRD_PG_DSN}'")
+        if [[ -n "${BIRD_PG_ADMIN_DSN:-}" ]]; then
+            DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_admin_dsn='${BIRD_PG_ADMIN_DSN}'")
+        fi
+    fi
     if [[ "${SPLIT}" != "dev" ]]; then
         # Train has its own db_ids: keep its Spark warehouse apart from dev's.
         DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_${SPLIT}")
