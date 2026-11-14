@@ -43,6 +43,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymMessage,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputItem,
+    NeMoGymResponseMcpCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
@@ -464,7 +465,7 @@ def _live_reasoning_text(items: list[NeMoGymResponseReasoningItem], *, path: str
 
 
 def _live_arguments(
-    call: NeMoGymResponseFunctionToolCall, *, reasons: set[str]
+    call: NeMoGymResponseFunctionToolCall | NeMoGymResponseMcpCall, *, reasons: set[str]
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """The live profile's tool arguments: a string that is not a JSON object becomes ``{}``, kept verbatim.
 
@@ -1212,6 +1213,12 @@ def transcript_to_atif(
     partial``, ``reasons``); raises :class:`AtifExportError` only for what the mapping cannot represent at
     all (a copied assistant turn, a later system turn, a result for no call or a second
     ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
+
+    An ``mcp_call`` is a tool call the model endpoint handled itself, possibly without running it; a model
+    can call a built-in tool even when the request declares no tools. It exports as an agent step with that
+    one tool call, with a status other than ``completed`` kept in the call's ``extra``. The endpoint's
+    output, or else its error, becomes the step's observation, and an error is also kept in the result's
+    ``extra``; a call with neither stays in ``open_tool_calls``, since no one ran it.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")
@@ -1224,6 +1231,11 @@ def transcript_to_atif(
     steps: list[AtifStep] = []
     agent_steps: list[AtifStep] = []
     open_calls: dict[str, AtifStep] = {}
+    # Every endpoint call's ID, so a function call cannot reuse one; the unanswered ones stay open.
+    endpoint_call_ids: set[str] = set()
+    # Every function call ID exported, answered or not; an endpoint call may not reuse one.
+    function_call_ids: set[str] = set()
+    unanswered_endpoint_calls: list[str] = []
     pending_reasoning: list[NeMoGymResponseReasoningItem] = []
     reasons: set[str] = set()
     seen_agent_output = False
@@ -1289,8 +1301,12 @@ def transcript_to_atif(
                 call_path = f"transcript[{index - len(calls) + offset}]"
                 if not call.call_id.strip() or not call.name.strip():
                     raise _path_error(call_path, "function calls need a call_id and a name")
-                if call.call_id in open_calls or any(call.call_id == c.tool_call_id for c in atif_calls):
-                    raise _path_error(call_path, f"duplicate function call ID {call.call_id!r}")
+                if (
+                    call.call_id in open_calls
+                    or call.call_id in endpoint_call_ids
+                    or any(call.call_id == c.tool_call_id for c in atif_calls)
+                ):
+                    raise _path_error(call_path, f"duplicate tool call ID {call.call_id!r}")
                 arguments, argument_extra = _live_arguments(call, reasons=reasons)
                 extra = ({"source_item_id": call.id} if call.id is not None else {}) | (argument_extra or {})
                 atif_calls.append(
@@ -1310,9 +1326,55 @@ def transcript_to_atif(
             )
             for call in atif_calls:
                 open_calls[call.tool_call_id] = step
+                function_call_ids.add(call.tool_call_id)
             pending_reasoning = []
             steps.append(step)
             agent_steps.append(step)
+            continue
+        if isinstance(item, NeMoGymResponseMcpCall):
+            if not item.id or not item.id.strip() or not item.name.strip():
+                raise _path_error(path, "MCP calls need an id and a name")
+            if item.id in function_call_ids or item.id in endpoint_call_ids:
+                raise _path_error(path, f"duplicate tool call ID {item.id!r}")
+            endpoint_call_ids.add(item.id)
+            arguments, argument_extra = _live_arguments(item, reasons=reasons)
+            call_extra: dict[str, Any] = {"source_item_type": "mcp_call"}
+            if item.server_label:
+                call_extra["server_label"] = item.server_label
+            if item.status is not None and item.status != "completed":
+                call_extra["status"] = item.status
+            observation = None
+            if item.output is not None or item.error is not None:
+                observation = AtifObservation(
+                    results=[
+                        AtifObservationResult(
+                            source_call_id=item.id,
+                            content=item.output if item.output is not None else item.error,
+                            extra={"nemo_gym": {"error": item.error}} if item.error is not None else None,
+                        )
+                    ]
+                )
+            else:
+                unanswered_endpoint_calls.append(item.id)
+            step = AtifStep(
+                step_id=len(steps) + 1,
+                source="agent",
+                message="",
+                reasoning_content=_live_reasoning_text(pending_reasoning, path=f"{path}.reasoning", reasons=reasons),
+                tool_calls=[
+                    AtifToolCall(
+                        tool_call_id=item.id,
+                        function_name=item.name,
+                        arguments=arguments,
+                        extra={"nemo_gym": call_extra | (argument_extra or {})},
+                    )
+                ],
+                observation=observation,
+            )
+            pending_reasoning = []
+            steps.append(step)
+            agent_steps.append(step)
+            index += 1
             continue
         if isinstance(item, NeMoGymFunctionCallOutput):
             flush_reasoning(path)
@@ -1366,7 +1428,7 @@ def transcript_to_atif(
     conversion: dict[str, Any] = {
         "profile": TRANSCRIPT_EXPORT_PROFILE,
         "status": "partial" if reasons else "complete",
-        "open_tool_calls": sorted(open_calls),
+        "open_tool_calls": sorted([*open_calls, *unanswered_endpoint_calls]),
     }
     if reasons:
         conversion["reasons"] = sorted(reasons)
