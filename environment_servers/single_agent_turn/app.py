@@ -26,9 +26,16 @@ from nemo_gym.agents import (
     OutcomeAction,
     agent_outcome_policy,
     confirmed_policy_response_timeout,
+    failure_outcome_policy,
+    inherited_timeout_policy,
     verification_failure_fields,
 )
-from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
+from nemo_gym.client import (
+    DependencyOutcomePolicyConfig,
+    get_response_json,
+    raise_boundary_failure,
+    rollout_path_prefix,
+)
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -133,6 +140,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
+    dependency_outcome_policy: DependencyOutcomePolicyConfig = Field(default_factory=DependencyOutcomePolicyConfig)
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
     # Resources servers, such as a search server, whose MCP tools every episode grants the agent besides its own
@@ -333,6 +341,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception as error:
                     raise dependency_failure(
                         error,
+                        policy=self.config.dependency_outcome_policy,
                         stage="cleanup",
                         partial_response=agent_response,
                     ) from error
@@ -349,7 +358,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if stage == "verify":
             action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
             cause = self._agent_failure(agent_response)
-            if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
+            if (
+                agent_response.status == "failed"
+                or (cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT)
+            ) and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
                 extra = agent_response.model_extra or {}
                 report = extra.get("failure_report")
                 # A report that selects nothing (e.g. a provider 400 without a Gym failure) keeps the policy action.
@@ -359,7 +371,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 if cause is None and "failure_report" in extra and not unselected:
                     action = OutcomeAction.FAIL
                 elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
-                    action = self._timeout_action(action)
+                    action = self._timeout_action(
+                        failure_outcome_policy(
+                            cause,
+                            config=self.config.agent_outcome_policy,
+                            classification=self.config.agent_outcome_policy.classification,
+                        )
+                    )
                 elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
                     # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
                     action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
@@ -511,6 +529,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
+                policy=self.config.dependency_outcome_policy,
                 stage="seed",
             ) from error
         handles.observation = seed.observation
@@ -642,6 +661,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
+                policy=self.config.dependency_outcome_policy,
                 stage="agent",
             ) from error
 
@@ -679,6 +699,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
+                policy=self.config.dependency_outcome_policy,
                 stage="agent",
             ) from error
 
@@ -774,6 +795,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
+                policy=self.config.dependency_outcome_policy,
                 stage="verification",
                 partial_response=agent_response,
                 agent_observations=observations,
@@ -793,7 +815,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     @staticmethod
     def _agent_failure(response: NeMoGymResponse) -> NgFailureEvent | None:
         """Rebuild only the cause selected by this failed reply and matching its outcome."""
-        if response.status != "failed":
+        if response.status not in {"failed", "incomplete"}:
             return None
         try:
             outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY, ""))
@@ -860,17 +882,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if MODEL_POLICY_RESPONSE_TIMEOUT in policy.by_failure_kind or "default_action" in policy.model_fields_set:
             return fallback
         agent = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        rules = (agent.get("outcome_policy") or {}).get("by_failure_kind") or {}
-        if MODEL_POLICY_RESPONSE_TIMEOUT in rules:
-            return OutcomeAction(rules[MODEL_POLICY_RESPONSE_TIMEOUT])
-        if "final_on_model_timeout" in agent:
-            return (
-                OutcomeAction.COUNT_AS_ZERO
-                if TypeAdapter(bool).validate_python(agent["final_on_model_timeout"])
-                else OutcomeAction.RETRY
-            )
-        # The migrated SimpleAgent /run boundary defaults confirmed timeouts to retry.
-        return OutcomeAction((agent.get("outcome_policy") or {}).get("default_action", OutcomeAction.RETRY))
+        return inherited_timeout_policy(agent)
 
     def _skipped_verification_reward(self) -> float | None:
         """The fixed reward that replaces /verify, or None to verify.

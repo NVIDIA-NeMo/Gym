@@ -176,9 +176,18 @@ async def test_only_proven_unconnected_selected_operation_retains_retry(case, re
         ({"by_failure_kind": {"model_policy_response_timeout": "retry"}}, "retry"),
         ({"default_action": "fail"}, "fail"),
         ({"default_action": "retry"}, "retry"),
+        (
+            {
+                "classification": {"by_failure_kind": {"model_policy_response_timeout": "evaluation"}},
+                "by_failure_class": {"evaluation": "retry"},
+                "default_action": "fail",
+            },
+            "retry",
+        ),
     ],
 )
-async def test_only_matching_environment_selector_overrides_agent_timeout_rule(policy, action):
+@pytest.mark.parametrize("status", ["failed", "incomplete"])
+async def test_only_matching_environment_selector_overrides_agent_timeout_rule(policy, action, status):
     environment, client = _environment_server()
     client.global_config_dict.agent.responses_api_agents.test.final_on_model_timeout = True
     environment.config.agent_outcome_policy = environment.config.agent_outcome_policy.model_validate(policy)
@@ -202,7 +211,7 @@ async def test_only_matching_environment_selector_overrides_agent_timeout_rule(p
     }
     response = _agent_response().model_dump(mode="json")
     response.update(
-        status="failed",
+        status=status,
         output=[],
         error={"code": "server_error", "message": "scripted timeout"},
         metadata={
@@ -473,3 +482,20 @@ async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
         assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
         saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert saved.failure_id == failure.event_id
+
+
+@pytest.mark.parametrize("action,terminal", [("retry", False), ("fail", True)])
+async def test_environment_dependency_config_controls_seed_failure(action, terminal):
+    from nemo_gym.client import DependencyOutcomePolicyConfig
+
+    environment, client = _environment_server()
+    environment.config.dependency_outcome_policy = DependencyOutcomePolicyConfig(
+        by_failure_kind={"transport_timeout": action}
+    )
+    client.fail_path = "/seed_session"
+    result = await environment.run_request(_request())
+    assert result.result is None
+    assert result.failure.terminal is terminal
+    assert result.failure.stage == "seed"
+    assert result.failure_report.events
+    assert not any(path.endswith("/v1/responses") for _, path, _ in client.calls)

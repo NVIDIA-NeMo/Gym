@@ -3,10 +3,11 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from aiohttp import ClientResponseError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.core.failure_kinds import (
@@ -150,6 +151,31 @@ def agent_outcome_policy(
             config=classification or config.classification,
         ),
     )
+
+
+class _InheritedTimeoutPolicy(OutcomePolicyConfig):
+    """Compatibility configuration of the legacy agent /run boundary."""
+
+    supported_actions = frozenset({OutcomeAction.RETRY, OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO})
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+
+def inherited_timeout_policy(agent_config: Mapping[str, object]) -> OutcomeAction:
+    """Adapt the agent's legacy timeout configuration, then use the shared selector.
+
+    An explicit kind rule wins over the old boolean alias. The Environment Server
+    calls this only when it has not supplied its own timeout/default rule.
+    """
+    policy_values = dict(agent_config.get("outcome_policy") or {})
+    rules = dict(policy_values.get("by_failure_kind") or {})
+    if MODEL_POLICY_RESPONSE_TIMEOUT not in rules and "final_on_model_timeout" in agent_config:
+        enabled = TypeAdapter(bool).validate_python(agent_config["final_on_model_timeout"])
+        rules[MODEL_POLICY_RESPONSE_TIMEOUT] = OutcomeAction.COUNT_AS_ZERO if enabled else OutcomeAction.RETRY
+        policy_values["by_failure_kind"] = rules
+    # Classification is an independent setting on the legacy agent config.
+    policy_values.pop("classification", None)
+    policy = _InheritedTimeoutPolicy.model_validate(policy_values)
+    return choose_action(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT, http_status=None, config=policy)
 
 
 def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:

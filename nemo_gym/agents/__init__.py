@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         agent_outcome_policy,
         confirmed_policy_response_timeout,
         failure_outcome_policy,
+        inherited_timeout_policy,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -138,6 +139,7 @@ _PUBLIC_API = {
     "SandboxSession": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "agent_outcome_policy": "agent_outcome",
+    "inherited_timeout_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
