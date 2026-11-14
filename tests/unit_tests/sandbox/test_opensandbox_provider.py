@@ -1348,8 +1348,10 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         def __init__(self) -> None:
             self.writes: list[tuple[str, str | bytes]] = []
 
-        async def write_file(self, target_path: str, data: str | bytes) -> None:
-            self.writes.append((target_path, data))
+        async def write_file(self, target_path: str, data: Any) -> None:
+            if isinstance(data, (str, bytes)):
+                raise TypeError("write_file needs a stream")
+            self.writes.append((target_path, data.read()))
 
         async def read_bytes_stream(self, source_path: str) -> Any:
             async def chunks() -> Any:
@@ -2642,6 +2644,33 @@ async def test_file_transfer_request_timeout_is_ungraded_provider_loss(tmp_path:
     assert files.write_file.await_count + files.read_bytes_stream.await_count == (1 if operation == "upload" else 4)
     if operation == "download":
         assert path.read_bytes() == b""
+
+
+async def test_upload_retry_restarts_the_stream_from_byte_zero(tmp_path: Path) -> None:
+    class Backend502Error(Exception):
+        status_code = 502
+
+    writes: list[bytes] = []
+
+    async def write_file(target_path: str, data: Any) -> None:
+        assert hasattr(data, "read")
+        if not writes:
+            writes.append(data.read(2))
+            raise Backend502Error("Failed to write file. Status code: 502")
+        writes.append(data.read())
+
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retry_delay_s": 0})
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="upload-retry",
+        provider_name="opensandbox",
+        raw=SimpleNamespace(files=SimpleNamespace(write_file=write_file)),
+    )
+    path = tmp_path / "artifact"
+    path.write_bytes(b"artifact")
+
+    await provider.upload_file(handle, path, "/artifact")
+
+    assert writes == [b"ar", b"artifact"]
 
 
 async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3238,7 +3238,22 @@ class OpenSandboxProvider:
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file into an OpenSandbox sandbox."""
-        await self._write_file(handle, target_path, source_path.read_bytes())
+
+        async def write() -> None:
+            with source_path.open("rb") as stream:
+                await handle.raw.files.write_file(target_path, stream)
+
+        try:
+            await self._await_sdk_operation(
+                write,
+                operation="write_file",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
+            )
+        except TimeoutError as error:
+            raise opensandbox_failure(operation="provider I/O", sandbox_id=handle.sandbox_id, cause=error) from error
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
         """Download one file from an OpenSandbox sandbox, streamed to disk in chunks."""

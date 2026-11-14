@@ -921,6 +921,27 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox.upload.await_count == 3
         assert len(set(remote_paths)) == 3
 
+    @mark.asyncio
+    async def test_seeded_sandbox_rejects_row_provider_options_and_cleans_up(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
+        sandbox = MagicMock(stop=AsyncMock())
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "seeded-opts"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]},
+            sandbox_provider_options={"image": "x"},
+        )
+
+        with raises(ValueError, match="seed-supplied"):
+            await server.run(request, body)
+
+        sandbox.stop.assert_awaited_once()
+
     @mark.parametrize(
         "error_type,expected_attempts",
         [(TimeoutError, 2), (sandbox_io_timeout, 2), (PermissionError, 1), (FileNotFoundError, 1)],
@@ -1110,19 +1131,32 @@ class TestOpenCodeSandboxedAgent:
         # Different questions spread over the pool rather than all landing on one key.
         assert len({server._resolve_opencode_env(f"question {i}")["EXA_API_KEY"] for i in range(50)}) == 4
 
+    def test_resolve_opencode_env_exports_provider_id(self) -> None:
+        config = self._create_config()
+        config.opencode_provider_id = "custom"
+        config.opencode_env = {"NEMO_GYM_OPENCODE_PROVIDER_ID": "user"}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server._resolve_opencode_env("q")["NEMO_GYM_OPENCODE_PROVIDER_ID"] == "custom"
+
     def test_resolve_opencode_env_edge_cases(self) -> None:
         config = self._create_config()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         # No pool configured -> nothing invented.
         config.opencode_env = {"OPENCODE_ENABLE_EXA": "true"}
-        assert server._resolve_opencode_env("q") == {"OPENCODE_ENABLE_EXA": "true"}
+        assert server._resolve_opencode_env("q") == {
+            "OPENCODE_ENABLE_EXA": "true",
+            "NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym",
+        }
         # An explicit single key wins over the pool.
         config.opencode_env = {"EXA_API_KEY": "pinned", "EXA_API_KEYS": "k0:k1"}
-        assert server._resolve_opencode_env("q") == {"EXA_API_KEY": "pinned"}
+        assert server._resolve_opencode_env("q") == {
+            "EXA_API_KEY": "pinned",
+            "NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym",
+        }
         # An empty pool is not a key.
         config.opencode_env = {"EXA_API_KEYS": "  "}
-        assert server._resolve_opencode_env("q") == {}
+        assert server._resolve_opencode_env("q") == {"NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym"}
 
     @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
     async def test_responses_builds_opencode_command(
@@ -1755,6 +1789,101 @@ class TestBenchmarkLifecycle:
         config.network_access = "model_and_tools"
         with raises(ValueError, match="tool_servers"):
             await server._start_sandbox()
+
+    async def test_row_provider_options_are_allowlisted_and_cannot_set_a_restricted_network_policy(self, monkeypatch):
+        sandbox = MagicMock(start=AsyncMock())
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: SimpleNamespace(name="opensandbox"))
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: SimpleNamespace(name="opensandbox"))
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+        monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://10.0.0.2:8000")
+        config = self._create_config()
+        config.network_access = "model_only"
+        config.sandbox_row_option_keys = ["volumes", "network_policy"]
+        config.sandbox_config = {
+            "provider_options": {"a": 1, "network_policy": {"egress": [{"action": "allow", "target": "example.org"}]}}
+        }
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        await server._start_sandbox(provider_options={"volumes": ["v"]})
+        options = sandbox.start.await_args.args[0].provider_options
+        assert options["a"] == 1 and options["volumes"] == ["v"]
+        assert options["network_policy"]["egress"] == [
+            {"action": "allow", "target": "example.org"},
+            {"action": "allow", "target": "10.0.0.2"},
+        ]
+        with raises(ValueError, match="network_access is restricted"):
+            await server._start_sandbox(provider_options={"network_policy": {"defaultAction": "deny"}})
+        with raises(ValueError, match="sandbox_row_option_keys"):
+            await server._start_sandbox(provider_options={"privileged": True})
+        config.sandbox_config = {"provider_options": {"network_policy": {"defaultAction": "allow"}}}
+        with raises(ValueError, match="defaultAction: deny"):
+            await server._start_sandbox()
+
+    async def test_run_forwards_row_options_and_uploads_inputs_before_inference(self, tmp_path, monkeypatch):
+        (tmp_path / "in.txt").write_text("a")
+        config = self._create_config()
+        config.sandbox_upload_roots = [str(tmp_path)]
+        seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        events = []
+        sandbox = MagicMock(stop=AsyncMock())
+        sandbox.upload = AsyncMock(side_effect=lambda *_: events.append("upload"))
+        start = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr(server, "_start_sandbox", start)
+
+        async def responses(self, *_):
+            events.append("responses")
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", responses)
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "row-inputs"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]},
+            sandbox_provider_options={"volumes": ["v"]},
+            sandbox_uploads={"/work/in.txt": str(tmp_path / "in.txt")},
+        )
+        with raises(RuntimeError, match="stop here"):
+            await server.run(request, body)
+        assert start.await_args.kwargs["provider_options"] == {"volumes": ["v"]}
+        assert events[:2] == ["upload", "responses"]
+
+        events.clear()
+        sandbox.stop.reset_mock()
+        sandbox.upload.side_effect = PermissionError("rejected")
+        with raises(PermissionError):
+            await server.run(request, body)
+        assert events == []
+        sandbox.stop.assert_awaited_once()
+
+    async def test_opencode_config_overrides_must_name_the_configured_ids(self):
+        config = self._create_config()
+        config.opencode_config = {"provider": {"other": {}}}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        request = MagicMock(json=AsyncMock(return_value={}))
+        with raises(ValueError, match="opencode_provider_id"):
+            await server._create_opencode_config(request)
+        config.opencode_config = {"provider": {config.opencode_provider_id: {"models": {"other": {}}}}}
+        with raises(ValueError, match="opencode_model_id"):
+            await server._create_opencode_config(request)
+
+    async def test_upload_inputs_only_from_the_configured_roots(self, tmp_path):
+        (tmp_path / "root").mkdir()
+        allowed = tmp_path / "root" / "a.txt"
+        allowed.write_text("a")
+        outside = tmp_path / "b.txt"
+        outside.write_text("b")
+        config = self._create_config()
+        config.sandbox_upload_roots = [str(tmp_path / "root")]
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox = MagicMock(upload=AsyncMock())
+        await server._upload_inputs(sandbox, {"/data/a.txt": str(allowed)})
+        sandbox.upload.assert_awaited_once_with(allowed, "/data/a.txt")
+        with raises(ValueError, match="sandbox_upload_roots"):
+            await server._upload_inputs(sandbox, {"/data/b.txt": str(outside)})
+        assert sandbox.upload.await_count == 1
 
     @mark.parametrize("error", [RuntimeError("generation failed"), asyncio.CancelledError()])
     async def test_generation_failure_and_cancellation_cleanup(self, monkeypatch, error):

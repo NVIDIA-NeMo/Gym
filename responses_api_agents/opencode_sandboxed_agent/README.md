@@ -61,6 +61,20 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+## Per-row sandbox inputs
+
+```yaml
+sandbox_upload_roots: [/data/inputs]
+sandbox_config:
+  provider_options: {network_policy: {defaultAction: deny, egress: []}}
+```
+
+```json
+{"responses_create_params": {"input": "..."}, "sandbox_provider_options": {"image": "x"}, "sandbox_uploads": {"/work/in.csv": "/data/inputs/a.csv"}}
+```
+
+`sandbox_uploads` maps a sandbox path to a local file, which must resolve under `sandbox_upload_roots` (empty roots refuse all). Row `sandbox_provider_options` override `sandbox_config.provider_options` at creation only, only for top-level keys the operator lists in `sandbox_row_option_keys` (default empty: any row option is rejected; `network_policy` is also rejected when `network_access` is restricted), and are rejected for a sandbox supplied by the resources server. A configured deny-default `network_policy` keeps its egress and gets the model/tool hosts appended. `opencode_provider_id` and `opencode_model_id` default to `nemo_gym` and `dummy_model`; `opencode_config` overrides must use `provider.<opencode_provider_id>.models.<opencode_model_id>`.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,
@@ -127,7 +141,8 @@ before anything runs, since the sandbox has no internet and OpenCode cannot show
 combines supplied system/developer messages with its native prompt.
 
 Restricted network policies require OpenSandbox. Python-only allows the Gym model
-host; search additionally allows the Gym tool host. Other destinations are denied.
+host; search additionally allows the Gym tool host. Other destinations are denied,
+except egress already allowed by a configured deny-default `network_policy`, which is kept.
 The allowlist permits **all ports and paths on each allowed host**. If model, tool,
 head, or verifier services share a host, the sandbox may reach those services too;
 this policy alone does not isolate privileged Gym APIs. Deploy on appropriately
