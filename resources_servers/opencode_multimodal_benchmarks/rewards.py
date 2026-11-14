@@ -8,7 +8,7 @@ from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from nemo_gym.core.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
