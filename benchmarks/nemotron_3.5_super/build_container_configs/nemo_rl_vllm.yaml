@@ -13,6 +13,11 @@ python_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_asy
 
 vllm:
   branch: bxyu/v0.32.0-dwdpnvfp4-rlrefit
+  # Match the trainer's NCCL runtime and refit bindings (NeMo RL uv.lock).
+  # vLLM's torch dependencies otherwise replace NCCL with 2.29.7.
+  dependency_overrides:
+    - nvidia-nccl-cu13==2.32.3
+    - nccl4py==0.5.0
 
 vllm_router:
   branch: bxyu/nemo-rl-pd

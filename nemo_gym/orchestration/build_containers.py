@@ -39,6 +39,10 @@ class VLLMConfig(BaseNeMoGymCLIConfig):
     branch: str
     version: str
     precompiled_wheel_commit: str
+    dependency_overrides: List[str] = Field(
+        default_factory=list,
+        description="Requirements installed alongside vLLM and overriding its transitive dependency pins.",
+    )
 
 
 class MooncakeConfig(BaseNeMoGymCLIConfig):
@@ -554,7 +558,14 @@ class VLLMBuilder(BaseBuilder):
             export VLLM_USE_PRECOMPILED=1
             export VLLM_PRECOMPILED_WHEEL_COMMIT
             export SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION"
-            uv pip install "${BUILD_PIP_ARGS[@]}" . --prerelease=allow --torch-backend=auto --index-strategy unsafe-best-match
+            # Constraints cannot replace a conflicting torch dependency pin. Use
+            # overrides, and request them explicitly so refit-only packages are installed too.
+            if (( $# )); then
+                printf '%s\n' "$@" > "$BUILD_DIR/dependency-overrides.txt"
+                export UV_OVERRIDE="$BUILD_DIR/dependency-overrides.txt"
+            fi
+            uv pip install "${BUILD_PIP_ARGS[@]}" . "$@" \
+                --prerelease=allow --torch-backend=auto --index-strategy unsafe-best-match
 
             # Installation copies wheel Rust artifacts too. Rebuild AFTER installing
             # and unset both reuse switches so the source and launcher stay in sync.
@@ -569,13 +580,59 @@ class VLLMBuilder(BaseBuilder):
                 install -m 755 "$rust_extension" "$installed_vllm_dir/"
             done
 
+            # Check the installed distributions AND the loaded library. A stale
+            # libnccl on the loader path can defeat package-version alignment.
+            cd /
+            "$BUILD_PYTHON" - "$@" <<'VERIFY_DEPENDENCIES'
+            import importlib.metadata as metadata
+            import sys
+
+            from packaging.requirements import Requirement
+
+            requirements = [Requirement(arg) for arg in sys.argv[1:]]
+            requirements = [req for req in requirements if req.marker is None or req.marker.evaluate()]
+            for req in requirements:
+                installed = metadata.version(req.name)
+                print(f"Dependency override: {req.name}=={installed}", flush=True)
+                if not req.specifier.contains(installed, prereleases=True):
+                    raise RuntimeError(f"Dependency override not satisfied: {req}; installed={installed}")
+
+            if any(req.name.lower().replace("_", "-") == "nvidia-nccl-cu13" for req in requirements):
+                import torch
+                from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+
+                expected = metadata.version("nvidia-nccl-cu13")
+                expected_parts = tuple(int(part) for part in expected.split("."))
+                major, minor, patch = expected_parts
+                expected_code = major * 10000 + minor * 100 + patch
+                versions = {
+                    "torch": torch.cuda.nccl.version(),
+                    "vllm": NCCLLibrary().ncclGetRawVersion(),
+                }
+                try:
+                    metadata.version("nccl4py")
+                except metadata.PackageNotFoundError:
+                    pass
+                else:
+                    from nccl.bindings import nccl
+                    versions["nccl4py"] = nccl.get_version()
+                print(f"NCCL runtime: expected={expected}; loaded={versions}; torch={torch.__version__}", flush=True)
+                for consumer, actual in versions.items():
+                    target = expected_parts if consumer == "torch" else expected_code
+                    if actual != target:
+                        raise RuntimeError(
+                            f"{consumer} loaded NCCL {actual}, expected {target}; "
+                            "check LD_LIBRARY_PATH and VLLM_NCCL_SO_PATH"
+                        )
+            VERIFY_DEPENDENCIES
+
             rm -rf /opt/uv/cache /root/.cache/uv /root/.cache/pip /var/lib/apt/lists/* 2>/dev/null || true
             apt-get clean || true
             rm -rf "$BUILD_DIR/source"
             find /usr/lib/aarch64-linux-gnu /usr/local/cuda-13.0 -name '*_static*.a' -delete 2>/dev/null || true
             """
         ).lstrip()
-        return self._build_command(script, "vllm-build")
+        return self._build_command(script, "vllm-build", *self.config.dependency_overrides)
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         """Pass build configuration as literal environment values."""

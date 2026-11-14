@@ -644,6 +644,116 @@ async def test_vllm_preflight_pins_commit(vllm_builder, container_config, monkey
         vllm_builder.get_srun_command_str()
 
 
+@pytest.mark.parametrize("overrides", [[], ["nvidia-nccl-cu13==2.32.3", "nccl4py==0.5.0"]])
+def test_vllm_dependency_overrides_reach_resolver(vllm_builder, tmp_path, overrides):
+    vllm_builder._head_sha = "a" * 40
+    vllm_builder.config.dependency_overrides = overrides
+    argv = shlex.split(vllm_builder.get_srun_command_str())
+    subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
+    script = (
+        argv[2]
+        .split("export VLLM_USE_PRECOMPILED=1\n", 1)[1]
+        .split("# Installation copies wheel Rust artifacts too.", 1)[0]
+    )
+    uv = tmp_path / "uv"
+    uv.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "path = os.environ.get('UV_OVERRIDE')\n"
+        "print(json.dumps({'args': sys.argv[1:], 'overrides': Path(path).read_text() if path else None}))\n"
+    )
+    uv.chmod(0o755)
+    env = {key: value for key, value in os.environ.items() if key != "UV_OVERRIDE"}
+    result = subprocess.run(
+        ["bash", "-c", 'set -euo pipefail\nBUILD_PIP_ARGS=(--python "$TARGET_PYTHON")\n' + script, *argv[3:]],
+        env={
+            **env,
+            "BUILD_DIR": str(tmp_path),
+            "TARGET_PYTHON": "/opt/worker with spaces/bin/python",
+            "VLLM_VERSION": "0.32.0",
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    call = json.loads(result.stdout)
+    assert call["args"] == [
+        "pip",
+        "install",
+        "--python",
+        "/opt/worker with spaces/bin/python",
+        ".",
+        *overrides,
+        "--prerelease=allow",
+        "--torch-backend=auto",
+        "--index-strategy",
+        "unsafe-best-match",
+    ]
+    assert call["overrides"] == ("\n".join(overrides) + "\n" if overrides else None)
+
+
+@pytest.mark.parametrize("mismatch", [None, "distribution", "torch", "vllm", "nccl4py"])
+def test_vllm_dependency_verification_checks_loaded_nccl(vllm_builder, monkeypatch, capsys, mismatch):
+    vllm_builder._head_sha = "a" * 40
+    script = shlex.split(vllm_builder.get_srun_command_str())[2]
+    validator = script.split("<<'VERIFY_DEPENDENCIES'\n", 1)[1].split("\nVERIFY_DEPENDENCIES\n", 1)[0]
+    versions = {"nvidia-nccl-cu13": "2.29.7" if mismatch == "distribution" else "2.32.3", "nccl4py": "0.5.0"}
+    monkeypatch.setattr(importlib.metadata, "version", versions.__getitem__)
+    monkeypatch.setattr(sys, "argv", ["-", "nvidia-nccl-cu13==2.32.3", "nccl4py==0.5.0"])
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            __version__="2.13.0",
+            cuda=SimpleNamespace(
+                nccl=SimpleNamespace(version=lambda: (2, 29, 7) if mismatch == "torch" else (2, 32, 3))
+            ),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.distributed.device_communicators.pynccl_wrapper",
+        SimpleNamespace(
+            NCCLLibrary=lambda: SimpleNamespace(ncclGetRawVersion=lambda: 22907 if mismatch == "vllm" else 23203)
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "nccl.bindings",
+        SimpleNamespace(nccl=SimpleNamespace(get_version=lambda: 22907 if mismatch == "nccl4py" else 23203)),
+    )
+    if mismatch:
+        message = "override not satisfied" if mismatch == "distribution" else f"{mismatch} loaded NCCL"
+        with pytest.raises(RuntimeError, match=message):
+            exec(compile(validator, "<dependency verification>", "exec"), {})
+    else:
+        exec(compile(validator, "<dependency verification>", "exec"), {})
+        assert "NCCL runtime: expected=2.32.3" in capsys.readouterr().out
+
+
+def test_nemo_rl_build_pins_refit_dependencies(monkeypatch, tmp_path):
+    monkeypatch.setenv("PWD", str(ROOT))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "test",
+            f"+config_paths=[{ROOT / BENCHMARK / 'build_container_configs/nemo_rl_vllm.yaml'}]",
+            f"++input_container_fpath={tmp_path / 'base.sqsh'}",
+            f"++output_container_fpath={tmp_path / 'built.sqsh'}",
+        ],
+    )
+    config = GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True))
+    resolved = BuildContainerConfig.model_validate(config)
+    assert resolved.vllm.dependency_overrides == ["nvidia-nccl-cu13==2.32.3", "nccl4py==0.5.0"]
+    assert resolved.python_executable.endswith("VllmAsyncGenerationWorker/bin/python")
+    assert resolved.vllm.repo == "https://github.com/bxyu-nvidia/vllm.git"
+    assert resolved.flashinfer is not None
+    assert resolved.mooncake is not None
+
+
 @pytest.mark.parametrize("unsupported", [None, "csrc/kernel.cu", "csrc/kernel.h", "setup.cfg"])
 def test_vllm_build_guard_and_rust_install(vllm_builder, container_config, tmp_path, unsupported):
     vllm_builder._head_sha = "a" * 40
@@ -734,7 +844,7 @@ elif tool == "python3":
         assert calls[rust_index]["precompiled_rust"] is None
         assert (installed / "vllm-rs").read_text() == "rebuilt"
         assert (installed / "_rust_test.so").read_text() == "extension"
-        assert calls[-1]["args"] == ["-", str(installed)]
+        assert calls[-1]["args"] == ["-"]  # Dependency verification has no overrides in this config.
         assert calls[-1]["cwd"] == "/"
 
 
