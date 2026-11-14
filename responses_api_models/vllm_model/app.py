@@ -613,10 +613,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "How the Responses-to-Chat-Completions conversion treats a request field that has no "
             "Chat Completions representation. Off, the conversion refuses the request, so the caller can "
             "route it to a server that serves Responses natively. On, the reporting-only fields, a "
-            "non-empty `include` (every value), `reasoning.summary` and `reasoning.generate_summary`, and "
-            "a message `phase` are dropped and the request proceeds, and so is a `reasoning.context` of "
+            "non-empty `include` (every value), `reasoning.summary` and `reasoning.generate_summary`, "
+            "a message `phase`, and a declared tool this backend cannot run (a hosted tool such as web "
+            "search or tool search) are dropped and the request proceeds, and so is a `reasoning.context` of "
             "`auto` or `all_turns`: the conversion passes every reasoning item the request carries to the "
-            "engine and leaves what is rendered to its chat template. An image part in a tool's output is "
+            "engine and leaves what is rendered to its chat template. A tool marked `defer_loading` is "
+            "declared eagerly instead of dropped, since this path has no search step. An image part in a "
+            "tool's output is "
             "replaced with the text placeholder `[image omitted from tool output]`, so the model does not "
             "see that image, unless `inline_tool_output_images` is on. Every other unrepresentable field, a "
             "`current_turn` reasoning context included, "
@@ -1503,6 +1506,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             ``client.create_chat_completion``.
         """
         self._strip_hosted_only_tool_fields(body_dict)
+        # Replayed OpenAI response annotations are client-side citation data, so they never reach the chat template.
+        for message_dict in body_dict.get("messages") or []:
+            message_dict.pop("annotations", None)
 
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
