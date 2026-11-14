@@ -190,3 +190,26 @@ def test_verification_retry_keeps_original_grade_and_rejects_changed_response(tm
     body["response"]["id"] = "different-answer"
     assert client.post("/verify", json=body).status_code == 409
     assert calls == ["verify", "cleanup"]
+
+
+def test_prepared_rows_have_source_bound_metadata_and_reject_missing_digests():
+    import json
+    from pathlib import Path
+
+    from pydantic import ValidationError
+
+    from nemo_gym.data import load_task_data_schema, normalize_task_fields
+    from resources_servers.wildclawbench.task_data import TaskData
+
+    directory = Path(__file__).parents[1]
+    schema = load_task_data_schema(directory)
+    for line in (directory / "data/example.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        metadata, conflicts = normalize_task_fields(row)
+        assert not conflicts
+        validated = schema.validate_python(metadata)
+        assert validated.task_id == row["verifier_metadata"]["task_id"]
+        incomplete = dict(metadata)
+        del incomplete["workspace_sha256"]
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(incomplete)
