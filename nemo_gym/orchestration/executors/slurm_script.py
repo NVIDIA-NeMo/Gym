@@ -274,7 +274,9 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd + _kv_transfer_flag(service)
 
 
-def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_single_instance_multi_node_command(
+    service: VllmServiceConfig, total_nodes: int, ray_head_var: str | None = None
+) -> str:
     # A single instance's tensor/pipeline-parallel footprint spans nodes. Uses vLLM's own Ray
     # *core* executor (--distributed-executor-backend ray) - not the ray.serve library, no Serve
     # deployment/ingress/HTTP proxy is involved.
@@ -287,7 +289,7 @@ def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, t
     # render_vllm_ray_symmetric_run installs it on the fly if it's missing. vLLM's Ray executor
     # blocks on placement-group scheduling until every node's GPUs join, so the fallback path there
     # needs no separate cluster-ready wait.
-    return render_vllm_ray_symmetric_run(inner_cmd, total_nodes, resource_flags)
+    return render_vllm_ray_symmetric_run(inner_cmd, total_nodes, resource_flags, ray_head_var)
 
 
 # vLLM refuses `--api-server-count` in headless mode ("no API servers are started in headless
@@ -347,12 +349,14 @@ def _build_vllm_multi_instance_multi_node_command(
     )
 
 
-def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int, head: str | None = None) -> str:
+def _build_vllm_ray_command(
+    service: VllmServiceConfig, total_nodes: int, head: str | None = None, ray_head_var: str | None = None
+) -> str:
     if service.number_of_instances > 1:
         if head is None:
             return _build_vllm_multi_instance_multi_node_command(service, total_nodes)
         return _build_vllm_multi_instance_multi_node_command(service, total_nodes, head)
-    return _build_vllm_single_instance_multi_node_command(service, total_nodes)
+    return _build_vllm_single_instance_multi_node_command(service, total_nodes, ray_head_var)
 
 
 def _escape_for_double_quoted_bash(text: str) -> str:
@@ -499,15 +503,42 @@ def _build_ray_command(
 
 _NODE_ARRAY = NODE_LIST_PRELUDE
 
+# The port the Ray prelude gives RAY_HEAD_NODE_IP, so a pool's own head listens where the workers expect.
+_RAY_HEAD_PORT = 6379
+
 
 def pool_nodes_var(pool: str) -> str:
     """The env var build_sbatch_script exports with a node pool's comma-separated hosts."""
     return f"GYM_POOL_{bash_var(pool)}_NODES"
 
 
+def _pool_head_var(pool: str) -> str:
+    """The env var build_sbatch_script exports with the first host of a node pool that spans several nodes."""
+    return f"GYM_POOL_{bash_var(pool)}_HEAD"
+
+
+def _pool_ray_head_var(pool: str) -> str:
+    """The env var build_sbatch_script exports with the host:port of the Ray head of a multi-node node pool."""
+    return f"GYM_POOL_{bash_var(pool)}_RAY_HEAD"
+
+
 def _places_services(config: SubmitConfig, is_multi_node: bool) -> bool:
     """Whether the script declares the allocation's host array to place services with."""
     return is_multi_node or any(s.node_pool for s in config.deployed_services.values())
+
+
+def _own_ray_head_pool(service: ServiceConfig, offsets: dict[str, tuple[int, int]]) -> str | None:
+    """The pool whose single multi-node vLLM instance needs a Ray head of its own, else None.
+
+    The prelude's RAY_HEAD_NODE_IP names the allocation's first node. A pool that starts elsewhere would
+    join the first pool's cluster as a worker, so it gets a head on its own first node.
+    """
+    if not isinstance(service, VllmServiceConfig) or service.node_pool is None or service.number_of_instances != 1:
+        return None
+    if isinstance(service, (VllmPDTierConfig, VllmNodeServiceConfig)) and service.server_per_node:
+        return None
+    start, count = offsets[service.node_pool]
+    return service.node_pool if start != 0 and count > 1 else None
 
 
 def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_multi_node: bool) -> str:
@@ -516,9 +547,18 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
         return ""
     lines = [_NODE_ARRAY]
     offsets = _pool_offsets(compute)
+    own_ray_head_pools = {
+        pool for service in config.deployed_services.values() if (pool := _own_ray_head_pool(service, offsets))
+    }
     for name, (start, count) in offsets.items():
         if count:
             lines.append(f'export {pool_nodes_var(name)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
+        if name in own_ray_head_pools:
+            lines.append(f'export {_pool_head_var(name)}="${{gym_nodes[{start}]}}"')
+            lines.append(
+                f"export {_pool_ray_head_var(name)}="
+                f'"$(getent hosts "${{gym_nodes[{start}]}}" | awk \'{{print $1}}\'):{_RAY_HEAD_PORT}"'
+            )
     for service in config.deployed_services.values():
         if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
             start, count = offsets[service.node_pool]
@@ -666,9 +706,12 @@ def _build_service_command(
         # Pointing them at the allocation's head node instead would make two tiers
         # of a prefill/decode pair try to coordinate through the same rank 0.
         head = None
+        ray_head_var = None
         if service.node_pool is not None and offsets is not None:
             head = _pool_head(offsets[service.node_pool][0])
-        return _build_vllm_ray_command(service, total_nodes, head)
+            if _own_ray_head_pool(service, offsets) is not None:
+                ray_head_var = _pool_ray_head_var(service.node_pool)
+        return _build_vllm_ray_command(service, total_nodes, head, ray_head_var)
     return _BUILDERS[type(service)](service)
 
 

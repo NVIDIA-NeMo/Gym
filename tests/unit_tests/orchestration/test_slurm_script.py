@@ -2143,6 +2143,64 @@ def test_pinned_services_take_contiguous_node_ranges(tmp_path):
     assert '--nodelist="${GYM_POOL_AUX_NODES}" --nodes=1 --ntasks=1' in script.split("# service: scorer")[1]
 
 
+_TWO_MULTI_NODE_POOLS = {
+    "gpu": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 8},
+    "gpu2": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 8},
+}
+
+
+def _two_copy_services():
+    return {
+        "policy": _vllm(8000, "gpu", tensor_parallel_size=4, pipeline_parallel_size=4),
+        "policy_b": _vllm(8000, "gpu2", tensor_parallel_size=4, pipeline_parallel_size=4),
+    }
+
+
+def test_a_multi_node_pool_that_starts_later_gets_its_own_ray_head(tmp_path):
+    script = _render(tmp_path, _two_copy_services(), _TWO_MULTI_NODE_POOLS)
+    # Each multi-node pool names its first host and its Ray head for the services and the driver.
+    assert 'export GYM_POOL_GPU2_HEAD="${gym_nodes[2]}"' in script
+    assert 'export GYM_POOL_GPU2_RAY_HEAD="$(getent hosts "${gym_nodes[2]}" | awk \'{print $1}\'):6379"' in script
+    # The first pool starts on the allocation's first node, which is where RAY_HEAD_NODE_IP already points.
+    first, second = _step(script, "policy"), _step(script, "policy_b")
+    assert "export RAY_HEAD_NODE_IP" not in first
+    assert 'export RAY_HEAD_NODE_IP="$GYM_POOL_GPU2_RAY_HEAD"' in second
+    assert "--min-nodes 2" in second
+
+
+def test_a_single_node_pool_exports_no_head_of_its_own(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4, pipeline_parallel_size=4),
+            "policy_b": _vllm(8000, "gpu2", tensor_parallel_size=4),
+        },
+        {**_TWO_MULTI_NODE_POOLS, "gpu2": {**_TWO_MULTI_NODE_POOLS["gpu2"], "nodes": 1}},
+    )
+    assert "GYM_POOL_GPU2_HEAD" not in script
+    assert "GYM_POOL_GPU2_RAY_HEAD" not in script
+    assert "export RAY_HEAD_NODE_IP" not in _step(script, "policy_b")
+
+
+def test_a_later_pools_workers_join_the_pools_own_ray_head(tmp_path):
+    # The job-wide RAY_HEAD_NODE_IP names a head that never comes up here; only the pool's own head does.
+    # A worker that still used the job-wide address would wait for it and fail.
+    own_head_port = _free_port()
+    cmd = _build_vllm_ray_command(
+        VllmServiceConfig(type="vllm", container="img", model="/ckpt", port=8000, tensor_parallel_size=4),
+        total_nodes=2,
+        ray_head_var="GYM_POOL_GPU2_RAY_HEAD",
+    )
+    argv, env = _ray_bootstrap(cmd, tmp_path, node_id=1, port=_free_port(), wait_s=10)
+    env["GYM_POOL_GPU2_RAY_HEAD"] = f"127.0.0.1:{own_head_port}"
+    with socket.create_server(("127.0.0.1", own_head_port)):
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    joined = (tmp_path / "ray_calls").read_text().splitlines()[-1]
+    assert joined.startswith(f"symmetric-run --address 127.0.0.1:{own_head_port} --min-nodes 2")
+
+
 def test_a_pinned_single_node_service_is_not_built_as_multi_node(tmp_path):
     # The job spans two nodes, but each service owns one. Sizing them by the
     # allocation total would build both as multi-node Ray deployments.
