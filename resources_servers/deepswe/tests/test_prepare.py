@@ -5,11 +5,13 @@ import hashlib
 import io
 import json
 import tarfile
+from functools import partial
 from pathlib import Path
 
 import pytest
 from pytest import MonkeyPatch
 
+from benchmarks.deepswe.prepare import is_prepared_data_current
 from resources_servers.deepswe import prepare as prepare_module
 from resources_servers.deepswe.prepare import _write_jsonl, ensure_ripgrep
 from resources_servers.deepswe.task_store import DeepSWETaskStore
@@ -76,3 +78,19 @@ def test_a_stale_ripgrep_without_download_is_reported(tmp_path: Path) -> None:
     (tmp_path / "rg").write_bytes(b"stale")
     with pytest.raises(FileNotFoundError, match="Pinned ripgrep"):
         ensure_ripgrep(tmp_path / "rg", allow_download=False)
+
+
+@pytest.mark.parametrize("ripgrep", [None, b"stale", b"rg"], ids=["missing", "stale", "pinned"])
+def test_a_cached_dataset_is_current_only_with_the_pinned_ripgrep(
+    tmp_path: Path, monkeypatch: MonkeyPatch, ripgrep: bytes | None
+) -> None:
+    requested = _serve(monkeypatch, _ripgrep_archive(b"rg"), executable=b"rg")
+    monkeypatch.setattr(prepare_module, "ensure_ripgrep", partial(ensure_ripgrep, tmp_path / "rg"))
+    if ripgrep is not None:
+        (tmp_path / "rg").write_bytes(ripgrep)
+    jsonl = tmp_path / "deepswe.jsonl"
+    assert not is_prepared_data_current(jsonl)
+    jsonl.write_text("{}\n", encoding="utf-8")
+
+    assert is_prepared_data_current(jsonl) is (ripgrep == b"rg")
+    assert requested == []

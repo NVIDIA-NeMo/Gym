@@ -8,9 +8,13 @@ same task image.
 
 ```bash
 python -m resources_servers.deepswe.prepare \
-  --source-dir /path/to/deep-swe \
-  --no-download
+  --source-dir /path/to/deep-swe
 ```
+
+Preparation also downloads the pinned ripgrep executable that OpenCode needs into
+`resources_servers/deepswe/data/cache/opencode-runtime/rg` and checks its digest. With `--no-download`, preparation
+uses no network: place the pinned `rg` at that path first, or preparation stops with an error naming the missing or
+differing file.
 
 The preparation step copies each immutable, versioned upstream image reference from the pinned task definition into
 the Gym JSONL alongside the instruction and task ID. The resources server rejects a row whose image differs from its

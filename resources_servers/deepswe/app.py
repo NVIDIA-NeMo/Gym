@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shlex
 import sys
 import tempfile
 import uuid
@@ -308,7 +309,7 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         self._agent_runtime_files = [_resolve_repo_path(path) for path in self.config.agent_runtime_files]
         if missing := [str(path) for path in self._agent_runtime_files if not path.is_file()]:
             raise ValueError(
-                f"agent_runtime_files are missing: {missing}; for the benchmark, run `gym eval prepare --benchmark deepswe`"
+                f"agent_runtime_files are missing: {missing}; for the benchmark, run `gym eval prepare --benchmark deepswe/opencode`"
             )
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
@@ -422,7 +423,7 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         await asyncio.gather(
             *(sandbox.upload(path, target) for path, target in zip(self._agent_runtime_files, targets))
         )
-        mode_result = await sandbox.exec(f"chmod 0755 {AGENT_RUNTIME_DIR} {' '.join(targets)}", timeout_s=60)
+        mode_result = await sandbox.exec(shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, *targets]), timeout_s=60)
         if mode_result.return_code != 0 or mode_result.error_type is not None:
             raise RuntimeError(f"DeepSWE could not stage agent_runtime_files: {mode_result.stderr or ''}")
 

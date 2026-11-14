@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -1386,6 +1388,33 @@ async def test_agent_runtime_files_are_staged_readable_into_the_agent_sandbox(
     assert commands[-1] == "chmod 0755 /tmp/nemo-gym-deepswe /tmp/nemo-gym-deepswe/rg"
 
 
+async def test_agent_runtime_file_names_reach_chmod_as_literal_arguments(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    runtime_files = [tmp_path / name for name in ("rg copy", "rg; touch injected")]
+    for path in runtime_files:
+        path.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_runtime_files = runtime_files
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    await sandbox.start_with_setup.await_args.args[1](sandbox)
+    chmod = sandbox.exec.await_args_list[-1].args[0]
+    assert shlex.split(chmod) == [
+        "chmod",
+        "0755",
+        "/tmp/nemo-gym-deepswe",
+        "/tmp/nemo-gym-deepswe/rg copy",
+        "/tmp/nemo-gym-deepswe/rg; touch injected",
+    ]
+
+
 async def test_the_verifier_sandbox_gets_no_agent_runtime_files(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -1427,7 +1456,7 @@ async def test_a_failed_runtime_file_staging_cannot_start_a_session(
 def test_missing_agent_runtime_file_refuses_to_start_the_server(task_assets: Path, tmp_path: Path) -> None:
     config = _config(task_assets, golden=False)
     config.agent_runtime_files = [tmp_path / "rg"]
-    with pytest.raises(ValueError, match="gym eval prepare --benchmark deepswe"):
+    with pytest.raises(ValueError, match=re.escape("run `gym eval prepare --benchmark deepswe/opencode`")):
         DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
