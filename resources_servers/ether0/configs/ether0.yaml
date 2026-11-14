@@ -2,6 +2,8 @@ ether0:
   resources_servers:
     ether0:
       entrypoint: app.py
+      # Per worker; oracle grades run in background threads so HTTP handling stays responsive.
+      oracle_max_concurrency: 8
       domain: knowledge
       verified: false
       description: ether0 chemistry benchmark verifiers

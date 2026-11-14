@@ -14,6 +14,11 @@
       "pathspec"
     ]
   },
+  "resources_servers/ether0": {
+    "exclude-dependencies": [
+      "pyonmttok"
+    ]
+  },
   "resources_servers/gdpval": {
     "include-dependencies": [
       "cryptography"

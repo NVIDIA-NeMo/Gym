@@ -12,7 +12,10 @@
 - Converting IUPAC name to SMILES
 - Answering multiple-choice questions about safety, ADME properties, BBB permeability, toxicity, scent, and pKa
 
-Note that retro-synthesis and oracle-solubility require an additional verifier server (see `ether0-serve` in the [ether0 repo](https://github.com/Future-House/ether0/)).
+Retro-synthesis and oracle-solubility are graded by three chemistry models running in-process
+(`local_oracles: true`). Missing MolTrans checkpoints and the default ZINC20 catalog download
+on first use. See the [resources server setup](../../resources_servers/ether0/README.md)
+for cache locations, pinned checksums, path overrides, offline setup, and remote-oracle options.
 
 ## Quickstart 
 
@@ -38,4 +41,4 @@ gym eval run --no-serve \
 tail -n 1 environments/ether0/data/ether0_rollouts.jsonl | jq | less
 ```
 
-See `prepare.py` to prepare the full dataset.
+See `prepare.py` to prepare the full dataset, or run the `ether0` benchmark: `gym eval prepare --benchmark ether0`.

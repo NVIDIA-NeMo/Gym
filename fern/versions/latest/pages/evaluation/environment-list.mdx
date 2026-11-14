@@ -31,13 +31,36 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [ugphysics_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ugphysics_judge) | Undergraduate physics benchmarks | LLM judge (TRUE/FALSE) + math-verify | ✓ |
 | [critpt](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/critpt) | Research-level physics problems scored by the Artificial Analysis API | LLM judge (external) | ✓ |
 | [critpt_custom_grader](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/critpt_custom_grader) | Sandboxed execution grader for CritPt-like tasks with operator-supplied expectations | Sandboxed code execution + comparator | |
-| [ether0](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ether0) | Chemistry benchmark verifiers (ether0) | Rule-based + LLM judge | ✓ |
+| [ether0](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ether0) | Chemistry benchmark verifiers (ether0) | Rules + chemistry models | ✓ |
 | [bunsenbench_chemistry_mcq](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bunsenbench_chemistry_mcq) | BunsenBench chemistry multiple-choice benchmark | Exact match | ✓ |
 | [assaybench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/assaybench) | AssayBench: rank the hit genes of a CRISPR screen from its description (1,920 screens, 3 cohorts) | Adjusted nDCG@100 via the authors' `assaybench` package | ✓ |
 | [frontierscience_judge](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/frontierscience_judge) | FrontierScience olympiad and research answer grading | LLM judge | ✓ |
 | [proof_verification](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) | Proof scoring against ground truth | LLM judge + meta-verifier | |
 | [newton_bench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/newton_bench) | Scientific law discovery across 12 physics domains | Execution | |
 | [math_with_code](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) | Competitive math with calculator tools | Boxed answer + numeric match | |
+
+### ether0 oracle concurrency
+
+The ether0 resources server runs its solubility (`sol_eval`) and retrosynthesis (`rxn_forward`)
+graders in background threads. `oracle_max_concurrency` limits simultaneous oracle-backed grades
+in each server worker and defaults to **8**. It applies to both local chemistry models and a
+configured remote oracle. Override it in the resources-server config:
+
+```yaml
+ether0:
+  resources_servers:
+    ether0:
+      oracle_max_concurrency: 8
+```
+
+Text and molecule comparison, molecular-formula, functional-group, and molecule-completion graders
+keep their existing local execution path and do not wait for an oracle slot. Cancelling a request
+that is already grading does not stop its background calculation; the slot stays occupied until
+that calculation finishes. Requests cancelled while waiting for a slot do not start grading.
+
+Tune the limit against available CPU and memory and the mix of tasks. More concurrent grades can
+improve oracle throughput, but each server worker has its own limit and loads its own local oracle
+models. Raising both the worker count and the per-worker limit increases resource demand.
 
 ## Coding
 
