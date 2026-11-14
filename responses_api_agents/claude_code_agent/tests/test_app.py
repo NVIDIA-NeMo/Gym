@@ -385,6 +385,8 @@ class TestObservability:
         assert observations is not None
         invocation = next(record for record in observations.records if isinstance(record, AgentInvocation))
         assert invocation.invocation_id == "session-1"
+        assert invocation.agent_instance.startswith("claude-code-agent:")
+        assert observations.schema_version == "2.0"
         assert invocation.status == "completed"
         assert invocation.duration_ms == 123
         assert invocation.model_calls[0].response_id == "msg-1"

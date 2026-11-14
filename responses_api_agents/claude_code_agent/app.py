@@ -718,6 +718,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cleanup_confirmed=state.session.cleanup_confirmed,
             agent_observations=state.observations
             or AgentObservationBundle(
+                schema_version="2.0",
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_activation_interrupted")],
             ),
@@ -833,7 +834,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         else:
             state.observations = AgentObservationBundle(
-                source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
+                schema_version="2.0", source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
         state.observations = await self._associate_compaction_calls(
             state.observations, rollout_id=state.request.episode_id.capture_key
@@ -938,12 +939,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     root_duration_ms=run_metadata.get("duration_ms"),
                     root_error_type=run_metadata.get("error_type"),
                     compaction_attempts=run_metadata.get("compaction_attempts"),
+                    # One Claude process wrote this fresh config directory's transcripts.
+                    agent_instance=f"claude-code-agent:{uuid4().hex}",
+                    clock_domain=f"claude-code-wall:{uuid4().hex}",
                 )
                 if self.config.model_server is None:
                     observations.gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
             except Exception:
                 LOG.exception("failed to extract Claude Code observations")
                 observations = AgentObservationBundle(
+                    schema_version="2.0",
                     source="claude_code",
                     gaps=[ObservationGap(code="observation_parse_failed")],
                 )
@@ -957,6 +962,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
         if observations is None:
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )

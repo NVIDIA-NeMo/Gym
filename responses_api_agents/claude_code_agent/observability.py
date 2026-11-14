@@ -9,6 +9,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,6 +31,8 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    normalize_operation_timing,
+    tool_attempt_id,
 )
 
 
@@ -66,8 +69,27 @@ _COMPACTION_SUFFIX_RE = re.compile(
 )
 
 
-def _gap(code: str, *, invocation_id: str | None = None, detail: str | None = None) -> ObservationGap:
-    return ObservationGap(code=code, invocation_id=invocation_id, detail=detail)
+def _gap(
+    code: str, *, invocation_id: str | None = None, span_id: str | None = None, detail: str | None = None
+) -> ObservationGap:
+    return ObservationGap(code=code, invocation_id=invocation_id, span_id=span_id, detail=detail)
+
+
+@dataclass
+class _ToolResult:
+    record_id: str
+    assistant_id: str | None
+    exact_assistant_id: bool
+    completed_at: float | None
+    status: str
+    ordinal: int
+
+
+def _aware_timestamp(value: datetime) -> float:
+    # A timestamp without an offset has no defined clock; it is reported as missing.
+    if value.tzinfo is None:
+        raise ValueError("timestamp has no UTC offset")
+    return value.timestamp()
 
 
 def _timestamp(value: Any) -> float | None:
@@ -75,7 +97,7 @@ def _timestamp(value: Any) -> float | None:
         result = (
             float(value)
             if isinstance(value, (int, float)) and not isinstance(value, bool)
-            else datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            else _aware_timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
         )
     except (AttributeError, TypeError, ValueError):
         return None
@@ -234,6 +256,13 @@ def _message_id(event: dict[str, Any], block_index: int, kind: str) -> str | Non
     return None
 
 
+def _record_key(event: dict[str, Any], record_id: str, block_index: int, kind: str) -> str:
+    """Persisted record identity only; a response ID is shared by Claude's split parallel records."""
+    event_id = event.get("uuid")
+    owner = event_id if isinstance(event_id, str) and event_id else record_id
+    return f"{owner}:{kind}:{block_index}"
+
+
 def _message(item_id: str, text: str) -> NeMoGymResponseOutputMessage:
     return NeMoGymResponseOutputMessage(id=item_id, content=[NeMoGymResponseOutputText(text=text, annotations=[])])
 
@@ -265,7 +294,7 @@ def _tool_result(block: dict[str, Any], status: str) -> NeMoGymFunctionCallOutpu
     )
 
 
-def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int, dict[str, Any]]]:
+def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int, str, dict[str, Any]]]:
     if not config_dir.is_dir():
         gaps.append(_gap("transcript_dir_missing"))
         return []
@@ -284,7 +313,10 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
         gaps.append(_gap("transcript_dir_unreadable"))
         return []
 
-    events: list[tuple[int, dict[str, Any]]] = []
+    events: list[tuple[int, str, dict[str, Any]]] = []
+    # Identical copies of one persisted record are replay, not new activity. Records that
+    # share a UUID but differ remain separate; UUID-less records keep their file positions.
+    seen: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in paths:
         try:
             lines = path.open(encoding="utf-8", errors="replace")
@@ -305,14 +337,19 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
                     continue
                 if not isinstance(event.get("sessionId"), str):
                     continue
-                events.append((len(events), event))
+                event_uuid = event.get("uuid")
+                if isinstance(event_uuid, str) and event_uuid:
+                    if event in seen[event_uuid]:
+                        continue
+                    seen[event_uuid].append(event)
+                events.append((len(events), f"{path.relative_to(transcript_dir)}:{line_number}", event))
     return events
 
 
 def _would_create_parent_cycle(
     child_id: str,
     parent_id: str,
-    parents: dict[str, tuple[str, str, str, int]],
+    parents: dict[str, tuple[str, str, str, int, str]],
 ) -> bool:
     seen = {child_id}
     current = parent_id
@@ -332,11 +369,16 @@ def extract_claude_code_observations(
     root_duration_ms: float | None = None,
     root_error_type: str | None = None,
     compaction_attempts: list[dict[str, str]] | None = None,
+    agent_instance: str | None = None,
+    clock_domain: str | None = None,
 ) -> AgentObservationBundle:
     """Extract exact relationships available in one ``CLAUDE_CONFIG_DIR``.
 
     Transcript IDs and timestamps are used directly. Missing or ambiguous evidence
     is reported as a gap; the extractor never joins calls by text or proximity.
+    Tool attempts are identified by their persisted record identity, so a native ID
+    reused across responses stays a separate attempt. Pass ``clock_domain`` only when
+    one Claude process wrote the transcript timestamps.
     """
 
     gaps: list[ObservationGap] = []
@@ -354,18 +396,18 @@ def extract_claude_code_observations(
     ]
     if not raw_events and not attempts:
         gaps.append(_gap("agent_transcript_unavailable"))
-        return AgentObservationBundle(source=SOURCE, gaps=gaps)
+        return AgentObservationBundle(schema_version="2.0", source=SOURCE, gaps=gaps)
     if not raw_events:
         gaps.append(_gap("agent_transcript_unavailable"))
 
-    events_by_invocation: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    events_by_invocation: dict[str, list[tuple[int, str, dict[str, Any]]]] = defaultdict(list)
     first_seen: dict[str, int] = {}
     agent_invocations: set[str] = set()
 
-    for ordinal, event in raw_events:
+    for ordinal, record_id, event in raw_events:
         agent_id = event.get("agentId")
         invocation_id = agent_id if isinstance(agent_id, str) and agent_id else event["sessionId"]
-        events_by_invocation[invocation_id].append((ordinal, event))
+        events_by_invocation[invocation_id].append((ordinal, record_id, event))
         first_seen.setdefault(invocation_id, ordinal)
         if isinstance(agent_id, str) and agent_id:
             agent_invocations.add(invocation_id)
@@ -379,9 +421,9 @@ def extract_claude_code_observations(
             )
         )
 
-    starts: dict[tuple[str, str], list[tuple[float | None, str]]] = defaultdict(list)
-    finishes: dict[tuple[str, str], list[tuple[float | None, str]]] = defaultdict(list)
-    parents: dict[str, tuple[str, str, str, int]] = {}
+    starts: dict[tuple[str, str], list[tuple[ToolCallObservation, float | None]]] = defaultdict(list)
+    finishes: dict[tuple[str, str], list[_ToolResult]] = defaultdict(list)
+    parents: dict[str, tuple[str, str, str, int, str]] = {}
     ambiguous_parents: set[str] = set()
     conversations: dict[str, list[Any]] = defaultdict(list)
     model_calls: dict[str, list[ModelCallRef]] = defaultdict(list)
@@ -398,7 +440,7 @@ def extract_claude_code_observations(
         last_model_call: ModelCallRef | None = None
         pending_compactions: list[ContextCompactionObservation] = []
         previous_compaction: tuple[int, bool, ContextCompactionObservation] | None = None
-        for entry_index, (ordinal, event) in enumerate(entries):
+        for entry_index, (ordinal, record_id, event) in enumerate(entries):
             compaction = _compaction(event, invocation_id)
             if compaction is not None:
                 is_summary = _is_compaction_summary(event)
@@ -483,8 +525,31 @@ def extract_claude_code_observations(
                             add_gap("tool_call_id_missing")
                             continue
                         tool_name = block.get("name") if isinstance(block.get("name"), str) else ""
+                        # Persisted record identity distinguishes reused native IDs.
+                        operation_key = _record_key(event, record_id, block_index, "tool_use")
                         items.append(_tool_call(tool_call_id, block))
-                        starts[(invocation_id, tool_call_id)].append((_timestamp(event.get("timestamp")), tool_name))
+                        message_uuid = event.get("uuid")
+                        starts[(invocation_id, tool_call_id)].append(
+                            (
+                                ToolCallObservation(
+                                    invocation_id=invocation_id,
+                                    agent_instance=agent_instance,
+                                    tool_call_id=tool_call_id,
+                                    native_tool_call_id=tool_call_id,
+                                    producer_id=SOURCE,
+                                    span_id=tool_attempt_id(
+                                        producer_id=SOURCE, invocation_id=invocation_id, operation_key=operation_key
+                                    ),
+                                    source_message_id=message_uuid if isinstance(message_uuid, str) else None,
+                                    model_call_ref=ModelCallRef(model_ref=model_ref, response_id=response_id)
+                                    if model_ref is not None and isinstance(response_id, str) and response_id
+                                    else None,
+                                    tool_name=tool_name or None,
+                                    status="incomplete",
+                                ),
+                                _timestamp(event.get("timestamp")),
+                            )
+                        )
                     else:
                         add_gap(
                             "unsupported_assistant_content_block",
@@ -502,21 +567,34 @@ def extract_claude_code_observations(
                     continue
 
                 tool_results: list[dict[str, Any]] = []
+                tool_result_indexes: list[int] = []
                 result_metadata = event.get("toolUseResult")
-                for block in content:
+                for block_index, block in enumerate(content):
                     if not isinstance(block, dict):
                         add_gap("invalid_user_content")
                         continue
                     if block.get("type") == "tool_result":
                         tool_results.append(block)
+                        tool_result_indexes.append(block_index)
                         tool_call_id = block.get("tool_use_id")
                         if not isinstance(tool_call_id, str) or not tool_call_id:
                             add_gap("tool_result_id_missing")
                             continue
                         tool_status = _status(block, result_metadata)
+                        result_id = _record_key(event, record_id, block_index, "tool_result")
                         items.append(_tool_result(block, tool_status))
+                        source = event.get("sourceToolAssistantUUID")
+                        source = source if isinstance(source, str) and source else None
+                        fallback = event.get("parentUuid")
                         finishes[(invocation_id, tool_call_id)].append(
-                            (_timestamp(event.get("timestamp")), tool_status)
+                            _ToolResult(
+                                record_id=result_id,
+                                assistant_id=source or (fallback if isinstance(fallback, str) else None),
+                                exact_assistant_id=source is not None,
+                                completed_at=_timestamp(event.get("timestamp")),
+                                status=tool_status,
+                                ordinal=ordinal,
+                            )
                         )
                     elif block.get("type") == "text":
                         if isinstance(block.get("text"), str):
@@ -538,8 +616,12 @@ def extract_claude_code_observations(
                             tool_results[0]["tool_use_id"],
                             _status(tool_results[0], result_metadata),
                             ordinal,
+                            _record_key(event, record_id, tool_result_indexes[0], "tool_result"),
                         )
-                        if child_id in parents and parents[child_id][:2] != parent[:2]:
+                        # A different result record is a competing link even for the same native ID.
+                        if child_id in parents and (
+                            parents[child_id][:2] != parent[:2] or parents[child_id][4] != parent[4]
+                        ):
                             parents.pop(child_id)
                             ambiguous_parents.add(child_id)
                             gaps.append(_gap("conflicting_subagent_parent", invocation_id=child_id))
@@ -573,47 +655,101 @@ def extract_claude_code_observations(
             gaps.append(_gap("compaction_timestamp_missing", invocation_id=compaction.invocation_id))
 
     tool_calls: list[ToolCallObservation] = []
+    result_tools: dict[str, ToolCallObservation] = {}
     for invocation_id, tool_call_id in sorted(
         set(starts) | set(finishes), key=lambda key: (first_seen.get(key[0], math.inf), key[1])
     ):
-        call_starts = starts.get((invocation_id, tool_call_id), [])
-        call_finishes = finishes.get((invocation_id, tool_call_id), [])
-
-        def add_tool_gap(code: str) -> None:
-            gaps.append(_gap(code, invocation_id=invocation_id, detail=tool_call_id))
-
-        if len(call_starts) > 1 or len(call_finishes) > 1:
-            add_tool_gap("ambiguous_tool_artifact")
-            continue
-        started_at, tool_name = call_starts[0] if call_starts else (None, "")
-        completed_at, tool_status = call_finishes[0] if call_finishes else (None, "incomplete")
-        if not call_starts:
-            add_tool_gap("tool_start_missing")
-        if not call_finishes:
-            add_tool_gap("tool_result_missing")
-        if call_starts and started_at is None:
-            add_tool_gap("tool_start_timestamp_missing")
-        if call_finishes and completed_at is None:
-            add_tool_gap("tool_result_timestamp_missing")
-        duration_ms = None
-        if started_at is not None and completed_at is not None:
-            if completed_at >= started_at:
-                duration_ms = (completed_at - started_at) * 1000
+        # Exact duplicate transcript blocks are replay, not additional executions.
+        call_starts = dict(
+            (tool.span_id, (tool, started_at)) for tool, started_at in starts.get((invocation_id, tool_call_id), [])
+        )
+        call_finishes = list(
+            {result.record_id: result for result in finishes.get((invocation_id, tool_call_id), [])}.values()
+        )
+        matches: dict[str, list[_ToolResult]] = defaultdict(list)
+        unmatched: list[_ToolResult] = []
+        for result in call_finishes:
+            # Claude records the requesting assistant message on each result; only a
+            # result without that field may fall back to the single start for its ID.
+            candidates = [
+                span_id for span_id, (tool, _) in call_starts.items() if tool.source_message_id == result.assistant_id
+            ]
+            if not result.exact_assistant_id and (result.assistant_id is None or not candidates):
+                candidates = list(call_starts)
+            if len(candidates) == 1:
+                matches[candidates[0]].append(result)
             else:
-                add_tool_gap("tool_timing_invalid")
-                completed_at = None
-        tool_calls.append(
-            ToolCallObservation(
-                invocation_id=invocation_id,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name or None,
+                unmatched.append(result)
+
+        def retain(
+            tool: ToolCallObservation, started_at: float | None, result: _ToolResult | None, *, has_start: bool
+        ) -> None:
+            def add_tool_gap(code: str) -> None:
+                gaps.append(_gap(code, invocation_id=invocation_id, span_id=tool.span_id, detail=tool_call_id))
+
+            if not has_start:
+                add_tool_gap("tool_start_missing")
+            elif started_at is None:
+                add_tool_gap("tool_start_timestamp_missing")
+            completed_at = None
+            if result is None:
+                add_tool_gap("tool_result_missing")
+            else:
+                tool.status = result.status
+                completed_at = result.completed_at
+                if completed_at is None:
+                    add_tool_gap("tool_result_timestamp_missing")
+                result_tools[result.record_id] = tool
+            # Transcript record timestamps, not executor timing.
+            timing, timing_gaps = normalize_operation_timing(
+                boundary="transcript",
+                timing_source="claude_code.transcript",
                 started_at=started_at,
                 completed_at=completed_at,
-                duration_ms=duration_ms,
-                timing_source="artifact" if started_at is not None or completed_at is not None else None,
-                status=tool_status,
+                duration_ms=(completed_at - started_at) * 1000
+                if started_at is not None and completed_at is not None and completed_at >= started_at
+                else None,
+                duration_source="wall_clock",
+                clock_domain=clock_domain,
             )
-        )
+            tool.timings = [timing] if timing else []
+            for code in timing_gaps:
+                add_tool_gap(code)
+            tool_calls.append(tool)
+
+        # A start without a result is ambiguous only when some result for its ID was not attributed.
+        unattributed = bool(unmatched)
+        for span_id, (tool, started_at) in call_starts.items():
+            results = matches[span_id]
+            if len(results) > 1 or (not results and unattributed):
+                gaps.append(_gap("ambiguous_tool_artifact", invocation_id=invocation_id, span_id=span_id))
+            retain(tool, started_at, results[0] if len(results) == 1 else None, has_start=True)
+            if len(results) > 1:
+                unmatched.extend(results)
+        for result in unmatched:
+            # Result evidence that cannot be attributed to one request stays a separate partial attempt.
+            tool = ToolCallObservation(
+                invocation_id=invocation_id,
+                agent_instance=agent_instance,
+                tool_call_id=tool_call_id,
+                native_tool_call_id=tool_call_id,
+                producer_id=SOURCE,
+                span_id=tool_attempt_id(
+                    producer_id=SOURCE, invocation_id=invocation_id, operation_key=result.record_id
+                ),
+                status="incomplete",
+            )
+            if call_starts:
+                gaps.append(_gap("ambiguous_tool_artifact", invocation_id=invocation_id, span_id=tool.span_id))
+            retain(tool, None, result, has_start=False)
+
+    for gap in gaps:
+        if gap.span_id is not None:
+            gap.agent_instance = agent_instance
+    for tool in tool_calls:
+        parent = parents.get(tool.invocation_id)
+        if parent is not None and parent[4] in result_tools:
+            tool.parent_span_id = result_tools[parent[4]].span_id
 
     parent_by_invocation = {child_id: parent[:3] for child_id, parent in parents.items()}
     for child_id, parent in parents.items():
@@ -644,6 +780,7 @@ def extract_claude_code_observations(
                 error_type = parent[2]
         invocations_by_id[invocation_id] = AgentInvocation(
             invocation_id=invocation_id,
+            agent_instance=agent_instance,
             parent_invocation_id=parent[0] if parent else None,
             spawned_by_tool_call_id=parent[1] if parent else None,
             status=status,
@@ -656,6 +793,7 @@ def extract_claude_code_observations(
     ordered_ids = sorted(all_invocation_ids, key=lambda invocation_id: (first_seen[invocation_id], invocation_id))
 
     return AgentObservationBundle(
+        schema_version="2.0",
         source=SOURCE,
         records=[
             *(invocations_by_id[invocation_id] for invocation_id in ordered_ids),

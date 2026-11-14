@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import copy
 import io
 import json
 import tarfile
@@ -170,10 +171,13 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
         model_ref=MODEL_REF,
         root_status="completed",
         root_duration_ms=5000,
+        agent_instance="claude-code-agent:a",
+        clock_domain="claude-code-wall:a",
     )
 
     invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
     assert set(invocations) == {session, child, grandchild}
+    assert {invocation.agent_instance for invocation in invocations.values()} == {"claude-code-agent:a"}
     root_invocation = invocations[session]
     child_invocation = invocations[child]
     grandchild_invocation = invocations[grandchild]
@@ -205,12 +209,20 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
     assert grandchild_result.status == "incomplete"
 
     timings = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
-    assert timings["tool-fast"].duration_ms == pytest.approx(1000)
-    assert timings["tool-child"].duration_ms == pytest.approx(3000)
-    assert timings["tool-grandchild"].duration_ms == pytest.approx(1000)
+    assert timings["tool-fast"].timings[0].duration_ms == pytest.approx(1000)
+    assert timings["tool-child"].timings[0].duration_ms == pytest.approx(3000)
+    assert timings["tool-grandchild"].timings[0].duration_ms == pytest.approx(1000)
     assert timings["tool-grandchild"].status == "timeout"
-    assert all(tool.timing_source == "artifact" for tool in timings.values())
-    assert bundle.gaps == []
+    legacy = bundle.model_copy(update={"schema_version": "1.0"}).model_dump(mode="json")
+    legacy_tools = {record["tool_call_id"]: record for record in legacy["records"] if record["kind"] == "tool_call"}
+    assert legacy_tools["tool-fast"]["duration_ms"] == pytest.approx(1000)
+    assert all(tool["timing_source"] == "artifact" for tool in legacy_tools.values())
+    assert not bundle.gaps
+    assert {tool.timings[0].clock_domain for tool in timings.values()} == {"claude-code-wall:a"}
+    assert {tool.agent_instance for tool in timings.values()} == {"claude-code-agent:a"}
+    assert all(tool.timings[0].boundary == "transcript" for tool in timings.values())
+    assert timings["tool-grandchild"].parent_span_id == timings["tool-child"].span_id
+    assert timings["tool-fast"].model_call_ref.response_id == "msg-root"
 
 
 def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
@@ -311,7 +323,7 @@ def test_malformed_and_incomplete_artifacts_produce_sanitized_gaps(tmp_path: Pat
         "tool_result_missing",
         "tool_start_timestamp_missing",
         "tool_start_missing",
-        "tool_timing_invalid",
+        "tool_clock_discontinuity",
     } <= codes
     invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
     assert all(not invocation.model_calls for invocation in invocations.values())
@@ -669,3 +681,424 @@ def test_compaction_call_correlation_rejects_inexact_matches(case: str) -> None:
     [compaction] = _records(associated, ContextCompactionObservation)
     assert compaction.model_calls == []
     assert "compaction_model_call_reference_unavailable" in {gap.code for gap in associated.gaps}
+
+
+def test_reused_ids_keep_exact_response_attempts_and_replay(tmp_path: Path) -> None:
+    from nemo_gym.trajectory import TrajectoryModelCall, normalize_tool_calls
+
+    events = []
+    for index, failed in enumerate((False, True)):
+        response_id = f"response-{index}"
+        events.append(
+            _assistant(
+                "root",
+                str(10 + index * 2),
+                response_id,
+                {"type": "tool_use", "id": "reused", "name": "Bash", "input": {}},
+            )
+        )
+        result = _tool_result("root", str(11 + index * 2), "reused", is_error=failed)
+        result.update(uuid=f"result-{index}", sourceToolAssistantUUID=f"{response_id}-event")
+        events.append(result)
+    # Numeric epoch values are legitimate transcript timestamps.
+    for event in events:
+        event["timestamp"] = float(event["timestamp"])
+    path = tmp_path / "projects" / "work" / "session.jsonl"
+    _write(path, *events)
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = _records(bundle, ToolCallObservation)
+    assert len(tools) == 2
+    assert len({tool.span_id for tool in tools}) == 2
+    assert [tool.model_call_ref.response_id for tool in tools] == ["response-0", "response-1"]
+    assert [tool.status for tool in tools] == ["completed", "failed"]
+    assert [tool.timings[0].duration_ms for tool in tools] == [1000, 1000]
+    calls = [
+        TrajectoryModelCall(
+            model_call_id=f"capture-{index}",
+            response_metadata={"model_ref": MODEL_REF, "response_id": f"response-{index}", "status_code": 200},
+            response={"content": [{"type": "tool_use", "id": "reused", "name": "Bash", "input": {}}]},
+        )
+        for index in range(2)
+    ]
+    normalized, gaps = normalize_tool_calls(
+        tools,
+        capture_key="capture",
+        producer_id="claude_code",
+        model_calls=calls,
+        invocations=_records(bundle, AgentInvocation),
+    )
+    assert [tool.model_call_id for tool in normalized] == ["capture-0", "capture-1"]
+    assert "tool_failure_detail_unavailable" in {gap.code for gap in gaps}
+    replay = AgentObservationBundle.model_validate_json(bundle.model_dump_json())
+    assert replay.model_dump() == bundle.model_dump()
+    repeated, _ = normalize_tool_calls(
+        [*normalized, *normalized],
+        capture_key="capture",
+        producer_id="claude_code",
+        model_calls=calls,
+        invocations=_records(bundle, AgentInvocation),
+    )
+    # Canonical trajectories omit input-only join evidence such as model_call_ref.
+    assert [tool.model_dump(exclude={"model_call_ref"}) for tool in repeated] == [
+        tool.model_dump(exclude={"model_call_ref"}) for tool in normalized
+    ]
+    # Copying the same persisted transcript does not create additional tool attempts.
+    _write(path.with_name("copy.jsonl"), *events)
+    assert _records(extract_claude_code_observations(tmp_path, model_ref=MODEL_REF), ToolCallObservation) == tools
+
+
+def test_ambiguous_reused_ids_keep_starts_and_failed_result(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "projects" / "work" / "session.jsonl",
+        _assistant(
+            "root", "2026-07-22T10:00:01Z", "first", {"type": "tool_use", "id": "reused", "name": "Bash", "input": {}}
+        ),
+        _assistant(
+            "root", "2026-07-22T10:00:02Z", "second", {"type": "tool_use", "id": "reused", "name": "Bash", "input": {}}
+        ),
+        _tool_result("root", "2026-07-22T10:00:03Z", "reused", is_error=True),
+    )
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = _records(bundle, ToolCallObservation)
+    assert len(tools) == 3
+    assert [tool.status for tool in tools] == ["incomplete", "incomplete", "failed"]
+    assert all(tool.timings[0].completed_at is None for tool in tools[:2])
+    assert tools[2].timings[0].started_at is None
+    assert tools[2].model_call_ref is None
+    assert {gap.span_id for gap in bundle.gaps if gap.code == "ambiguous_tool_artifact"} == {
+        tool.span_id for tool in tools
+    }
+
+
+def test_parent_completion_does_not_complete_child_and_partial_identity_is_stable(tmp_path: Path) -> None:
+    root = tmp_path / "projects" / "work" / "root.jsonl"
+    child = root.parent / "root" / "subagents" / "child.jsonl"
+    _write(
+        root,
+        _assistant(
+            "root",
+            "2026-07-22T10:00:01Z",
+            "parent-response",
+            {"type": "tool_use", "id": "spawn", "name": "Agent", "input": {}},
+        ),
+        _tool_result("root", "2026-07-22T10:00:03Z", "spawn", child_id="child"),
+    )
+    start = _assistant(
+        "root",
+        "2026-07-22T10:00:02Z",
+        "child-response",
+        {"type": "tool_use", "id": "pending", "name": "Bash", "input": {}},
+        agent="child",
+    )
+    _write(child, start, '{"truncated":')
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF, root_status="completed")
+    tools = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+    assert tools["spawn"].status == "completed"
+    assert tools["pending"].status == "incomplete"
+    assert tools["pending"].timings[0].completed_at is None
+    assert tools["pending"].parent_span_id == tools["spawn"].span_id
+    _write(child, start, _tool_result("root", "2026-07-22T10:00:04Z", "pending", agent="child"))
+    complete = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    completed = {tool.tool_call_id: tool for tool in _records(complete, ToolCallObservation)}
+    assert completed["pending"].span_id == tools["pending"].span_id
+    assert completed["pending"].timings[0].duration_ms == 2000
+
+
+def test_records_without_uuid_use_file_position_and_unknown_model(tmp_path: Path) -> None:
+    start = _event(
+        "root",
+        "assistant",
+        "2026-07-22T10:00:01Z",
+        [{"type": "tool_use", "id": "pending", "name": "Bash", "input": {}}],
+    )
+    path = tmp_path / "projects" / "work" / "root.jsonl"
+    _write(path, start)
+    first = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    [tool] = _records(first, ToolCallObservation)
+    assert tool.span_id
+    assert tool.model_call_ref is None
+    assert tool.status == "incomplete"
+    _write(path, start, _tool_result("root", "2026-07-22T10:00:03Z", "pending"))
+    [complete] = _records(extract_claude_code_observations(tmp_path, model_ref=MODEL_REF), ToolCallObservation)
+    assert complete.span_id == tool.span_id
+
+
+def test_result_with_different_exact_assistant_reference_stays_unmatched(tmp_path: Path) -> None:
+    result = _tool_result("root", "2026-07-22T10:00:02Z", "reused", is_error=True)
+    result["sourceToolAssistantUUID"] = "missing-assistant"
+    _write(
+        tmp_path / "projects" / "work" / "root.jsonl",
+        _assistant(
+            "root",
+            "2026-07-22T10:00:01Z",
+            "observed",
+            {"type": "tool_use", "id": "reused", "name": "Bash", "input": {}},
+        ),
+        result,
+    )
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    requested, orphan = _records(bundle, ToolCallObservation)
+    assert requested.status == "incomplete"
+    assert requested.timings[0].completed_at is None
+    assert orphan.status == "failed"
+    assert orphan.timings[0].started_at is None
+    assert orphan.model_call_ref is None
+
+
+async def test_default_v1_export_keeps_claude_ids_and_is_replay_stable(tmp_path: Path) -> None:
+    from nemo_gym.rollouts import enrich_run_result
+
+    events = []
+    for index in range(2):
+        tool_id = f"tool-{index}"
+        events.append(
+            _assistant(
+                "root",
+                f"2026-07-22T10:00:0{index * 2}Z",
+                f"response-{index}",
+                {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {}},
+            )
+        )
+        result = _tool_result("root", f"2026-07-22T10:00:0{index * 2 + 1}Z", tool_id)
+        result.update(uuid=f"result-{index}", sourceToolAssistantUUID=f"response-{index}-event")
+        result["message"]["content"][0]["content"] = f"output-{index}"
+        events.append(result)
+    _write(tmp_path / "config" / "projects" / "work" / "root.jsonl", *events)
+    bundle = extract_claude_code_observations(tmp_path / "config", root_status="completed")
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    record = {"ng_agent_observations": bundle.model_dump(mode="json")}
+    first = None
+    for _ in range(3):
+        await enrich_run_result(row, record, capture_dirs=[captures], observability_enabled=True)
+        trajectory = record["ng_trajectory"]
+        assert trajectory["schema_version"] == "1.0"
+        tools = trajectory["tool_calls"]
+        conversation = trajectory["invocations"][0]["conversation"]
+        assert [tool["output"] for tool in tools] == ["output-0", "output-1"]
+        assert all("span_id" not in tool and "timings" not in tool for tool in tools)
+        assert all(tool["duration_ms"] == 1000 for tool in tools)
+        assert [tool["tool_call_id"] for tool in tools] == ["tool-0", "tool-1"]
+        assert [item["call_id"] for item in conversation if "call_id" in item] == [
+            "tool-0",
+            "tool-0",
+            "tool-1",
+            "tool-1",
+        ]
+        if first is None:
+            first = copy.deepcopy(trajectory)
+        assert trajectory == first
+
+
+def _bash(tool_id: str) -> dict:
+    return {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {}}
+
+
+async def _enriched_trajectory(tmp_path: Path, bundle: AgentObservationBundle, schema: str) -> dict:
+    from nemo_gym.rollouts import enrich_run_result
+
+    captures = tmp_path / f"captures-{schema}"
+    captures.mkdir()
+    record = {"ng_agent_observations": bundle.model_dump(mode="json")}
+    await enrich_run_result(
+        {"_ng_task_index": 0, "_ng_rollout_index": 0},
+        record,
+        capture_dirs=[captures],
+        observability_enabled=True,
+        trajectory_schema_version=schema,
+    )
+    return record["ng_trajectory"]
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+async def test_split_parallel_records_without_uuid_stay_separate_attempts(tmp_path: Path, schema: str) -> None:
+    # Claude persists parallel tool_use blocks as one record each, all sharing the response ID.
+    _write(
+        tmp_path / "config" / "projects" / "work" / "root.jsonl",
+        _event("root", "assistant", "2026-07-22T10:00:01Z", [_bash("t1")], message_id="msg-1"),
+        _event("root", "assistant", "2026-07-22T10:00:01Z", [_bash("t2")], message_id="msg-1"),
+        _event("root", "user", "2026-07-22T10:00:02Z", [{"type": "tool_result", "tool_use_id": "t1", "content": "a"}]),
+        _event("root", "user", "2026-07-22T10:00:03Z", [{"type": "tool_result", "tool_use_id": "t2", "content": "b"}]),
+    )
+    bundle = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
+    tools = _records(bundle, ToolCallObservation)
+    assert len({tool.span_id for tool in tools}) == 2
+    trajectory = await _enriched_trajectory(tmp_path, bundle, schema)
+    assert sorted(tool["tool_call_id"] for tool in trajectory["tool_calls"]) == ["t1", "t2"]
+    assert sorted(tool["output"] for tool in trajectory["tool_calls"]) == ["a", "b"]
+    assert "tool_attempt_identity_conflict" not in {gap["code"] for gap in trajectory["gaps"]}
+
+
+def test_split_parallel_records_join_exact_assistant_references(tmp_path: Path) -> None:
+    events = [
+        _event("root", "assistant", "2026-07-22T10:00:01Z", [_bash("t1")], message_id="msg-1", uuid="a1"),
+        _event("root", "assistant", "2026-07-22T10:00:01Z", [_bash("t2")], message_id="msg-1", uuid="a2"),
+    ]
+    # Results arrive in reverse order; each names its own requesting record.
+    for tool_id, assistant, timestamp in (("t2", "a2", "2026-07-22T10:00:02Z"), ("t1", "a1", "2026-07-22T10:00:04Z")):
+        result = _tool_result("root", timestamp, tool_id)
+        result["sourceToolAssistantUUID"] = assistant
+        events.append(result)
+    _write(tmp_path / "projects" / "work" / "root.jsonl", *events)
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
+    assert [tools[name].timings[0].duration_ms for name in ("t1", "t2")] == [3000, 1000]
+    assert {tool.source_message_id for tool in tools.values()} == {"a1", "a2"}
+    assert {tool.model_call_ref.response_id for tool in tools.values()} == {"msg-1"}
+    assert {gap.code for gap in bundle.gaps if gap.span_id} == {"tool_clock_domain_unavailable"}
+
+
+def test_parent_uuid_attributes_a_result_without_an_exact_reference(tmp_path: Path) -> None:
+    result = _tool_result("root", "2026-07-22T10:00:04Z", "reused")
+    result["parentUuid"] = "second-event"
+    _write(
+        tmp_path / "projects" / "work" / "root.jsonl",
+        _assistant("root", "2026-07-22T10:00:01Z", "first", _bash("reused")),
+        _assistant("root", "2026-07-22T10:00:03Z", "second", _bash("reused")),
+        result,
+    )
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    first, second = _records(bundle, ToolCallObservation)
+    assert (first.status, second.status) == ("incomplete", "completed")
+    assert second.model_call_ref.response_id == "second"
+    assert second.timings[0].duration_ms == 1000
+    assert first.timings[0].completed_at is None
+    assert {gap.code for gap in bundle.gaps if gap.span_id == first.span_id} == {
+        "tool_result_missing",
+        "tool_clock_domain_unavailable",
+    }
+    assert "ambiguous_tool_artifact" not in {gap.code for gap in bundle.gaps}
+
+
+def test_unfinished_reused_start_is_missing_not_ambiguous_when_results_are_attributed(tmp_path: Path) -> None:
+    result = _tool_result("root", "2026-07-22T10:00:02Z", "reused")
+    result["sourceToolAssistantUUID"] = "first-event"
+    _write(
+        tmp_path / "projects" / "work" / "root.jsonl",
+        _assistant("root", "2026-07-22T10:00:01Z", "first", _bash("reused")),
+        result,
+        # The run stopped before this second request returned.
+        _assistant("root", "2026-07-22T10:00:03Z", "second", _bash("reused")),
+    )
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    first, second = _records(bundle, ToolCallObservation)
+    assert (first.status, second.status) == ("completed", "incomplete")
+    assert {gap.code for gap in bundle.gaps if gap.span_id == second.span_id} == {
+        "tool_result_missing",
+        "tool_clock_domain_unavailable",
+    }
+    assert "ambiguous_tool_artifact" not in {gap.code for gap in bundle.gaps}
+
+
+def test_timestamp_without_offset_is_reported_missing(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "projects" / "work" / "root.jsonl",
+        _assistant("root", "2026-07-22T10:00:01", "first", _bash("naive")),
+        _tool_result("root", "2026-07-22T10:00:02Z", "naive"),
+    )
+    bundle = extract_claude_code_observations(
+        tmp_path, model_ref=MODEL_REF, agent_instance="claude-code-agent:a", clock_domain="claude-code-wall:a"
+    )
+    [tool] = _records(bundle, ToolCallObservation)
+    assert tool.timings[0].started_at is None
+    assert tool.timings[0].duration_ms is None
+    assert tool.timings[0].completed_at is not None
+    assert "tool_start_timestamp_missing" in {gap.code for gap in bundle.gaps if gap.span_id == tool.span_id}
+
+
+async def test_default_v1_keeps_reused_id_attempts_with_explicit_gaps(tmp_path: Path) -> None:
+    events = []
+    for index in range(2):
+        events.append(_assistant("root", f"2026-07-22T10:00:0{index * 2}Z", f"response-{index}", _bash("reused")))
+        result = _tool_result("root", f"2026-07-22T10:00:0{index * 2 + 1}Z", "reused")
+        result.update(uuid=f"result-{index}", sourceToolAssistantUUID=f"response-{index}-event")
+        events.append(result)
+    _write(tmp_path / "config" / "projects" / "work" / "root.jsonl", *events)
+    bundle = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
+    trajectory = await _enriched_trajectory(tmp_path, bundle, "1.0")
+    tools = trajectory["tool_calls"]
+    # V1 has one call ID per invocation, so both attempts keep Claude's ID without an output.
+    assert [tool["tool_call_id"] for tool in tools] == ["reused", "reused"]
+    assert [tool["status"] for tool in tools] == ["completed", "completed"]
+    assert all(tool["output"] is None and tool["duration_ms"] == 1000 for tool in tools)
+    assert {"tool_native_identity_unrepresentable", "tool_output_ambiguous"} <= {
+        gap["code"] for gap in trajectory["gaps"]
+    }
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+async def test_copied_transcript_keeps_one_attempt_with_its_output(tmp_path: Path, schema: str) -> None:
+    result = _tool_result("root", "2026-07-22T10:00:02Z", "toolu")
+    result["sourceToolAssistantUUID"] = "response-event"
+    result["message"]["content"][0]["content"] = "ok"
+    events = [_assistant("root", "2026-07-22T10:00:01Z", "response", _bash("toolu")), result]
+    path = tmp_path / "config" / "projects" / "work" / "root.jsonl"
+    _write(path, *events)
+    single = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
+    _write(path.with_name("copy.jsonl"), *events)
+    copied = extract_claude_code_observations(tmp_path / "config", model_ref=MODEL_REF, root_status="completed")
+    assert copied.model_dump() == single.model_dump()
+    trajectory = await _enriched_trajectory(tmp_path, copied, schema)
+    [tool] = trajectory["tool_calls"]
+    assert tool["output"] == "ok"
+    assert tool["tool_call_id"] == "toolu"
+    [invocation] = trajectory["invocations"]
+    assert [item["type"] for item in invocation["conversation"]] == ["function_call", "function_call_output"]
+    if schema == "2.0":
+        assert tool["timings"][0]["duration_ms"] == 1000
+    else:
+        assert tool["duration_ms"] == 1000
+
+
+def _spawn_result(timestamp: str, record: str, assistant: str) -> dict:
+    result = _tool_result("root", timestamp, "spawn", child_id="child")
+    result.update(uuid=record, sourceToolAssistantUUID=assistant)
+    return result
+
+
+def _child_tool() -> dict:
+    return _assistant("root", "2026-07-22T10:00:02Z", "child-response", _bash("child-tool"), agent="child")
+
+
+def test_competing_result_records_leave_the_subagent_parent_unset(tmp_path: Path) -> None:
+    root = tmp_path / "projects" / "work" / "root.jsonl"
+    _write(
+        root,
+        _assistant("root", "2026-07-22T10:00:01Z", "a1", {**_bash("spawn"), "name": "Agent"}),
+        _spawn_result("2026-07-22T10:00:03Z", "r1", "a1-event"),
+        _assistant("root", "2026-07-22T10:00:04Z", "a2", {**_bash("spawn"), "name": "Agent"}),
+        _spawn_result("2026-07-22T10:00:05Z", "r2", "a2-event"),
+    )
+    _write(root.parent / "root" / "subagents" / "agent-child.jsonl", _child_tool())
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = _records(bundle, ToolCallObservation)
+    spawns = [tool for tool in tools if tool.native_tool_call_id == "spawn"]
+    [child_tool] = [tool for tool in tools if tool.invocation_id == "child"]
+    assert len({tool.span_id for tool in spawns}) == 2
+    assert [tool.status for tool in spawns] == ["completed", "completed"]
+    assert child_tool.parent_span_id is None
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+    assert invocations["child"].parent_invocation_id is None
+    assert invocations["child"].spawned_by_tool_call_id is None
+    assert "conflicting_subagent_parent" in {gap.code for gap in bundle.gaps if gap.invocation_id == "child"}
+
+
+def test_one_result_record_links_the_subagent_even_when_replayed(tmp_path: Path) -> None:
+    root = tmp_path / "projects" / "work" / "root.jsonl"
+    events = [
+        _assistant("root", "2026-07-22T10:00:01Z", "a1", {**_bash("spawn"), "name": "Agent"}),
+        _spawn_result("2026-07-22T10:00:03Z", "r1", "a1-event"),
+    ]
+    _write(root, *events)
+    _write(root.with_name("copy.jsonl"), *events)
+    _write(root.parent / "root" / "subagents" / "agent-child.jsonl", _child_tool())
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    tools = _records(bundle, ToolCallObservation)
+    [spawn] = [tool for tool in tools if tool.native_tool_call_id == "spawn"]
+    [child_tool] = [tool for tool in tools if tool.invocation_id == "child"]
+    assert child_tool.parent_span_id == spawn.span_id
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+    assert invocations["child"].parent_invocation_id == "root"
+    assert invocations["child"].spawned_by_tool_call_id == "spawn"
+    assert "conflicting_subagent_parent" not in {gap.code for gap in bundle.gaps}
