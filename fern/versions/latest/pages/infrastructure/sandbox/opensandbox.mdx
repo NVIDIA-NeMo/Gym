@@ -172,28 +172,54 @@ left behind by the attempt's metadata key, deletes it and cancels the create req
 deletes the sandbox the server's answer names. `aclose()` waits up to `operations.close_timeout_s` for
 those requests.
 
-Set `create.renew_ttl_s` and `create.renew_interval_s` to keep every sandbox on a lease, as partial-rollout
-checkpoints recommend (`renew_ttl_s: 1200`, `renew_interval_s: 300`, `renew_timeout_s: 30`). Each sandbox is
+Set `create.renew_ttl_s` and `create.renew_interval_s` to keep every sandbox on a lease
+(`renew_ttl_s: 1200`, `renew_interval_s: 300`, `renew_timeout_s: 30`). The lease is off in the shipped config.
+A config that checkpoints sandboxes should set it: a server that crashes leaves its sandboxes running, a
+restore replaces them with new ones, and without a lease the old ones run until the spec's `ttl_s`. Each sandbox is
 then created with `renew_ttl_s`, or the spec's `ttl_s` when that is shorter, and the process that created it
 renews it every `renew_interval_s` (jittered by up to 10% earlier), with `renew_timeout_s` per call, but never
-past the spec's `ttl_s` from creation. The lease runs from creation, so it must be longer than the provider-side
-setup that follows (the reconnect, the readiness probe and `setup.commands`); the first renewal comes that much
-sooner. Stopping a sandbox stops its renewal, and so does a crash of the process that
+past the spec's `ttl_s` from creation. The lease runs from the create request: the service starts it when it
+receives the request and answers once the sandbox is ready. It must therefore be longer than the time the
+request stays open (placement and the image pull, which a sandbox created from a snapshot repeats) plus the
+provider-side setup that follows (the reconnect, the readiness probe and `setup.commands`); the first renewal
+comes that much sooner, and at once if more than one interval has already passed. A create that takes longer
+than the whole lease loses its sandbox. Stopping a sandbox stops its renewal, and so does a crash of the process that
 created it: the service then deletes the sandbox within one `renew_ttl_s` instead of at the end of the spec's
 lifetime. A failed renewal is logged and tried again at the next interval; if the OpenSandbox API is
 unreachable for longer than `renew_ttl_s - renew_interval_s`, live sandboxes expire. Without `renew_ttl_s`,
 `renew_interval_s` alone refreshes the spec's whole `ttl_s` at every interval, and a renewal that fails fails
 the sandbox's later operations.
 
-A job that ended for good without releasing every checkpoint can leave its last snapshots behind. Delete them
-by the run's name prefix, with the run id from `<checkpoint.state_dir>/run_id`:
+The snapshots of partial-rollout checkpoints are deleted only when the controller releases a checkpoint it no
+longer restores. The OpenSandbox service does not expire snapshots, and deleting the source sandbox leaves
+them. So what a job leaves behind depends on its controller:
+
+- A controller that releases as it goes leaves the snapshots of the checkpoints it had not released when the
+  job ended.
+- A controller that never releases leaves every snapshot of every checkpoint: one per live sandbox at each
+  commit. The server logs a warning once its index holds more than a few checkpoints.
+
+Delete them by the name prefix of the job's `checkpoint.state_dir`, whose id is in
+`<checkpoint.state_dir>/state_dir_id` (this is not the `run_id` of a rollouts manifest):
 
 ```bash
 python -m nemo_gym.sandbox.providers.opensandbox.snapshots \
   --connection-config <yaml> \
-  --name-prefix "ng-$(cat <state_dir>/run_id)-" \
+  --name-prefix "ng-$(cat <state_dir>/state_dir_id)-" \
   --reap
 ```
+
+A `checkpoint.state_dir` belongs to one job and its restarts. Two jobs that run at the same time must not share
+one, for example by launching two experiments from a config that sets the same absolute path: they would share
+the name prefix above and the record of which snapshots belong to which checkpoint, and each job's release would
+delete the other's snapshots. Put the job's id in the path. The directory must also be on a filesystem whose
+`flock` holds across every node that runs the server: on Lustre, mount with `-o flock`, since `localflock` only
+holds within one node.
+
+A release lists every snapshot on the service to find the ones a crashed process left unrecorded, because the
+service's `name` filter matches whole names only. `operations.snapshot_list_timeout_s` bounds that listing and
+`operations.snapshot_delete_timeout_s` each delete, retries included; one that runs out fails the release, and
+the next release tries again.
 
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
@@ -211,7 +237,7 @@ The provider constructor accepts these optional config sections:
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
 | `create` | Sandbox create timeout, retry, image pull policy, health-check behavior, and the lease (`renew_ttl_s`, `renew_interval_s`, `renew_timeout_s`). |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. `checkpoint_background_poll_interval_s` caps the command-poll interval while a harness is being stopped for a checkpoint. `snapshot_timeout_s` and `snapshot_lookup_grace_s` bound the snapshots of partial-rollout checkpoints, and `snapshot_request_timeout_s` bounds each management API request for one. |
+| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. `checkpoint_background_poll_interval_s` caps the command-poll interval while a harness is being stopped for a checkpoint. `snapshot_timeout_s` and `snapshot_lookup_grace_s` bound the snapshots of partial-rollout checkpoints, `snapshot_request_timeout_s` bounds each management API request for one, and `snapshot_list_timeout_s` and `snapshot_delete_timeout_s` bound one whole listing and one whole delete, retries included. |
 | `diagnostics` | `timeout_s` bounds active diagnostic I/O during one uninterrupted status-read recovery. Status requests and polling sleeps do not spend it; each lookup also respects the recovery and client-wait deadlines. A successful status read resets the diagnostic budget. `request_timeout_s` bounds each diagnostic request; `poll_interval_s` controls diagnostic polling. Recognized control-plane lifecycle reports can confirm OOM; `inspect_oom` enables a deployment-specific fallback and defaults to `false`. See [OOM evidence](./opensandbox-debugging#the-whole-sandbox-died). |
 
 ## Failure reporting and recovery

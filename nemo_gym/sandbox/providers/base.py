@@ -324,19 +324,22 @@ class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
 
-class SandboxSnapshotNotFoundError(LookupError):
-    """Raised when a provider has no snapshot with the requested id.
-
-    The snapshot may be deleted, or not yet visible on every replica of a snapshot store that is not fully shared.
-    """
-
-
 class SandboxSnapshotError(RuntimeError):
-    """Raised when a provider cannot complete an operation on a snapshot; ``snapshot_id`` names it when known."""
+    """Raised when a provider cannot complete an operation on a snapshot; ``snapshot_id`` names it when known.
+
+    The base of every snapshot error, so ``except SandboxSnapshotError`` handles any snapshot failure.
+    """
 
     def __init__(self, message: str, *, snapshot_id: str | None = None) -> None:
         super().__init__(message)
         self.snapshot_id = snapshot_id
+
+
+class SandboxSnapshotNotFoundError(SandboxSnapshotError, LookupError):
+    """Raised when a provider has no snapshot with the requested id.
+
+    The snapshot may be deleted, or not yet visible on every replica of a snapshot store that is not fully shared.
+    """
 
 
 class SandboxSnapshotFailedError(SandboxSnapshotError):
@@ -351,8 +354,9 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
 class SandboxSnapshotInfo:
     """One snapshot in a provider's listing.
 
-    ``state`` is the provider's own lifecycle word, lowercased, and ``sandbox_id`` the sandbox the snapshot was
-    taken from; either is ``None`` when the provider does not report it.
+    ``name`` is the name the snapshot was taken with, and ``None`` only for one taken without a name. ``state`` is
+    the provider's own lifecycle word, lowercased, and ``sandbox_id`` the sandbox the snapshot was taken from;
+    either is ``None`` when the provider does not report it.
     """
 
     snapshot_id: str
@@ -588,10 +592,17 @@ class SupportsSandboxSnapshot(Protocol):
 
     A snapshot is a restore point: ``create_from_snapshot`` builds a new sandbox from it, however the source sandbox
     changed or ended since. Deleting the source sandbox leaves the snapshot; only ``delete_snapshot`` removes it.
+
+    A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
+    its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
+    other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
-        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet."""
+        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet.
+
+        ``name``, when given, is stored with the snapshot and is the name ``list_snapshots`` matches and returns.
+        """
         ...
 
     async def wait_snapshot_ready(self, snapshot_id: str) -> None:
@@ -611,7 +622,10 @@ class SupportsSandboxSnapshot(Protocol):
         ...
 
     async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
-        """Every snapshot whose name starts with ``prefix``; raises ``SandboxSnapshotError`` if the listing fails."""
+        """Every snapshot whose name starts with ``prefix``, each with the name it was taken with.
+
+        Raises ``SandboxSnapshotError`` if the listing fails; never returns a partial listing.
+        """
         ...
 
     async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:

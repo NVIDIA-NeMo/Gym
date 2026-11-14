@@ -25,11 +25,13 @@ any Python with aiohttp and PyYAML, for example as a job submitted by file path.
     snapshots.py --connection-config env.yaml --sandbox-id <id> --reap
     snapshots.py --connection-config env.yaml --kill-paused --reap    # also delete paused sandboxes
     snapshots.py --domain <host> --api-key <key> --snapshot-id <id> --reap
-    snapshots.py --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/run_id)-" --reap
+    snapshots.py --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/state_dir_id)-" --reap
 
-Partial-rollout checkpoints name their snapshots ``ng-<run id>-...``, with the run id in
-``<checkpoint.state_dir>/run_id``. A running job deletes the snapshots of checkpoints it dropped; once a job
-has ended for good, the last line deletes the rest of its snapshots.
+Partial-rollout checkpoints name their snapshots ``ng-<state dir id>-...``, with that id in
+``<checkpoint.state_dir>/state_dir_id``; it identifies the state directory and is not the ``run_id`` of a rollouts
+manifest. A running job deletes the snapshots of the checkpoints its controller releases, and the service never
+expires one, so once a job has ended for good, or under a controller that never releases, the last line is what
+deletes its snapshots.
 """
 
 import argparse
@@ -262,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--name-prefix",
-        help="Only snapshots whose name starts with this, such as a checkpointed run's ng-<run id>-.",
+        help="Only snapshots whose name starts with this, such as a checkpointed job's ng-<state dir id>-.",
     )
     parser.add_argument(
         "--kill-paused",

@@ -258,9 +258,12 @@ async def test_a_404_after_the_snapshot_appeared_fails_at_once(monkeypatch: pyte
         ],
     )
 
-    with pytest.raises(SandboxSnapshotNotFoundError, match=r"'snap-1' lookup failed -> HTTP 404: .*NOT_FOUND"):
+    # Caught as any snapshot failure, the not-found error still says which snapshot is missing.
+    with pytest.raises(SandboxSnapshotError, match=r"'snap-1' lookup failed -> HTTP 404: .*NOT_FOUND") as raised:
         await _provider(snapshot_timeout_s=5, snapshot_lookup_grace_s=60).wait_snapshot_ready("snap-1")
 
+    assert isinstance(raised.value, SandboxSnapshotNotFoundError) and isinstance(raised.value, LookupError)
+    assert raised.value.snapshot_id == "snap-1"
     assert len(calls) == 2
 
 
@@ -475,6 +478,71 @@ async def test_a_listing_page_that_keeps_failing_raises_instead_of_returning_a_p
     assert [call["params"]["page"] for call in calls] == ["1", *["2"] * requests]
 
 
+async def test_a_listing_asks_for_the_servers_largest_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(200, _EMPTY_LISTING)])
+    await _provider().list_snapshots("ng-")
+    # The server refuses a pageSize above 200; every page of the store is read, so each one is as large as allowed.
+    assert calls[0]["params"] == {"page": "1", "pageSize": "200"}
+
+
+async def test_an_empty_page_ends_the_listing_even_if_the_server_reports_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = {"items": [{"id": "a", "name": "ng-1"}], "pagination": {"hasNextPage": True}}
+    endless = {"items": [], "pagination": {"hasNextPage": True}}
+    calls = _management(monkeypatch, [_ManagementResponse(200, first), _ManagementResponse(200, endless)])
+
+    listed = await asyncio.wait_for(_provider().list_snapshots("ng-"), 5)
+
+    assert listed == [SandboxSnapshotInfo(snapshot_id="a", name="ng-1")]
+    assert [call["params"]["page"] for call in calls] == ["1", "2"]
+
+
+async def test_a_listing_that_outlasts_its_budget_raises_instead_of_paging_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each page answers, slowly, so no per-request timeout or retry limit would ever end the listing."""
+    import nemo_gym.client.http_client as http_client
+
+    pages: list[str] = []
+
+    async def slow_page(method: str, url: str, **kwargs: Any) -> _ManagementResponse:
+        pages.append(kwargs["params"]["page"])
+        await asyncio.sleep(0.05)
+        item = {"id": f"s{len(pages)}", "name": "ng-1"}
+        return _ManagementResponse(200, {"items": [item], "pagination": {"hasNextPage": True}})
+
+    monkeypatch.setattr(http_client, "request", slow_page)
+
+    with pytest.raises(
+        SandboxSnapshotError, match=r"listing did not finish within 0\.12s \((\d+) pages read\)"
+    ) as raised:
+        await asyncio.wait_for(_provider(snapshot_list_timeout_s=0.12).list_snapshots("ng-"), 5)
+
+    # It stopped inside the page it was reading when the budget ran out, a few pages in: the endless listing did
+    # not run to the test's own 5 s.
+    assert pages == [str(number) for number in range(1, len(pages) + 1)] and len(pages) <= 4
+    assert f"({len(pages) - 1} pages read)" in str(raised.value)
+
+
+async def test_a_delete_that_outlasts_its_budget_raises_and_names_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every try is answered with a retryable status, so only the delete's own budget ends it this early."""
+    calls = _management(monkeypatch, [_ManagementResponse(503, body="busy")])
+    provider = _provider(retries=1000, retry_delay_s=0.02, snapshot_delete_timeout_s=0.1)
+
+    with pytest.raises(SandboxSnapshotError, match=r"'snap-1' delete did not finish within 0\.1s") as raised:
+        await asyncio.wait_for(provider.delete_snapshot("snap-1"), 5)
+
+    assert raised.value.snapshot_id == "snap-1"
+    assert 1 <= len(calls) < 20, "ended by the budget, long before the 1000 retries"
+
+
+async def test_a_timeout_inside_a_delete_is_not_mistaken_for_its_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [asyncio.TimeoutError("the request timed out")])
+    with pytest.raises(SandboxSnapshotError, match="delete failed: TimeoutError"):
+        await _provider(retries=1).delete_snapshot("snap-1")
+
+
 async def test_a_snapshot_the_sdk_returns_without_an_id_raises() -> None:
     class _NoId:
         async def create_snapshot(self, name: str | None = None) -> Any:
@@ -572,10 +640,48 @@ async def test_a_management_request_has_its_own_short_timeout(monkeypatch: pytes
     assert [attempt["timeout"].total for attempt in client.attempts] == [7]
 
 
-async def test_snapshot_operations_require_a_domain() -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(connection={"api_key": "k"})
-    with pytest.raises(RuntimeError, match="require connection.domain"):
-        await provider.delete_snapshot("snap-1")
+@pytest.mark.parametrize(
+    ("connection", "url", "headers"),
+    [
+        # The config leaves both to the environment, as the SDK allows.
+        ({}, "http://env.example:8443/v1/snapshots/snap-1", {"OPEN-SANDBOX-API-KEY": "env-key"}),
+        # Only the key is left to the environment, to keep it out of the config file.
+        ({"domain": "cell.example"}, "http://cell.example/v1/snapshots/snap-1", {"OPEN-SANDBOX-API-KEY": "env-key"}),
+        ({"api_key": "k"}, "http://env.example:8443/v1/snapshots/snap-1", {"OPEN-SANDBOX-API-KEY": "k"}),
+        # What the config sets wins over the environment.
+        (
+            {"domain": "https://cell.example", "api_key": "k"},
+            "https://cell.example/v1/snapshots/snap-1",
+            {"OPEN-SANDBOX-API-KEY": "k"},
+        ),
+    ],
+)
+async def test_management_requests_go_to_the_server_and_key_the_sdk_resolves(
+    monkeypatch: pytest.MonkeyPatch, connection: dict[str, str], url: str, headers: dict[str, str]
+) -> None:
+    """The SDK creates sandboxes and submits snapshots with these; the wait, listing and delete must agree."""
+    monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "env.example:8443")
+    monkeypatch.setenv("OPEN_SANDBOX_API_KEY", "env-key")
+    calls = _management(monkeypatch, [_ManagementResponse(200, _READY)])
+    provider = opensandbox_provider.OpenSandboxProvider(connection=connection)
+
+    await provider.wait_snapshot_ready("snap-1")
+    await provider.delete_snapshot("snap-1")
+
+    assert [(call["method"], call["url"], call["headers"]) for call in calls] == [
+        ("GET", url, headers),
+        ("DELETE", url, headers),
+    ]
+
+
+async def test_a_management_request_without_a_key_anywhere_sends_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPEN_SANDBOX_API_KEY", raising=False)
+    calls = _management(monkeypatch, [_ManagementResponse(200, _EMPTY_LISTING)])
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"domain": "cell.example"})
+
+    assert await provider.list_snapshots("ng-") == []
+
+    assert calls[0]["url"] == "http://cell.example/v1/snapshots" and calls[0]["headers"] == {}
 
 
 @pytest.mark.parametrize(
@@ -586,6 +692,10 @@ async def test_snapshot_operations_require_a_domain() -> None:
         ({"snapshot_lookup_grace_s": float("nan")}, "snapshot_lookup_grace_s"),
         ({"snapshot_request_timeout_s": 0}, "snapshot_request_timeout_s"),
         ({"snapshot_request_timeout_s": float("inf")}, "snapshot_request_timeout_s"),
+        ({"snapshot_list_timeout_s": 0}, "snapshot_list_timeout_s"),
+        ({"snapshot_list_timeout_s": float("inf")}, "snapshot_list_timeout_s"),
+        ({"snapshot_delete_timeout_s": -1}, "snapshot_delete_timeout_s"),
+        ({"snapshot_delete_timeout_s": float("nan")}, "snapshot_delete_timeout_s"),
     ],
 )
 def test_snapshot_budgets_are_validated(operations: dict[str, float], match: str) -> None:
@@ -594,6 +704,7 @@ def test_snapshot_budgets_are_validated(operations: dict[str, float], match: str
     defaults = opensandbox_provider.OpenSandboxOperationConfig()
     assert (defaults.snapshot_timeout_s, defaults.snapshot_lookup_grace_s) == (240.0, 60.0)
     assert defaults.snapshot_request_timeout_s == 30.0
+    assert (defaults.snapshot_list_timeout_s, defaults.snapshot_delete_timeout_s) == (300.0, 120.0)
 
 
 def _recording_create(monkeypatch: pytest.MonkeyPatch, provider: Any, outcome: Any) -> list[SandboxSpec]:
@@ -656,6 +767,7 @@ async def test_create_from_a_missing_snapshot_raises_snapshot_not_found(monkeypa
     with pytest.raises(SandboxSnapshotNotFoundError, match="'snap-1'") as raised:
         await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
 
+    assert isinstance(raised.value, SandboxSnapshotError) and raised.value.snapshot_id == "snap-1"
     # The server's code sits under the create path's own failure, and its text is not in the outer message.
     wrapper = raised.value.__cause__
     assert isinstance(wrapper, NgFailureEvent) and wrapper.__cause__ is sdk_error

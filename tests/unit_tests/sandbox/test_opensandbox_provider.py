@@ -678,13 +678,25 @@ async def test_a_renewal_without_a_lease_that_finds_the_sandbox_gone_fails_the_s
 
 
 @pytest.mark.parametrize(
-    ("setup_s", "first_renewal_s"),
-    [(250, 300), (700, 700)],
-    ids=["setup-within-one-interval", "setup-longer-than-one-interval"],
+    ("request_s", "setup_s", "first_renewal_s"),
+    [(0, 250, 300), (0, 700, 700), (250, 0, 300), (700, 0, 700), (200, 200, 400)],
+    ids=[
+        "setup-within-one-interval",
+        "setup-longer-than-one-interval",
+        "create-request-within-one-interval",
+        "create-request-longer-than-one-interval",
+        "create-request-and-setup-longer-than-one-interval",
+    ],
 )
-async def test_the_first_renewal_counts_the_time_the_create_spent_setting_the_sandbox_up(
-    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, setup_s: float, first_renewal_s: float
+async def test_the_first_renewal_counts_the_time_since_the_create_request_was_sent(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+    request_s: float,
+    setup_s: float,
+    first_renewal_s: float,
 ) -> None:
+    """The server starts the TTL when it receives the create request and answers once the sandbox is ready, so
+    the time the request stays open (placement, image pull) is spent from the lease like the setup after it."""
     lease_s, interval_s = 320, 300
     monkeypatch.setattr(opensandbox_provider.random, "uniform", lambda low, high: high)
     # The event loop's clock, which every sleep moves forward instead of waiting.
@@ -707,6 +719,13 @@ async def test_the_first_renewal_counts_the_time_the_create_spent_setting_the_sa
         await asyncio.sleep(setup_s)
 
     monkeypatch.setattr(provider, "_run_setup_commands", slow_setup)
+    sdk_create = FakeSandbox.create.__func__
+
+    async def slow_create(cls: Any, *args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(request_s)
+        return await sdk_create(cls, *args, **kwargs)
+
+    monkeypatch.setattr(FakeSandbox, "create", classmethod(slow_create))
     renewed_at: list[float] = []
 
     async def renew(self: Any, duration: timedelta) -> None:
@@ -722,9 +741,9 @@ async def test_the_first_renewal_counts_the_time_the_create_spent_setting_the_sa
         await real_sleep(0)
     await provider.aclose()
 
-    # The lease has been running since the sandbox was created, not since its setup ended.
+    # The lease has been running since the create request was sent, not since it returned or the setup ended.
     assert renewed_at[0] == pytest.approx(first_renewal_s, abs=5)
-    if setup_s < interval_s:
+    if request_s + setup_s < interval_s:
         assert renewed_at[0] < lease_s, "renewed before the lease taken at create would expire"
     assert renewed_at[1] - renewed_at[0] == pytest.approx(interval_s, abs=5), "later renewals keep the interval"
 

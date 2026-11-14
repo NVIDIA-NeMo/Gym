@@ -117,6 +117,10 @@ sandbox:
       snapshot_lookup_grace_s: 60
       # Budget of one management API request for a snapshot (lookup, delete, listing page).
       snapshot_request_timeout_s: 30
+      # Budgets of one whole snapshot listing and one whole snapshot delete, retries included. A release of
+      # dropped checkpoints lists the server's snapshots and deletes theirs before the next checkpoint starts.
+      snapshot_list_timeout_s: 300
+      snapshot_delete_timeout_s: 120
       # Per-request budget for status polls, which are small idempotent GETs:
       # without their own short budget, each poll against an unreachable
       # sandbox hangs for the full connection request_timeout_s (tuned for

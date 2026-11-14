@@ -575,11 +575,9 @@ class AsyncSandbox:
         return self._owns_provider
 
     @property
-    def handle(self) -> SandboxHandle | None:
-        """The provider handle of a started or connected sandbox, or ``None`` before start and after stop."""
-        if self._handle is None or self._stopped:
-            return None
-        return self._handle
+    def started(self) -> bool:
+        """Whether the sandbox is started or connected and not yet stopped, so its operations can be called."""
+        return self._handle is not None and not self._stopped
 
     def checkpoint_exec_polling(self) -> AbstractContextManager[None]:
         """Poll this sandbox's running commands for completion often while a harness in it stops for a checkpoint.
@@ -596,8 +594,9 @@ class AsyncSandbox:
         """Hold completion checks of this sandbox's commands while a harness in it is paused for a checkpoint.
 
         A provider that polls command status stops asking a sandbox that a snapshot may leave unresponsive, and
-        asks again once the scope exits; other providers use a no-op scope. Do not wait inside the scope for a
-        command of this sandbox.
+        asks again once the scope exits; other providers use a no-op scope. The scope does not extend a command's
+        time limit: one whose limit runs out inside it fails then. Do not wait inside the scope for a command of
+        this sandbox.
         """
         handle = self._require_handle()
         if isinstance(self._provider, SupportsSandboxParkedPolling):
@@ -902,6 +901,21 @@ class AsyncSandbox:
             name = getattr(provider, "name", type(provider).__name__)
             raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
         await provider.resume(handle)
+
+    async def snapshot(self, *, name: str | None = None) -> str:
+        """Start a snapshot of this sandbox and return its id at once; the sandbox keeps running.
+
+        The snapshot may not be usable yet: the provider's ``wait_snapshot_ready`` returns once it can create
+        sandboxes, and ``start(snapshot_id=...)`` creates one from it. ``name`` is stored with the snapshot, which
+        the provider's ``list_snapshots`` finds it by. Raises ``NotImplementedError`` on a provider without
+        snapshots.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxSnapshot):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
+        return await provider.snapshot(handle, name=name)
 
     async def stop(self) -> None:
         if self._closed:

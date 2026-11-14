@@ -99,8 +99,10 @@ logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-# Management API listing page size; one listing per release, so a few large pages beat many small ones.
-SNAPSHOT_LIST_PAGE_SIZE = 100
+# Management API listing page size, the largest the server accepts: the listing has no prefix filter, so every
+# page of the store is read, and fewer pages are fewer requests and fewer chances for a concurrent change to
+# shift an item between two of them.
+SNAPSHOT_LIST_PAGE_SIZE = 200
 # The management API's error code for a snapshot it does not have.
 SNAPSHOT_NOT_FOUND_CODE = "SNAPSHOT::NOT_FOUND"
 # How much of a management API error body is kept in an error message.
@@ -917,6 +919,12 @@ class OpenSandboxOperationConfig:
     # so a server that does not answer is retried within the caller's budget instead of holding one request for
     # the connection's request timeout, which is tuned for long submits.
     snapshot_request_timeout_s: float = 30.0
+    # Budget of one whole snapshot listing (every page and its retries) and of one whole snapshot delete (its
+    # confirming lookups and retries). A release of dropped checkpoints holds up the next checkpoint while it
+    # lists and deletes, so a server that answers slowly or not at all fails the listing or the delete here
+    # instead of after every per-request retry; what a failed one leaves is deleted by the next release.
+    snapshot_list_timeout_s: float = 300.0
+    snapshot_delete_timeout_s: float = 120.0
     # Per-request budget for background-command status polls, which are small
     # idempotent GETs: without their own short budget, each poll against an
     # unreachable sandbox hangs for the shared request timeout (tuned for long
@@ -955,8 +963,10 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.snapshot_timeout_s must be finite and > 0")
         if not math.isfinite(self.snapshot_lookup_grace_s) or self.snapshot_lookup_grace_s < 0:
             raise ValueError("operations.snapshot_lookup_grace_s must be finite and >= 0")
-        if not math.isfinite(self.snapshot_request_timeout_s) or self.snapshot_request_timeout_s <= 0:
-            raise ValueError("operations.snapshot_request_timeout_s must be finite and > 0")
+        for name in ("snapshot_request_timeout_s", "snapshot_list_timeout_s", "snapshot_delete_timeout_s"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"operations.{name} must be finite and > 0")
         if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
             raise ValueError("operations.status_poll_timeout_s must be > 0")
 
@@ -1519,7 +1529,9 @@ class OpenSandboxProvider:
 
         For a harness launch paused for a checkpoint: the sandbox is being snapshotted and may not answer for a
         while. A status request that fails after the scope opened is asked again once it exits, with a fresh retry
-        allowance. Do not wait inside the scope for a command of this sandbox: its polls are held too.
+        allowance. A park does not extend a command's time limit: a command whose client wait (its timeout plus
+        ``operations.command_timeout_headroom_s``) runs out while parked fails then, with its outcome unknown. Do
+        not wait inside the scope for a command of this sandbox: its polls are held too.
         """
         sandbox_id = handle.sandbox_id
         self._parked_poll_scopes[sandbox_id] = self._parked_poll_scopes.get(sandbox_id, 0) + 1
@@ -1560,9 +1572,20 @@ class OpenSandboxProvider:
             await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
             poll.wakeup.clear()
 
-    async def _wait_while_parked(self, sandbox_id: str, poll: _BackgroundCommandPoll) -> None:
+    async def _wait_while_parked(
+        self, sandbox_id: str, poll: _BackgroundCommandPoll, *, deadline: float | None
+    ) -> None:
+        """Hold a command's poll while a parked scope is open on its sandbox, but not past the command's
+        ``deadline`` (the event loop's time): a park does not suspend the command's own time limit."""
+        loop = asyncio.get_running_loop()
         while sandbox_id in self._parked_poll_scopes:
-            await self._wait_command_poll(poll, interval_s=self._operations.background_poll_interval_s)
+            interval_s = self._operations.background_poll_interval_s
+            if deadline is not None:
+                remaining_s = deadline - loop.time()
+                if remaining_s <= 0:
+                    return
+                interval_s = min(interval_s, remaining_s)
+            await self._wait_command_poll(poll, interval_s=interval_s)
 
     # -- snapshots ----------------------------------------------------------------------------------------------
 
@@ -1606,7 +1629,7 @@ class OpenSandboxProvider:
         found = False
         not_found = 0
         deadline = asyncio.timeout(timeout_s)
-        path = f"/v1/snapshots/{quote(snapshot_id, safe='')}"
+        path = f"/snapshots/{quote(snapshot_id, safe='')}"
         try:
             async with deadline:
                 while True:
@@ -1633,7 +1656,7 @@ class OpenSandboxProvider:
                             f"{f': {body}' if body else ''}"
                         )
                         if status == 404:
-                            raise SandboxSnapshotNotFoundError(message)
+                            raise SandboxSnapshotNotFoundError(message, snapshot_id=snapshot_id)
                         raise SandboxSnapshotError(message, snapshot_id=snapshot_id)
                     if not found and not_found:
                         LOGGER.warning(
@@ -1674,11 +1697,26 @@ class OpenSandboxProvider:
         connection errors and that 404, for the delete or its confirming lookup) are retried
         ``operations.retries`` times with the operation backoff, one request per try. A snapshot still there after
         them, or any other answer, raises ``SandboxSnapshotError``; a 409 to the delete, which the API answers
-        while something still uses the snapshot, raises ``SandboxSnapshotInUseError`` at once.
+        while something still uses the snapshot, raises ``SandboxSnapshotInUseError`` at once. The whole delete
+        has ``operations.snapshot_delete_timeout_s``; one that is not done by then raises ``SandboxSnapshotError``.
         """
+        budget_s = self._operations.snapshot_delete_timeout_s
+        budget = asyncio.timeout(budget_s)
+        try:
+            async with budget:
+                await self._delete_snapshot(snapshot_id)
+        except TimeoutError as error:
+            if not budget.expired():
+                raise
+            raise SandboxSnapshotError(
+                f"OpenSandbox snapshot {snapshot_id!r} delete did not finish within {budget_s:g}s",
+                snapshot_id=snapshot_id,
+            ) from error
+
+    async def _delete_snapshot(self, snapshot_id: str) -> None:
         import aiohttp
 
-        path = f"/v1/snapshots/{quote(snapshot_id, safe='')}"
+        path = f"/snapshots/{quote(snapshot_id, safe='')}"
         attempts = self._operations.retries + 1
         for attempt in range(1, attempts + 1):
             try:
@@ -1716,11 +1754,30 @@ class OpenSandboxProvider:
         """Every snapshot whose name starts with ``prefix``.
 
         The management API's ``name`` query parameter matches a whole name, not a prefix, so this reads every page
-        of the listing and filters here. Pages are collected before anything is deleted, so deletes do not shift
-        them. A page request is retried ``operations.retries`` times with the operation backoff for 429, 5xx,
-        connection errors and a reply cut off mid-body, one request per try; a page that still fails, any other
-        answer, or a malformed listing raises ``SandboxSnapshotError`` instead of returning a partial listing.
+        of the listing, other runs' snapshots included, and filters here. Pages are collected before the caller
+        deletes anything, so its own deletes do not shift them. The listing is paged by offset, though, so a
+        snapshot another run creates or deletes meanwhile can move one across a page boundary and out of this
+        listing; a caller that sweeps leftovers finds it in its next listing. A page request is retried
+        ``operations.retries`` times with the operation backoff for 429, 5xx, connection errors and a reply cut off
+        mid-body, one request per try; a page that still fails, any other answer, or a malformed listing raises
+        ``SandboxSnapshotError`` instead of returning a partial listing. So does a listing that is not complete
+        within ``operations.snapshot_list_timeout_s``. A page without items ends the listing whatever it says of
+        a next page.
         """
+        budget_s = self._operations.snapshot_list_timeout_s
+        budget = asyncio.timeout(budget_s)
+        pages_read: list[int] = []
+        try:
+            async with budget:
+                return await self._list_snapshots(prefix, pages_read)
+        except TimeoutError as error:
+            if not budget.expired():
+                raise
+            raise SandboxSnapshotError(
+                f"OpenSandbox snapshot listing did not finish within {budget_s:g}s ({len(pages_read)} pages read)"
+            ) from error
+
+    async def _list_snapshots(self, prefix: str, pages_read: list[int]) -> list[SandboxSnapshotInfo]:
         found: list[SandboxSnapshotInfo] = []
         page = 1
         while True:
@@ -1742,7 +1799,9 @@ class OpenSandboxProvider:
                             sandbox_id=item.get("sandboxId"),
                         )
                     )
-            if pagination.get("hasNextPage") is not True:
+            pages_read.append(page)
+            # An empty page is the end even if the server reports another: the loop must not outlive the store.
+            if not items or pagination.get("hasNextPage") is not True:
                 return found
             page += 1
 
@@ -1756,7 +1815,9 @@ class OpenSandboxProvider:
             return await self.create(fork)
         except Exception as error:
             if _is_snapshot_not_found(error):
-                raise SandboxSnapshotNotFoundError(f"OpenSandbox has no snapshot {snapshot_id!r}: {error}") from error
+                raise SandboxSnapshotNotFoundError(
+                    f"OpenSandbox has no snapshot {snapshot_id!r}: {error}", snapshot_id=snapshot_id
+                ) from error
             raise
 
     async def _management_get_page(self, page: int) -> dict[str, Any]:
@@ -1766,7 +1827,7 @@ class OpenSandboxProvider:
         params = {"page": str(page), "pageSize": str(SNAPSHOT_LIST_PAGE_SIZE)}
         for attempt in range(1, attempts + 1):
             try:
-                status, payload, body = await self._management_request("GET", "/v1/snapshots", params=params)
+                status, payload, body = await self._management_request("GET", "/snapshots", params=params)
             except (aiohttp.ClientError, OSError, asyncio.TimeoutError, ConnectionError) as error:
                 if attempt == attempts:
                     raise SandboxSnapshotError(f"OpenSandbox snapshot listing failed: {error!r}") from error
@@ -1794,18 +1855,18 @@ class OpenSandboxProvider:
 
         from nemo_gym.client.http_client import request
 
-        if self._connection.domain is None:
-            raise SandboxSnapshotError("OpenSandbox snapshot operations require connection.domain")
-        # The connection config keeps the scheme in ``protocol`` (the SDK's default is http) and the host, with any
-        # path prefix, in ``domain``.
-        base_url = f"{self._connection.protocol or 'http'}://{self._connection.domain.rstrip('/')}"
-        headers = {"OPEN-SANDBOX-API-KEY": self._connection.api_key} if self._connection.api_key else {}
+        # The SDK's connection config resolves the server and the key, so these requests go where the SDK's own do:
+        # a domain or key the Gym config leaves out comes from OPEN_SANDBOX_DOMAIN and OPEN_SANDBOX_API_KEY. Its
+        # base URL ends in the API version, so ``path`` starts below it.
+        connection = self._connection_config()
+        api_key = connection.get_api_key()
+        headers = {"OPEN-SANDBOX-API-KEY": api_key} if api_key else {}
         # Same certificate policy as the SDK transport and the PTY sockets (connection.tls_verify).
         tls: dict[str, Any] = {} if self._connection.tls_verify else {"ssl": False}
         extra: dict[str, Any] = {"params": dict(params)} if params else {}
         response = await request(
             method,
-            f"{base_url}{path}",
+            f"{connection.get_base_url()}{path}",
             headers=headers,
             timeout=aiohttp.ClientTimeout(total=self._operations.snapshot_request_timeout_s),
             _control=True,
@@ -2380,7 +2441,8 @@ class OpenSandboxProvider:
         """Renew the sandbox's TTL every ``renew_interval_s`` (jittered by up to 10% earlier) until cancelled.
 
         The sandbox's TTL has been running since ``created_at`` (the event loop's time when the SDK create
-        returned), so the first renewal comes that much sooner, and at once if more than one interval has passed.
+        request was sent, which is when the server starts it), so the first renewal comes that much sooner, and at
+        once if more than one interval has passed.
 
         Without a lease every renewal sets the TTL to ``ttl_s`` again, and one that fails after its retries, or
         that finds the sandbox gone, ends the loop and fails the sandbox's later operations. With a lease
@@ -2397,7 +2459,7 @@ class OpenSandboxProvider:
         spent_s = loop.time() - created_at
 
         async def renew() -> None:
-            # Only the first wait is shortened by what the create spent after the sandbox existed.
+            # Only the first wait is shortened by what the create spent since its request was sent.
             already_waited_s = spent_s
             while True:
                 # Jittered downward only: a renewal later than the interval could miss a TTL just above it.
@@ -2528,6 +2590,10 @@ class OpenSandboxProvider:
 
         sandbox_id: str | None = None
         sandbox: Any | None = None
+        # The server starts the sandbox's TTL when it receives the create request and answers once the sandbox is
+        # ready, so the TTL is already running while the request is open (placement, image pull) and while the
+        # sandbox is reconnected, probed and set up below.
+        created_at = asyncio.get_running_loop().time()
         # The attempt key finds a sandbox the server has already recorded, not one it records after
         # the lookup, so an abandoned request is cancelled only once that sweep deleted its sandbox;
         # otherwise it is left to finish and the sandbox it names deleted. Once the id is known, the
@@ -2563,8 +2629,6 @@ class OpenSandboxProvider:
             await self._raise_timed_out_create(
                 e, spec, metadata, attempt_key, f"at the SDK's request timeout of {request_bound_s:g}s ({e})"
             )
-        # The sandbox's TTL is already running while it is reconnected, probed and set up below.
-        created_at = asyncio.get_running_loop().time()
         if sandbox_id is None:
             raise opensandbox_failure(
                 operation="create_once",
@@ -3216,8 +3280,9 @@ class OpenSandboxProvider:
         while True:
             # A parked sandbox is being snapshotted and may not answer: ask once the park ends,
             # with a fresh status-recovery window, since the park, not the sandbox, kept the status unanswered.
+            # A park that outlasts the client wait ends it below like any other wait: the park is not exempt.
             if handle.sandbox_id in self._parked_poll_scopes or poll.parked:
-                await self._wait_while_parked(handle.sandbox_id, poll)
+                await self._wait_while_parked(handle.sandbox_id, poll, deadline=deadline)
                 status_failure_deadline = None
                 status_failure_error = None
             poll.parked = False
@@ -3367,8 +3432,9 @@ class OpenSandboxProvider:
         # cursor this endpoint reports back is the end offset rather than a
         # more-data flag, so there is no tail to follow.
         output_deleted = False
-        # A parked sandbox is being snapshotted and may not answer: read the logs once the park ends.
-        await self._wait_while_parked(handle.sandbox_id, poll)
+        # A parked sandbox is being snapshotted and may not answer: read the logs once the park ends, or once the
+        # client wait has run out, when the read is tried anyway and fails the command if it gets no answer.
+        await self._wait_while_parked(handle.sandbox_id, poll, deadline=deadline)
         try:
             logs = await self._await_sdk_operation(
                 lambda: handle.raw.commands.get_background_command_logs(execution_id),

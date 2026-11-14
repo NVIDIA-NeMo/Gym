@@ -13,47 +13,60 @@ once the episode continues, and never a paused state, which the backend may cons
 A sandbox and a snapshot are two objects outside Gym with two lifetimes.
 
 A sandbox lives while its owner uses it. :meth:`~SandboxSessionCheckpointer.stop` stops it when its session ends
-or is retired; a restore stops the crashed process's sandboxes it supersedes. What a crashed process leaves running
-ends with the provider's lifetime, the spec's ``ttl_s`` unless the provider shortens it: on OpenSandbox, setting
-``create.renew_ttl_s`` puts every sandbox on a lease the creating process renews, so the service deletes a dead
-process's sandboxes within one lease. That lease is off in the shipped OpenSandbox config; a config that
-checkpoints sandboxes should set it. Forks made by a restore go through the same create and get the same lifetime.
+or is retired, and :meth:`~SandboxSessionCheckpointer.aclose` stops every one left at the server's shutdown; a
+restore stops the crashed process's sandboxes it supersedes. What a crashed process leaves running ends with the
+lifetime the provider gives a sandbox, the spec's ``ttl_s`` at the latest. A provider whose sandboxes would outlive
+a crashed process by that much should end them sooner, for example with a lease that only the creating process
+renews; the provider's documentation says how. Forks made by a restore go through the same create and get the same
+lifetime.
 
 A snapshot lives while a checkpoint the controller may restore names it. No episode event deletes one: a checkpoint
 taken before a rollout finished still restores that rollout. Instead the checkpointer keeps an index on disk, an
 empty file ``<state_dir>/<server>/snapshots/<checkpoint id>/<snapshot id>`` per snapshot, and the controller's
-``release`` decides:
+release decides, through :meth:`~SandboxSessionCheckpointer.delete_snapshots`:
 
 - At commit, :meth:`~SandboxSessionCheckpointer.export` snapshots every live sandbox it is asked for. The moment the
   service returns a snapshot's id, its file is written, before the snapshot is awaited; then the export waits until
   each snapshot is ready. A snapshot that fails or does not become ready in time is taken again, up to
   ``snapshot_attempts`` times, and every attempt is indexed. The sandbox keeps running; the episode continues in it
-  after the resume. The owner calls ``export`` only while no command uses the sandbox, as a participant's prepare
-  guarantees.
-- :meth:`~SandboxSessionCheckpointer.release` receives every checkpoint the controller may still restore and deletes
-  the snapshots indexed under any other checkpoint, removing each file once the service confirms the snapshot is
-  gone. It returns only once it has tried every delete, so the participant that awaits it admits no commit
-  meanwhile and a later checkpoint is never among the ones it drops. The index outlives the process, so a release
-  deletes what a crashed process created too, including the snapshots of a commit that never finished. A failed
-  delete keeps its file, the release raises, and the next release tries again. A release also lists this server's
-  snapshots by name and deletes those of dropped checkpoints that never reached the index, such as one whose
-  process died between the service's reply and the file write.
+  after the resume. The owner calls ``export`` only while no command uses the sandbox. A participant's prepare
+  guarantees that for a resources server whose ``checkpoint_verify`` is ``"wait"``, the default. With ``"replay"``
+  its ``/verify`` is admitted while a checkpoint is open, so an owner whose ``/verify`` runs commands in the
+  sandbox, or stops it, must keep ``checkpoint_verify`` at ``"wait"``.
+- :meth:`~SandboxSessionCheckpointer.delete_snapshots` receives every checkpoint the controller may still restore
+  and deletes the snapshots indexed under any other checkpoint, removing each file once the service confirms the
+  snapshot is gone. It returns only once it has tried every delete, so the participant that awaits it admits no
+  commit meanwhile and a later checkpoint is never among the ones it drops. The index outlives the process, so a
+  release deletes what a crashed process created too, including the snapshots of a commit that never finished. A
+  failed delete keeps its file, the call raises, and the next release tries again. A release also lists this
+  server's snapshots by name and deletes those of dropped checkpoints that never reached the index, such as one
+  whose process died between the service's reply and the file write. That sweep relies on the provider keeping
+  the name a snapshot is taken with (see :class:`~nemo_gym.sandbox.providers.base.SupportsSandboxSnapshot`): on a
+  provider that drops it, such a snapshot is never found.
 - After a crash, :meth:`~SandboxSessionCheckpointer.restore` rebuilds each sandbox in a fresh process from its
   snapshot (a fork), whatever happened to the live sandbox since. It validates every state first and installs all or
   nothing. The superseded sandboxes are stopped afterwards, best effort and off the restore's critical path. A
   restore deletes no snapshot.
 
-Snapshot names are ``ng-<run>-<server>-<checkpoint>-<key>-<attempt>``, each part but the attempt a short hash, so
-names stay within provider limits and a listing can tell the run, the server and the checkpoint of each snapshot.
-``<run>`` is read from ``<state_dir>/run_id``, written once by the first server to use the directory, so every
-server and every restart that shares a ``state_dir`` shares it too. A job that ended for good without releasing
-every checkpoint leaves its last snapshots; on OpenSandbox,
-``python -m nemo_gym.sandbox.providers.opensandbox.snapshots --name-prefix ng-<run>- --reap`` deletes them.
+Nothing but a release deletes a snapshot: the checkpointer cannot tell which checkpoints the controller may still
+restore, and it does not assume the provider expires snapshots. Under a controller that never releases, every
+commit therefore leaves one snapshot per live sandbox, for good, and :meth:`~SandboxSessionCheckpointer.export`
+warns once the index holds more than a few checkpoints. A job that ended without a last release leaves the
+snapshots of the checkpoints it had not dropped. Either way they are found by their name prefix and deleted with
+the provider's own tooling.
 
-``state_dir`` must be on a filesystem every restart of the server reads, outside anything the controller deletes,
-and the same across restarts: the index is only useful to a process that can read it. The filesystem must support
-``flock``, which serializes releases across the processes that share the index (Lustre: mount with ``-o flock``;
-``localflock`` only serializes the processes of one node).
+Snapshot names are ``ng-<state dir>-<server>-<checkpoint>-<key>-<attempt>``, each part but the attempt a short hash,
+so names stay within provider limits and a listing can tell the state directory, the server and the checkpoint of
+each snapshot. ``<state dir>`` is read from ``<state_dir>/state_dir_id``, written once by the first server to use
+the directory, so every server and every restart that shares a ``state_dir`` shares it too. It identifies the
+directory, not a collection run: it is unrelated to the ``run_id`` of a rollouts manifest or an exporter.
+
+A ``state_dir`` belongs to one job and its restarts. Two jobs that run at the same time must not share one: they
+would share the index and the name prefix, each one's release would treat the other's checkpoints as dropped, and
+each would delete the other's snapshots. Give every job its own, for example with the job's id in the path. It
+must be on a filesystem every restart of the server reads, outside anything the controller deletes, and the same
+across restarts: the index is only useful to a process that can read it. The filesystem's ``flock`` must hold
+across every node that runs the server, since it serializes releases across the processes that share the index.
 """
 
 import asyncio
@@ -77,7 +90,6 @@ from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
-    SandboxHandle,
     SandboxProvider,
     SandboxSnapshotInUseError,
     SandboxSnapshotNotFoundError,
@@ -96,13 +108,16 @@ FORK_NOT_FOUND_BACKOFF_S = 5.0
 
 # Spec entries a fork never reads: the snapshot replaces the image, and with it the registry credentials.
 _UNRESTORED_PROVIDER_OPTIONS = ("image_auth", "snapshot_id")
-_RUN_ID_FILE = "run_id"
+_STATE_DIR_ID_FILE = "state_dir_id"
 _HASH_CHARS = 8
 _MARK_ATTEMPTS = 10
 # What follows the prefix in a name this checkpointer gives: the checkpoint's hash, the key's hash and the attempt.
 _SNAPSHOT_NAME_SUFFIX = re.compile(rf"([0-9a-f]{{{_HASH_CHARS}}})-[0-9a-f]{{{_HASH_CHARS}}}-[1-9][0-9]*")
 # Pause between tries for the index lock while another release holds it.
 _LOCK_POLL_S = 0.1
+# An export warns once the index holds more checkpoints than this, and again each time that number doubles: a
+# controller that releases keeps the one or two it may restore, so more means no release is dropping any.
+_UNRELEASED_CHECKPOINTS_WARNING = 5
 _STATE_VERSION = 1
 _SPEC_JSON = TypeAdapter(dict[str, JsonValue])
 
@@ -158,7 +173,7 @@ class SandboxCheckpointError(RuntimeError):
         self.key = key
 
 
-class SnapshotReleaseError(RuntimeError):
+class SnapshotDeleteIncompleteError(RuntimeError):
     """A release could not delete every snapshot it dropped; ``failed`` counts those left for the next release."""
 
     def __init__(self, failed: int, kept: frozenset[str]) -> None:
@@ -238,12 +253,16 @@ def _path_component(name: str, what: str) -> str:
     return name
 
 
-def read_run_id(state_dir: Path) -> str:
-    """The run ID of ``state_dir``, written once by the first process to ask; every later process reads it."""
+def read_state_dir_id(state_dir: Path) -> str:
+    """The ID of ``state_dir``, written once by the first process to ask; every later process reads it.
+
+    It identifies the directory, and so every server, restart and job that uses it; it is not the ``run_id`` of a
+    rollouts manifest or an exporter.
+    """
     state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / _RUN_ID_FILE
+    path = state_dir / _STATE_DIR_ID_FILE
     candidate = secrets.token_hex(_HASH_CHARS // 2)
-    temporary = state_dir / f".{_RUN_ID_FILE}.{os.getpid()}.{candidate}"
+    temporary = state_dir / f".{_STATE_DIR_ID_FILE}.{os.getpid()}.{candidate}"
     temporary.write_text(candidate)
     try:
         # A hard link never replaces an existing file, so of two processes racing here exactly one wins.
@@ -252,10 +271,10 @@ def read_run_id(state_dir: Path) -> str:
         pass
     finally:
         temporary.unlink(missing_ok=True)
-    run_id = path.read_text().strip()
-    if len(run_id) != _HASH_CHARS or any(char not in "0123456789abcdef" for char in run_id):
-        raise ValueError(f"{path} does not hold a run ID of {_HASH_CHARS} hex digits: {run_id!r}")
-    return run_id
+    state_dir_id = path.read_text().strip()
+    if len(state_dir_id) != _HASH_CHARS or any(char not in "0123456789abcdef" for char in state_dir_id):
+        raise ValueError(f"{path} does not hold a state directory ID of {_HASH_CHARS} hex digits: {state_dir_id!r}")
+    return state_dir_id
 
 
 class _SnapshotIndex:
@@ -292,6 +311,13 @@ class _SnapshotIndex:
     def remove_if_empty(self, checkpoint_id: str) -> None:
         with contextlib.suppress(OSError):  # not empty, or already gone
             (self.root / checkpoint_id).rmdir()
+
+    def checkpoint_count(self) -> int:
+        """How many checkpoints have an indexed snapshot: the ones no release has dropped yet."""
+        try:
+            return sum(1 for folder in self.root.iterdir() if folder.is_dir())
+        except FileNotFoundError:
+            return 0
 
     def snapshot_ids(self) -> dict[str, list[str]]:
         """Every indexed snapshot, by checkpoint."""
@@ -373,17 +399,21 @@ class SandboxSessionCheckpointer:
         self._semaphore = asyncio.Semaphore(config.parallelism)
         self._entries: dict[str, _Entry] = {}
         self._index: Optional[_SnapshotIndex] = None
-        self._run_id: Optional[str] = None
+        self._state_dir_id: Optional[str] = None
         if state_dir is not None:
             # Fails at server start, not at the first commit, if the directory cannot be created.
-            self._run_id = read_run_id(Path(state_dir))
+            self._state_dir_id = read_state_dir_id(Path(state_dir))
             self._index = _SnapshotIndex(Path(state_dir) / self._server_name / "snapshots")
             self._index.root.mkdir(parents=True, exist_ok=True)
         # Keys whose sandbox is being created or restored: no other create, add or restore may take them meanwhile.
         self._pending: set[str] = set()
-        # Forks of a failed restore whose stop failed; the next restore stops them again.
+        # Forks a restore created and will not install, from before their stop until it succeeds: a stop that
+        # fails or is cancelled leaves its fork here for ``settle``, the next restore and ``aclose`` to stop again.
         self._unstopped_forks: list[AsyncSandbox] = []
+        # One stop per fork at a time, whichever of those retries it.
+        self._fork_stops = asyncio.Lock()
         self._background: set[asyncio.Task[Any]] = set()
+        self._unreleased_warning_at = _UNRELEASED_CHECKPOINTS_WARNING
 
     @classmethod
     def from_config(
@@ -415,9 +445,9 @@ class SandboxSessionCheckpointer:
     @property
     def snapshot_name_prefix(self) -> Optional[str]:
         """The name prefix of every snapshot this server takes under its ``state_dir``; ``None`` without one."""
-        if self._run_id is None:
+        if self._state_dir_id is None:
             return None
-        return f"ng-{self._run_id}-{name_hash(self._server_name)}-"
+        return f"ng-{self._state_dir_id}-{name_hash(self._server_name)}-"
 
     def snapshot_name(self, checkpoint_id: str, key: str, attempt: int) -> str:
         """The name of attempt ``attempt`` to snapshot ``key``'s sandbox for ``checkpoint_id``."""
@@ -474,20 +504,42 @@ class SandboxSessionCheckpointer:
         """Access to ``key``'s current sandbox for a borrower, such as an agent that runs a harness in it.
 
         A restore rebuilds the sandbox from its snapshot under a new id, so a borrower that kept an older access must
-        be given the new one after a restore.
+        be given the new one after a restore. The access lets the borrower operate the sandbox but not destroy it,
+        on a provider that scopes descriptors: the owner still has to checkpoint it and stops it itself.
         """
         entry = self._entries.get(key)
         if entry is None:
             raise KeyError(f"{key!r} has no sandbox")
-        descriptor = await entry.sandbox.serialize()
+        descriptor = await entry.sandbox.serialize(scope="operate")
         connection = DirectSandboxConnection(provider_config_ref=provider_config_ref, descriptor=descriptor)
         return SandboxAccess(connection=connection, workdir=workdir)
 
     async def settle(self) -> None:
-        """Wait for the background work: superseded sandboxes and forks a restore stops, and failed snapshots an
-        export deletes. It only waits: cancelling it leaves that work running."""
+        """Wait for the background work, then stop again the forks an earlier restore could not stop.
+
+        The background work is the superseded sandboxes and forks a restore stops and the failed snapshots an
+        export deletes; cancelling the wait leaves that work running. Each fork whose stop failed is then tried
+        once more, so a process that never restores again still stops them; one that fails again is logged and
+        stays for the next call.
+        """
         while self._background:
             await asyncio.wait(set(self._background))
+        await self._stop_forks()
+
+    async def aclose(self) -> None:
+        """Stop every sandbox this checkpointer is responsible for; call it at the server's shutdown.
+
+        That is every key's sandbox and every fork a failed restore left running, after the background work has
+        ended. A sandbox whose stop fails is logged and stays tracked (its key stays in :attr:`keys`), the others
+        are still stopped, and calling this again tries the rest again. Snapshots are not touched: the controller
+        may still restore from them, and only its release deletes them.
+        """
+        keys = list(self._entries)
+        outcomes = await asyncio.gather(*(self.stop(key) for key in keys), return_exceptions=True)
+        for key, outcome in zip(keys, outcomes):
+            if isinstance(outcome, BaseException):
+                LOGGER.warning("sandbox of %s was not stopped at shutdown; its lifetime ends it: %r", key, outcome)
+        await self.settle()
 
     # -- commit -------------------------------------------------------------------------------------------------
 
@@ -495,7 +547,11 @@ class SandboxSessionCheckpointer:
         """Snapshot each key's sandbox for checkpoint ``checkpoint_id`` and return its checkpoint state.
 
         A key without a live sandbox, never started or already stopped (for example after the owner captured what it
-        grades), maps to ``None``: a restore then gives it no sandbox. Each snapshot is indexed under
+        grades), maps to ``None``: a restore then gives it no sandbox. That tells an owner which of its keys have
+        nothing to restore, but it is not what the ``export_session_states`` hook returns for such a session: the
+        hook leaves out a session the server no longer holds. An owner keyed by session ID must drop the ``None``
+        entries before it returns this result from the hook, or a restore brings those sessions back without a
+        sandbox. Each snapshot is indexed under
         ``checkpoint_id`` as soon as it exists, and every snapshot is awaited before the result or the first failure
         is returned. Raises :class:`SandboxCheckpointError` if a sandbox cannot be snapshotted in
         ``snapshot_attempts`` attempts, or a snapshot cannot be indexed, which fails the commit. Every sandbox keeps
@@ -505,14 +561,42 @@ class SandboxSessionCheckpointer:
         outcomes = await asyncio.gather(
             *(self._export_one(key, checkpoint_id) for key in keys), return_exceptions=True
         )
+        await self._warn_of_unreleased_checkpoints()
         failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
         if failures:
             raise failures[0]
         return dict(zip(keys, outcomes))
 
+    async def _warn_of_unreleased_checkpoints(self) -> None:
+        """Warn when the index keeps growing: nothing but a release deletes a snapshot.
+
+        A controller that releases keeps the index at the one or two checkpoints it may restore. One that never
+        does leaves the snapshots of every commit on the provider for good, which only shows in the provider's
+        storage unless it is said here.
+        """
+        if self._index is None:
+            return
+        try:
+            count = await asyncio.to_thread(self._index.checkpoint_count)
+        except OSError:
+            return  # the export itself reports an index that cannot be read
+        if count <= _UNRELEASED_CHECKPOINTS_WARNING:
+            self._unreleased_warning_at = _UNRELEASED_CHECKPOINTS_WARNING
+        elif count > self._unreleased_warning_at:
+            self._unreleased_warning_at = 2 * count
+            LOGGER.warning(
+                "the snapshot index of server %s holds %d checkpoints that no release has dropped. Nothing but a "
+                "release deletes a snapshot, so each of them keeps its snapshots on the provider: check that the "
+                "controller releases the checkpoints it no longer restores, and delete what a finished job left "
+                "by the name prefix %s",
+                self._server_name,
+                count,
+                self.snapshot_name_prefix,
+            )
+
     async def _export_one(self, key: str, checkpoint_id: str) -> Optional[dict[str, JsonValue]]:
         entry = self._entries.get(key)
-        if entry is None or entry.sandbox.handle is None:
+        if entry is None or not entry.sandbox.started:
             return None
         provider = self._provider
         if not isinstance(provider, SupportsSandboxSnapshot):
@@ -522,20 +606,21 @@ class SandboxSessionCheckpointer:
         index = self._index
         if index is None:
             raise SandboxCheckpointError(key, "cannot be checkpointed without a state_dir to index its snapshot")
-        handle = entry.sandbox.handle
+        sandbox = entry.sandbox
         # Before any snapshot is taken: a spec that cannot be written fails every commit the same way.
         try:
             spec = _SPEC_JSON.validate_python(spec_to_json(entry.spec))
         except ValidationError as error:
             raise SandboxCheckpointError(key, f"has a spec that cannot be checkpointed: {error}") from error
         if isinstance(provider, ConnectableProvider):
-            descriptor = await entry.sandbox.serialize()
+            # The full descriptor, not a borrower's: a restore stops the superseded sandbox with it.
+            descriptor = await sandbox.serialize()
         else:
-            descriptor = {"sandbox_id": handle.sandbox_id}
+            descriptor = {"sandbox_id": sandbox.sandbox_id}
         attempt = 1
         while True:
             try:
-                snapshot_id = await self._snapshot_once(key, handle, index, checkpoint_id, attempt)
+                snapshot_id = await self._snapshot_once(key, sandbox, index, checkpoint_id, attempt)
                 break
             except _RetryableSnapshotError as failure:
                 if failure.snapshot_id is not None:
@@ -548,13 +633,13 @@ class SandboxSessionCheckpointer:
                     attempt,
                     self._snapshot_attempts,
                     key,
-                    handle.sandbox_id,
+                    sandbox.sandbox_id,
                     failure.error,
                 )
                 attempt += 1
                 await asyncio.sleep(self._snapshot_retry_delay_s)
         state = SandboxCheckpointState(
-            provider_name=handle.provider_name,
+            provider_name=self._provider_name(),
             descriptor=descriptor,
             snapshot_id=snapshot_id,
             spec=spec,
@@ -563,7 +648,7 @@ class SandboxSessionCheckpointer:
         return state.model_dump(mode="json")
 
     async def _snapshot_once(
-        self, key: str, handle: SandboxHandle, index: _SnapshotIndex, checkpoint_id: str, attempt: int
+        self, key: str, sandbox: AsyncSandbox, index: _SnapshotIndex, checkpoint_id: str, attempt: int
     ) -> str:
         """Take one snapshot and wait until it is ready.
 
@@ -574,7 +659,7 @@ class SandboxSessionCheckpointer:
         name = self.snapshot_name(checkpoint_id, key, attempt)
         try:
             async with self._semaphore:
-                snapshot_id = await self._provider.snapshot(handle, name=name)
+                snapshot_id = await sandbox.snapshot(name=name)
         except Exception as error:
             raise _RetryableSnapshotError(
                 SandboxCheckpointError(key, f"could not be snapshotted: {error}"), None
@@ -600,11 +685,12 @@ class SandboxSessionCheckpointer:
 
         Every state is validated before the backend is touched. If any sandbox cannot be rebuilt, the forks this call
         created are stopped and :class:`SandboxCheckpointError` names the key; if the call is cancelled, they are
-        stopped in the background, which :meth:`settle` waits for. A fork whose stop fails is logged and stopped
-        again by the next restore. Once the forks are in place the crashed process's sandboxes are stopped in the
-        background, best effort; a failure there is logged and the sandbox runs out its lifetime.
+        stopped in the background, which :meth:`settle` waits for. A fork whose stop fails or is cancelled stays
+        tracked, and :meth:`settle`, the next restore and :meth:`aclose` stop it again. Once the forks are in place
+        the crashed process's sandboxes are stopped in the background, best effort; a failure there is logged and
+        the sandbox runs out its lifetime.
         """
-        await self._stop_unstopped_forks()
+        await self._stop_forks()
         provider_name = self._provider_name()
         parsed: dict[str, tuple[SandboxCheckpointState, SandboxSpec]] = {}
         for key, raw in states.items():
@@ -642,11 +728,14 @@ class SandboxSessionCheckpointer:
                 )
             except asyncio.CancelledError:
                 # The gather cancelled the forks still starting and waited for them, so ``created`` is complete.
-                self._spawn(self._roll_back(created))
+                self._track_unstopped(created)
+                self._spawn(self._stop_forks())
                 raise
             failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
             if failures:
-                await self._roll_back(created)
+                # Tracked before the first stop is awaited: a cancel from here on leaves every fork recorded.
+                self._track_unstopped(created)
+                await self._stop_forks()
                 raise failures[0]
             for key, sandbox in created.items():
                 self._entries[key] = _Entry(sandbox=sandbox, spec=parsed[key][1])
@@ -686,26 +775,30 @@ class SandboxSessionCheckpointer:
                 ) from error
         created[key] = sandbox
 
-    async def _roll_back(self, created: Mapping[str, AsyncSandbox]) -> None:
-        """Stop the forks of a restore that will not install them; one whose stop fails waits for the next restore."""
-        sandboxes = list(created.values())
-        outcomes = await asyncio.gather(
-            *(self._stop_sandbox(sandbox) for sandbox in sandboxes), return_exceptions=True
-        )
-        for sandbox, outcome in zip(sandboxes, outcomes):
+    def _track_unstopped(self, created: Mapping[str, AsyncSandbox]) -> None:
+        """Record the forks of a restore that will not install them, before anything stops them."""
+        self._unstopped_forks.extend(created.values())
+
+    async def _stop_forks(self) -> None:
+        """Stop every tracked fork once; one leaves the list only when its stop succeeded.
+
+        A stop that fails is logged and its fork stays for the next call; one that is cancelled leaves it too.
+        """
+        async with self._fork_stops:
+            forks = list(self._unstopped_forks)
+            outcomes = await asyncio.gather(*(self._stop_fork(sandbox) for sandbox in forks), return_exceptions=True)
+        for sandbox, outcome in zip(forks, outcomes):
             if isinstance(outcome, BaseException):
                 LOGGER.warning(
-                    "fork %s of a restore that failed was not stopped; the next restore stops it again: %r",
-                    sandbox.handle.sandbox_id if sandbox.handle is not None else None,
+                    "fork %s of a restore that failed was not stopped; settle, the next restore or aclose stops it "
+                    "again: %r",
+                    sandbox.sandbox_id,
                     outcome,
                 )
-                self._unstopped_forks.append(sandbox)
 
-    async def _stop_unstopped_forks(self) -> None:
-        """Stop again the forks an earlier restore could not stop; one that still fails waits for the next restore."""
-        forks, self._unstopped_forks = self._unstopped_forks, []
-        if forks:
-            await self._roll_back({str(position): sandbox for position, sandbox in enumerate(forks)})
+    async def _stop_fork(self, sandbox: AsyncSandbox) -> None:
+        await self._stop_sandbox(sandbox)
+        self._unstopped_forks.remove(sandbox)
 
     async def _stop_superseded_all(self, parsed: Mapping[str, tuple[SandboxCheckpointState, SandboxSpec]]) -> None:
         await asyncio.gather(*(self._stop_superseded(key, state) for key, (state, _) in parsed.items()))
@@ -730,30 +823,32 @@ class SandboxSessionCheckpointer:
 
     # -- release ------------------------------------------------------------------------------------------------
 
-    async def release(self, kept: frozenset[str]) -> None:
+    async def delete_snapshots(self, kept: frozenset[str]) -> None:
         """Delete the snapshots of every checkpoint outside ``kept``; returns once every delete was tried.
 
-        ``kept`` is every checkpoint the controller may still restore; an empty set deletes every snapshot. The
-        checkpoints to drop are read from the index here, so call it only while no export runs, as a participant
-        does by admitting a release only when idle and awaiting it before it admits a commit. The deletion holds
+        This is what an owner's ``delete_external_state`` hook calls for the controller's release. It stops no
+        sandbox. ``kept`` is every checkpoint the controller may still restore, not the ones to delete; an empty
+        set deletes every snapshot. The checkpoints to drop are read from the index here, so call it only while no
+        export runs, as a participant does by admitting a release only when idle and awaiting it before it admits
+        a commit. The deletion holds
         the index's file lock, so releases of other processes that share the index wait for it. It deletes the
         indexed snapshots of dropped checkpoints, then lists this server's snapshots by name and deletes those of
         dropped checkpoints the index never recorded. A snapshot the service deleted, or confirms gone, leaves the
         index; one whose delete fails stays.
 
-        Raises :class:`SnapshotReleaseError` if any delete failed, once every delete was tried, and ``RuntimeError``
-        if the index cannot be locked; the provider's error if the listing fails. Whatever a failed or cancelled
-        release left is still indexed, and the next release deletes it.
+        Raises :class:`SnapshotDeleteIncompleteError` if any delete failed, once every delete was tried, and
+        ``RuntimeError`` if the index cannot be locked; the provider's error if the listing fails. Whatever a
+        failed or cancelled call left is still indexed, and the next release deletes it.
         """
         if self._index is None:
             return
         kept = frozenset(kept)
         async with self._index.locked():
-            failed = await self._release_locked(self._index, kept)
+            failed = await self._delete_snapshots_locked(self._index, kept)
         if failed:
-            raise SnapshotReleaseError(failed, kept)
+            raise SnapshotDeleteIncompleteError(failed, kept)
 
-    async def _release_locked(self, index: _SnapshotIndex, kept: frozenset[str]) -> int:
+    async def _delete_snapshots_locked(self, index: _SnapshotIndex, kept: frozenset[str]) -> int:
         """Delete what ``kept`` drops; returns how many snapshots could not be deleted."""
         indexed = await asyncio.to_thread(index.snapshot_ids)
         dropped = {checkpoint_id: ids for checkpoint_id, ids in indexed.items() if checkpoint_id not in kept}

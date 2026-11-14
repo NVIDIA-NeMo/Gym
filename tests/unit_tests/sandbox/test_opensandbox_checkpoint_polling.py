@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.core.failure_kinds import PROVIDER_IO_TIMEOUT, PROVIDER_STATUS_UNAVAILABLE
+from nemo_gym.core.failure_kinds import (
+    PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_STATUS_UNAVAILABLE,
+)
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxHandle
@@ -368,6 +372,49 @@ async def test_a_park_forgives_one_failed_request_and_a_sandbox_still_lost_after
     assert provider._command_polls == {} and provider._parked_poll_scopes == {}
 
 
+@pytest.mark.asyncio
+async def test_a_park_that_outlasts_the_commands_client_wait_fails_the_command_while_still_parked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A park holds the polls, not the command's time limit: the wait ends at its deadline, not when the park does."""
+    provider = make_parked_provider(monkeypatch)
+    object.__setattr__(provider._operations, "command_timeout_headroom_s", 0.1)
+    commands = ScriptedStatus(running)
+    sandbox_handle = handle("parked-too-long", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=0.2))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        with provider.parked_exec_polling(sandbox_handle):
+            # The client wait is the 0.2 s timeout plus the 0.1 s headroom; the exec's hard cap is 30 s later.
+            with pytest.raises(NgFailureEvent) as failed:
+                await asyncio.wait_for(task, 5)
+            assert failed.value.failure_kind == PROVIDER_COMMAND_OUTCOME_UNKNOWN
+            assert "client wait expired" in str(failed.value)
+            assert commands.status_calls == 1, "the parked sandbox was not asked again"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert provider._command_polls == {} and provider._parked_poll_scopes == {}
+
+
+@pytest.mark.asyncio
+async def test_a_command_without_a_timeout_waits_for_the_park_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_parked_provider(monkeypatch)
+    commands = ScriptedStatus(running, finished)
+    sandbox_handle = handle("parked-without-a-limit", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work"))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        with provider.parked_exec_polling(sandbox_handle):
+            await asyncio.sleep(0.4)
+            assert not task.done() and commands.status_calls == 1
+        result = await asyncio.wait_for(task, 5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert result.return_code == 0 and commands.status_calls == 2
+
+
 class ScriptedLogs(ScriptedStatus):
     """Status steps as ``ScriptedStatus``; each log request runs the next log step.
 
@@ -429,6 +476,39 @@ async def test_the_logs_of_a_command_seen_finished_during_a_park_are_read_once_t
     assert (result.return_code, result.stdout) == (3, "the command's output")
     assert (commands.log_calls, commands.log_calls_while_parked) == (1, 0)
     assert provider._command_polls == {} and provider._parked_poll_scopes == {}
+
+
+@pytest.mark.asyncio
+async def test_the_logs_are_read_at_the_commands_deadline_when_the_park_outlasts_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The log read waits for the park only as long as the command's client wait: then it is tried anyway."""
+    provider = make_parked_provider(monkeypatch)
+    object.__setattr__(provider._operations, "command_timeout_headroom_s", 0.1)
+    object.__setattr__(provider._connection, "request_timeout_s", 0.05)
+    # The status request below stays in flight across the start of the park, so it must not time out first.
+    object.__setattr__(provider._operations, "status_poll_timeout_s", HANG_GUARD_S)
+    answer = asyncio.Event()
+
+    async def finished_once_parked() -> Any:
+        await answer.wait()
+        return SimpleNamespace(running=False, exit_code=0, error=None)
+
+    commands = ScriptedLogs(provider, "parked-too-long", status=[finished_once_parked], logs=[output])
+    sandbox_handle = handle("parked-too-long", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=0.2))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        with provider.parked_exec_polling(sandbox_handle):
+            answer.set()
+            with pytest.raises(NgFailureEvent) as failed:
+                await asyncio.wait_for(task, 5)
+            # The parked sandbox did not answer the read, which fails the command as an unanswered read does.
+            assert failed.value.failure_kind == PROVIDER_IO_TIMEOUT
+            assert (commands.log_calls, commands.log_calls_while_parked) == (1, 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
