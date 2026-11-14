@@ -600,7 +600,7 @@ class TestLogParserPin:
             command = args[1]
             calls.append(args)
             if command == fail_on:
-                raise subprocess.CalledProcessError(128, args)
+                raise subprocess.CalledProcessError(128, args, stderr=b"fatal: remote error: not our ref")
             if command == "init":
                 Path(args[-1]).mkdir(parents=True)
             elif command in ("clone", "checkout"):
@@ -686,6 +686,6 @@ class TestLogParserPin:
 
         destination = tmp_path / log_parsers._repo_dir_name()
         monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on=step))
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(RuntimeError, match=f"git {step} .* failed: fatal: remote error: not our ref"):
             log_parsers._clone_locked(destination)
         assert list(tmp_path.iterdir()) == [], f"no clone, staging tree, or lock may survive a failed {step}"

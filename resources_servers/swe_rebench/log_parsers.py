@@ -88,19 +88,28 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
             shutil.rmtree(orphan, ignore_errors=True)
         staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
         try:
-            subprocess.run(["git", "init", "-q", str(staging)], check=True, capture_output=True)
-            subprocess.run(
-                ["git", "fetch", "--depth", "1", UPSTREAM_REPO, UPSTREAM_COMMIT],
-                cwd=staging,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=staging, check=True, capture_output=True)
+            _git("init", "-q", str(staging))
+            _git("fetch", "--depth", "1", UPSTREAM_REPO, UPSTREAM_COMMIT, cwd=staging)
+            _git("checkout", "-q", "FETCH_HEAD", cwd=staging)
             os.rename(staging, destination)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     finally:
         shutil.rmtree(lock_path, ignore_errors=True)
+
+
+def _git(*args: str, cwd: Path | None = None) -> None:
+    """Run one git command, and raise with its stderr if it fails.
+
+    ``verify()`` reports ``str(exc)`` as the failure reason.
+    ``CalledProcessError`` leaves stderr out of that string.
+    Without stderr, a masked row would not say whether the fetch hit an unknown commit, a DNS failure, or a proxy error.
+    """
+    try:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        raise RuntimeError(f"git {args[0]} of {UPSTREAM_REPO} at {UPSTREAM_COMMIT} failed: {stderr}") from exc
 
 
 def _repo_dir_name() -> str:
