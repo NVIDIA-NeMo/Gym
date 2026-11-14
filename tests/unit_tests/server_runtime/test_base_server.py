@@ -22,6 +22,7 @@ import socket
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
+import itsdangerous
 import uvicorn
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi import Request
@@ -48,6 +49,7 @@ from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_runtime.base_server import (
     BaseServer,
     KeepaliveHttpToolsProtocol,
@@ -1208,6 +1210,7 @@ class TestRunWebserverProxyKwargs:
         routes_sessions: bool = False,
         server_reuse_port: bool | None = None,
         unsupported_reason: str | None = None,
+        mcp: dict | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -1240,13 +1243,15 @@ class TestRunWebserverProxyKwargs:
 
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
 
-        server_config = BaseRunServerInstanceConfig(
+        # With ``mcp``, a resources server's config that serves the MCP endpoint with those options.
+        server_config = (BaseRunServerInstanceConfig if mcp is None else BaseResourcesServerConfig)(
             name="my_server",
             host="127.0.0.1",
             port=8000,
             entrypoint="app.py",
             num_workers=num_workers,
             uvicorn_reuse_port=server_reuse_port,
+            **({} if mcp is None else {"expose_tools_over_mcp": True, **mcp}),
         )
         ray_setting = ray_enabled
 
@@ -1580,6 +1585,52 @@ class TestRunWebserverProxyKwargs:
         )
 
         assert 4096 == install.call_args.kwargs["backlog"]
+
+    def test_the_session_router_reads_the_cookie_as_the_session_middleware_does(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "install_session_routing", install)
+        monkeypatch.setattr(SimpleServer, "get_session_cookie_name", lambda self: "sid_named")
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True)
+
+        assert install.call_args.kwargs["session_cookie"] == "sid_named"
+        assert install.call_args.kwargs["secret_key"] == "a secret"
+
+    @mark.parametrize(
+        ("mcp", "header", "credentials"),
+        [
+            ({"mcp_bearer_token": True}, "Authorization", "Bearer {token}"),
+            ({}, "X-NeMo-Gym-Session-Token", "{token}"),
+        ],
+    )
+    def test_the_session_router_reads_mcp_tokens_where_and_as_the_server_signs_them(
+        self, monkeypatch: MonkeyPatch, mcp: dict, header: str, credentials: str
+    ) -> None:
+        import nemo_gym.server_runtime.mcp_auto_exposure
+        from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+        from nemo_gym.server_runtime.request_handling.session_routing import mcp_session_token
+
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "install_session_routing", install)
+        # The endpoint itself is not under test: only what run_webserver hands the session router.
+        monkeypatch.setattr(nemo_gym.server_runtime.mcp_auto_exposure, "maybe_auto_expose", MagicMock())
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True, mcp=mcp)
+
+        routing = install.call_args.kwargs
+        assert routing["mcp_token_header"] == header
+        token = mcp_session_token_serializer("a secret").dumps({"sid": "s"})
+        assert mcp_session_token({header: credentials.format(token=token)}, routing["mcp_token_header"]) == token
+        assert routing["mcp_token_serializer"].loads(token) == {"sid": "s"}
+        # A token signed with the server's public name is refused.
+        with raises(itsdangerous.BadSignature):
+            routing["mcp_token_serializer"].loads(
+                mcp_session_token_serializer("TestSimpleServer___my_server").dumps({"sid": "s"})
+            )
 
     def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="uvicorn_backlog"):

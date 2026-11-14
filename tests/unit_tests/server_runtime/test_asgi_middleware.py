@@ -53,6 +53,9 @@ def _app_with_gym_middleware() -> FastAPI:
     app = FastAPI()
     server = MagicMock()
     server.get_session_middleware_key.return_value = "TestServer___test"
+    # The session hooks keep their defaults, which derive the signing key and the cookie's name from the key above.
+    server.get_session_secret.side_effect = lambda: SimpleServer.get_session_secret(server)
+    server.get_session_cookie_name.side_effect = lambda: SimpleServer.get_session_cookie_name(server)
     server.config.name = "test"
     SimpleServer.setup_session_middleware(server, app)
     SimpleServer.setup_exception_middleware(server, app)
