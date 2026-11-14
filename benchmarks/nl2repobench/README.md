@@ -28,6 +28,8 @@ For `no_internet_preinstalled` on the upstream 104, also set `scrub_workspace_in
 
 Four targets ship vendored inside pip or setuptools in their images (six, tenacity, typing_extensions, more-itertools) and cannot be removed without breaking pip; exclude them when a leak-free score matters. Images that run as a non-root user without a writable home (more-itertools) also need `++...opencode_sandboxed_agent.opencode_data_home_in_tmp=true`.
 
+**Official vs clean score.** With `grading_protocol: upstream`, every row carries both. `reward` is NL2RepoBench's own scoring: every "N passed" line of the pytest output summed, over the stored test count, capped at 1. Use it to compare with published numbers. `clean_reward` counts only each pytest command's outer summary line, over the larger of the stored count and the outer run's passed+failed+errors. It is `None` for `clean_exclude_tasks`, which defaults to the four vendored targets above, so `mean/clean_reward` in the aggregate metrics is the clean score over the rest. The two differ where tests run pytest themselves (pytest-cov: 510 "passed" against 184 tests, 1.00 official, 0.81 clean) or the stored count is stale (parse: 96 stored, 131 run). On a 99-row DeepSeek V4.1 Flash run, 13 rows changed, all downward.
+
 On vahid_1016 tasks the guard identifiers come from the clone URL in `test_commands.json`; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
 
 ## Combinations and status (what has actually been run)

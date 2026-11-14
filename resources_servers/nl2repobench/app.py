@@ -408,6 +408,35 @@ def _upstream_restore_command(
     )
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The outer session's summary line: "=== 41 failed, 92 passed, 1 error in 0.19s ===", also without the "=" bars (-q) and
+# with a negative duration (freezegun freezes the clock).
+_SUMMARY_LINE_RE = re.compile(r"^(?:=+ )?((?:\d+ [a-z]+(?:, )?)+) in -?[\d.]+s\b")
+# Upstream NL2RepoBench tasks whose real implementation ships vendored inside pip or setuptools in the task image, so
+# no scrub can remove it (agents read pip/_vendor/tenacity, pip/_vendor/six.py, setuptools/_vendor/typing_extensions.py
+# on 2026-11-02; setuptools/_vendor/more_itertools is in the more-itertools image). clean_reward is None for them.
+_UPSTREAM_VENDORED_TARGETS = ("six", "tenacity", "typing_extensions", "more-Itertools")
+
+
+def _parse_pytest_outer(pytest_outputs: list[str]) -> tuple[int, int, int]:
+    """Sum only the LAST summary line of each pytest command's output: the outer session's.
+
+    Upstream's parser (below) adds every line matching "N passed", which also counts the summaries that tests running
+    pytest themselves print into their failure output (pytest-cov: 510 "passed" against 184 tests, real outer result
+    149 passed / 35 failed)."""
+    passed = failed = errors = 0
+    for output in pytest_outputs:
+        last = None
+        for line in output.split("\n"):
+            if match := _SUMMARY_LINE_RE.match(_ANSI_RE.sub("", line)):
+                last = match.group(1)
+        if last is not None:
+            passed += int(m.group(1)) if (m := re.search(r"\b(\d+) passed", last)) else 0
+            failed += int(m.group(1)) if (m := re.search(r"\b(\d+) failed", last)) else 0
+            errors += int(m.group(1)) if (m := re.search(r"\b(\d+) errors?\b", last)) else 0
+    return passed, failed, errors
+
+
 def _parse_pytest_upstream(pytest_outputs: list[str]) -> tuple[int, int, int]:
     """Sum the first "N passed/failed/error" match of every line of every pytest command's output, like upstream."""
     passed = failed = errors = 0
@@ -459,6 +488,9 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # target-named eggs, and the checkout left at the root (/project, /app, /<task>). See _TARGET_INSTALL_SCRUB_COMMAND.
     # Off by default so existing eval behavior is byte-identical. Added 2026-11-02.
     scrub_target_installs: bool = False
+    # Tasks whose clean_reward is None (left out of mean/clean_reward): targets no scrub can remove. Defaults to the
+    # upstream tasks vendored inside pip/setuptools; set [] or another list for other task sets. Added 2026-11-02.
+    clean_exclude_tasks: list[str] = Field(default_factory=lambda: list(_UPSTREAM_VENDORED_TARGETS))
     # no_internet_preinstalled only: grade in verify_image_override instead of the agent's task image. Needed when the task
     # image ships the reference repo under /workspace (the verifier extracts the agent workspace over /workspace without
     # wiping it). Off by default. Added 2026-10-24.
@@ -521,6 +553,9 @@ class NL2RepoBenchVerifyResponse(BaseVerifyResponse):
     tests_error: int = 0
     test_case_count: int = 0
     success_rate: float = 0.0
+    # See VerifierResult.clean_reward. None for tasks in clean_exclude_tasks, so mean/clean_reward in the aggregate
+    # metrics is the clean score over the remaining tasks; `reward` stays the official, leaderboard-comparable one.
+    clean_reward: float | None = None
 
     workspace_bytes: int | None = None
     workspace_sha256: str | None = None
@@ -544,6 +579,11 @@ class VerifierResult(BaseModel):
     tests_error: int = 0
     test_case_count: int = 0
     success_rate: float = 0.0
+    # grading_protocol=upstream only: passed / max(test_case_count, collected) from each pytest command's outer summary
+    # line (_parse_pytest_outer), instead of upstream's sum of every "N passed" line over the stored count. Differs
+    # where tests run pytest themselves (pytest-cov 1.00 -> 0.81) or the stored count is stale (markupsafe: 39 stored,
+    # 80 collected). None until set; the gym_strict protocol uses its own last-summary parse, so it equals reward there.
+    clean_reward: float | None = None
 
 
 @dataclass
@@ -590,6 +630,14 @@ def _parse_pytest_summary(combined_output: str) -> tuple[int, int, int]:
     tests_failed = int(failed_matches[-1]) if failed_matches else 0
     tests_error = int(error_matches[-1]) if error_matches else 0
     return tests_passed, tests_failed, tests_error
+
+
+def _clean_reward_for(task_name: str, result: "VerifierResult", exclude: list[str]) -> float | None:
+    """None for excluded tasks (left out of mean/clean_reward); otherwise the clean score. Failure paths build a
+    VerifierResult without clean_reward and score 0 either way, so they fall back to reward."""
+    if task_name in exclude:
+        return None
+    return result.clean_reward if result.clean_reward is not None else result.reward
 
 
 def _compute_reward(tests_passed: int, test_case_count: int) -> float:
@@ -1080,9 +1128,14 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 break
 
         combined_output = ("\n" + "-" * 40 + "\n").join(output_parts)
+        clean_reward: float | None = None
         if upstream:
             # Parsed before the size cap below, so a long log can't hide a summary line.
             tests_passed, tests_failed, tests_error = _parse_pytest_upstream(pytest_outputs)
+            outer_passed, outer_failed, outer_error = _parse_pytest_outer(pytest_outputs)
+            clean_reward = _compute_reward(
+                outer_passed, max(task.test_case_count, outer_passed + outer_failed + outer_error)
+            )
             combined_output = f"[grading_protocol: upstream]\n{combined_output}"
         if len(combined_output) > TEST_OUTPUT_MAX_CHARS:
             combined_output = combined_output[-TEST_OUTPUT_MAX_CHARS:]
@@ -1092,6 +1145,8 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         if verifier_error is not None:
             tests_passed = 0
         reward = _compute_reward(tests_passed, task.test_case_count)
+        if clean_reward is None or verifier_error is not None:
+            clean_reward = reward
 
         return VerifierResult(
             evaluation_completed=True,
@@ -1104,6 +1159,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             tests_error=tests_error,
             test_case_count=task.test_case_count,
             success_rate=reward,
+            clean_reward=clean_reward,
         )
 
     async def verify(self, request: Request, body: NL2RepoBenchVerifyRequest) -> NL2RepoBenchVerifyResponse:
@@ -1201,10 +1257,12 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             log_dir.mkdir(parents=True, exist_ok=True)
             log_dir_str = str(log_dir)
 
+        clean_reward = _clean_reward_for(current_task_id, result, self.config.clean_exclude_tasks)
         return NL2RepoBenchVerifyResponse.model_validate(
             body.model_dump()
             | result.model_dump()
             | {
+                "clean_reward": clean_reward,
                 "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
                 "workspace_bytes": workspace_bytes,
