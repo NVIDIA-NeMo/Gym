@@ -17,13 +17,16 @@ from fastapi.responses import JSONResponse
 
 import nemo_gym.rollouts.rollout_recovery as recovery
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
 from nemo_gym.rollouts.rollout_recovery import RunManifest, resume_drift_path_for, validate_resume
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification.judge import judge_failsafe
+from resources_servers.eqbench4.app import EQBench4VerifyRequest
+from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY
 from resources_servers.eqbench4.verifier_fixture import fixture_verdict
 
-from .test_app import MARKER, _policy_response, _reply, make_request, make_server
+from .test_app import MARKER, _policy_response, _reply, _transcript, make_request, make_server
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -220,6 +223,34 @@ async def test_a_judge_outage_is_a_masked_judge_failure_that_keeps_the_answer(tm
     # The saved answer is what a re-judge grades; the policy is not asked again.
     assert row["response"] == request.response.model_dump(mode="json") == _policy_response()
     assert row["transcript"] == [message.model_dump(mode="json") for message in request.transcript]
+
+
+async def test_a_rejudge_grades_the_conversation_the_saved_response_carries(tmp_path: Path) -> None:
+    # The response as eqbench4_agent sends it: the conversation rides in its metadata.
+    conversation = {
+        "transcript": _transcript(),
+        "conversation_status": "completed",
+        "conversation_error": None,
+        "policy_stop_reason": None,
+    }
+    response = _policy_response() | {"metadata": {CONVERSATION_METADATA_KEY: json_module.dumps(conversation)}}
+    request = make_request(response=response)
+    outage = make_server(tmp_path, judge_max_attempts=1)
+    outage.server_client.post = AsyncMock(side_effect=ConnectionError("judge endpoint down"))
+    saved = json_module.loads((await judge_failsafe(outage.verify)(body=request)).body)
+    assert saved["failure_kind"] == "judge_failed"
+
+    # Gym rebuilds the re-judge's request from the task row and the saved response, without the agent's fields.
+    task_row = {key: value for key, value in request.model_dump(mode="json").items() if key not in conversation}
+    del task_row["response"]
+    payload = _build_verify_payload(InputRolloutPair(input=task_row, rollout=saved))
+    assert not conversation.keys() & payload.keys()
+
+    rejudge = EQBench4VerifyRequest.model_validate(payload)
+    assert rejudge.transcript == request.transcript and rejudge.conversation_status == "completed"
+    regraded, _ = await verify_observed(judged_server(tmp_path, JudgeTransport()), rejudge)
+    graded, _ = await verify_observed(judged_server(tmp_path, JudgeTransport()), request)
+    assert (regraded.reward, regraded.mask_sample) == (graded.reward, False)
 
 
 # 3. A resumed run may change how it runs, never what it measures.
