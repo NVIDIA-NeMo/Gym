@@ -1,0 +1,13 @@
+got10k_resources_server:
+  resources_servers:
+    got10k:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: GOT-10k single-object tracking verifier for multi-image prompts on a 0-1000 grid
+      value: Score per-frame boxes against GOT-10k ground truth by IoU over visible frames and report frame-weighted average overlap and success rates
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/got10k/data/example.jsonl
+        num_repeats: 1

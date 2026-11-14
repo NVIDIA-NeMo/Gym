@@ -1,0 +1,30 @@
+name: got10k
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: GOT-10k val single-object tracking (180 sequences). The model sees the first frame with
+  the target box and frames sampled at 1 fps, and returns one box per frame on a 0-1000 grid, scored by IoU.
+modality: text, image
+licensing: CC-BY-NC-SA-4.0
+authors:
+- Pulkit Khandelwal
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: got10k
+agent_server: simple_agent
+datasets:
+- name: got10k
+  type: benchmark
+  jsonl_fpath: benchmarks/got10k/data/got10k_benchmark.jsonl
+  prepare_script: benchmarks/got10k/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: val
+prompt_source: prepared
+lifecycle: active
