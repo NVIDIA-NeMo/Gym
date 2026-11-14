@@ -100,13 +100,10 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
         assert model.sampling_overrides.max_completion_tokens is None
         assert model.extra_body is None and model.propagate_context_overflow_errors
     if mode == "default_eval":
-        from responses_api_models.vllm_model.app import VLLMModelConfig
-
         model = config.policy_model.responses_api_models.vllm_model
-        parsed = VLLMModelConfig.model_validate(OmegaConf.to_container(model, resolve=True) | {"name": "policy_model"})
-        assert parsed.reasoning_field == "both"
-        assert parsed.model == "test-model"
-        assert parsed.sampling_overrides["temperature"] == 0.6
-        assert parsed.sampling_overrides["top_p"] == 0.95
+        assert "reasoning_field" not in model  # Preserve the model server's default.
+        assert model.model == "test-model"
+        assert model.sampling_overrides.temperature == 0.6
+        assert model.sampling_overrides.top_p == 0.95
     if mode == "training":
         assert config.policy_model.responses_api_models.vllm_model.return_token_id_information

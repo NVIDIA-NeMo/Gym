@@ -5141,6 +5141,43 @@ class TestChatCompletionsConverter:
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
 
+    @mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
+    def test_visual_eval_defaults_validate_with_model_defaults(self, benchmark, monkeypatch) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        for name, value in {
+            "POLICY_API_KEY": "test-only",
+            "POLICY_BASE_URL": "https://policy.invalid/v1",
+            "GYM_JUDGE_API_KEY": "test-only",
+            "GYM_JUDGE_BASE_URL": "https://judge.invalid/v1",
+            "OPENSANDBOX_API_KEY": "test-only",
+            "OPENSANDBOX_DOMAIN": "https://sandbox.invalid",
+        }.items():
+            monkeypatch.setenv(name, value)
+        catalog = PARENT_DIR / "benchmarks/opencode_multimodal_benchmarks"
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "config_paths": [str(catalog / "default_eval.yaml"), str(catalog / benchmark / "config.yaml")],
+                        "policy_model_name": "test-model",
+                        "visual_agent": {
+                            "responses_api_agents": {"opencode_agent": {"sandbox_config": {"image": "test-image"}}}
+                        },
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                skip_exporters=True,
+                offline=True,
+            )
+        )
+        block = OmegaConf.to_container(resolved.policy_model.responses_api_models.vllm_model, resolve=True)
+        config = VLLMModelConfig.model_validate({"name": "policy_model", **block})
+        assert config.reasoning_field == "both"
+        assert config.model == "test-model"
+        assert config.sampling_overrides["temperature"] == 0.6
+        assert config.sampling_overrides["top_p"] == 0.95
+
     def test_benchmark_extra_body_survives_model_type_config_and_reaches_vllm(self, tmp_path) -> None:
         # `gym eval run --benchmark <b> --model-type vllm_model` merges the vllm_model config after the benchmark
         # config; the per-request budget and template kwargs a benchmark sets must still reach the engine.
