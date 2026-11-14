@@ -33,8 +33,10 @@ starts the rollout over from its input.
 If nothing crashes, it just keeps running.
 An episode becomes a restart only while no checkpoint is open,
 so the episodes a checkpoint exports and the restarts it reports never change during it.
-The one exception is fixed when admission closes: an agent or resources server reports a rollout whose first seed
-is still in flight as a restart of that checkpoint, since it has done no work worth saving.
+There are two exceptions. One is fixed when admission closes: an agent or resources server reports a rollout whose
+first seed is still in flight as a restart of that checkpoint, since it has done no work worth saving.
+The other is an episode the open checkpoint is still waiting for: it becomes a restart at once,
+since the checkpoint has not counted it yet.
 """
 
 import asyncio
@@ -85,6 +87,17 @@ CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER = "x-ng-checkpoint-rebinds-tool-accesses
 def seed_rebinds_tool_accesses(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether an agent seed reply says the agent takes fresh tool grants when a restored session is seeded again."""
     return (headers or {}).get(CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER) == "1"
+
+
+# A resources server whose state a restore can continue only until the episode's agent ended its turn,
+# such as one whose grader needs processes the agent started while its snapshots hold files only,
+# says so on its seed reply. The environment server then makes the episode a restart once the agent's turn ended.
+CHECKPOINT_RESTORE_POLICY_HEADER = "x-ng-checkpoint-restore-policy"
+
+
+def seed_restores_before_agent_close(headers: Optional[Mapping[str, str]]) -> bool:
+    """Whether a resources seed reply says a restore can continue the session only until its agent's turn ends."""
+    return (headers or {}).get(CHECKPOINT_RESTORE_POLICY_HEADER) == "before_agent_close"
 
 
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:
@@ -198,8 +211,16 @@ class EpisodeSteps:
         self._blocking += _blocks(episode)
 
     async def mark_restart(self, key: str) -> None:
-        """Make this episode a restart from now on, once no checkpoint is open; see the module docstring."""
-        while self.closed:
+        """Make this episode a restart from now on; see the module docstring.
+
+        It waits until no checkpoint is open, except for an episode a checkpoint is still waiting for, which becomes
+        a restart at once: the checkpoint cannot have counted it yet, and waiting for resume would hold that
+        checkpoint up. An episode that is already a restart, or is unknown, returns without waiting.
+        """
+        episode = self._episodes.get(key)
+        if episode is None or episode.restart:
+            return
+        while self.closed and not self._blocks_checkpoint(key):
             await self._open.wait()
         episode = self._episodes.get(key)
         if episode is None:
@@ -208,6 +229,10 @@ class EpisodeSteps:
         episode.restart = True
         self._blocking += _blocks(episode) - blocked
         await self._changed()
+
+    def _blocks_checkpoint(self, key: str) -> bool:
+        episode = self._episodes.get(key)
+        return episode is not None and _blocks(episode) and not episode.retired
 
     def continuation(self, key: str) -> Optional[Boundary]:
         """Return the restored boundary this episode continues from, once."""
