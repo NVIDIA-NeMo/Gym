@@ -12,6 +12,25 @@ if TYPE_CHECKING:
 
 
 OPENCODE_VERSION = "1.17.11"
+# OpenCode 2 (npm @opencode/cli, GitHub releases of anomalyco/opencode), selected with opencode_version.
+OPENCODE_V2_VERSION = "2.2.7"
+# SHA-256 of each Linux release asset the sandbox installer downloads, from the release's SHA256SUMS. A 2.x version
+# without an entry here cannot be downloaded into a sandbox; pin a binary with sandbox_executable_path instead.
+OPENCODE_RELEASE_SHA256 = {
+    "2.2.7": {
+        "x64-baseline": "89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7",  # pragma: allowlist secret
+        "x64-baseline-musl": "c1801a36bf61e03eafac8d7f4521a200e4d3cd76cf43b36621cb78b460b851ee",  # pragma: allowlist secret
+        "arm64": "c1682057f0815cb2abdd6e00305f1146ebaf1c167f0335cdb74ddc80008120e7",  # pragma: allowlist secret
+        "arm64-musl": "a03405f94ae02db7acb0870cf32030bab86460dc7faf524780e9cae305526b96",  # pragma: allowlist secret
+    },
+}
+
+
+def opencode_major(version: str) -> int:
+    """The major version of an exact ``opencode_version`` such as ``1.17.11`` or ``2.2.7``."""
+    return int(version.split(".", 1)[0])
+
+
 RUNTIME_INSTALLER_SOURCE = Path(__file__).with_name("install_opencode_runtime.sh")
 RUNTIME_INSTALLER_FILE = RUNTIME_INSTALLER_SOURCE.name
 TASK_ENVIRONMENT_PLUGIN_SOURCE = Path(__file__).with_name("task_environment.mjs")

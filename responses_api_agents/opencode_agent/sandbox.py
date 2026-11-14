@@ -31,6 +31,8 @@ from nemo_gym.sandbox import SandboxExecResult, read_text, stage_media, upload_t
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+from responses_api_agents.opencode_agent.opencode2 import LABEL_FILE as OPENCODE2_LABEL_FILE
+from responses_api_agents.opencode_agent.opencode2.store import message_labels, translate_store
 from responses_api_agents.opencode_agent.runtime import (
     REQUIRED_MCP_PLUGIN_FILE,
     REQUIRED_MCP_PLUGIN_SOURCE,
@@ -155,6 +157,8 @@ set -- "$4.json" "$2/$3.json"
     + _PUBLISH
     + 'rm -f -- "$1"\n'
 )
+# OpenCode 2 exports with `session export`; `--standalone` keeps it from starting a background OpenCode service.
+_EXPORT_OPENCODE2_SESSION = _EXPORT_SESSION.replace('"$1" export "$3"', '"$1" session export --standalone "$3"')
 
 
 @dataclass
@@ -200,6 +204,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     export_dir: str | None = None
     # POSIX sh that gives OpenCode's import and export their environment (see ``cli_environment``).
     opencode_environment: str = ""
+    # Whether the session runs OpenCode 2: its store is translated (``opencode2.store``) before it is read.
+    opencode2: bool = False
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
@@ -350,13 +356,17 @@ class OpenCodeSandboxSession(AgentSessionState):
             await upload_text(
                 self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
-        if self.is_continuation:
+        # OpenCode 2 loads the Gym plugin from the session's private storage, staged at seed.
+        if self.is_continuation and not self.opencode2:
             await self.session.sandbox.upload(
                 TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
             )
         directory = self.session.session_dir
         if payload.get("mcp_grants") is not None:
-            await self.session.sandbox.upload(REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}")
+            if not self.opencode2:
+                await self.session.sandbox.upload(
+                    REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}"
+                )
             await upload_text(
                 self.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(payload["mcp_grants"])
             )
@@ -451,7 +461,8 @@ class OpenCodeSandboxSession(AgentSessionState):
                     continue
                 command = self.opencode_environment + (
                     f"set -- {quote(f'{self.runtime}/opencode')} {quote(self.export_dir)} {session_id} "
-                    f"{quote(f'{self.session.session_dir}/export-{session_id}')}\n{_EXPORT_SESSION}"
+                    f"{quote(f'{self.session.session_dir}/export-{session_id}')}\n"
+                    f"{_EXPORT_OPENCODE2_SESSION if self.opencode2 else _EXPORT_SESSION}"
                 )
                 result = await self._exec_until(command, deadline)
                 if result is None:
@@ -536,6 +547,10 @@ class OpenCodeSandboxSession(AgentSessionState):
                 if "opencode.db" not in names:
                     raise RuntimeError("OpenCode left no session store")
                 await self.download_store(names, directory)
+        if self.opencode2:
+            # The capture translated the store it copied; a fresh copy is translated here.
+            translated = directory / "sessions.db"
+            database = translated if translated.is_file() else await self.readable_store(directory)
         return await asyncio.to_thread(stored_sessions, database)
 
     async def _collect_artifacts(self, directory: Path, *, timeout: float) -> str:
@@ -708,6 +723,28 @@ class OpenCodeSandboxSession(AgentSessionState):
         for name in names:
             await self.session.sandbox.download(f"{self.store_directory}/{name}", directory / name)
 
+    async def readable_store(self, directory: Path) -> Path:
+        """The downloaded store in ``directory`` with OpenCode 1 tables, which every reader of the store parses.
+
+        An OpenCode 2 store is translated into ``sessions.db`` beside it, with the assistant messages that the Gym
+        plugin labeled named by their labels, so captured model calls join to them.
+        """
+        database = directory / "opencode.db"
+        if not self.opencode2:
+            return database
+        try:
+            async with asyncio.timeout(30):
+                text = await read_text(
+                    self.session.sandbox, path=f"{self.persistent_directory}/{OPENCODE2_LABEL_FILE}"
+                )
+            labels = message_labels(text)
+        except Exception:
+            # Without capture there is no label file; unlabeled messages keep their OpenCode IDs.
+            labels = {}
+        translated = directory / "sessions.db"
+        await asyncio.to_thread(translate_store, database, translated, labels=labels)
+        return translated
+
     async def snapshot(self, directory: Path, timeout: float) -> None:
         """Copy SQLite out after CLI completion and export it here; borrowed task services may remain alive."""
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
@@ -729,7 +766,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         try:
             await asyncio.to_thread(
                 snapshot,
-                directory / "opencode.db",
+                await self.readable_store(directory),
                 directory,
                 harness_session_id=self.harness_session_id,
                 previous_message_ids=self.message_ids,

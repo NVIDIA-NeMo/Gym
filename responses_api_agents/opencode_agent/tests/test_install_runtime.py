@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -439,3 +440,83 @@ def test_pinned_ripgrep_replaces_the_best_effort_package_install(sandbox, pinned
     assert result.returncode == 0, result.stderr
     assert (root / "packages.log").exists() is not pinned
     assert ("ripgrep" in result.stderr or (root / "bin/rg").exists()) is not pinned
+
+
+ARCHES = ("x64-baseline", "x64-baseline-musl", "arm64", "arm64-musl")
+
+
+def opencode2_release(root: Path) -> str:
+    """Serve a release archive whose `opencode` prints OpenCode 2's version line through the fake curl; return its
+    SHA-256."""
+    staging = root / "release"
+    staging.mkdir()
+    (staging / "opencode").write_text("#!/bin/bash\necho 'opencode v2.2.7'\n")
+    (staging / "opencode").chmod(0o755)
+    archive = root / "release.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(staging / "opencode", arcname="opencode")
+    curl = root / "bin/curl"
+    curl.write_text(
+        '#!/bin/bash\necho "$*" > "$TEST_ROOT/download.log"\n'
+        'while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\ncp "$TEST_ROOT/release.tar.gz" "$out"\n'
+    )
+    curl.chmod(0o755)
+    return hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def install_opencode2(root: Path, env: dict[str, str], digests: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "2.2.7", "", "", "", digests],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+def test_an_opencode_2_download_is_kept_only_with_its_pinned_digest(sandbox, pinned):
+    root, env = sandbox
+    digest = opencode2_release(root)
+    if not pinned:
+        digest = "0" * 64
+    result = install_opencode2(root, env, " ".join(f"{arch}={digest}" for arch in ARCHES))
+    assert "releases/download/v2.2.7/opencode-linux-" in (root / "download.log").read_text()
+    if pinned:
+        assert result.returncode == 0, result.stderr
+        # OpenCode 2 prints "opencode v<version>"; the installed runtime reports the requested release.
+        assert subprocess.run(
+            [str(root / "runtime/opencode"), "--version"], capture_output=True, text=True
+        ).stdout == ("opencode v2.2.7\n")
+    else:
+        assert result.returncode == 1
+        assert "OpenCode download digest mismatch" in result.stderr
+        assert not (root / "runtime/opencode").exists()
+        assert not (root / "runtime/opencode.tar.gz").exists()
+
+
+def test_an_opencode_2_download_without_a_digest_for_this_platform_is_refused(sandbox):
+    root, env = sandbox
+    opencode2_release(root)
+    result = install_opencode2(root, env, "unknown-arch=" + "0" * 64)
+    assert result.returncode == 1
+    assert "No pinned SHA-256 for opencode-linux-" in result.stderr
+    assert not (root / "download.log").exists()
+
+
+def test_opencode_2_version_line_is_accepted_for_cached_and_pinned_binaries(sandbox):
+    root, env = sandbox
+    (root / "runtime").mkdir()
+    (root / "runtime/opencode").write_text("#!/bin/bash\necho 'opencode v2.2.7'\n")
+    (root / "runtime/opencode").chmod(0o755)
+    assert install_opencode2(root, env, "").returncode == 0
+    assert not (root / "download.log").exists()
+    binary = root / "pinned-opencode"
+    binary.write_text("#!/bin/bash\necho 'opencode v2.2.7'\n")
+    binary.chmod(0o755)
+    result = seed_binary(root, env, binary, version="2.2.7")
+    assert result.returncode == 0, result.stderr
+    # Another release's version line is still refused.
+    (root / "runtime/opencode").unlink()
+    binary.write_text("#!/bin/bash\necho 'opencode v2.2.6'\n")
+    assert seed_binary(root, env, binary, version="2.2.7").returncode == 1
