@@ -97,6 +97,154 @@ def test_prepared_prompt_source_rejects_rows_without_input(tmp_path: Path) -> No
         validate_environment(path)
 
 
+def _benchmark_rows(
+    tmp_path: Path,
+    rows: list[dict],
+    *,
+    prompt_source: str = "prepared",
+    environment_server: str | None = "single_agent_turn",
+) -> Path:
+    """A benchmark whose dataset holds ``rows``; taskset ``demo`` routes to an ``environment_server`` server."""
+    path = _asset(tmp_path, kind="benchmark")
+    if prompt_source != "template":
+        raw = yaml.safe_load(path.read_text())
+        raw["prompt_source"] = prompt_source
+        raw.pop("standard_prompt_config")
+        path.write_text(yaml.safe_dump(raw))
+    if environment_server is not None:
+        config_path = path.with_name("config.yaml")
+        config = yaml.safe_load(config_path.read_text())
+        config["demo_task_environment_server"] = {
+            "environment_servers": {
+                environment_server: {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+                    "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+                }
+            }
+        }
+        config["environment_server_routes"] = {"demo": "demo_task_environment_server"}
+        config_path.write_text(yaml.safe_dump(config))
+    (path.parent / "data/example.jsonl").write_text("".join(f"{json.dumps(row)}\n" for row in rows))
+    return path
+
+
+def _task_row(task_id: str = "1", **task_input: object) -> dict:
+    task_input.setdefault("responses_create_params", {"input": [{"role": "user", "content": "What is 1 + 1?"}]})
+    task_input.setdefault("task_data", {"expected_answer": "2"})
+    return {"task_id": {"taskset": "demo", "task_id": task_id}, "task_input": task_input}
+
+
+@pytest.mark.parametrize("environment_server", ["single_agent_turn", "single_agent_turn_legacy"])
+def test_prepared_materialized_task_rows_are_valid_rollout_inputs(tmp_path: Path, environment_server: str) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row("1"), _task_row("2")], environment_server=environment_server)
+
+    report = validate_environment(path)
+
+    assert report.datasets[0].rows == 2
+
+
+@pytest.mark.parametrize("prompt_source", ["prepared", "agent"])
+@pytest.mark.parametrize("environment_server", ["swe_together", None])
+def test_tasks_of_another_environment_server_are_checked_as_task_envelopes(
+    tmp_path: Path, prompt_source: str, environment_server: str | None
+) -> None:
+    # As swe_together's prepare writes them: the server builds the request, so the task input holds task_data only.
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": {"instance_id": "1"}}}
+    path = _benchmark_rows(tmp_path, [row], prompt_source=prompt_source, environment_server=environment_server)
+
+    report = validate_environment(path)
+
+    assert report.datasets[0].rows == 1
+
+
+@pytest.mark.parametrize("environment_server", ["single_agent_turn", "swe_together", None])
+@pytest.mark.parametrize(
+    ("row", "location"),
+    [
+        ({"task_id": {"taskset": "demo"}, "task_input": {"task_data": {}}}, "task_id.task_id"),
+        ({"task_id": {"taskset": "demo", "task_id": "2"}, "task_input": "not an object"}, "task_input"),
+    ],
+)
+def test_a_broken_task_envelope_fails_whatever_server_its_taskset_routes_to(
+    tmp_path: Path, environment_server: str | None, row: dict, location: str
+) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row(), row], prompt_source="agent", environment_server=environment_server)
+
+    with pytest.raises(
+        EnvironmentValidationError, match=rf"^Dataset 'example' row 2 is not a valid task at {location}:"
+    ):
+        validate_environment(path)
+
+
+def test_prepared_materialized_task_row_without_input_names_the_dataset_and_row(tmp_path: Path) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row("1"), _task_row("2", responses_create_params={"input": []})])
+
+    with pytest.raises(EnvironmentValidationError) as raised:
+        validate_environment(path)
+
+    assert str(raised.value) == (
+        "Benchmark dataset 'example' row 2 declares prepared prompts but has no task_input.responses_create_params.input."
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "location"),
+    [
+        ({"task_id": {"taskset": "demo"}, "task_input": _task_row()["task_input"]}, "task_id.task_id"),
+        (_task_row(task_data="not an object"), "task_input.task_data"),
+        (
+            _task_row(responses_create_params={"input": "Hi", "temperature": "warm"}),
+            "task_input.responses_create_params",
+        ),
+    ],
+)
+def test_materialized_task_rows_are_checked_as_the_environment_server_reads_them(
+    tmp_path: Path, row: dict, location: str
+) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row(), row], prompt_source="agent")
+
+    with pytest.raises(
+        EnvironmentValidationError, match=rf"^Dataset 'example' row 2 is not a valid task at {location}"
+    ):
+        validate_environment(path)
+
+
+def test_prompt_templates_are_refused_for_materialized_task_rows(tmp_path: Path) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row()], prompt_source="template")
+
+    with pytest.raises(EnvironmentValidationError) as raised:
+        validate_environment(path)
+
+    assert str(raised.value) == (
+        "Benchmark dataset 'example' row 1 is a materialized task, and prompt templates are not supported for "
+        "materialized task rows."
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    [
+        (
+            {"responses_create_params": {"input": []}},
+            "Benchmark dataset 'example' row 1 declares prepared prompts but has no responses_create_params.input.",
+        ),
+        (
+            {"responses_create_params": {"input": "Hi", "temperature": "warm"}},
+            "Dataset 'example' row 1 is not a valid rollout input at responses_create_params.temperature: "
+            "Input should be a valid number, unable to parse string as a number",
+        ),
+    ],
+)
+def test_flat_rows_keep_their_checks_and_messages(tmp_path: Path, row: dict, message: str) -> None:
+    path = _benchmark_rows(tmp_path, [row])
+
+    with pytest.raises(EnvironmentValidationError) as raised:
+        validate_environment(path)
+
+    assert str(raised.value) == message
+
+
 def test_manifest_selects_named_config_and_dataset_owner(tmp_path: Path) -> None:
     path = _asset(tmp_path, kind="benchmark")
     config = path.with_name("config.yaml")

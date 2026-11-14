@@ -167,3 +167,50 @@ async def test_rejected_reply_is_retained_but_requires_an_accepted_verdict(judge
     assert [dependency.response_id for dependency in operation.dependencies] == (
         ["rejected", "accepted"] if accepted else ["rejected"]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judged", [False, True], ids=["no judge call", "judge call"])
+async def test_a_judge_optional_grading_without_a_judge_call_records_no_operation(judge_server, judged):
+    client, replies = judge_server
+    replies.append({"id": "judge-response-1"})
+    invocation = VerifierInvocation(invocation_id="verify-optional")
+    token = verifier_observability._active_verifier.set(invocation)
+
+    async def calculate():
+        if judged:
+            await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+            record_parsed_judge_verdict()
+        return _result(1.0)
+
+    try:
+        await observe_llm_judge_grading(calculate, judge_optional=True)
+    finally:
+        verifier_observability._active_verifier.reset(token)
+    if judged:
+        assert [operation.outcome for operation in invocation.grading_operations] == ["completed"]
+    else:
+        # observe_verifier then records the grade as the verifier's own, which a judge-free grade is.
+        assert invocation.grading_operations is None
+
+
+@pytest.mark.asyncio
+async def test_a_judge_optional_grading_keeps_its_operation_for_an_unidentified_judge_reply(judge_server):
+    client, replies = judge_server
+    replies.append({"id": None})
+    invocation = VerifierInvocation(invocation_id="verify-optional-unidentified")
+    token = verifier_observability._active_verifier.set(invocation)
+
+    async def calculate():
+        await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+        record_parsed_judge_verdict()
+        return _result(1.0)
+
+    try:
+        await observe_llm_judge_grading(calculate, judge_optional=True)
+    finally:
+        verifier_observability._active_verifier.reset(token)
+    # The judge was asked, so the grade is not the verifier's own; the reply has no id, so it stays unknown.
+    assert [(operation.kind, operation.outcome) for operation in invocation.grading_operations] == [
+        ("llm_judge", "unknown")
+    ]
