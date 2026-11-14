@@ -5,8 +5,11 @@ OpenClaw → the original task grader**. Gym owns preparation, episode dispatch,
 policy-call correlation, trace conversion and aggregation. Factory supplies
 launch composition. No OpenCode adapter or training changes are included.
 
-This is an evaluation-only baseline using the original runner, not a template for new Gym agents.
-Follow-up: [migrate to Gym agent sessions](https://github.com/bpritam14/WildClawBench-gym/issues/1).
+The `wildclawbench` Environment Server drives Gym's single-agent session protocol:
+Resources seed → agent seed → OpenClaw activation → agent close → native verification → Resources close.
+The agent has no benchmark `/run` or aggregation override. The Resources Server owns the
+native container and original graders; the Environment Server owns aggregation and retry identity.
+Native source, prompts, skills, OpenClaw version, compaction and grader code remain pinned unchanged.
 
 This is a development integration. Offline checks are not a fresh benchmark
 baseline, a leaderboard reproduction or live sandbox qualification.
@@ -223,8 +226,25 @@ retain the resolved Gym configuration with results. Required search and task
 `Env` credentials are checked before policy execution. A missing key masks the
 sample, with a namespaced failure reason, rather than producing a scored zero.
 
-Agent-session follow-up scope: gateway mode, image layout/OpenClaw version,
-configuration and compaction passthrough, image/search/skills tools, and transcript
-compatibility with all nine safety graders. The current PR does not implement
-this migration. Live four-task plus full-suite leaderboard validation remain required before
-claiming integration qualification.
+Session execution is limited to one trusted host with a shared private output directory for
+Environment, Resources and Agent Servers. The native runtime creates its container lazily during
+activation on behalf of the Resources owner. Agent close stops the harness and returns observations;
+it leaves the task container available for the original verifier. Verification requires the matching
+confirmed agent-close receipt, and Resources cleanup removes the container even on a failed episode.
+Live verification retries reuse retained results, including failures, after cleanup.
+
+The adapter explicitly rejects borrowed `SandboxAccess`, required external tool grants, modified
+prompts, extra Responses controls and per-row sampling overrides. Configure native budgets and model
+settings through the YAML profile. Only inherited native network access is supported; this adapter
+does not implement Gym sandbox-provider isolation. Optional unused tool grants are skipped. There
+is no token-ID capture or multi-activation continuation support in this native bridge.
+
+Identical activation retries share one shielded task. Only session close cancels it. Completed
+episode retries return the saved reply; changed requests and interrupted attempts require inspection
+and a new attempt ID. Output identity includes the output root, collector run and capture key.
+`evaluation_protocol.gym_protocol=agent_sessions_v1` prevents merging these results with the older
+combined execution/grading protocol. A process crash still requires operator inspection and cleanup
+of any native container that the owning allocation did not reclaim.
+
+Historical four-task/full-suite results below the session migration do not qualify the new lifecycle.
+Fresh representative session smokes must pass before publishing a new integration qualification.

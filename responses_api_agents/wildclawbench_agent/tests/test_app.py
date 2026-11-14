@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from benchmarks.wildclawbench.merge import merge
 from responses_api_agents.wildclawbench_agent import data
-from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawRunRequest
+from responses_api_agents.wildclawbench_agent.app import WildClawAgent
 from responses_api_agents.wildclawbench_agent.enroot_docker import (
     TrackedSubprocess,
     process_start,
@@ -23,7 +23,7 @@ from responses_api_agents.wildclawbench_agent.enroot_docker import (
     stop_owned_groups,
 )
 from responses_api_agents.wildclawbench_agent.metrics import benchmark_metrics
-from responses_api_agents.wildclawbench_agent.tests.helpers import make_agent
+from responses_api_agents.wildclawbench_agent.tests.helpers import make_agent, make_pipeline
 from responses_api_agents.wildclawbench_agent.worker import grader_failures, read_events
 from responses_api_models.vllm_model.wildclawbench import restore_reasoning
 
@@ -248,58 +248,60 @@ config=json.loads(Path(sys.argv[3]).read_text())
 output=Path(config['output'])
 if '--cleanup' in sys.argv:
     (output/'cleaned').write_text('yes')
+elif '--verify' in sys.argv:
+    assert (output/'agent_closed.json').is_file()
+    result=json.loads((output/'agent_result.json').read_text())
+    result.update(reward=0.0,native_reward=0.0,mask_sample=False)
+    (output/'result.json').write_text(json.dumps(result))
 else:
     (output/'executed').open('x').write('one execution only')
     result=dict(**config['metadata'],evaluation_protocol=config['evaluation_protocol'],reward=0.0,native_reward=0.0,mask_sample=False,errors=[],artifact_dir=str(output),events=[
         {'type':'message','id':'a','message':{'role':'assistant','content':[{'type':'text','text':'No deliverable'}]}}
     ])
-    (output/'result.json').write_text(json.dumps(result))
+    (output/'agent_result.json').write_text(json.dumps(result))
+    (output/'harness_stopped.json').write_text('{"cleanup_confirmed":true}')
 """
     )
     script.chmod(0o700)
-    agent = make_agent(tmp_path, str(script))
+    environment, agent, resources, calls = make_pipeline(tmp_path, str(script), monkeypatch)
     monkeypatch.setattr(
         WildClawAgent, "resolve_model_base_url", lambda self, name, rollout: f"http://localhost/rollouts/{rollout}/v1"
     )
-    request = WildClawRunRequest.model_validate(
-        dict(
-            _ng_task_index=3,
-            _ng_rollout_index=2,
-            _ng_attempt_index=0,
-            _ng_run_id="run-one",
-            responses_create_params=dict(input=[dict(role="user", content="task")]),
-            verifier_metadata=dict(
-                task_id="task", task_sha256="a" * 64, source_revision="b" * 40, timeout_seconds=300
-            ),
-        )
+    request = dict(
+        _ng_task_index=3,
+        _ng_rollout_index=2,
+        _ng_attempt_index=0,
+        _ng_run_id="run-one",
+        responses_create_params=dict(input=[dict(role="user", content="task")]),
+        verifier_metadata=dict(task_id="task", task_sha256="a" * 64, source_revision="b" * 40, timeout_seconds=300),
     )
-    first, duplicate = await asyncio.gather(agent.run(request), agent.run(request))
-    assert first.reward == duplicate.reward == 0
-    assert not first.mask_sample
-    output = Path(first.artifact_dir)
+    first, duplicate = await asyncio.gather(environment.run_legacy(request), environment.run_legacy(request))
+    assert first["reward"] == duplicate["reward"] == 0
+    assert not first["mask_sample"]
+    output = Path(first["artifact_dir"])
     assert (output / "cleaned").read_text() == "yes"
     assert (output / "executed").read_text() == "one execution only"
     saved = json.loads((output / "worker.json").read_text())
     assert saved["policy_base_url"] == "http://localhost/rollouts/3-2/v1"
-    assert (await agent.run(request)).reward == 0
+    assert (await environment.run_legacy(request))["reward"] == 0
     for changes in ({"_ng_run_id": "run-two"}, {"_ng_attempt_index": 1}):
-        retried = request.model_copy(update=changes)
-        result = await agent.run(retried)
-        assert result.artifact_dir != first.artifact_dir
-        assert Path(result.artifact_dir, "executed").exists()
-    changed = request.model_copy(deep=True)
-    changed.verifier_metadata["task_id"] = "other-task"
+        retried = dict(request, **changes)
+        result = await environment.run_legacy(retried)
+        assert result["artifact_dir"] != first["artifact_dir"]
+        assert Path(result["artifact_dir"], "executed").exists()
+    changed = json.loads(json.dumps(request))
+    changed["verifier_metadata"]["task_id"] = "other-task"
     with pytest.raises(HTTPException) as exc:
-        await agent.run(changed)
+        await environment.run_legacy(changed)
     assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
-async def test_missing_rollout_id_is_rejected_before_execution(tmp_path):
-    agent = make_agent(tmp_path, sys.executable)
-    body = WildClawRunRequest.model_validate(dict(responses_create_params=dict(input="test"), verifier_metadata={}))
+async def test_missing_rollout_id_is_rejected_before_execution(tmp_path, monkeypatch):
+    environment, _, _, _ = make_pipeline(tmp_path, sys.executable, monkeypatch)
+    body = dict(responses_create_params=dict(input="test"), verifier_metadata={})
     with pytest.raises(HTTPException) as exc:
-        await agent.run(body)
+        await environment.run_legacy(body)
     assert exc.value.status_code == 400
 
 
@@ -384,16 +386,15 @@ else:
 """
     )
     script.chmod(0o700)
-    agent = make_agent(tmp_path, str(script))
+    environment, agent, resources, calls = make_pipeline(tmp_path, str(script), monkeypatch)
     monkeypatch.setattr(WildClawAgent, "resolve_model_base_url", lambda *args: "http://localhost/v1")
-    body = WildClawRunRequest.model_validate(
-        dict(
-            _ng_rollout_id="cancelled",
-            responses_create_params=dict(input=[dict(role="user", content="task")]),
-            verifier_metadata=dict(task_id="task", timeout_seconds=300),
-        )
+    body = dict(
+        _ng_task_index=0,
+        _ng_rollout_index=0,
+        responses_create_params=dict(input=[dict(role="user", content="task")]),
+        verifier_metadata=dict(task_id="task", timeout_seconds=300),
     )
-    running = asyncio.create_task(agent.run(body))
+    running = asyncio.create_task(environment.run_legacy(body))
     started = None
     for _ in range(100):
         matches = list((tmp_path / "episodes").glob("*/started"))
@@ -435,7 +436,7 @@ def test_explicit_output_path_is_honored(fixture_source, monkeypatch):
 
 
 def test_worker_environment_blocks_hidden_native_overrides(tmp_path, monkeypatch):
-    from responses_api_agents.wildclawbench_agent.app import worker_environment
+    from responses_api_agents.wildclawbench_agent.execution import worker_environment
 
     agent = make_agent(tmp_path, sys.executable)
     for name in ("WILDCLAW_OPENCLAW_MODEL_PARAMS", "WILDCLAW_OPENCLAW_THINKING", "OPENCLAW_IMAGE_MODEL"):

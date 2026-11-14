@@ -92,7 +92,7 @@ def read_events(path: Path) -> list[dict]:
     return events
 
 
-def execute(config: dict) -> dict:
+def execute(config: dict, *, stage: str = "full") -> dict:
     root = Path(config["source_root"])
     output = Path(config["output"])
     verify_source(root)
@@ -148,6 +148,8 @@ def execute(config: dict) -> dict:
     execution = None
     errors = []
     try:
+        if stage == "agent":
+            (output / "agent_started.json").write_text("{}\n")
         execution = backend.run_task(
             AgentTaskSpec(
                 task_id=output.name,
@@ -190,6 +192,22 @@ def execute(config: dict) -> dict:
                 if isinstance(block, dict) and block.get("type") == "thinking" and block.get("thinking"):
                     if block.get("thinkingSignature") not in ("reasoning", "reasoning_content", "reasoning_text"):
                         errors.append("reasoning_replay_signature_missing")
+        if stage == "agent":
+            collect_output_from_container(output.name, output)
+            return dict(
+                **expected,
+                evaluation_protocol=config["evaluation_protocol"],
+                errors=errors,
+                artifact_dir=str(output),
+                events=events,
+                elapsed_time=execution.elapsed_time,
+                agent_returncode=returncode,
+                task_deadline_reached=deadline_reached,
+                execution_started=True,
+                policy_request_errors=[
+                    message.get("errorMessage") for message in assistants if message.get("stopReason") == "error"
+                ],
+            )
         gt = Path(task["workspace_path"]) / "gt"
         if gt.is_dir():
             subprocess.run(
@@ -230,13 +248,73 @@ def execute(config: dict) -> dict:
             ],
         )
     finally:
+        stopped = False
         try:
             if execution is not None:
                 for process in (execution.agent_proc, execution.gateway_proc):
                     if process is not None:
                         stop_background_process(process)
+                stopped = True
         finally:
-            remove_container(output.name)
+            if stage == "agent" and stopped:
+                (output / "harness_stopped.json").write_text('{"cleanup_confirmed":true}\n')
+            elif stage != "agent":
+                remove_container(output.name)
+
+
+def verify_execution(config: dict) -> dict:
+    """Run the unchanged native grader only after the agent owner confirmed close."""
+    root, output = Path(config["source_root"]), Path(config["output"])
+    lease = json.loads((output / "lease.json").read_text())
+    closed = json.loads((output / "agent_closed.json").read_text())
+    if closed.get("cleanup_confirmed") is not True or closed.get("episode_id") != lease["episode_id"]:
+        raise ValueError("Native verification requires confirmed agent close for this episode")
+    result = json.loads((output / "agent_result.json").read_text())
+    for key in ("task_id", "task_sha256", "source_revision", "workspace_sha256"):
+        if result[key] != config["metadata"][key]:
+            raise ValueError("Agent receipt differs from the seeded task")
+    if result["evaluation_protocol"] != config["evaluation_protocol"]:
+        raise ValueError("Agent receipt differs from the evaluation protocol")
+    errors = list(result["errors"])
+    if not result.get("execution_started"):
+        return dict(
+            result, reward=0.0, native_reward=None, mask_sample=True, **failure_fields(errors or ["agent_execution"])
+        )
+    verify_source(root)
+    sys.path.insert(0, str(root))
+    from src.utils.docker_utils import collect_output_from_container
+    from src.utils.grading import run_grading
+    from src.utils.task_parser import parse_task_md
+
+    task = parse_task_md(root / config["metadata"]["task_path"])
+    gt = Path(task["workspace_path"]) / "gt"
+    if gt.is_dir():
+        subprocess.run(["docker", "cp", str(gt), f"{output.name}:/tmp_workspace/gt"], check=True, capture_output=True)
+    scores = run_grading(
+        task_id=output.name,
+        automated_checks=task["automated_checks"],
+        output_dir=output,
+        extra_env=task.get("env", ""),
+        transcript_container_path="/root/.openclaw/agents/main/sessions/chat.jsonl",
+        write_error_score=True,
+    )
+    errors.extend(grader_failures(scores))
+    native_reward = scores.get("overall_score")
+    if isinstance(native_reward, bool) or not isinstance(native_reward, (int, float)):
+        errors.append("missing_grader_reward")
+        native_reward = None
+    elif not math.isfinite(native_reward) or not 0 <= native_reward <= 1:
+        errors.append("invalid_grader_reward")
+        native_reward = None
+    collect_output_from_container(output.name, output)
+    return dict(
+        result,
+        errors=errors,
+        reward=0.0 if errors else native_reward,
+        native_reward=native_reward,
+        mask_sample=bool(errors),
+        **failure_fields(errors),
+    )
 
 
 def main() -> None:
@@ -252,8 +330,9 @@ def main() -> None:
         if cleanup.returncode and f"No such container: {output.name}" not in cleanup.stderr:
             raise RuntimeError("Sandbox cleanup failed; inspect the private worker log")
         return
+    stage = "agent" if "--agent" in sys.argv else "verify" if "--verify" in sys.argv else "full"
     try:
-        result = execute(config)
+        result = verify_execution(config) if stage == "verify" else execute(config, stage=stage)
     except Exception as exc:
         # Error details stay in restricted local logs, not public rollout rows.
         import traceback
@@ -270,9 +349,12 @@ def main() -> None:
             artifact_dir=str(output),
             events=[],
         )
-    temporary = output / "result.tmp"
+    if stage == "agent" and not (output / "agent_started.json").exists():
+        (output / "harness_stopped.json").write_text('{"cleanup_confirmed":true}\n')
+    target = output / ("agent_result.json" if stage == "agent" else "result.json")
+    temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2))
-    temporary.replace(output / "result.json")
+    temporary.replace(target)
 
 
 if __name__ == "__main__":

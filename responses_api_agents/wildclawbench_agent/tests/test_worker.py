@@ -237,3 +237,41 @@ def test_nonzero_exit_without_native_deadline_remains_masked(episode, elapsed, e
     result = worker.execute(config)
     assert result["mask_sample"]
     assert not result["task_deadline_reached"]
+
+
+def test_agent_stage_leaves_grading_and_container_cleanup_to_resources(episode):
+    state, config = episode
+    result = worker.execute(config, stage="agent")
+    assert result["execution_started"]
+    assert "grade" not in state["calls"]
+    assert "remove" not in state["calls"]
+    assert result["events"]
+    assert json.loads((__import__("pathlib").Path(config["output"]) / "harness_stopped.json").read_text())[
+        "cleanup_confirmed"
+    ]
+
+
+def test_verifier_requires_confirmed_agent_close_and_preserves_native_score(episode):
+    from pathlib import Path
+
+    state, config = episode
+    output = Path(config["output"])
+    result = worker.execute(config, stage="agent")
+    (output / "agent_result.json").write_text(json.dumps(result))
+    (output / "lease.json").write_text(json.dumps({"episode_id": {"rollout_id": "3-2", "attempt": 0}}))
+    with pytest.raises(FileNotFoundError):
+        worker.verify_execution(config)
+    assert "grade" not in state["calls"]
+    (output / "agent_closed.json").write_text(
+        json.dumps({"cleanup_confirmed": True, "episode_id": {"rollout_id": "other", "attempt": 0}})
+    )
+    with pytest.raises(ValueError, match="confirmed agent close"):
+        worker.verify_execution(config)
+    (output / "agent_closed.json").write_text(
+        json.dumps({"cleanup_confirmed": True, "episode_id": {"rollout_id": "3-2", "attempt": 0}})
+    )
+    result = worker.verify_execution(config)
+    assert result["reward"] == result["native_reward"] == 0.25
+    assert not result["mask_sample"]
+    assert state["calls"].count("grade") == 1
+    assert "remove" not in state["calls"]

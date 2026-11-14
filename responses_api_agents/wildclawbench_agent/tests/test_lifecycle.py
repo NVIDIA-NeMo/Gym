@@ -3,7 +3,6 @@
 """Exercise the benchmark agent against Gym's routing and disconnect middleware."""
 
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -12,8 +11,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.server_runtime import ClientDisconnectCancellationMiddleware
-from responses_api_agents.wildclawbench_agent.app import WildClawAgent, WildClawRunRequest
-from responses_api_agents.wildclawbench_agent.tests.helpers import make_agent
+from responses_api_agents.wildclawbench_agent.app import WildClawAgent
+from responses_api_agents.wildclawbench_agent.tests.helpers import make_agent, make_pipeline
 
 
 @pytest.mark.asyncio
@@ -32,15 +31,19 @@ elif config['metadata']['task_id']=='first':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     (output/'started').write_text(str(os.getpid()))
     time.sleep(60)
+elif '--verify' in sys.argv:
+    assert (output/'agent_closed.json').is_file()
+    result=json.loads((output/'agent_result.json').read_text())
+    (output/'result.json').write_text(json.dumps(result))
 else:
     first=list(output.parent.glob('*/started'))[0].parent
     (output/'previous-cleaned').write_text(str((first/'cleaned').exists()))
     result=dict(**config['metadata'],evaluation_protocol=config['evaluation_protocol'],reward=0,native_reward=0,mask_sample=False,errors=[],artifact_dir=str(output),events=[])
-    (output/'result.json').write_text(json.dumps(result))
+    (output/'agent_result.json').write_text(json.dumps(result))
 """
     )
     script.chmod(0o700)
-    agent = make_agent(tmp_path, str(script))
+    environment, agent, resources, calls = make_pipeline(tmp_path, str(script), monkeypatch)
     monkeypatch.setattr(WildClawAgent, "resolve_model_base_url", lambda *args: "http://localhost/v1")
     original_wait = asyncio.wait_for
 
@@ -52,21 +55,17 @@ else:
     await queue.put({"type": "http.request", "body": b"{}", "more_body": False})
 
     def request(task):
-        return WildClawRunRequest.model_validate(
-            dict(
-                _ng_task_index=0 if task == "first" else 1,
-                _ng_rollout_index=0,
-                _ng_run_id="disconnect-test",
-                responses_create_params={"input": [{"role": "user", "content": "task"}]},
-                verifier_metadata=dict(
-                    task_id=task, timeout_seconds=300, task_sha256="a" * 64, source_revision="b" * 40
-                ),
-            )
+        return dict(
+            _ng_task_index=0 if task == "first" else 1,
+            _ng_rollout_index=0,
+            _ng_run_id="disconnect-test",
+            responses_create_params={"input": [{"role": "user", "content": "task"}]},
+            verifier_metadata=dict(task_id=task, timeout_seconds=300, task_sha256="a" * 64, source_revision="b" * 40),
         )
 
     async def application(scope, receive, send):
         await receive()
-        await agent.run(request("first"))
+        await environment.run_legacy(request("first"))
 
     async def send(message):
         pass
@@ -82,13 +81,13 @@ else:
         await asyncio.sleep(0.01)
     assert started
     await queue.put({"type": "http.disconnect"})
-    second = asyncio.create_task(agent.run(request("second")))
+    second = asyncio.create_task(environment.run_legacy(request("second")))
     await asyncio.wait_for(running, timeout=5)
     result = await asyncio.wait_for(second, timeout=5)
     assert (started[0].parent / "cleaned").exists()
-    assert Path(result.artifact_dir, "previous-cleaned").read_text() == "True"
+    assert Path(result["artifact_dir"], "previous-cleaned").read_text() == "True"
     assert middleware.num_cancelled == 1
-    assert not agent._inflight
+    assert not environment._inflight
     with pytest.raises(ProcessLookupError):
         os.kill(int(started[0].read_text()), 0)
 
@@ -121,7 +120,7 @@ def test_fixed_port_agent_rejects_multiple_workers(tmp_path, monkeypatch, worker
     monkeypatch.setattr(WildClawAgent, "load_config_from_global_config", classmethod(lambda cls: agent.config))
     monkeypatch.setattr("responses_api_agents.wildclawbench_agent.app.get_global_config_dict", lambda: config)
     monkeypatch.setattr(
-        "responses_api_agents.wildclawbench_agent.app.subprocess.run",
+        "responses_api_agents.wildclawbench_agent.execution.subprocess.run",
         lambda *args, **kwargs: type("Inspect", (), {"stdout": "sha256:" + "b" * 64})(),
     )
     if workers == 2:
@@ -181,56 +180,31 @@ def test_model_profile_validation(tmp_path, monkeypatch, profile, valid):
     config = OmegaConf.create({"policy_model": {"responses_api_models": {"model": profile}}})
     monkeypatch.setattr(app, "get_global_config_dict", lambda: config)
     monkeypatch.setattr(
-        app.subprocess, "run", lambda *args, **kwargs: type("Inspect", (), {"stdout": "sha256:" + "b" * 64})()
+        __import__("subprocess"),
+        "run",
+        lambda *args, **kwargs: type("Inspect", (), {"stdout": "sha256:" + "b" * 64})(),
     )
     if valid:
         agent = app.WildClawAgent(config=template.config, server_client=MagicMock(spec=ServerClient))
-        assert agent._image_identity == "sha256:" + "b" * 64
+        assert agent._image_identity is None
     else:
         with pytest.raises(ValueError, match="WildClaw vLLM requires"):
             app.WildClawAgent(config=template.config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio
-async def test_legacy_relay_preserves_collector_indices_and_retry_attempt(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
+async def test_environment_preserves_collector_indices_and_retry_attempt(tmp_path, monkeypatch):
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 
-    from starlette.requests import Request
-
-    from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
-    from nemo_gym.client import ServerClient
-
-    agent = make_agent(tmp_path, sys.executable)
+    environment, _, _, _ = make_pipeline(tmp_path, sys.executable, monkeypatch)
     seen = []
 
-    async def episode(self, body, rollout_id, identity, fingerprint):
-        seen.append((rollout_id, identity, body.model_dump()["_ng_run_id"]))
-        return {"rollout_id": rollout_id}
+    async def episode(self, row):
+        request = self._episode_request_from_row(row)
+        seen.append((request.episode_id.capture_key, row["wildclaw_execution_key"], row["_ng_run_id"]))
+        return {"rollout_id": request.episode_id.capture_key}
 
-    monkeypatch.setattr(WildClawAgent, "_episode", episode)
-
-    async def post(**kwargs):
-        response = await agent.run(WildClawRunRequest.model_validate_json(kwargs["data"]))
-
-        async def read():
-            return json.dumps(response).encode()
-
-        return SimpleNamespace(read=read, status=200, headers={"content-type": "application/json"})
-
-    client = MagicMock(spec=ServerClient)
-    client.post = post
-    relay = LegacyAgentEnvironmentServer(
-        config=LegacyAgentEnvironmentServerConfig(
-            name="environment",
-            host="127.0.0.1",
-            port=0,
-            entrypoint="app.py",
-            agent_server={"type": "responses_api_agents", "name": "wildclaw_agent"},
-            default_episode_timeout_seconds=1,
-        ),
-        server_client=client,
-    )
+    monkeypatch.setattr(SingleAgentTurnLegacyEnvironmentServer, "run_legacy", episode)
     for attempt in (0, 1):
         payload = dict(
             _ng_task_index=7,
@@ -240,12 +214,7 @@ async def test_legacy_relay_preserves_collector_indices_and_retry_attempt(tmp_pa
             responses_create_params={"input": [{"role": "user", "content": "task"}]},
             verifier_metadata={},
         )
-
-        async def receive():
-            return {"type": "http.request", "body": json.dumps(payload).encode(), "more_body": False}
-
-        response = await relay.run_legacy(Request({"type": "http", "headers": []}, receive))
-        assert response.status_code == 200
-        assert json.loads(response.body)["rollout_id"] == ("7-2" if not attempt else "7-2-a1")
+        response = await environment.run_legacy(payload)
+        assert response["rollout_id"] == ("7-2" if not attempt else "7-2-a1")
     assert [item[2] for item in seen] == ["collector-run", "collector-run"]
     assert seen[0][1] != seen[1][1]

@@ -1,0 +1,16 @@
+wildclaw_resources:
+  resources_servers:
+    wildclawbench:
+      entrypoint: app.py
+      domain: agent
+      description: Original WildClawBench task state and native verifier
+      value: Preserve original tasks, sandbox state and grading through Gym sessions.
+      verified: false
+      execution:
+        source_root: ${oc.env:WILDCLAW_ROOT}
+        worker_python: ${oc.env:WILDCLAW_PYTHON}
+        output_root: ${oc.env:WILDCLAW_OUTPUT_ROOT}
+        model_server:
+          type: responses_api_models
+          name: policy_model
+        model_name: ${policy_model_name}
