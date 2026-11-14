@@ -56,6 +56,7 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
     An unsynchronised clone into a shared path would yield a half-written tree that imports with a confusing error.
     The tree is built in a private staging directory and published with one rename.
     A parser file under ``destination`` therefore always belongs to a complete checkout of ``UPSTREAM_COMMIT``.
+    A worker killed while it holds the lock leaves the lock behind, and later callers time out naming it.
     """
     if _parser_path(destination) is not None:
         return
@@ -70,14 +71,19 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
             if _parser_path(destination) is not None:
                 return
             if waited > timeout_s:
-                raise TimeoutError(f"timed out waiting for the SWE-rebench clone lock at {lock_path}")
+                raise TimeoutError(
+                    f"timed out after {timeout_s:.0f}s waiting for the SWE-rebench clone lock at {lock_path}. "
+                    "A worker killed while fetching leaves this lock behind; "
+                    "if no other worker is fetching, remove it and retry."
+                )
             time.sleep(2.0)
             waited += 2.0
     try:
         if _parser_path(destination) is not None:
             return
         shutil.rmtree(destination, ignore_errors=True)
-        # The lock holder has exclusive access, so any staging tree found here belongs to a killed worker.
+        # Only the lock holder creates staging trees, so any found here belong to a holder that was killed.
+        # Such a holder also leaves the lock behind, so this runs once that lock has been removed.
         for orphan in destination.parent.glob(f".{destination.name}.tmp-*"):
             shutil.rmtree(orphan, ignore_errors=True)
         staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")

@@ -595,12 +595,10 @@ class TestLogParserPin:
     """
 
     @staticmethod
-    def _fake_git(calls: list, fail_on: str | None = None, on_call=None):
+    def _fake_git(calls: list, fail_on: str | None = None):
         def run(args, cwd=None, check=False, capture_output=False):
             command = args[1]
             calls.append(args)
-            if on_call is not None:
-                on_call(command)
             if command == fail_on:
                 raise subprocess.CalledProcessError(128, args)
             if command == "init":
@@ -645,29 +643,49 @@ class TestLogParserPin:
 
         destination = tmp_path / log_parsers._repo_dir_name()
         seen: list = []
-        on_call = lambda command: seen.append((command, log_parsers._parser_path(destination)))  # noqa: E731
-        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], on_call=on_call))
+        fake = self._fake_git([])
+
+        def run(args, **kwargs):
+            fake(args, **kwargs)
+            seen.append((args[1], log_parsers._parser_path(destination)))
+
+        monkeypatch.setattr(log_parsers.subprocess, "run", run)
         log_parsers._clone_locked(destination)
-        assert seen and all(path is None for _, path in seen), seen
+        assert [command for command, _ in seen] == ["init", "fetch", "checkout"]
+        assert all(path is None for _, path in seen), seen
         assert log_parsers._parser_path(destination) is not None
         assert [p.name for p in tmp_path.iterdir()] == [destination.name]
 
-    def test_staging_trees_from_killed_workers_are_removed(self, monkeypatch, tmp_path) -> None:
+    def test_a_killed_workers_lock_is_named_and_its_staging_tree_removed_once_cleared(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A worker killed mid-fetch skips its cleanup, so it leaves both its staging tree and the lock."""
         from resources_servers.swe_rebench import log_parsers
 
         destination = tmp_path / log_parsers._repo_dir_name()
+        lock_path = tmp_path / f".{destination.name}.clone.lockdir"
+        lock_path.mkdir()
         orphan = tmp_path / f".{destination.name}.tmp-999999"
         orphan.mkdir()
         (orphan / "partial").write_text("left by a worker killed mid-fetch")
-        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([]))
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TimeoutError, match=re.escape(str(lock_path))):
+            log_parsers._clone_locked(destination, timeout_s=0)
+        assert calls == []
+
+        lock_path.rmdir()
         log_parsers._clone_locked(destination)
         assert [p.name for p in tmp_path.iterdir()] == [destination.name]
 
-    def test_a_failed_fetch_leaves_no_tree_behind(self, monkeypatch, tmp_path) -> None:
+    @pytest.mark.parametrize("step", ["fetch", "checkout"])
+    def test_a_failed_git_step_leaves_no_tree_behind(self, monkeypatch, tmp_path, step: str) -> None:
         from resources_servers.swe_rebench import log_parsers
 
         destination = tmp_path / log_parsers._repo_dir_name()
-        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on="fetch"))
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on=step))
         with pytest.raises(subprocess.CalledProcessError):
             log_parsers._clone_locked(destination)
-        assert list(tmp_path.iterdir()) == [], "no clone, staging tree, or lock may survive a failed fetch"
+        assert list(tmp_path.iterdir()) == [], f"no clone, staging tree, or lock may survive a failed {step}"
