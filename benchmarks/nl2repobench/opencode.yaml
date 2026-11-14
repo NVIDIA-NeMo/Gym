@@ -63,6 +63,20 @@ nl2repobench_opencode_sandboxed_agent:
       # other opencode_sandboxed_agent benchmarks keep today's 262144 behavior.
       opencode_max_context_window: 524288
 
+      # mini-swe-agent answers a reply without a command with a correction, and OpenHands a reasoning-only reply with
+      # a corrective message; `opencode run` instead ends on ANY reply without a tool call. So a turn cut off at the
+      # output token limit mid-reasoning, or a model that announces its next step and stops, ended the task: Super 3.5
+      # at max_tokens 32000 lost 5 of 63 rollouts that way on 2026-11-02, each scored 0 on an empty workspace. Continue
+      # the session a few times unless the model says it is done -- the same rule and limit as the ProgramBench
+      # OpenCode arm (benchmarks/programbench/opencode.yaml idle_nudge), with NL2RepoBench's finish line.
+      idle_nudge:
+        max_nudges: 3
+        stop_on_text: TASK_COMPLETE
+        text: |-
+          Your previous response did not run any tool, so nothing happened and the task is not finished.
+          Every response must use a tool to make progress until the entire project described in /workspace/start.md is implemented in /workspace.
+          Continue working now. If that is already true and nothing is left to do, reply with exactly TASK_COMPLETE.
+
       # The agent sandbox denies all egress except the policy model host
       # (enforce_agent_no_network: true), so the default `curl
       # https://opencode.ai/install` fallback fails (confirmed via a live

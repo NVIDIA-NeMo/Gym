@@ -16,6 +16,7 @@
 import json
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -25,7 +26,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -387,6 +388,17 @@ def parse_opencode_observations(
     )
 
 
+class IdleNudgeConfig(BaseModel):
+    """After OpenCode exits cleanly with time left, and its last assistant turn made no tool call, continue the same
+    session with ``text``, up to ``max_nudges`` times, unless that turn's text contains ``stop_on_text`` (the model's
+    explicit "done"). A turn cut off at the output token limit gets LENGTH_NOTE before the text. A turn that ended on an
+    API/provider error is not continued. Mirrors responses_api_agents/opencode_agent's IdleNudgeConfig."""
+
+    text: str
+    max_nudges: int = Field(default=3, ge=1)
+    stop_on_text: Optional[str] = None
+
+
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -402,6 +414,12 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     # user without a writable home (NL2RepoBench more-itertools runs as `appuser`), where the default $HOME/.local/share
     # fails with EACCES before the agent's first turn. Off by default: unchanged command line for everyone else.
     opencode_data_home_in_tmp: bool = False
+    # Continue the session when the model stops with budget left (same model and semantics as the ProgramBench
+    # opencode_agent's IdleNudgeConfig). `opencode run` exits on ANY reply without a tool call, which is also how it
+    # says it is done; mini-swe-agent answers a reply without a command with a correction, and OpenHands with a
+    # corrective message. Without this, a turn cut off at max_tokens mid-reasoning ends the task with an empty workspace
+    # (NL2RepoBench, Super 3.5 at max_tokens 32000: 5 of 63 rollouts, 2026-11-02). Off unless configured.
+    idle_nudge: Optional["IdleNudgeConfig"] = None
 
     # Sandbox config
     sandbox_provider: str
@@ -439,6 +457,58 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("The newest OpenCode session does not have a valid ID")
     return session_id
+
+
+# Put before the idle-nudge text when the stopped turn was cut off at the output token limit (OpenCode records finish
+# "length"), the case mini-swe-agent's ProgramBench format_error_template calls out on its own.
+LENGTH_NOTE = (
+    "Your previous response reached the output token limit before you produced a tool call, so it was cut off. "
+    "Respond more concisely."
+)
+
+
+def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = None) -> Optional[str]:
+    """Why the session should be continued, or None.
+
+    "length": the last assistant turn was cut off at the output token limit without a tool call.
+    "idle":   it stopped without a tool call for any other reason (reasoning only, empty, or text), unless its text
+              contains ``stop_on_text``.
+    None:     it called a tool, ended on an API/provider error, said ``stop_on_text``, or there is no assistant turn."""
+    messages = opencode_export.get("messages") or []
+    assistant = [m for m in messages if (m.get("info") or {}).get("role") == "assistant"]
+    if not assistant:
+        return None
+    last = assistant[-1]
+    info = last.get("info") or {}
+    if info.get("error"):
+        return None  # an API/provider error is a failure to report, not a turn to continue
+    parts = last.get("parts") or []
+    if any(p.get("type") == "tool" for p in parts):
+        return None
+    text = " ".join(str(p.get("text") or "") for p in parts if p.get("type") == "text")
+    if stop_on_text and stop_on_text in text:
+        return None
+    if info.get("finish") == "length" or any(
+        p.get("type") == "step-finish" and p.get("reason") == "length" for p in parts
+    ):
+        return "length"
+    return "idle"
+
+
+class _CombinedExecResult:
+    """Stdout/stderr of several `opencode run` execs (the first run plus nudged resumes), shaped like an exec result."""
+
+    def __init__(self, first: Any) -> None:
+        self.stdout = getattr(first, "stdout", "") or ""
+        self.stderr = getattr(first, "stderr", "") or ""
+        self.return_code = getattr(first, "return_code", None)
+        self.error_type = getattr(first, "error_type", None)
+
+    def add(self, nxt: Any) -> None:
+        self.stdout += "\n" + (getattr(nxt, "stdout", "") or "")
+        self.stderr += "\n" + (getattr(nxt, "stderr", "") or "")
+        self.return_code = getattr(nxt, "return_code", None)
+        self.error_type = getattr(nxt, "error_type", None)
 
 
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
@@ -580,6 +650,78 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
             **self.config.opencode_config,
         }
+
+    async def _nudge_idle_turns(
+        self,
+        *,
+        sandbox: Any,
+        first_result: Any,
+        env_prefix: str,
+        run_flags: str,
+        session_env: Optional[Dict[str, str]],
+        deadline: float,
+    ) -> tuple[Any, int]:
+        """Continue the session per ``idle_nudge`` while its last assistant turn made no tool call.
+
+        Returns the combined exec result and the number of nudges sent. Stops at the configured limit, when an
+        `opencode run` does not exit cleanly, when the session cannot be read, or when under a minute of the
+        sandbox_timeout budget is left."""
+        combined = _CombinedExecResult(first_result)
+        latest_stdout = combined.stdout
+        nudges = 0
+        check_remote = "/tmp/opencode_idle_check.json"
+        nudge_config = self.config.idle_nudge
+        assert nudge_config is not None
+        while nudges < nudge_config.max_nudges:
+            if "OpenCode run finished" not in latest_stdout:
+                break
+            remaining = deadline - time()
+            if remaining < 60:
+                break
+            try:
+                listed = await sandbox.exec(
+                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                    env=session_env,
+                )
+                session_id = _extract_opencode_session_id(listed.stdout or "")
+                exported = await sandbox.exec(
+                    command=(
+                        "export PATH=$HOME/.opencode/bin:$PATH "
+                        f"&& opencode export {quote(session_id)} > {quote(check_remote)}"
+                    ),
+                    env=session_env,
+                )
+                if exported.return_code != 0:
+                    break
+                with tempfile.TemporaryDirectory(prefix="nemo-gym-opencode-nudge-") as tmp:
+                    local = Path(tmp) / "export.json"
+                    await sandbox.download(check_remote, local)
+                    session_export = json.loads(local.read_text().strip() or "{}")
+            except Exception:
+                print("Idle check failed; not nudging", format_exc(), file=sys.stderr)
+                break
+            reason = _idle_reason(session_export, nudge_config.stop_on_text)
+            if reason is None:
+                break
+            nudges += 1
+            print(
+                f"OpenCode session {session_id} stopped without a tool call ({reason}); nudge {nudges}",
+                file=sys.stderr,
+            )
+            nudge = f"{LENGTH_NOTE}\n{nudge_config.text}" if reason == "length" else nudge_config.text
+            resume = (
+                f"export PATH=$HOME/.opencode/bin:$PATH "
+                f"&& {env_prefix} opencode run --session {quote(session_id)} {run_flags} -- {quote(nudge)} "
+                f'&& echo "OpenCode run finished"'
+            )
+            try:
+                resumed = await sandbox.exec(command=resume, timeout_s=remaining)
+            except Exception:
+                print("OpenCode resume after an idle stop hit an error", format_exc(), file=sys.stderr)
+                break
+            combined.add(resumed)
+            latest_stdout = getattr(resumed, "stdout", "") or ""
+        return combined, nudges
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
@@ -748,6 +890,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
         run_error_type = None
+        run_started = time()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -757,6 +900,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+
+        idle_nudges = 0
+        if result is not None and self.config.idle_nudge is not None:
+            result, idle_nudges = await self._nudge_idle_turns(
+                sandbox=sandbox,
+                first_result=result,
+                env_prefix=(
+                    f"OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} "
+                    f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str}"
+                ),
+                run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
+                session_env=dict(xdg_env) or None,
+                deadline=run_started + self.config.sandbox_timeout,
+            )
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -894,6 +1051,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_idle_nudges": idle_nudges,
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations

@@ -648,3 +648,129 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+
+def _export(last_parts, error=None, finish=None) -> Dict[str, Any]:
+    info = {"role": "assistant"}
+    if error:
+        info["error"] = error
+    if finish:
+        info["finish"] = finish
+    return {
+        "messages": [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "build it"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "tool", "tool": "read"}]},
+            {"info": info, "parts": last_parts},
+        ]
+    }
+
+
+def test_idle_reason_follows_the_programbench_idle_nudge_rule() -> None:
+    reason = app_module._idle_reason
+    # any stop without a tool call is idle: reasoning only, empty, or text that just stops
+    assert reason(_export([{"type": "reasoning", "text": "plan ... from .util"}])) == "idle"
+    assert reason(_export([])) == "idle"
+    assert reason(_export([{"type": "text", "text": "I'll implement the parser next."}], finish="stop")) == "idle"
+    # unless the model says the agreed sentinel
+    assert reason(_export([{"type": "text", "text": "All done. TASK_COMPLETE"}]), "TASK_COMPLETE") is None
+    # a turn cut off at the output token limit (the 2026-11-02 live case, partial text and all)
+    cut = [{"type": "text", "text": "Let me set up a task plan"}, {"type": "step-finish", "reason": "length"}]
+    assert reason(_export(cut, finish="length"), "TASK_COMPLETE") == "length"
+    assert reason(_export(cut), "TASK_COMPLETE") == "length"
+    # not continued: a tool call, an API error, no assistant turn
+    assert reason(_export([{"type": "tool", "tool": "bash"}], finish="length")) is None
+    assert reason(_export([{"type": "reasoning", "text": "x"}], error={"name": "APIError"})) is None
+    assert reason({"messages": []}) is None
+
+
+class TestIdleNudge:
+    TEXT = "Continue working now. If nothing is left to do, reply with exactly TASK_COMPLETE."
+
+    def _server(self, nudges: int) -> Any:
+        config = (
+            TestOpenCodeSandboxedAgent()
+            ._create_config()
+            .model_copy(
+                update={
+                    "idle_nudge": app_module.IdleNudgeConfig(
+                        text=self.TEXT, max_nudges=nudges, stop_on_text="TASK_COMPLETE"
+                    )
+                }
+            )
+        )
+        return OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def _sandbox(self, exports: list) -> MagicMock:
+        """exec answers by command; each download writes the next session export."""
+
+        async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+            if "session list" in command:
+                return SimpleNamespace(stdout='[{"id": "ses_1"}]', stderr="", return_code=0, error_type=None)
+            if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode run --session" in command:
+                return SimpleNamespace(
+                    stdout="working\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                )
+            raise AssertionError(command)
+
+        remaining = list(exports)
+
+        async def download(remote: str, local: Path) -> None:
+            Path(local).write_text(json.dumps(remaining.pop(0)))
+
+        sandbox = MagicMock()
+        sandbox.exec = AsyncMock(side_effect=exec_)
+        sandbox.download = AsyncMock(side_effect=download)
+        return sandbox
+
+    async def _run(self, server: Any, sandbox: Any, first: Any, seconds_left: float = 3600) -> tuple:
+        return await server._nudge_idle_turns(
+            sandbox=sandbox,
+            first_result=first,
+            env_prefix="OPENCODE_CONFIG_CONTENT='{}'",
+            run_flags="--thinking",
+            session_env={"XDG_DATA_HOME": "/tmp/x"},
+            deadline=app_module.time() + seconds_left,
+        )
+
+    FIRST = SimpleNamespace(
+        stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+    )
+
+    def _resumes(self, sandbox: Any) -> list:
+        return [
+            c.kwargs["command"]
+            for c in sandbox.exec.await_args_list
+            if "opencode run --session" in c.kwargs["command"]
+        ]
+
+    async def test_continues_until_the_model_says_task_complete(self) -> None:
+        stopped = _export([{"type": "text", "text": "Next I will write the tests."}], finish="stop")
+        done = _export([{"type": "text", "text": "TASK_COMPLETE"}], finish="stop")
+        sandbox = self._sandbox([stopped, done])
+        result, nudges = await self._run(self._server(3), sandbox, self.FIRST)
+        assert nudges == 1
+        [resume] = self._resumes(sandbox)
+        assert "--session ses_1" in resume and shlex.quote(self.TEXT) in resume
+        assert "OPENCODE_CONFIG_CONTENT='{}'" in resume and "--thinking" in resume
+        assert result.stdout.endswith("OpenCode run finished")  # opencode_finished still detected after the resume
+
+    async def test_length_cutoff_gets_the_length_note_first(self) -> None:
+        cut = _export([{"type": "text", "text": "Let me set up"}], finish="length")
+        done = _export([{"type": "text", "text": "TASK_COMPLETE"}], finish="stop")
+        sandbox = self._sandbox([cut, done])
+        _, nudges = await self._run(self._server(3), sandbox, self.FIRST)
+        assert nudges == 1
+        [resume] = self._resumes(sandbox)
+        assert shlex.quote(f"{app_module.LENGTH_NOTE}\n{self.TEXT}") in resume
+
+    async def test_stops_at_the_limit_after_an_unclean_exit_and_when_time_is_short(self) -> None:
+        idle = _export([{"type": "reasoning", "text": "cut"}])
+        _, nudges = await self._run(self._server(2), self._sandbox([idle, idle, idle]), self.FIRST)
+        assert nudges == 2
+        crashed = SimpleNamespace(stdout="Shell: x\nError: boom", stderr="", return_code=1, error_type=None)
+        _, nudges = await self._run(self._server(2), self._sandbox([idle]), crashed)
+        assert nudges == 0
+        _, nudges = await self._run(self._server(2), self._sandbox([idle]), self.FIRST, seconds_left=30)
+        assert nudges == 0
