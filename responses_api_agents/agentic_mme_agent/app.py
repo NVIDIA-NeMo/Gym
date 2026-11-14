@@ -39,7 +39,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
+from resources_servers.agentic_mme.app import TOOL_TRACE_METRICS_KEY, AgenticMMEVerifyResponse
 from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
 
@@ -167,7 +167,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         cookies: Any,
         replay: list[dict[str, Any]] | None = None,
         model_url_path: str = "/v1/responses",
-    ) -> tuple[NeMoGymResponse, list[dict[str, Any]], Any, PolicyCallError | None]:
+    ) -> tuple[NeMoGymResponse, Any, PolicyCallError | None]:
         async with self._rollouts:
             workspace = ImageWorkspace(
                 max_pixels=self.config.max_image_pixels,
@@ -183,7 +183,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         replay: list[dict[str, Any]] | None,
         workspace: ImageWorkspace,
         model_url_path: str = "/v1/responses",
-    ) -> tuple[NeMoGymResponse, list[dict[str, Any]], Any, PolicyCallError | None]:
+    ) -> tuple[NeMoGymResponse, Any, PolicyCallError | None]:
         params = params.model_copy(deep=True)
         if isinstance(params.input, str):
             params.input = [NeMoGymEasyInputMessage(role="user", content=params.input)]
@@ -344,7 +344,10 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     "output": [],
                 }
             )
-        result = generated.model_copy(update={"output": outputs, "usage": usage})
+        # The trace goes in metrics, which the model never sees, so that verify receives it on /run and under an
+        # agent session alike: a session's Environment Server sends verify only the task data and this response.
+        metrics = {**(generated.metrics or {}), TOOL_TRACE_METRICS_KEY: trace}
+        result = generated.model_copy(update={"output": outputs, "usage": usage, "metrics": metrics})
         if not finished and result.incomplete_details is None:
             # An episode that ends without an answer (tool or round budget used up, or a context-limit
             # refusal) is incomplete, but not a length cut: NeMo RL's overlong filtering and Gym's
@@ -352,7 +355,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             # drop the loss for running out of budget. The verifier scores it 0 as missing_answer, since
             # no assistant message follows the last tool call.
             result = NeMoGymResponse.model_validate(result.model_dump() | {"status": "incomplete"})
-        return result, trace, cookies, policy_error
+        return result, cookies, policy_error
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgenticMMESessionState:
         if body.sandbox_access is not None:
@@ -385,7 +388,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
     async def _session_episode(
         self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict[str, str], model_url_path: str
     ) -> tuple[NeMoGymResponse, dict[str, str]]:
-        result, _, model_cookies, policy_error = await self._episode(body, cookies, model_url_path=model_url_path)
+        result, model_cookies, policy_error = await self._episode(body, cookies, model_url_path=model_url_path)
         if policy_error is not None:
             # Report the cause, so the Environment Server's outcome policy decides between grading and retry.
             result = policy_error.failed_response(result)
@@ -405,7 +408,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         route = self.url_path_for_request("/v1/responses", request)
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            result, _, model_cookies, _ = await self._episode(body, request.cookies, model_url_path=route)
+            result, model_cookies, _ = await self._episode(body, request.cookies, model_url_path=route)
             for name, value in (model_cookies or {}).items():
                 response.set_cookie(name, value)
             return result
@@ -432,7 +435,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: AgenticMMERunRequest) -> AgenticMMEVerifyResponse:
-        result, trace, _, policy_error = await self._episode(
+        result, _, policy_error = await self._episode(
             body.responses_create_params,
             request.cookies,
             body.retrieval_replay,
@@ -451,22 +454,10 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             cookies=request.cookies,
         )
         await raise_for_status(verification)
+        # Verify returns the tool trace and its counts.
         verified = AgenticMMEVerifyResponse.model_validate(await get_response_json(verification))
-        successful = sum(bool(event["output"].get("ok")) for event in trace)
-        reference = (
-            (body.verifier_metadata.get("process_evaluation") or {}).get("efficiency", {}).get("reference_tool_calls")
-        )
-        overthink = None
-        if isinstance(reference, int) and not isinstance(reference, bool) and reference >= 0:
-            overthink = max(0, successful - reference) / (reference + 1)
         return verified.model_copy(
             update={
-                "tool_trace": trace,
-                "tool_call_count": len(trace),
-                "successful_tool_calls": successful,
-                "tool_error_count": len(trace) - successful,
-                "overthink": overthink,
-                "process_scores_available": False,
                 "policy_error": policy_error.message if policy_error else None,
                 **({"failure_reason": "policy_error"} if policy_error else {}),
             }

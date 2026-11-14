@@ -54,7 +54,9 @@ not a hardened training verifier. Final answers use <answer>...</answer> (the
 last tag when there are several), with plain terminal text as a fallback;
 reasoning blocks are excluded.
 
-The response includes tool_trace, counts, overthink and process_scores_available=false.
+With the Agentic-MME agent, the result includes tool_trace, counts, overthink and process_scores_available=false,
+on /run and under an agent session alike. The agent reports the trace in response.metrics, which the model never
+sees, and verify moves it into the result.
 Overthink counts successful observable interactions relative to reference_tool_calls;
 failed requests are counted separately. It never changes the reward.
 Full S/V, V-tool and V-true checkpoint judging and published-score reproduction

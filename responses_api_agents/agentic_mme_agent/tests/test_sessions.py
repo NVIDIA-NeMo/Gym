@@ -5,6 +5,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,6 +13,10 @@ from aiohttp import ClientConnectionError
 from fastapi import HTTPException, Request, Response
 from omegaconf import OmegaConf
 
+from environment_servers.single_agent_turn_legacy.app import (
+    SingleAgentTurnLegacyEnvironmentServer,
+    SingleAgentTurnLegacyEnvironmentServerConfig,
+)
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
@@ -21,8 +26,15 @@ from nemo_gym.agents import (
     OutcomeAction,
     agent_outcome_policy,
 )
-from nemo_gym.core import NeMoGymResponse
-from resources_servers.agentic_mme.tests.test_app import response
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
+from resources_servers.agentic_mme.tests.test_app import no_session, response
+from resources_servers.agentic_mme.tests.test_opencode_recipes import load
+from responses_api_agents.agentic_mme_agent.app import AgenticMMEAgent, AgenticMMEAgentConfig
+from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
 from responses_api_agents.agentic_mme_agent.tests.test_app import (
     FakeResponse,
     UnreadableResponse,
@@ -277,3 +289,137 @@ async def test_unanswered_episode_without_a_failed_call_is_not_marked_failed() -
     result = await agent.responses(request, Response(), body().responses_create_params)
 
     assert result.status == "incomplete" and AGENT_OUTCOME_METADATA_KEY not in (result.metadata or {})
+
+
+class Reply(FakeResponse):
+    """A successful HTTP reply, as the collector and the Environment Server read it."""
+
+    status = 200
+    headers: dict = {}
+
+
+@pytest.mark.asyncio
+async def test_a_collected_session_rollout_keeps_the_tool_trace_and_its_counts(monkeypatch) -> None:
+    """The default recipe's rollout row keeps what /run returned: the trace, its retrieval metadata and the counts.
+
+    Collection, the single-agent-turn Environment Server, the agent's session routes and the grader run in this
+    process; only the policy model and the live search provider are scripted.
+    """
+    # A live search result: the provider's answer, the leak guard's count and the cache outcome stay out of the
+    # model's tool output.
+    searched = {
+        "ok": True,
+        "tool": "google_search",
+        "context": "1. Red",
+        "raw": {"organic": [{"title": "provider-only answer"}]},
+        "contaminated": 1,
+        "cache": "miss",
+    }
+    monkeypatch.setattr(Retrieval, "call", AsyncMock(return_value=searched))
+    replies = [
+        response(output=[call("google_search", {"query": "image color"}, call_id="search")]),
+        response(output=[call(call_id="crop")]),
+        response(output=[call("zoom", {}, call_id="unknown")]),
+        response("<answer>red</answer>"),
+    ]
+    config = load("config")
+    config.policy_model = {"responses_api_models": {"openai_model": {"host": "model", "port": 9000}}}
+    transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
+    agent_config = OmegaConf.to_container(
+        config.agentic_mme_agent.responses_api_agents.agentic_mme_agent, resolve=True
+    )
+    agent_config["retrieval"] = {
+        "mode": "live",
+        "serper_api_key": "k",
+        "serpapi_api_key": "k",
+        "allow_image_upload": True,
+    }
+    agent = AgenticMMEAgent(
+        config=AgenticMMEAgentConfig(name="agentic_mme_agent", host="agent", port=8001, **agent_config),
+        server_client=transport,
+    )
+    grader = AgenticMMEServer(
+        config=AgenticMMEConfig(name="agentic_mme", host="resources", port=8000, entrypoint=""),
+        server_client=transport,
+    )
+    pairing = config.agentic_mme_environment_server.environment_servers.single_agent_turn_legacy
+    environment = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
+            name="agentic_mme_environment_server",
+            host="environment",
+            port=8002,
+            **OmegaConf.to_container(pairing, resolve=True),
+        ),
+        server_client=transport,
+    )
+    calls, model_inputs, agent_session = [], [], {}
+
+    async def post(self, server_name, url_path, **kwargs):
+        body = kwargs["json"]
+        calls.append((server_name, url_path))
+        if server_name == "agentic_mme_environment_server":
+            return Reply(await environment.run_legacy(body))
+        if server_name == "policy_model":
+            model_inputs.append(body.model_dump(mode="json")["input"])
+            return Reply(replies.pop(0).model_dump(mode="json"))
+        body = body.model_dump(mode="json") if hasattr(body, "model_dump") else body
+        if server_name == "agentic_mme":
+            if url_path == "/verify":
+                verified = await grader.verify(no_session(), AgenticMMEVerifyRequest.model_validate(body))
+                return Reply(verified.model_dump(mode="json"))
+            # Seed and close. The Environment Server needs the seed's session cookie.
+            cookie = {"session": SimpleNamespace(value="resources-cookie")}
+            return Reply({"resources_session_id": body["resources_session_id"]}, cookie)
+        path = url_path.split("?")[0]
+        request = Request(
+            {
+                "type": "http",
+                "headers": [],
+                "method": "POST",
+                "scheme": "http",
+                "server": ("agent", 8001),
+                "path": path,
+                "query_string": b"",
+                "session": agent_session,
+            }
+        )
+        if url_path == "/v1/agent_sessions":
+            result = await agent.seed_agent_session(request, AgentSeedSessionRequest.model_validate(body))
+        elif url_path == "/v1/agent_sessions/close":
+            result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
+        else:
+            request.scope["path_params"] = {"rollout_id": path.split("/")[2]}
+            params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+            result = await agent.responses(request, Response(), params)
+        return Reply(result.model_dump(mode="json"))
+
+    monkeypatch.setattr(ServerClient, "post", post)
+    monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: f"http://{name}:8000")
+    monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self, head=None: transport)
+    task = body().model_dump(mode="json", include={"responses_create_params", "verifier_metadata"})
+    rows = RolloutCollectionHelper._preprocess_raw_rows(
+        [(0, json.dumps(task), task)],
+        RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            agent_name="agentic_mme_agent",
+            num_repeats=1,
+        ),
+    )
+    _, row = await next(RolloutCollectionHelper().run_examples(rows))
+
+    # The episode ran under an agent session, not through the agent's /run.
+    assert ("agentic_mme_agent", "/v1/agent_sessions/close") in calls
+    assert ("agentic_mme_agent", "/run") not in calls
+    assert row["reward"] == 1.0
+    assert [event["tool_name"] for event in row["tool_trace"]] == ["google_search", "crop", "zoom"]
+    search = row["tool_trace"][0]["output"]
+    assert search["raw"] == searched["raw"] and search["contaminated"] == 1 and search["cache"] == "miss"
+    assert row["tool_trace"][2]["output"] == {"ok": False, "error": "unknown tool"}
+    assert (row["tool_call_count"], row["successful_tool_calls"], row["tool_error_count"]) == (3, 2, 1)
+    # Two successful calls against a reference of none.
+    assert row["overthink"] == 2.0 and row["process_scores_available"] is False
+    # The model saw only the search context, and the row stores the trace once.
+    assert "provider-only answer" not in json.dumps(model_inputs)
+    assert json.loads(model_inputs[1][-1]["output"]) == {"ok": True, "tool": "google_search", "context": "1. Red"}
+    assert row["response"].get("metrics") is None

@@ -32,7 +32,14 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.agents import HARNESS_STEP_LIMIT_METADATA_KEY
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, VERIFIER_ERROR, EpisodeId, NeMoGymChatCompletion, TaskId
+from nemo_gym.core import (
+    TOOL_OUTPUT_IMAGES_KEY,
+    VERIFIER_ERROR,
+    EpisodeId,
+    NeMoGymChatCompletion,
+    NeMoGymResponse,
+    TaskId,
+)
 from nemo_gym.sandbox import SandboxConfig
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -255,6 +262,40 @@ class AgenticMMEVerifyResponse(BaseVerifyResponse):
     # 1.0 when the harness marked the response as reaching its step limit, so the share of such rollouts shows in
     # the per-key metrics whether or not the answer is scored.
     step_limit_reached: float = 0.0
+
+
+# The Agentic-MME agent reports its tool trace under this key of response.metrics, which the model never sees. Only the
+# trace keeps each retrieval call's provider answer, leak-guard count and cache outcome; the model's tool outputs leave
+# them out.
+TOOL_TRACE_METRICS_KEY = "agentic_mme_tool_trace"
+
+
+def tool_trace_fields(
+    response: NeMoGymResponse, verifier_metadata: dict[str, Any]
+) -> tuple[NeMoGymResponse, dict[str, Any]]:
+    """Move the agent's tool trace out of the response, into result fields with the counts derived from it.
+
+    The agent sends the trace on /run and under an agent session alike, so both rows carry the same fields. A response
+    without a trace, from another harness, gets no fields.
+    """
+    metrics = dict(response.metrics or {})
+    trace = metrics.pop(TOOL_TRACE_METRICS_KEY, None)
+    if trace is None:
+        return response, {}
+    successful = sum(bool(event["output"].get("ok")) for event in trace)
+    reference = (verifier_metadata.get("process_evaluation") or {}).get("efficiency", {}).get("reference_tool_calls")
+    overthink = None
+    if isinstance(reference, int) and not isinstance(reference, bool) and reference >= 0:
+        overthink = max(0, successful - reference) / (reference + 1)
+    # The row stores the trace once, in tool_trace.
+    return response.model_copy(update={"metrics": metrics or None}), {
+        "tool_trace": trace,
+        "tool_call_count": len(trace),
+        "successful_tool_calls": successful,
+        "tool_error_count": len(trace) - successful,
+        "overthink": overthink,
+        "process_scores_available": False,
+    }
 
 
 @dataclass
@@ -513,13 +554,17 @@ class AgenticMMEServer(SimpleResourcesServer):
         A judge failure propagates: the base class wraps this method in judge_failsafe, which masks the row and sends
         it to the failures sidecar instead of counting it as a wrong answer.
         """
+        response, tool_fields = tool_trace_fields(body.response, body.verifier_metadata)
+        body = body.model_copy(update={"response": response})
         if self._fences.get(request.session.get(SESSION_ID_KEY, "")) is not None:
             # Masked although the score reads only the response, so that every server under the resources session
             # contract treats a closed session alike. single_agent_turn verifies before it closes, so only an
             # out-of-order verify lands here. A session that no close fenced, such as an agent's /run, is graded.
             lost = lost_session_verification("This agentic_mme session is already closed")
-            return AgenticMMEVerifyResponse(**(body.model_dump() | lost | {"evaluation_completed": False}))
-        result = AgenticMMEVerifyResponse(**body.model_dump(), reward=0.0)
+            return AgenticMMEVerifyResponse(
+                **(body.model_dump() | tool_fields | lost | {"evaluation_completed": False})
+            )
+        result = AgenticMMEVerifyResponse(**(body.model_dump() | tool_fields), reward=0.0)
         result.step_limit_reached = float(
             (body.response.metadata or {}).get(HARNESS_STEP_LIMIT_METADATA_KEY) == "true"
         )
