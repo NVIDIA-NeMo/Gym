@@ -110,6 +110,7 @@ from nemo_gym.server_runtime import (
     seed_restarts,
     seed_verify_step_type,
 )
+from nemo_gym.server_runtime.base_resources_server import NEMO_GYM_TOOL_CALL_ID_HEADER, RESERVED_MCP_TOOL_NAMES
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -732,13 +733,22 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     started_at = time()
                     started_monotonic = perf_counter()
                 try:
+                    if not _is_sendable_tool_name(output_function_call.name):
+                        raise _UnsendableToolNameError(output_function_call.name)
                     parsed_arguments = json.loads(output_function_call.arguments)
+                except _UnsendableToolNameError as e:
+                    tool_output = json.dumps({"error": f"{e} is not an available tool"})
+                    if collect_trajectory:
+                        error_type = "unsendable_tool_name"
+                        tool_status = "failed"
                 except (json.JSONDecodeError, TypeError) as e:
                     tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
                     if collect_trajectory:
                         error_type = type(e).__name__
                         tool_status = "failed"
                 else:
+                    # A resend of this request after a lost reply carries the same id (see the header's comment).
+                    call_headers = {NEMO_GYM_TOOL_CALL_ID_HEADER: uuid4().hex}
                     # Resource-server errors are valid model-visible tool outputs.
                     if tool_access is not None:
                         api_response = await http_request(
@@ -746,7 +756,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
+                            headers=dict(tool_access.headers) | call_headers,
                             _internal=True,
                         )
                     else:
@@ -767,6 +777,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url_path=f"{resources_prefix}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
+                            headers=call_headers,
                         )
                     tool_output, images = _split_tool_output_images((await api_response.content.read()).decode())
                     tool_images.extend(images)
@@ -1339,6 +1350,24 @@ def _tool_image_message(image: ToolOutputImage) -> NeMoGymEasyInputMessage:
     content = [{"type": "input_text", "text": image.label}] if image.label else []
     content.append({"type": "input_image", "image_url": image.image_url, "detail": "auto"})
     return NeMoGymEasyInputMessage(type="message", role="user", content=content)
+
+
+# A tool name becomes one URL path segment on the resources server.
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+
+
+def _is_sendable_tool_name(name: str) -> bool:
+    """Whether a function call may be posted to the resources server under its name.
+
+    A name that is not one plain path segment (``verify?x=1``, ``a/../verify``) or that names one of the
+    server's own routes (``seed_session``, ``verify``, ``close_session``) would reach that route with the
+    episode's cookies and let the model re-seed, grade or close its own episode.
+    """
+    return _TOOL_NAME.fullmatch(name) is not None and name not in RESERVED_MCP_TOOL_NAMES
+
+
+class _UnsendableToolNameError(ValueError):
+    """A function call whose name ``_is_sendable_tool_name`` refuses; it is answered with an error, never sent."""
 
 
 def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) -> str:
