@@ -11,9 +11,9 @@ after(() => rmSync(marker, { force: true }));
 const prompt = (date) => `You are opencode.\n<env>\n  Platform: linux\n  Today's date: ${date}\n</env>\nRules.`;
 
 async function render(hook, sessionID, system) {
-  const output = { system };
-  await hook["experimental.chat.system.transform"]({ sessionID, model: {} }, output);
-  return output.system;
+  // OpenCode passes a fresh `{ system }` and keeps reading its own array, so assert on that array.
+  await hook["experimental.chat.system.transform"]({ sessionID, model: {} }, { system });
+  return system;
 }
 
 test("a session keeps its first call's date across 00:00 UTC", async () => {

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // OpenCode renders today's date into every call's system prompt. Pin it to the
 // session's first call so a session crossing 00:00 UTC keeps a stable prefix.
-// Uses OpenCode's experimental system-prompt hook (present in 1.17.11); the
-// marker lets the host fail loudly if the hook or the date line ever changes.
+// Uses OpenCode's experimental system-prompt hook (present in 1.17.11). The
+// marker shows only that the plugin loaded and replaced a date at least once.
 import { writeFileSync } from "node:fs";
 
 const DATE_LINE = /Today's date: [^\n]*/;
@@ -17,15 +17,16 @@ export default async function stableDate() {
     "experimental.chat.system.transform": async (input, output) => {
       const sessionID = input?.sessionID;
       if (!sessionID || !Array.isArray(output?.system)) return;
-      output.system = output.system.map((text) => {
+      // OpenCode keeps using the array it passed in, so change it in place.
+      output.system.forEach((text, i) => {
         const line = typeof text === "string" ? text.match(DATE_LINE) : null;
-        if (!line) return text;
+        if (!line) return;
         if (!pinned.has(sessionID)) pinned.set(sessionID, line[0]);
+        output.system[i] = text.replace(DATE_LINE, () => pinned.get(sessionID));
         if (!marked) {
           writeFileSync(MARKER, "ok\n");
           marked = true;
         }
-        return text.replace(DATE_LINE, () => pinned.get(sessionID));
       });
     },
   };
