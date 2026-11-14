@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compatibility alias: the Agent-X catalog config now defaults to OpenCode.
+config_paths:
+  - benchmarks/opencode_multimodal_benchmarks/agentx/config.yaml

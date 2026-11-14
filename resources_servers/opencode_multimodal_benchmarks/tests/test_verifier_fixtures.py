@@ -3,10 +3,11 @@
 import pytest
 
 from nemo_gym.verification import exercise_verifier_fixture
+from resources_servers.opencode_multimodal_benchmarks.agentx import VERIFIER_FIXTURE as AGENTX_FIXTURE
 from resources_servers.opencode_multimodal_benchmarks.app import VERIFIER_FIXTURE
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fixture", [VERIFIER_FIXTURE])
+@pytest.mark.parametrize("fixture", [VERIFIER_FIXTURE, AGENTX_FIXTURE])
 async def test_catalog_verifier_contract(fixture):
     await exercise_verifier_fixture(fixture, reward_range=(0, 1), determinism="unknown")

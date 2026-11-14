@@ -62,6 +62,12 @@ def benchmark_report(benchmark: str, rows: list[dict[str, Any]]) -> list[dict[st
     # Category fields are optional task annotations, including on synthetic
     # examples. Their absence must not prevent reporting the overall score.
     rows = [{"category": "", "l2_category": ""} | row for row in rows]
+    if benchmark == "AgentX":
+        report = []
+        for modality in ("Image", "Video"):
+            group = [row for row in rows if row["modality"] == modality]
+            report.append({"modality": modality, "count": len(group), "accuracy": accuracy(group)})
+        return report
     if benchmark == "ZeroBench":
         return [{"split": "zerobench", "count": len(rows), "accuracy": accuracy(rows)}]
     if benchmark == "HRBench8K":

@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[3]
 CATALOG = "benchmarks/opencode_multimodal_benchmarks"
 
 
-@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
-@pytest.mark.parametrize("mode", ["simple", "openai", "vllm", "training"])
+@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench", "agentx"])
+@pytest.mark.parametrize("mode", ["default", "openai", "vllm", "training"])
 def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypatch):
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-only")
     monkeypatch.setenv("OPENSANDBOX_DOMAIN", "https://sandbox.invalid")
@@ -25,6 +25,7 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     overrides = {}
     if mode in {"openai", "vllm"}:
         paths[-1] = f"{CATALOG}/{benchmark}/opencode.yaml"
+    if benchmark == "agentx" or mode in {"openai", "vllm"}:
         overrides = {
             "visual_agent": {"responses_api_agents": {"opencode_agent": {"sandbox_config": {"image": "test-image"}}}}
         }
@@ -60,6 +61,9 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     assert env.agent_server.name == "visual_agent"
     assert env.resources_server.name == "opencode_multimodal_benchmarks"
     agent = config.visual_agent.responses_api_agents
+    assert set(agent) == (
+        {"opencode_agent"} if benchmark == "agentx" or mode in {"openai", "vllm"} else {"simple_agent"}
+    )
     assert next(iter(agent.values())).model_server.name == "policy_model"
     resources = config.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks
     assert resources.datasets[0].num_repeats == (5 if benchmark == "zerobench" else 1)

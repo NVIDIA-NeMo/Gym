@@ -36,7 +36,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | Kimi Code (`kimi_code_agent`) | Chat Completions | None | Not validated; evaluation only | Not declared | Not declared | Not validated |
 
 The [visual benchmark catalog](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/opencode_multimodal_benchmarks)
-uses stock OpenCode sessions for VStar, HRBench8K, VTCBench and ZeroBench. Prompt
+uses stock OpenCode sessions for VStar, HRBench8K, VTCBench, Agent-X and ZeroBench. Prompt
 and tool images use the shared media path. Evaluation disables auxiliary tool
 rewards; optional training rewards are implemented by the Resources verifier.
 Network and tool profiles are selected per task before sandbox creation.
@@ -392,3 +392,18 @@ Understand where shared tool implementations and verification logic belong.
 </Card>
 
 </Cards>
+
+
+For generic answer-equivalence training with configurable tool rewards, use the
+`llm_judge_tool_rewards` Resources component and
+`resources_servers/llm_judge_tool_rewards/configs/llm_judge_tool_rewards.yaml`. It retains
+`equivalence_llm_judge`'s dataset schema (`expected_answer` and optional question
+metadata); visual-benchmark metadata is unnecessary. Bind the environment to
+`llm_judge_with_tools`, configure a separate `training_judge` model, and enable
+`forward_agent_evidence: true`. Reverification needs that flag separately when
+recomputing tool rewards. The wrapper preserves the saved policy response and
+records correctness and tool reward separately; unusable judge replies remain
+masked failures. Shell/search tool names and rate-limit matching are configurable;
+the shipped settings are OpenCode-compatible. Other harnesses must provide matching
+tool settings and canonical execution observations; OpenCode is the currently
+validated tool-using pairing.
