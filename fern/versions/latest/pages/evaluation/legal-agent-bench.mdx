@@ -1,0 +1,163 @@
+---
+title: "Legal Agent Bench"
+description: "Configure judges, run Harvey LAB, and compare agent harnesses."
+position: 20
+---
+
+# Legal Agent Bench
+
+LAB evaluates legal work using documents and task-specific criteria. Benchmark
+version **0.2.0** contains **2,010 tasks**, pinned to [Harvey LAB revision
+9e9fa7f](https://github.com/harveyai/harvey-labs/tree/9e9fa7fe126103de1fceb2227b7c70bf59b67f73).
+The Harbor Environment Server manages task setup, sandboxes, grading, and cleanup.
+LAB Native is the default agent.
+
+## Configure judges
+
+Add a nonempty `lab_judges` list to the gitignored root `env.yaml`. Use one model
+for single judging, or the official pair for dual judging:
+
+```yaml
+judge_base_url: https://your-judge-endpoint.example/v1
+judge_api_key: your-judge-key
+lab_judges:
+  - model_name: claude-sonnet-4-6
+  - model_name: gpt-5.5
+```
+
+For separate OpenAI-compatible endpoints and keys:
+
+```yaml
+lab_judges:
+  - model_name: claude-sonnet-4-6
+    base_url: https://your-claude-gateway.example/v1
+    api_key: your-claude-key
+  - model_name: gpt-5.5
+    base_url: https://your-openai-gateway.example/v1
+    api_key: your-openai-key
+```
+
+Per-judge values override the shared settings. Entries also accept
+`reasoning_effort`. Model route prefixes are preserved; only the legacy
+`openai-compatible/` prefix is removed. Replace `judge_model_name` with a list
+entry and remove `judge_profile`. Judge credentials and rubrics reach only the
+separate verifier sandbox.
+
+## Choose a harness and sandbox
+
+All presets are under `benchmarks/legal_agent_bench/`:
+
+| Preset | Agent |
+| --- | --- |
+| `config.yaml`, `config_native.yaml` | LAB Native |
+| `config_hermes.yaml` | Hermes |
+| `config_claude_code.yaml` | Claude Code |
+| `config_codex.yaml` | Codex |
+
+All presets run through the Harbor Environment Server and
+use `legal_agent_bench_benchmark_agent` and the same task rows and verifier.
+Change the preset to compare harnesses while keeping tasks, model, judges,
+sampling, and budgets fixed. LAB Native uses LAB's `finish` tool; CLI harnesses
+keep their own tools and termination rules.
+
+`finish` checks only the agent's listed output files, without consulting the rubric.
+Missing files cause up to two rejections so the agent can correct them; a third
+attempt ends the run even if files are still missing, matching Harvey LAB.
+After an accepted `finish`, later tool calls in the same response are not executed.
+Accepting `finish` does not mean the task passed: the verifier still grades the
+actual outputs against the rubric.
+
+Set the `sandbox` provider block independently of the harness. The supported
+providers are Docker, ECS Fargate, Apptainer, Enroot, OpenSandbox, and OpenShell,
+subject to the [Harbor Environment Server's capabilities](https://github.com/NVIDIA-NeMo/Gym/blob/main/environment_servers/harbor/README.md).
+Apptainer and Enroot borrowers must run on the owner's host and UID; Enroot also
+requires matching data/runtime directories. Fargate needs exec-server mode and
+the owner's active SSH forward. OpenShell needs the same gateway and workspace.
+
+OpenShell policies must allow writes to `/workspace`, `/tmp`, `/home/sandbox`, `/tests`, and `/logs`.
+The LAB image creates the Harbor directories with ownership assigned to the restricted sandbox user.
+Rubrics and judge credentials are still injected only into the separate verifier sandbox.
+
+Automatic image preparation uses Docker. To run without local Docker, supply
+an accessible, provider-compatible
+LAB tools image using `prepare_script_args.image`. Every sandbox must reach the
+advertised model-server address. OpenShell policies must also permit harness
+installation; scoped npm packages need encoded slashes allowed on registry requests.
+
+## Run selected tasks
+
+Put your policy model settings in `model-provider.yaml`. For a bounded run, select
+rows from `resources_servers/legal_agent_bench/data/example.jsonl` into
+`selected-tasks.jsonl`. Create `lab-comparison.yaml`:
+
+```yaml
+num_samples_in_parallel: 1
+prepare_script_args:
+  input: /absolute/path/selected-tasks.jsonl
+  output: /absolute/path/prepared-lab.jsonl
+  # image: registry.example.com/lab-tools:your-version
+lab:
+  policy_temperature: 1.0
+  policy_top_p: 0.95
+  reward_mode: full_task
+  judge_parallelism: 6
+  agent_timeout_seconds: 10800
+  verifier_timeout_seconds: 3600
+```
+
+Keep the prepared JSONL and its `.tasksets.json` mapping together. As with shared
+Harbor preparation, these outputs are not published together as one transaction.
+Finish preparation before starting the servers, and use separate output paths
+for concurrent runs with different task selections.
+
+From the repository root:
+
+```bash
+gym eval prepare --config benchmarks/legal_agent_bench/config_native.yaml \
+  --config model-provider.yaml --config lab-comparison.yaml
+
+gym env start --config benchmarks/legal_agent_bench/config_native.yaml \
+  --config model-provider.yaml \
+  --config benchmarks/legal_agent_bench/model_sampling_openai.yaml \
+  --config lab-comparison.yaml
+```
+
+In another terminal with the same environment:
+
+```bash
+gym eval run --no-serve \
+  --config benchmarks/legal_agent_bench/config_native.yaml \
+  --config model-provider.yaml \
+  --config benchmarks/legal_agent_bench/model_sampling_openai.yaml \
+  --config lab-comparison.yaml \
+  --input /absolute/path/prepared-lab.jsonl \
+  --output results/lab-native-smoke.jsonl --limit 1 --concurrency 1
+```
+
+The sampling file above targets `openai_model`; configure equivalent defaults
+for other model servers. Hermes rejects row-level `top_p`, and Codex rejects
+row-level `temperature` and `top_p`, so use shared model defaults for comparisons.
+
+Preparation converts legacy `instance_id` rows into canonical Environment Server
+rows. Original IDs and caller parameters are retained. Shared corpora are stored
+once and hardlinked into prepared task inputs. Caches require hardlinks and
+filesystem-wide `flock`; shared mounts using `noflock` or `localflock` are not
+supported. Use local storage or enable cluster-wide locking on shared storage.
+
+## Results and limits
+
+- **`full_task` (default):** each judge awards 1 only when every criterion passes.
+  Averaging the two task scores gives 0, 0.5, or 1.
+- **`criteria_pass_rate`:** average the judges' criterion pass rates. Scores of
+  2/2 and 1/2 give 0.75, rather than 0.5 in full-task mode.
+- Reports retain each judge's result, source revision, harness version,
+  document-tool versions, completion status, and usage. Judge errors are operational
+  failures. Turn/context exhaustion remains scoreable, and measured verifier-budget
+  timeouts retain Harbor's scoring policy. Cleanup failures remain operational failures.
+
+The production-review task
+`categorize-document-production-set-by-relevance-and-privilege` has a grading
+correction: both judges receive the 22 document-ID-to-filename mappings already
+present in its rubric. Criteria and agent outputs are unchanged. Reports record
+this correction, which differs from unmodified upstream grading. Results from
+older task revisions or grading rules are not directly comparable.

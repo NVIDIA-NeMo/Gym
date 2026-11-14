@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from tqdm.auto import tqdm
 
@@ -48,6 +49,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
+    get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
 )
@@ -537,21 +539,27 @@ class DatasetValidatorState(BaseModel):
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
-def _declares_prepared_dataset(value: object, dataset: DatasetConfig) -> bool:
+def _declares_prepared_dataset(value: object, dataset: DatasetConfig, *, context: DictConfig) -> bool:
     if isinstance(value, Mapping):
-        if str(value.get("jsonl_fpath", "")) == str(dataset.jsonl_fpath) and value.get("prepare_script") is not None:
-            return True
-        return any(_declares_prepared_dataset(item, dataset) for item in value.values())
+        if value.get("prepare_script") is not None and "jsonl_fpath" in value:
+            try:
+                candidate = OmegaConf.merge(context, {"_prepared_dataset_path": value["jsonl_fpath"]})
+                if str(candidate._prepared_dataset_path) == str(dataset.jsonl_fpath):
+                    return True
+            except InterpolationResolutionError:
+                pass  # An unrelated dataset must not prevent a useful preparation hint.
+        return any(_declares_prepared_dataset(item, dataset, context=context) for item in value.values())
     if isinstance(value, list):
-        return any(_declares_prepared_dataset(item, dataset) for item in value)
+        return any(_declares_prepared_dataset(item, dataset, context=context) for item in value)
     return False
 
 
 def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
     for raw_config_path in global_config.get("config_paths") or []:
         config_path = _resolve_under_cwd_or_install(raw_config_path)
-        config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)
-        if _declares_prepared_dataset(config, dataset):
+        config = OmegaConf.load(config_path)
+        context = OmegaConf.merge(config, global_config)
+        if _declares_prepared_dataset(OmegaConf.to_container(config, resolve=False), dataset, context=context):
             return f"gym eval prepare --config {raw_config_path}"
     return "gym eval prepare --config <config path>"
 
@@ -667,7 +675,30 @@ class TrainDataProcessor(BaseModel):
         in_scope_dataset_types = config.in_scope_dataset_types
         agent_configs_with_in_scope_datasets: List[ServerInstanceConfig] = []
         for agent_config in agent_configs_with_data:
-            in_scope_datasets = [d for d in agent_config.datasets if d.type in in_scope_dataset_types]
+            raw_datasets = (
+                get_first_server_config_dict(global_config_dict, agent_config.name).get("datasets", [])
+                if agent_config.name in global_config_dict
+                else []
+            )
+            in_scope_datasets = []
+            for index, dataset in enumerate(agent_config.datasets):
+                if dataset.type not in in_scope_dataset_types:
+                    continue
+                if index < len(raw_datasets):
+                    raw = raw_datasets[index]
+                    values = dataset.model_dump()
+                    if isinstance(dataset, DatasetConfig) and dataset.source is not None:
+                        # Revalidation restores these aliases from source; passing both would be ambiguous.
+                        values.pop("gitlab_identifier", None)
+                        values.pop("huggingface_identifier", None)
+                    try:
+                        for field in ("jsonl_fpath", "prepare_script", "prepare_project", "prompt_config"):
+                            if field in type(dataset).model_fields and field in raw:
+                                values[field] = raw[field]
+                    except InterpolationResolutionError as error:
+                        raise ValueError(f"Could not resolve paths for dataset {dataset.name!r}: {error}") from error
+                    dataset = type(dataset).model_validate(values)
+                in_scope_datasets.append(dataset)
             if not in_scope_datasets:
                 continue
 

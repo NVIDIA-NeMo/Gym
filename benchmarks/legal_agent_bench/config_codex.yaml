@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+- resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml
+- responses_api_agents/codex_agent/configs/codex_agent.yaml
+legal_agent_bench_benchmark_agent:
+  _inherit_from: codex_agent
+  responses_api_agents:
+    codex_agent:
+      model: ${policy_model_name}
+      timeout: ${lab.agent_timeout_seconds}
+      concurrency: ${num_samples_in_parallel}
+      codex_version: 0.144.4
+      inherit_sandbox_environment: false
+      datasets:
+      - name: legal_agent_bench
+        type: benchmark
+        taskset: legal_agent_bench
+        jsonl_fpath: ${lab.rows_path}
+        prepare_script: benchmarks/legal_agent_bench/prepare.py
+        prepare_project: resources_servers/legal_agent_bench
+        num_repeats: 1
+use_absolute_ip: true
