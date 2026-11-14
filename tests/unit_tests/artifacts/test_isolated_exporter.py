@@ -25,12 +25,12 @@ import nemo_gym.artifacts.exporters.isolated as isolated
 from nemo_gym.artifacts.exporters.base import ExportState
 from nemo_gym.artifacts.exporters.isolated import (
     ExportPreparationError,
+    IsolatedExportConfig,
     IsolatedExporter,
     ensure_exporter_environment,
     exporter_venv_path,
 )
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
-from nemo_gym.config.config_types import RunExportConfig
 
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build the exporter environment")
@@ -90,7 +90,7 @@ def run(payload):
 
 class FakeExporter(IsolatedExporter):
     name: ClassVar[str] = "fake"
-    config_model: ClassVar[type[RunExportConfig]] = RunExportConfig
+    config_model: ClassVar[type[IsolatedExportConfig]] = IsolatedExportConfig
     prepared_workdirs: ClassVar[list[Path]] = []
     mode: ClassVar[str] = "ok"
     refuse: ClassVar[bool] = False
@@ -109,7 +109,7 @@ def fake_exporter(tmp_path: Path, monkeypatch: MonkeyPatch) -> FakeExporter:
     worker.write_text(WORKER)
     monkeypatch.setattr(FakeExporter, "worker_fpath", worker, raising=False)
     monkeypatch.setattr(FakeExporter, "prepared_workdirs", [])
-    config = RunExportConfig(rollouts_jsonl_fpath=tmp_path / "run.jsonl")
+    config = IsolatedExportConfig(rollouts_jsonl_fpath=tmp_path / "run.jsonl")
     return FakeExporter(config, venv_root=tmp_path / "venvs")
 
 
@@ -145,6 +145,35 @@ def test_environment_command_installs_the_requirements_with_the_environments_pyt
     assert f"uv pip install --python {python} " in commands[0]
     assert "'evalrdl>=1.2'" in commands[0] and "'odd name; python_version>'\"'\"'3'\"'\"''" in commands[0]
     assert "uv pip install" not in commands[1]
+    assert commands[0].startswith("uv venv") and " && uv pip install" in commands[0]
+
+
+def test_uv_settings_apply_to_each_uv_command_only(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    commands: list[str] = []
+    monkeypatch.setattr(isolated, "setup_environment", lambda venv, command, **kwargs: commands.append(command) or 0)
+
+    ensure_exporter_environment(tmp_path, "evalrdl", ("evalrdl",), {"UV_INDEX": "https://i.example/a b", "UV_X": "1"})
+
+    venv_part, pip_part = commands[0].split(" && ")
+    for part, tool in ((venv_part, "uv venv"), (pip_part, "uv pip install")):
+        assert part.startswith("env UV_INDEX='https://i.example/a b' UV_X=1 " + tool)
+
+
+def test_the_configured_requirement_is_what_gets_installed(tmp_path: Path) -> None:
+    def exporter(**settings: str) -> FakeExporter:
+        config = IsolatedExportConfig(rollouts_jsonl_fpath=tmp_path / "run.jsonl", **settings)
+        return FakeExporter(config, venv_root=tmp_path)
+
+    assert exporter().required_packages() == ()
+    assert exporter(requirement="sdk>=2").required_packages() == ("sdk>=2",)
+
+
+def test_uv_settings_must_be_uv_variables() -> None:
+    config = IsolatedExportConfig(rollouts_jsonl_fpath=Path("r.jsonl"), uv_settings={"UV_INDEX": "u"})
+    assert config.uv_settings == {"UV_INDEX": "u"}
+    for name in ("PATH", "uv_index", "UV_", "UV_A=B"):
+        with pytest.raises(ValueError, match="starting with `UV_`"):
+            IsolatedExportConfig(rollouts_jsonl_fpath=Path("r.jsonl"), uv_settings={name: "x"})
 
 
 @needs_uv
@@ -275,7 +304,9 @@ class TestRealEnvironment:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(FakeExporter, "worker_fpath", Path("worker.py"))
-        exporter = FakeExporter(RunExportConfig(rollouts_jsonl_fpath=tmp_path / "run.jsonl"), venv_root=Path("venvs"))
+        exporter = FakeExporter(
+            IsolatedExportConfig(rollouts_jsonl_fpath=tmp_path / "run.jsonl"), venv_root=Path("venvs")
+        )
 
         result = exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
 

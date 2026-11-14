@@ -19,7 +19,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import Field, field_validator
 
 from nemo_gym.artifacts.exporters.base import unexportable_reason
-from nemo_gym.artifacts.exporters.isolated import ExportPreparationError, IsolatedExporter
+from nemo_gym.artifacts.exporters.isolated import ExportPreparationError, IsolatedExportConfig, IsolatedExporter
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import RunExportConfig
 
@@ -41,7 +41,7 @@ def _dotted_keys(meta: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     return flat
 
 
-class EvalRDLExportConfig(RunExportConfig):
+class EvalRDLExportConfig(IsolatedExportConfig):
     """Configuration for `gym eval export evalrdl`.
 
     Credentials are not settings here: the EvalRDL SDK reads its token from `$EVALRDL_TOKEN`, `$GITLAB_TOKEN` or
@@ -95,9 +95,6 @@ class EvalRDLExporter(IsolatedExporter):
     worker_fpath: ClassVar[Path] = Path(__file__).with_name("_evalrdl_worker.py")
 
     config: EvalRDLExportConfig
-
-    def required_packages(self) -> tuple[str, ...]:
-        return (self.config.requirement,)
 
     def worker_timeout_s(self, payload: dict[str, Any]) -> float:
         """The wait for the verdict (when waiting) plus an allowance for the upload itself, which `timeout` excludes."""

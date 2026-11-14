@@ -22,7 +22,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.artifacts.exporters.base import Exporter, ExportResult, unexportable_reason
-    from nemo_gym.artifacts.exporters.isolated import ExportPreparationError, IsolatedExporter
+    from nemo_gym.artifacts.exporters.isolated import ExportPreparationError, IsolatedExportConfig, IsolatedExporter
     from nemo_gym.artifacts.rollout_rows import (
         NG_DISPATCH_DRAINED_KEY,
         NG_FAILURE_CLASS_KEY,
@@ -38,6 +38,7 @@ _PUBLIC_API = {
     "ExportPreparationError": "exporters.isolated",
     "ExportResult": "exporters.base",
     "Exporter": "exporters.base",
+    "IsolatedExportConfig": "exporters.isolated",
     "IsolatedExporter": "exporters.isolated",
     "NG_DISPATCH_DRAINED_KEY": "rollout_rows",
     "NG_FAILURE_CLASS_KEY": "rollout_rows",

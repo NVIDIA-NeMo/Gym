@@ -18,11 +18,17 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from nemo_gym.artifacts import ExportPreparationError, IsolatedExporter, RunArtifacts, unexportable_reason
+from nemo_gym.artifacts import (
+    ExportPreparationError,
+    IsolatedExportConfig,
+    IsolatedExporter,
+    RunArtifacts,
+    unexportable_reason,
+)
 from nemo_gym.config import RunExportConfig
 
 
-class AcmeExportConfig(RunExportConfig):
+class AcmeExportConfig(IsolatedExportConfig):
     """Settings of `gym eval export acme`."""
 
     project: str = Field(description="Acme project to upload to.")
@@ -37,9 +43,6 @@ class AcmeExporter(IsolatedExporter):
     worker_fpath: ClassVar[Path] = Path(__file__).with_name("acme_worker.py")
 
     config: AcmeExportConfig
-
-    def required_packages(self) -> tuple[str, ...]:
-        return (self.config.requirement,)
 
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
         try:
