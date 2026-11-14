@@ -485,6 +485,9 @@ def _drop_before_status_line(conn) -> None:
 def _truncate_body(conn) -> None:
     conn.recv(65536)
     conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{"content": [')
+    # An orderly EOF after a short body, so the client reads IncompleteRead rather than a reset.
+    conn.shutdown(socket.SHUT_WR)
+    threading.Event().wait(0.5)
 
 
 def _stall(conn) -> None:
@@ -496,14 +499,15 @@ def _stall(conn) -> None:
 @pytest.mark.parametrize(
     "handler,expected",
     [
-        (_drop_before_status_line, "RemoteDisconnected"),
-        (_truncate_body, "IncompleteRead"),
-        (_stall, "TimeoutError"),
+        (_drop_before_status_line, ("RemoteDisconnected",)),
+        # The kernel may turn the early close into a reset before the client reads the short body.
+        (_truncate_body, ("IncompleteRead", "ConnectionResetError", "RemoteDisconnected")),
+        (_stall, ("TimeoutError",)),
     ],
     ids=["dropped-before-status-line", "truncated-body", "stalled"],
 )
 def test_hub_post_records_transport_failures_as_unavailable(
-    hub_judge, monkeypatch: pytest.MonkeyPatch, handler, expected: str
+    hub_judge, monkeypatch: pytest.MonkeyPatch, handler, expected: tuple[str, ...]
 ) -> None:
     module, _ = hub_judge
     server = _socket_server(handler)
@@ -513,9 +517,10 @@ def test_hub_post_records_transport_failures_as_unavailable(
         monkeypatch.setattr(module.time, "sleep", lambda _s: None)
         monkeypatch.setattr(module, "CALL_TIMEOUT_SECONDS", 0.2)
         module.FAILURES.clear()
-        with pytest.raises(RuntimeError, match=expected):
+        with pytest.raises(RuntimeError, match="|".join(expected)):
             module.real_post("/v1/messages", {"model": "m"})
-        assert len(module.FAILURES) == 1 and expected in next(iter(module.FAILURES.values()))
+        recorded = next(iter(module.FAILURES.values()))
+        assert len(module.FAILURES) == 1 and any(name in recorded for name in expected)
     finally:
         server.close()
 
