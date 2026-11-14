@@ -468,18 +468,34 @@ def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
     return n429, n_other
 
 
-# A 403 whose body is a content-safety refusal of one request (Exa: "Sorry, we've detected unsafe content and
-# can't ..."), not a rejected key. Such a refusal must fail only that tool call.
-_CONTENT_REFUSAL = re.compile(r"unsafe content|content (policy|filter|moderation)", re.IGNORECASE)
+# A 403 either refuses one request on content-safety grounds or rejects the account. Exa says which in the body's
+# `tag` (https://docs.exa.ai/reference/error-codes): PROHIBITED_CONTENT and CONTENT_FILTER_ERROR refuse one request,
+# while TEAM_BLOCKED and FEATURE_DISABLED reject the account. A body without a tag counts as a refusal only with Exa's
+# refusal wording ("Sorry, we've detected unsafe content and can't ..."); Tavily documents no refusal. A refusal must
+# fail only that tool call, and an account rejection must still abort the run.
+_CONTENT_REFUSAL_TAGS = frozenset({"PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"})
+_CONTENT_REFUSAL = re.compile(r"unsafe content", re.IGNORECASE)
 
 
 class SearchProviderRefusal(Exception):
     """The search provider refused one request; the API key is fine."""
 
 
+def _is_content_refusal(body: str) -> bool:
+    """Whether a 403 body refuses one request rather than rejecting the account."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    tag = parsed.get("tag") if isinstance(parsed, dict) else None
+    if tag is not None:
+        return tag in _CONTENT_REFUSAL_TAGS
+    return _CONTENT_REFUSAL.search(body) is not None
+
+
 def _check_auth_failure(provider: str, status: int, body: str) -> None:
     """A 401/403: raise SearchProviderRefusal for a content refusal, otherwise abort as a bad key."""
-    if status == 403 and _CONTENT_REFUSAL.search(body):
+    if status == 403 and _is_content_refusal(body):
         print(f"[browsecomp][tool_fail][{provider}_refused] HTTP {status}: {body[:300]}", flush=True)
         raise SearchProviderRefusal(f"{provider} refused this request: {body[:200]}")
     _abort_on_invalid_api_key(provider, status, body)
