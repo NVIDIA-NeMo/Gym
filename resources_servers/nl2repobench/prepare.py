@@ -29,8 +29,8 @@ DEFAULT_TASKS_DIR = PACKAGE_DIR / "data" / "cache" / "tasks"
 DEFAULT_JSONL = NEMO_GYM_ROOT / "benchmarks" / "nl2repobench" / "data" / "nl2repobench_benchmark.jsonl"
 CACHE_MARKER = ".nemo_gym_nl2repobench.json"
 
-# NL2RepoBench's own task prompt, verbatim: the `-t` argument of its OpenHands launcher (openhands/openhands_app.py in
-# the pinned upstream source, line 199). Until 2026-11-04 this was a shortened paraphrase ("...as per the requirements
+# NL2RepoBench's own task prompt, verbatim (the `-t` argument of its OpenHands launcher (openhands/openhands_app.py in
+# the pinned upstream source, line 199), plus the no-internet line below. Until 2026-11-04 this was a shortened paraphrase ("...as per the requirements
 # described in start.md."), which every OpenCode row used; the OpenHands agent overrode it with this text (its
 # user_prompt default), so the two harnesses were asked different questions. Runs before and after differ.
 FIXED_INSTRUCTION = (
@@ -38,6 +38,12 @@ FIXED_INSTRUCTION = (
     "the document, ensuring that the final product can be directly run in the current directory. The running "
     "requirements should comply with the <API Usage Guide> section of the document. Please complete this task step "
     "by step."
+    # Plus a no-internet line, adopted 2026-11-04 because our standard mode (no_internet_preinstalled) has no network and
+    # the task image's dependencies installed; it is NOT true for the internet-on modes (official, block_target). The
+    # wording is from the nl2repo-tasks grader code (its patched AweAgent task.py). NOT in the NL2Repo SFT traces: all
+    # 4,055 of nl2repo-traces-20261030-1 use the official prompt alone, so this prompt differs from theirs by this line.
+    "\n\nThis training sandbox has no internet access. The required third-party dependencies are already installed in "
+    "the task image."
 )
 
 
