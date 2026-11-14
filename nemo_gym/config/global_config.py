@@ -97,6 +97,8 @@ ray_version = _installed_version("ray")
 _GLOBAL_CONFIG_DICT = None
 _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
+# A file holding the same YAML. One env string is capped at 128 KiB on Linux, so large configs go by file.
+NEMO_GYM_CONFIG_DICT_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT_PATH"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
@@ -1986,7 +1988,7 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
     """The global config dict when this process already has one; never triggers a CLI parse.
 
     Returns the cached dict, or the one the parent injected via
-    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    NEMO_GYM_CONFIG_DICT or NEMO_GYM_CONFIG_DICT_PATH (caching it), or None in a bare process. Library code
     that only wants to *consult* the config should use this instead of
     `get_global_config_dict`, which falls through to a full CLI/hydra parse.
     """
@@ -1995,6 +1997,9 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return _GLOBAL_CONFIG_DICT
 
     nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    config_dict_path = getenv(NEMO_GYM_CONFIG_DICT_PATH_ENV_VAR_NAME)
+    if not nemo_gym_config_dict_str_from_env and config_dict_path:
+        nemo_gym_config_dict_str_from_env = Path(config_dict_path).read_text()
     if nemo_gym_config_dict_str_from_env:
         global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 
@@ -2053,7 +2058,7 @@ def get_global_config_dict(
 
     Then, the global config dict will be cached and reused.
 
-    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
+    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, or NEMO_GYM_CONFIG_DICT_PATH_ENV_VAR_NAME naming a file that holds it. The config dict will be read directly off this variable, cached, and returned with no additional validation.
     """
     existing_global_config_dict = maybe_get_global_config_dict()
     if existing_global_config_dict is not None:
