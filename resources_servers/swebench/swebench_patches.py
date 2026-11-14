@@ -346,9 +346,8 @@ _SECTION_RULE = re.compile(r"^[_=]{3,}")
 _OUTSIDE_THE_REPO = re.compile(r"/(?:site|dist)-packages/|/lib/python\d|^<frozen ")
 
 
-def _warning_origins(test_output: str) -> list[tuple[str, Optional[str]]]:
+def _warning_origins(lines: list[str]) -> list[tuple[str, Optional[str]]]:
     """Each warning raised as an error, with the file of the frame that raised it (None if the report shows none)."""
-    lines = test_output.splitlines()
     origins = []
     for index, line in enumerate(lines):
         warning = _WARNING_RAISED_AS_ERROR.match(line)
@@ -366,31 +365,76 @@ def _warning_origins(test_output: str) -> list[tuple[str, Optional[str]]]:
     return origins
 
 
+# pytest prints one section per failing test or failed collection, headed `___ ERROR at setup of Class.test ___` or
+# `___ ERROR collecting path ___`, and ends the last one at the next `===` banner.
+_SECTION_HEADER = re.compile(r"^_{2,} (.+?) _{2,}\s*$")
+_ERROR_SECTION = re.compile(r"^ERROR (?:at (?:setup|teardown) of|collecting) (.+)$")
+
+
+def _outside_warning_sections(test_output: str) -> tuple[Dict[str, list[bool]], list[bool], Optional[str]]:
+    """For each test, and for the collections, whether each of its error sections is a warning from outside the repo.
+
+    Returns the sections of tests by name (`Class.test`), those of collections, and the first warning found.
+    """
+    tests: Dict[str, list[bool]] = {}
+    collections: list[bool] = []
+    first: Optional[str] = None
+    name, body = None, []
+
+    def close() -> None:
+        nonlocal first
+        error = _ERROR_SECTION.match(name) if name else None
+        if error is None:
+            return
+        origins = _warning_origins(body)
+        outside = bool(origins) and all(path and _OUTSIDE_THE_REPO.search(path) for _, path in origins)
+        if outside and first is None:
+            first = f"{origins[0][1]}: {origins[0][0][:200]}"
+        if name.startswith("ERROR collecting"):
+            collections.append(outside)
+        else:
+            tests.setdefault(error.group(1), []).append(outside)
+
+    for line in test_output.splitlines():
+        header = _SECTION_HEADER.match(line)
+        if header or line.startswith("=="):
+            close()
+            name, body = (header.group(1) if header else None), []
+        elif name is not None:
+            body.append(line)
+    close()
+    return tests, collections, first
+
+
 def warning_blocking_required_tests(
     test_spec: TestSpec, test_output: str, status_map: Dict[str, str]
 ) -> Optional[str]:
     """Why the required tests could not run, or None when they ran or failed for another reason.
 
     The model did not fail a test that errored or never started because a warning from code outside the repo became
-    an error (an installed package, the standard library or pytest itself), so the run has no verdict. A warning
-    raised from a file of the repo, a test that reported FAILED, or a report that does not show where a warning was
-    raised keeps the normal grading.
+    an error (an installed package, the standard library or pytest itself), so the run has no verdict. Each test
+    that did not run must be explained that way by its own error section, or by a failed collection when it is
+    missing. A test that reported FAILED, a warning raised from a file of the repo, an error of another kind, or a
+    report that does not show where a warning was raised keeps the normal grading.
     """
     if MAP_REPO_TO_EXT.get(test_spec.repo) != "py":
         return None
     required = [*test_spec.FAIL_TO_PASS, *test_spec.PASS_TO_PASS]
-    statuses = [status_map.get(test) for test in required]
-    if TestStatus.FAILED.value in statuses:
+    statuses = {test: status_map.get(test) for test in required}
+    if TestStatus.FAILED.value in statuses.values():
         return None
-    if all(status not in (None, TestStatus.ERROR.value) for status in statuses):
+    not_run = {test: status for test, status in statuses.items() if status in (None, TestStatus.ERROR.value)}
+    if not not_run:
         return None
-    origins = _warning_origins(test_output)
-    if not origins or not all(path and _OUTSIDE_THE_REPO.search(path) for _, path in origins):
-        return None
-    message, path = origins[0]
+    tests, collections, first = _outside_warning_sections(test_output)
+    for test, status in not_run.items():
+        # A failed collection stops pytest, so a test missing from the report is explained by every collection error.
+        sections = collections if status is None else tests.get(test.split("::", 1)[-1].replace("::", "."), [])
+        if not sections or not all(sections):
+            return None
     return (
         f"The {test_spec.repo} test run did not run all required tests: a warning was raised as an error "
-        f"by code outside the repo ({path}: {message[:200]})"
+        f"by code outside the repo ({first})"
     )
 
 

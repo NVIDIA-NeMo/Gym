@@ -118,6 +118,21 @@ E   DeprecationWarning: use set instead
 PASSED {ASTROPY_F2P}
 ERROR {ASTROPY_P2P}
 """
+# Two required tests error at setup. One errors on pytest's nose warning, the other on an ImportError of its own.
+MIXED_OUTPUT = f"""
+==================================== ERRORS ====================================
+______ ERROR at setup of TestHeaderFunctions.test_card_constructor_default_args ______
+E               pytest.PytestRemovedIn8Warning: Support for nose tests is deprecated and will be removed in a future release.
+
+/opt/miniconda3/envs/testbed/lib/python3.9/site-packages/_pytest/python.py:898: PytestRemovedIn8Warning
+____________________ ERROR at setup of test_shallow_copy ____________________
+astropy/io/fits/header.py:12: in <module>
+    from .card import x
+E   ImportError: cannot import name 'x'
+=========================== short test summary info ============================
+ERROR {ASTROPY_F2P}
+ERROR {ASTROPY_P2P}
+"""
 TOX_OUTPUT = f"""
 =========================== short test summary info ============================
 PASSED {SPHINX_F2P}
@@ -209,6 +224,18 @@ class TestTestsBlockedByWarning:
     ) -> None:
         assert self.blocked(tmp_path, NOSE_WARNING_OUTPUT + REPO_WARNING_OUTPUT) is None
 
+    def test_an_independent_error_of_a_required_test_keeps_the_normal_grading(self, tmp_path: Path) -> None:
+        # Both required tests error, and only one of them on a warning from outside the repo.
+        assert self.blocked(tmp_path, MIXED_OUTPUT) is None
+
+    def test_a_missing_test_is_explained_only_by_collection_errors_on_warnings(self, tmp_path: Path) -> None:
+        other_error = COLLECTION_WARNING_OUTPUT + (
+            "_____ ERROR collecting astropy/io/fits/tests/test_other.py _____\n"
+            "E   ImportError: cannot import name 'y'\n"
+        )
+
+        assert self.blocked(tmp_path, other_error) is None
+
     def test_a_warning_whose_origin_the_report_does_not_show_keeps_the_normal_grading(self, tmp_path: Path) -> None:
         output = f"E   DeprecationWarning: no frame shown\nERROR {ASTROPY_P2P}\n"
 
@@ -277,6 +304,13 @@ class TestRunBlockedByWarning:
 
         assert result["completed"] is False and result["resolved"] is False
         assert "a warning was raised as an error" in result["error"]
+
+    async def test_an_independent_error_beside_a_warning_is_the_models_graded_zero(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        result = await grade(monkeypatch, tmp_path, MIXED_OUTPUT)
+
+        assert result["completed"] is True and result["resolved"] is False and result["error"] is None
 
     async def test_a_passing_run_is_resolved(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         result = await grade(monkeypatch, tmp_path, f"PASSED {ASTROPY_F2P}\nPASSED {ASTROPY_P2P}\n")
