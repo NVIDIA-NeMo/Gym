@@ -146,14 +146,13 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
     """
     if not capture_dirs:
         return
+    rollout_ids = {rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))}
     for directory in capture_dirs:
         store = CaptureStore(directory)
-        for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.path_for(rollout_id).unlink(missing_ok=True)
-                store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                store.clear_all_pending(rollout_id)
+        for rollout_id in rollout_ids:
+            store.path_for(rollout_id).unlink(missing_ok=True)
+            store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+        store.clear_pending_for(rollout_ids)
 
 
 def merge_model_call_capture_into_record(
