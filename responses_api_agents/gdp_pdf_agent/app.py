@@ -44,22 +44,24 @@ stays Simple Agent's. The delivery record goes into the response's ``document_de
 Server verifies the answer.
 """
 
+import asyncio
 import base64
 import errno
 import io
 import json
 import math
+import os
 import re
 from dataclasses import dataclass, fields
 from http import HTTPStatus
 from pathlib import Path
 from time import time
-from typing import Any, Awaitable, Callable, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
 from fastapi import Request
 from PIL import Image, ImageDraw
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import (
@@ -95,6 +97,12 @@ BASE_DPI = 150
 MIN_DPI = 72
 _COMPOSITE_COLUMNS = 2
 _MAX_PAGES_PER_IMAGE = 4
+# Document work (manifest reads, page decode, resize and encode) runs in at most this many worker threads at once. It
+# is CPU-bound, and the bound leaves four threads of asyncio's default executor (min(32, cores + 4) threads) to its
+# other users, such as aiohttp's DNS lookups.
+_DOCUMENT_THREADS = max(1, min(32, (os.cpu_count() or 1) + 4) - 4)
+
+_T = TypeVar("_T")
 
 
 class GdpPdfAgentConfig(SimpleAgentConfig):
@@ -615,10 +623,17 @@ class GdpPdfSessionState(SimpleAgentSessionState):
 class GdpPdfAgent(SimpleAgent):
     config: GdpPdfAgentConfig
     agent_context_model = GdpPdfAgentContext
+    _document_threads: asyncio.Semaphore = PrivateAttr(default_factory=lambda: asyncio.Semaphore(_DOCUMENT_THREADS))
 
     def _documents_base_dir(self) -> Path:
         base = Path(self.config.documents_base_dir)
         return base if base.is_absolute() else PARENT_DIR / base
+
+    async def _in_thread(self, function: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+        """Run blocking document work in a worker thread, so that rendering a long document does not stall the event
+        loop that seeds, activates and closes every other session on this worker."""
+        async with self._document_threads:
+            return await asyncio.to_thread(function, *args, **kwargs)
 
     def _new_session_state(self, body: AgentSeedSessionRequest) -> GdpPdfSessionState:
         # A restore rebuilds sessions through here too, so a restored session keeps its document.
@@ -719,17 +734,19 @@ class GdpPdfAgent(SimpleAgent):
         Every attempt passes the same checkpoint activation to ``create_episode``. That is safe because this agent
         runs no tools and so never commits a boundary past step 0: a restore restarts the backoff at full DPI.
         """
-        manifest = _load_manifest(manifest_path)
+        manifest = await self._in_thread(_load_manifest, manifest_path)
         prompt_blocks = _prompt_blocks({"responses_create_params": params.model_dump(exclude_unset=True)})
         text_blocks: list[dict[str, Any]] = []
         pages_truncated = 0
         if self.config.include_text:
-            text_blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=self.config.max_pages)
+            text_blocks, pages_truncated = await self._in_thread(
+                _manifest_text_blocks, manifest, max_pages=self.config.max_pages
+            )
         delivery = DocumentDelivery(self.config.dpi, self.config.max_images)
         terminal_limit: Optional[str] = None
         while True:
-            request, image_pages_truncated = self._document_request(
-                params, manifest, manifest_path.parent, delivery, prompt_blocks, text_blocks
+            request, image_pages_truncated = await self._in_thread(
+                self._document_request, params, manifest, manifest_path.parent, delivery, prompt_blocks, text_blocks
             )
             pages_truncated = max(pages_truncated, image_pages_truncated)
             model_response, trajectory, model_cookies, resources_cookies = await create_episode(request)
@@ -805,7 +822,7 @@ class GdpPdfAgent(SimpleAgent):
                     f"Document manifest not found: {manifest_path}\n"
                     f"Source documents are not committed. Fetch and render them with:\n  {hint}"
                 )
-            manifest = _load_manifest(manifest_path)
+            manifest = await self._in_thread(_load_manifest, manifest_path)
             manifest_source_dpi = int(manifest.get("source_dpi", self.config.dpi))
             if manifest_source_dpi != self.config.dpi:
                 raise ValueError(
@@ -819,11 +836,19 @@ class GdpPdfAgent(SimpleAgent):
             prompt_blocks = _prompt_blocks(row)
             text_blocks: list[dict[str, Any]] = []
             if self.config.include_text:
-                text_blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=self.config.max_pages)
+                text_blocks, pages_truncated = await self._in_thread(
+                    _manifest_text_blocks, manifest, max_pages=self.config.max_pages
+                )
 
             while True:
-                params, image_pages_truncated = self._document_request(
-                    body.responses_create_params, manifest, manifest_dir, delivery, prompt_blocks, text_blocks
+                params, image_pages_truncated = await self._in_thread(
+                    self._document_request,
+                    body.responses_create_params,
+                    manifest,
+                    manifest_dir,
+                    delivery,
+                    prompt_blocks,
+                    text_blocks,
                 )
                 pages_truncated = max(pages_truncated, image_pages_truncated)
                 try:

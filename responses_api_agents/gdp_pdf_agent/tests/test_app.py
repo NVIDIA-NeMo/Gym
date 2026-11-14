@@ -15,15 +15,17 @@
 """Tests for the gdp_pdf agent's manifest-based document embedding, reactive DPI backoff, and
 page compositing."""
 
+import asyncio
 import base64
 import errno
 import io
 import json
 import random
+import threading
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Awaitable, Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -510,6 +512,67 @@ def test_an_agent_session_sends_the_model_the_same_request_as_run(tmp_path: Path
     expected_truncated = 1 if overrides.get("max_pages") == 1 else 0
     assert session_delivery["pages_truncated"] == expected_truncated
     assert ("## Page 2" in run_requests[0]["input"][0]["content"][-1]["text"]) == (not expected_truncated)
+
+
+async def _activate_with_document(agent: GdpPdfAgent, manifest: str) -> Any:
+    params = _run_request(manifest).responses_create_params
+    episode = AsyncMock(return_value=(_response(), None, {}, {}))
+    return await agent._answer_with_document(params, agent._documents_base_dir() / manifest, episode)
+
+
+async def _run_document(agent: GdpPdfAgent, manifest: str) -> Any:
+    return await _run_with_episodes(agent, manifest, AsyncMock(return_value=(_response(), None, {}, {})))
+
+
+class TestDocumentWorkLeavesTheEventLoopFree:
+    """Reading and rendering a document runs in a worker thread: a long document must not stall the other sessions
+    that the same event loop seeds, activates and closes."""
+
+    @pytest.mark.parametrize("entrypoint", [_run_document, _activate_with_document], ids=["run", "session"])
+    async def test_another_coroutine_runs_while_a_document_renders(
+        self, tmp_path: Path, entrypoint: Callable[[GdpPdfAgent, str], Awaitable[Any]]
+    ) -> None:
+        agent, manifest, _ = _image_agent(tmp_path)
+        original = GdpPdfAgent._document_request
+        started, released = threading.Event(), threading.Event()
+        released_while_working: list[bool] = []
+
+        def slow(*args: Any, **kwargs: Any) -> Any:
+            started.set()
+            # Only a coroutine on the event loop sets `released`, which it can do only while this runs off the loop;
+            # on the loop, the wait would time out.
+            released_while_working.append(released.wait(timeout=5))
+            return original(*args, **kwargs)
+
+        async def other_session() -> None:
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            released.set()
+
+        with patch.object(GdpPdfAgent, "_document_request", new=slow):
+            result, _ = await asyncio.gather(entrypoint(agent, manifest), other_session())
+
+        assert released_while_working and all(released_while_working)
+        assert result is not None
+
+    async def test_document_work_runs_in_at_most_the_bounded_number_of_threads(self, tmp_path: Path) -> None:
+        agent, _, _ = _image_agent(tmp_path)
+        agent._document_threads = asyncio.Semaphore(2)
+        lock = threading.Lock()
+        running, most_running = 0, 0
+
+        def work() -> None:
+            nonlocal running, most_running
+            with lock:
+                running += 1
+                most_running = max(most_running, running)
+            threading.Event().wait(0.05)
+            with lock:
+                running -= 1
+
+        await asyncio.gather(*(agent._in_thread(work) for _ in range(6)))
+
+        assert most_running == 2
 
 
 async def test_run_refuses_a_manifest_whose_page_image_leaves_its_directory(tmp_path: Path) -> None:
