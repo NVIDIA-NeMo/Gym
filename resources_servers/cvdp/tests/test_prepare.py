@@ -127,3 +127,58 @@ def test_prepare_skips_dataset_without_build_services(tmp_path) -> None:
 
     assert images == {}
     run.assert_not_called()
+
+
+def test_cocotb_compatibility_pin_is_opt_in_and_changes_build_identity(tmp_path):
+    from resources_servers.cvdp.testbench_runner import _normalize_build_file, _service_build_key
+
+    source = "FROM __OSS_SIM_IMAGE__\nRUN pip3 install cocotb-bus pytest\n"
+    original = _config()
+    fixed = original.model_copy(update={"cocotb_bus_version": "1.9.2"})
+    assert "cocotb==" not in _normalize_build_file("Dockerfile", source, original)
+    assert "RUN pip3 install cocotb==1.9.2 cocotb-bus pytest" in _normalize_build_file("Dockerfile", source, fixed)
+    compose = {"services": {"sim": {"build": {"context": "."}}}}
+    assert _service_build_key(compose, "sim", {"Dockerfile": source}, original) != _service_build_key(
+        compose, "sim", {"Dockerfile": source}, fixed
+    )
+
+
+def test_cli_pin_matches_runtime_build_identity(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+
+    from resources_servers.cvdp.prepare import main
+    from resources_servers.cvdp.testbench_runner import _resolve_service_image
+
+    compose = {"services": {"sim": {"build": "."}}}
+    harness = {
+        "docker-compose.yml": json.dumps(compose),
+        "Dockerfile": "FROM __OSS_SIM_IMAGE__\nRUN pip3 install cocotb-bus pytest\n",
+    }
+    dataset = tmp_path / "data.jsonl"
+    dataset.write_text(json.dumps({"verifier_metadata": {"harness_files": harness}}) + "\n")
+    manifest = tmp_path / "images.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare",
+            str(dataset),
+            "--image-prefix",
+            "registry.example/sim",
+            "--manifest",
+            str(manifest),
+            "--cocotb-bus-version",
+            "1.9.2",
+        ],
+    )
+
+    def build(command, **kwargs):
+        assert "cocotb==1.9.2" in Path(command[command.index("-f") + 1]).read_text()
+
+    with patch("resources_servers.cvdp.prepare.subprocess.run", side_effect=build):
+        main()
+    config = _config().model_copy(update={"cocotb_bus_version": "1.9.2"})
+    images = json.loads(manifest.read_text())["images"]
+    image, key = _resolve_service_image(compose, "sim", harness, config, images)
+    assert images[key] == image and image.startswith("registry.example/sim:")

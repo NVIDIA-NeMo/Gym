@@ -1,0 +1,32 @@
+config_paths:
+  - resources_servers/cvdp/configs/cvdp.yaml
+  - responses_api_agents/cvdp_agent/configs/cvdp_agent.yaml
+
+cvdp_v110_resources_server:
+  _inherit_from: cvdp
+  resources_servers:
+    cvdp:
+      cocotb_bus_version: "1.9.2"
+      container_timeout: 600
+
+cvdp_v110_agent:
+  _inherit_from: cvdp_agent
+  responses_api_agents:
+    cvdp_agent:
+      resources_server:
+        name: cvdp_v110_resources_server
+      datasets:
+        - name: cvdp_v110
+          type: benchmark
+          jsonl_fpath: benchmarks/cvdp_v110/data/cvdp_v110.jsonl
+          prepare_script: benchmarks/cvdp_v110/prepare.py
+          prepare_dependencies: [huggingface_hub]
+          prompt_config: null
+          num_repeats: 32
+
+cvdp_v110_environment_server:
+  _inherit_from: cvdp_agent_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: cvdp_v110_agent

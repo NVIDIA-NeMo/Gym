@@ -127,6 +127,7 @@ def main() -> None:
     parser.add_argument("--oss-sim-image", default="ghcr.io/hdl/sim/osvb")
     parser.add_argument("--oss-pnr-image", default="ghcr.io/hdl/impl/pnr")
     parser.add_argument("--eda-sim-image", default="")
+    parser.add_argument("--cocotb-bus-version", default=None)
     parser.add_argument("--push", action="store_true", help="Push built images to the configured repository")
     parser.add_argument("--force", action="store_true", help="Rebuild keys already present in the manifest")
     args = parser.parse_args()
@@ -139,6 +140,7 @@ def main() -> None:
         oss_sim_image=args.oss_sim_image,
         oss_pnr_image=args.oss_pnr_image,
         eda_sim_image=args.eda_sim_image,
+        cocotb_bus_version=args.cocotb_bus_version,
     )
     images = prepare_images(
         args.inputs,

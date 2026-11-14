@@ -133,6 +133,27 @@ gym eval run --benchmark agent_arena \
 
 `++judge_base_url` takes one URL or a list of replicas. `++prepare_script_args.source_jsonl=<path>` names the staged file instead of the environment variable, and `++prepare_script_args.limit=<n>` prepares only the first `n` turns for a smoke run. A subset is not the benchmark's score: the protocol is all 433 turns at four repeats.
 
+## CVDP v1.1 RTL generation
+
+The experimental [CVDP v1.1 recipe](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/cvdp_v110/README.md)
+prepares the pinned 302-task non-agentic, non-commercial split. Configure a supported
+sandbox provider, compatible simulator base images and a prepared-image manifest
+as described in the recipe before evaluating. Image preparation and runtime must
+use the same base images and cocotb compatibility setting.
+
+```bash
+gym eval prepare --benchmark cvdp_v110
+gym eval run --benchmark cvdp_v110 \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --num-repeats 32 --output results/cvdp_v110/rollouts.jsonl
+```
+
+The default is 32 samples per task (9,664 total). Use `--num-repeats 1` only for a
+single-sample smoke run. Smoke results do not establish full benchmark qualification;
+the public dataset has no populated official reference implementations. The general
+[CVDP workflow](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/cvdp/README.md)
+continues to support older datasets.
+
 ## Interpreting Results
 
 A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config. It is also only as reliable as the verifier behind it — before trusting a score, confirm the reward function actually measures the behavior you care about.

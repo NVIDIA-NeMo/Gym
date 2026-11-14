@@ -1,0 +1,27 @@
+name: cvdp_v110
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: CVDP v1.1.0 non-agentic RTL generation with sandbox verification
+modality: text
+licensing: LicenseRef-CVDP-Upstream
+authors: [igitman]
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: cvdp
+agent_server: cvdp_agent
+datasets:
+- name: cvdp_v110
+  type: benchmark
+  jsonl_fpath: benchmarks/cvdp_v110/data/cvdp_v110.jsonl
+  prepare_script: benchmarks/cvdp_v110/prepare.py
+  prompt_config: null
+  num_repeats: 32
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
