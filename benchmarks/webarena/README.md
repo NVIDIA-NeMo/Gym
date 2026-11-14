@@ -27,8 +27,26 @@ For an offline copy, set `WEBARENA_SOURCE_JSONL`; the same checks still apply.
 
 ## External environment
 
-Deploy and validate the WebArena services before starting Gym, then export the
-task-visible endpoints:
+Deploy and validate the WebArena services before starting Gym. The scripts in
+[jayl940712/webarena-setup](https://github.com/jayl940712/webarena-setup)
+(`webarena/01_docker_load_images.sh` to `07_serve_reset.sh`) deploy all sites on
+one Linux host with Docker:
+
+- Disk: about 1 TB for the Docker root and about 450 GB for the image and map
+  archives. The six images alone use about 430 GB.
+- Time: loading the images takes several hours. Populating the map database
+  (`osmosis` into the OpenStreetMap Postgres, see
+  [issue 5](https://github.com/gasse/webarena-setup/issues/5)) takes 24 hours
+  or more and cannot resume, so do not query the reset server until it ends.
+- Map: keep the public tile server, but self-host geocoding and routing; the
+  public services return different results for some tasks
+  ([issue 4](https://github.com/gasse/webarena-setup/issues/4)).
+- Reset: `07_serve_reset.sh` serves a reset endpoint on port 7777 over HTTPS,
+  protected by a token and a self-signed certificate. Keep both off the
+  repository and pass them to the host that resets the sites.
+
+The cluster that runs Gym must reach every port below from its compute nodes.
+Then export the task-visible endpoints:
 
 ```bash
 export WA_SHOPPING="http://host:7770"
