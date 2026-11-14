@@ -116,14 +116,18 @@ requires matching settings and rejects ambiguous in-flight receipts. A rejected
 resume preserves the saved output and reports. Use a new run directory for changed
 settings. Historical grades and recovery waves
 remain historical; this adaptive protocol does not reproduce them.
-The runtime identity records the running Gym revision and hashes its agent/core
-source and live judge schema separately from the historical source pin. It ignores
-the checkout-wide `-dirty` suffix and hidden checkout/cache trees prepared by other
-components: unrelated generated outputs must not invalidate resume. Visible
-Python-source, judge-schema, revision, dependency and configuration changes still
-reject resume. Older journals without the live schema hash, with a `-dirty`
-revision, or with generated hidden-source entries are not compatible with this
-identity; start a new run directory rather than migrating them. Older journals
+The runtime identity records the running Gym revision and hashes the Python source
+of the run's components and the live judge schema, separately from the historical
+source pin. The components are Gym core (`nemo_gym`), this benchmark, and every
+server that the run's configuration names: the agent, the policy model, and the
+resources and Environment Servers. Other components' files, including checkouts
+that their servers generate during concurrent runs, hidden checkout/cache trees and
+the checkout-wide `-dirty` suffix do not invalidate resume. Python-source changes in
+the run's components, and judge-schema, revision, dependency and configuration
+changes, still reject resume. Older journals without the live schema hash, with a
+`-dirty` revision, with generated hidden-source entries, or without the recorded
+component list are not compatible with this identity; start a new run directory
+rather than migrating them. Older journals
 from before the recovery fix are also rejected.
 Each delivery attempt has its own Gym capture identity. The main rollout retains
 the selected attempt's actual request settings and trajectory; all earlier

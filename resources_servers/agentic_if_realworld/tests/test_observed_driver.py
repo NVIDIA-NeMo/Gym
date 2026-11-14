@@ -47,7 +47,7 @@ def test_http_resume_and_connection_recovery(
     # Other CI workers change source files while installing and testing components.
     # Keep this synthetic run stable; exercise a deliberate runtime change below.
     runtime = core.runtime_identity()
-    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda components: copy.deepcopy(runtime))
     create(tmp_path / "data")
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"

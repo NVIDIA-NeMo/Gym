@@ -21,6 +21,7 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     indexed,
     judge,
     read,
+    runtime_components,
     runtime_identity,
     source_preflight,
     summarize,
@@ -83,7 +84,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         "policy_assets": dataset.pin["policy_assets"],
         "profile": "adaptive_first_complete_max_effort_v1" if reasoning_effort else "adaptive_first_complete_v1",
         "response_source": resource.get("response_source", "raw_receipt"),
-        "runtime": runtime_identity(),
+        "runtime": runtime_identity(runtime_components(global_config_dict)),
         "observability": {
             "enabled": global_config_dict.get("observability_enabled", False),
             "capture_dir": global_config_dict.get("model_call_capture_dir"),
