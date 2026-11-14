@@ -414,7 +414,10 @@ is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollo
 names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
 so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
 1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
-selected task had a solution to run. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks).
+selected task had a solution to run. When no task is left to run (every task folder was left out, for example
+because the sandbox block lacks a setting the tasks need), the command prints `No runnable task left` with the
+reason for each task and exits 2. When every selected task fails before it is scored (for example at seed), the
+run is incomplete and exits 75 or 76, as described for `gym eval submit` below. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
