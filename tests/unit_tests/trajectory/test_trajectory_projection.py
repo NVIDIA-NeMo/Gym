@@ -478,3 +478,149 @@ def test_legacy_boundary_gap_requires_preserved_valid_interval(project, invalid)
     )
     assert raw["gaps"][0] == gap
     assert project(projected) == projected
+
+
+def messages_evidence(natives):
+    """Qualified attempts whose turns hold the native IDs from Anthropic Messages captures.
+
+    Each call's captured request carries the earlier calls' tool_use and tool_result blocks.
+    """
+    pairs = [(f"call:record-{index}", native) for index, native in enumerate(natives)]
+    raw = evidence(pairs)
+    raw["model_calls"] = []
+    raw["turns"] = []
+    messages = [{"role": "user", "content": "run"}]
+    for index, (tool, (_, native)) in enumerate(zip(raw["tool_calls"], pairs)):
+        tool["model_call_id"] = f"model-{index}"
+        tool_use = {"type": "tool_use", "id": native, "name": "Bash", "input": {"command": native}}
+        raw["model_calls"].append(
+            {
+                "model_call_id": f"model-{index}",
+                "request": {"messages": deepcopy(messages)},
+                "response": {"type": "message", "role": "assistant", "content": [deepcopy(tool_use)]},
+            }
+        )
+        raw["turns"].append(
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "capture",
+                "turn_no": index + 1,
+                "timestamp": index,
+                "step_count": 0,
+                "model_calls": [{"model_call_id": f"model-{index}"}],
+                "question": deepcopy(messages),
+                "answer": [deepcopy(tool_use)],
+            }
+        )
+        messages += [
+            {"role": "assistant", "content": [deepcopy(tool_use)]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": native, "content": native}]},
+        ]
+    return raw
+
+
+def test_projection_restores_ids_referenced_by_messages_turns():
+    raw = messages_evidence(["toolu_A", "toolu_B"])
+    before = deepcopy(raw)
+    projected = project_trajectory_v1(raw)
+    assert raw == before
+    assert [t["tool_call_id"] for t in projected["tool_calls"]] == ["toolu_A", "toolu_B"]
+    assert [item["call_id"] for item in projected["invocations"][0]["conversation"]] == ["toolu_A", "toolu_B"] * 2
+    assert projected["invocations"][1]["spawned_by_tool_call_id"] == "toolu_A"
+    assert [turn["answer"][0]["id"] for turn in projected["turns"]] == ["toolu_A", "toolu_B"]
+    assert projected["turns"][1]["question"][1]["content"][0]["id"] == "toolu_A"
+    assert projected["turns"][1]["question"][2]["content"][0]["tool_use_id"] == "toolu_A"
+    assert projected["model_calls"] == raw["model_calls"]
+    assert not any(g["code"] == "tool_native_identity_unrepresentable" for g in projected.get("gaps", []))
+    TrajectoryRecord.model_validate(projected)
+    assert project_trajectory_v1(projected) == projected
+
+
+def test_projection_keeps_reused_messages_ids_as_distinct_attempts():
+    projected = project_trajectory_v1(messages_evidence(["toolu_A", "toolu_A"]))
+    assert [t["tool_call_id"] for t in projected["tool_calls"]] == ["call:record-0", "call:record-1"]
+    assert [turn["answer"][0]["id"] for turn in projected["turns"]] == ["toolu_A", "toolu_A"]
+    assert any(g["code"] == "tool_native_identity_unrepresentable" for g in projected["gaps"])
+
+
+@pytest.mark.parametrize(
+    ("natives", "expected"),
+    [(["toolu_A", "toolu_B"], ["toolu_A", "toolu_B"]), (["toolu_A", "toolu_A"], ["call:record-0", "call:record-1"])],
+)
+async def test_default_enrichment_of_messages_captures_is_replay_stable(natives, expected):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    raw = messages_evidence(natives)
+    raw["invocations"][0]["model_calls"] = [{"model_call_id": call["model_call_id"]} for call in raw["model_calls"]]
+    result = {
+        "ng_agent_observations": {
+            "schema_version": "2.0",
+            "source": "test",
+            "records": [*raw["invocations"], *raw["tool_calls"]],
+        },
+        "ng_model_call_capture": {
+            "calls": [{**call, "started_at": index} for index, call in enumerate(raw["model_calls"])]
+        },
+    }
+    for _ in range(3):
+        await enrich_run_result(
+            {"task_id": "task", "_ng_rollout_id": "capture"}, result, capture_dirs=[], observability_enabled=True
+        )
+        record = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        assert record.schema_version == "1.0"
+        assert len(record.turns) == 2
+        assert [tool.tool_call_id for tool in record.tool_calls] == expected
+        assert [
+            r["tool_call_id"] for r in result["ng_agent_observations"]["records"] if r["kind"] == "tool_call"
+        ] == expected
+        assert any(g.code == "tool_native_identity_unrepresentable" for g in record.gaps) == (
+            expected[0] != natives[0]
+        )
+        assert not any(
+            g.code in {"trajectory_projection_failed", "producer_trajectory_invalid", "agent_observations_invalid"}
+            for g in record.gaps
+        )
+
+
+def test_unproven_messages_result_block_blocks_the_rename():
+    raw = messages_evidence(["toolu_A"])
+    raw["turns"].append(
+        {
+            "invocation_id": "root",
+            "task_id": "task",
+            "rollout_id": "capture",
+            "turn_no": 2,
+            "timestamp": 1,
+            "step_count": 0,
+            "question": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_A"}]}],
+            "answer": None,
+        }
+    )
+    projected = project_trajectory_v1(raw)
+    assert [t["tool_call_id"] for t in projected["tool_calls"]] == ["call:record-0"]
+    assert projected["turns"][1]["question"][0]["content"][0]["tool_use_id"] == "toolu_A"
+    assert any(g["code"] == "tool_native_identity_unrepresentable" for g in projected["gaps"])
+
+
+def test_nested_messages_references_are_rewritten_without_touching_text():
+    raw = messages_evidence(["toolu_A"])
+    tool_use = {"type": "tool_use", "id": "call:record-0", "name": "Bash", "input": {"command": "call:record-0"}}
+    tool_result = {"type": "tool_result", "tool_use_id": "call:record-0", "content": "call:record-0"}
+    raw["turns"][0]["question"] = [
+        {"role": "assistant", "content": [{"type": "text", "text": "call:record-0"}, tool_use]},
+        {"role": "user", "content": [tool_result]},
+    ]
+    raw["turns"][0]["answer"] = [
+        {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}},
+        deepcopy(tool_use),
+    ]
+    projected = project_trajectory_v1(raw)
+    question, answer = projected["turns"][0]["question"], projected["turns"][0]["answer"]
+    assert [t["tool_call_id"] for t in projected["tool_calls"]] == ["toolu_A"]
+    assert question[0]["content"] == [
+        {"type": "text", "text": "call:record-0"},
+        {**tool_use, "id": "toolu_A"},
+    ]
+    assert question[1]["content"] == [{**tool_result, "tool_use_id": "toolu_A"}]
+    assert answer == [raw["turns"][0]["answer"][0], {**tool_use, "id": "toolu_A"}]
