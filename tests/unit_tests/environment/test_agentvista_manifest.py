@@ -27,7 +27,7 @@ async def test_manifest_uses_resource_verifier_fixtures():
 
 @pytest.fixture
 def resource_server(tmp_path):
-    from nemo_gym.client import ServerClient
+    from nemo_gym.client.server_client import ServerClient
     from resources_servers.agentvista.app import AgentVistaResources, AgentVistaResourcesConfig
 
     return AgentVistaResources(
@@ -54,7 +54,7 @@ async def test_resource_contract_preserves_zero_reuses_receipts_and_rejects_acto
     import json
     import sys
 
-    from nemo_gym.config import AggregateMetricsRequest
+    from nemo_gym.config.config_types import AggregateMetricsRequest
     from responses_api_agents.agentvista_agent.runtime.results import AgentVistaVerifyRequest
 
     evidence = {
