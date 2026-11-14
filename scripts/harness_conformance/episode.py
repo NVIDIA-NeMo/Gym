@@ -121,6 +121,9 @@ def _config(
     if harness == "opencode":
         # Auxiliary title/summary requests would consume the scripted policy replies.
         agent["opencode_config"] = {"permission": {"bash": "allow"}}
+        if use_agent_sessions:
+            # The local probe sandbox is the CI host, which has network but no rg; no scenario runs grep or glob.
+            agent["sandbox_ripgrep_download"] = True
         if not use_agent_sessions:
             agent["opencode_config"]["agent"] = {"title": {"disable": True}, "summary": {"disable": True}}
     if harness == "codex" and not use_agent_sessions:
