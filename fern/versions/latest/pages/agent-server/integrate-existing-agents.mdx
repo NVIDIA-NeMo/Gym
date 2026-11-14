@@ -290,7 +290,7 @@ For where the harness runs and who cleans up, including borrowed and agent-owned
 
 ### Run Codex on Terminal-Bench-Science
 
-[Terminal-Bench-Science v0.1](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md) ships a ready-made Codex profile, `terminal_bench_science/codex`, so you do not write the four files above. Unlike the Terminal Bench 2.1 adapters, its Resources Server is `terminal_bench_4`: it provisions each pinned task, lends the task sandbox to `codex_agent`, and grades in a separate offline verifier sandbox. The profile composes `single_agent_turn_legacy`, so it reads flat rows rather than a taskset. Like the other session paths, it is for evaluation only.
+[Terminal-Bench-Science v0.1](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md) ships a ready-made Codex profile, `terminal_bench_science/codex`, so you do not write the four files above. Unlike the Terminal Bench 2.1 adapters, its Resources Server is `terminal_bench_4`: it provisions each pinned task, lends the task sandbox to `codex_agent`, and grades in a separate offline verifier sandbox. The profile composes `single_agent_turn_legacy`, so it reads flat rows rather than a taskset. The profile is for evaluation. Training capture on this path is off by default (`token_id_capture`), as for other Codex runs.
 
 Before you run it:
 
