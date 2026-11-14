@@ -468,7 +468,7 @@ The [`nemo_gym/agents/utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_
 
 ### Code layout
 
-Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI. A harness that is itself a Python program runs an adapter-specific `sandbox_runner.py` shim with a Python runtime that the Agent Server builds and uploads with `SandboxPythonRuntime`, as Hermes and Stirrup do. `hermes_sandboxed_agent` is being deprecated; use `hermes_agent` for new development and as the integration reference.
+Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI. A harness that is itself a Python program runs an adapter-specific `sandbox_runner.py` shim with a Python runtime that the Agent Server builds and uploads with `SandboxPythonRuntime`, as Hermes and Stirrup do.
 
 | Adapter file | Responsibility |
 | --- | --- |
@@ -666,7 +666,7 @@ All control files live under `session_dir`, and their names are defined in `supe
 | `cleanup.json` | The supervisor records here whether the harness process group terminated. If a stop wins the launch claim, the stop shell writes the same receipt shape with `return_code: null` and `timed_out: false`. |
 | `output.log` | The launch shell redirects supervisor and harness diagnostics here. Task output is a separate, adapter-owned artifact. |
 
-To migrate an adapter that launches the process supervisor itself, move launch, termination, collection, and release into `SandboxSession`. For Hermes, use the existing `hermes_agent` integration; `hermes_sandboxed_agent` is being deprecated and should not receive new integration work. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agents.utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
+To migrate an adapter that launches the process supervisor itself, move launch, termination, collection, and release into `SandboxSession`. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agents.utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
 
 Out-of-tree adapters written for the Python supervisor also need these changes:
 

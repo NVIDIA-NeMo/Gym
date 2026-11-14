@@ -192,8 +192,9 @@ gym eval run my-dataset --agent hermes_agent --sandbox docker \
 ```
 
 `--agent` takes the harness's folder name under `responses_api_agents/`. You can drop a trailing `_agent` or
-`_sandboxed_agent` when only one harness matches. `hermes` matches both `hermes_agent` and `hermes_sandboxed_agent`,
-so it is refused. `--model-type openai_model` serves any OpenAI-compatible endpoint, with `<url>` as its base URL.
+`_sandboxed_agent` when only one harness matches. `terminus_2` matches both `terminus_2_agent` and
+`terminus_2_sandboxed_agent`, so it is refused. `--model-type openai_model` serves any OpenAI-compatible
+endpoint, with `<url>` as its base URL.
 
 Gym prepares the dataset, starts the servers and collects one rollout per task, unless
 `[gym.defaults].num_repeats` in `dataset.toml` or `--num-repeats` sets another count. The results land in
