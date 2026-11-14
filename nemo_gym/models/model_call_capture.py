@@ -925,6 +925,7 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        request_state["nemo_gym_model_call_identity"] = {"rollout_id": rollout_id, "model_call_id": model_call_id}
         verifier_invocation_id = _unique_request_header(
             scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
         )
