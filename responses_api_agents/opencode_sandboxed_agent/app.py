@@ -391,6 +391,13 @@ def parse_opencode_observations(
     )
 
 
+# Task images can carry their builder's proxy settings (gitingest's points HTTP(S)_PROXY at
+# sys-proxy-rd-relay.byted.org:8118, unresolvable here). OpenCode runs on Bun, which honours them, so every model call
+# failed at once and was retried every 30 s for the whole rollout: gitingest never finished in any no-internet run.
+# The model server is reached directly and the agent's own commands have no internet anyway, so drop them.
+UNSET_PROXY_ENV = "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy"
+
+
 class IdleNudgeConfig(BaseModel):
     """After OpenCode exits cleanly with time left, and its last assistant turn made no tool call, continue the same
     session with ``text``, up to ``max_nudges`` times, unless that turn's text contains ``stop_on_text`` (the model's
@@ -860,7 +867,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 else nudge_config.text
             )
             resume = (
-                f"export PATH=$HOME/.opencode/bin:$PATH "
+                f"export PATH=$HOME/.opencode/bin:$PATH && {UNSET_PROXY_ENV} "
                 f"&& printf '%s' {quote(nudge)} | OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
                 f"opencode run --session {quote(session_id)} {run_flags} "
                 f'&& echo "OpenCode run finished"'
@@ -1048,6 +1055,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         echo "Shell: $SHELL" \
         && {stuck_setup}{install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
+        && {UNSET_PROXY_ENV} \
         && echo "Installed OpenCode" \
         && printf '%s' {quote(query)} | OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} \
