@@ -242,7 +242,7 @@ def saved_failure_classification(output: Path) -> FailureClassificationConfig:
         config = OmegaConf.to_container(OmegaConf.load(resolved), resolve=False)
         benchmark = config["driver"]["benchmarks"][job.name]
         resumable = benchmark.get("resumable")
-        if resumable is None:
+        if resumable is None or isinstance(resumable, bool):
             resumable = {}
         if not isinstance(resumable, Mapping):
             raise ValueError("resumable must be a mapping")
