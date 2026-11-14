@@ -55,6 +55,18 @@ def test_current_benchmark_manifests_match_runtime_composition(name: str) -> Non
     assert _mirror_differences(manifest, composition) == {}
 
 
+def test_manifest_resolves_dataset_interpolation_against_its_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _asset(tmp_path)
+    config = path.with_name("config.yaml")
+    text = config.read_text().replace(
+        "jsonl_fpath: environments/demo/data/example.jsonl", "jsonl_fpath: ${fixture_data_path}"
+    )
+    config.write_text("fixture_data_path: environments/demo/data/example.jsonl\n" + text)
+    report = validate_environment(path)
+    assert report.datasets[0].rows == 1
+
+
 @pytest.mark.parametrize("source", ["prepared", "agent"])
 def test_benchmark_prompt_ownership_preserves_prepared_rows(tmp_path: Path, source: str) -> None:
     path = _asset(tmp_path, kind="benchmark")

@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
@@ -97,6 +98,27 @@ def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPI
 
 
 class TestLoadAndValidateServerInstanceConfigs:
+    def test_prepared_dataset_path_resolves_before_loading(self, tmp_path: Path) -> None:
+        prepared = tmp_path / "prepared.jsonl"
+        prepared.write_text("{}\n")
+        instance = _make_agent_instance_config(
+            "prepared_agent",
+            [{"name": "prepared", "type": "benchmark", "jsonl_fpath": "${paths.prepared}"}],
+        )
+        global_config = DictConfig(
+            {
+                "paths": {"prepared": str(prepared)},
+                "prepared_agent": OmegaConf.to_container(instance.server_type_config_dict),
+            }
+        )
+        config = TrainDataProcessorConfig(
+            output_dirpath=str(tmp_path / "collated"), mode="train_preparation", should_download=False
+        )
+        processor = TrainDataProcessor()
+        instances = processor.load_and_validate_server_instance_configs(config, global_config)
+        assert Path(instances[0].datasets[0].jsonl_fpath) == prepared
+        processor.load_datasets(config, instances)
+
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()
@@ -1792,6 +1814,31 @@ class TestDeclaringInstanceValidation:
             {"my_rs": {"resources_servers": {"impl": {"entrypoint": "a.py", "domain": "math", "datasets": [d]}}}}
         )
         assert [c.name for c in out] == ["my_rs"]
+
+    def test_unused_train_input_does_not_resolve_missing_environment(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("AGENTVISTA_UNUSED_TRAIN_JSONL", raising=False)
+        example = _dataset(tmp_path, "selected", [{"responses_create_params": {"input": []}}])
+        train = {
+            **example,
+            "name": "unused",
+            "type": "train",
+            "license": "MIT",
+            "jsonl_fpath": "${oc.env:AGENTVISTA_UNUSED_TRAIN_JSONL}",
+        }
+        selected = self._validate(
+            {
+                "example_path": example["jsonl_fpath"],
+                "fixture_agent": {
+                    "responses_api_agents": {
+                        "impl": {
+                            "entrypoint": "a.py",
+                            "datasets": [{**example, "jsonl_fpath": "${example_path}"}, train],
+                        }
+                    }
+                },
+            }
+        )
+        assert selected[0].get_inner_run_server_config().datasets[0].jsonl_fpath == example["jsonl_fpath"]
 
     def test_model_server_datasets_rejected(self, tmp_path) -> None:
         d = _dataset(tmp_path, "d5", [{"responses_create_params": {"input": []}}])

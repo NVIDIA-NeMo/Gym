@@ -1,0 +1,4 @@
+{"name": "original_binary_positive", "kind": "full_reward", "request": {"question": "What is shown?", "reference": "42", "responses": ["draft", "<answer>42</answer>"], "provider_score": "1"}, "expected_reward": 1.0}
+{"name": "original_binary_negative", "kind": "zero_reward", "request": {"question": "What is shown?", "reference": "42", "responses": ["<answer>wrong</answer>"], "provider_score": "0"}, "expected_reward": 0.0}
+{"name": "missing_reference", "kind": "malformed", "request": {"question": "What is shown?", "reference": "", "responses": ["answer"], "provider_score": "1"}, "expected_error": "Missing reference answer"}
+{"name": "unparseable_provider", "kind": "malformed", "request": {"question": "What is shown?", "reference": "42", "responses": ["answer"], "provider_score": ""}, "expected_error": "Verifier did not return a valid binary score"}

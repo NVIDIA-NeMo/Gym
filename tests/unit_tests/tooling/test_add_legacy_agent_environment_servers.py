@@ -281,3 +281,13 @@ def test_finds_the_agent_references_gym_finds() -> None:
 def test_server_names_match_the_relays_gym_generates(agent_name: str, agent_type: str) -> None:
     # The deprecation warning prints a block to paste; it must match what this script writes.
     assert migration.server_name(agent_name, agent_type) == legacy_environment_server_name(agent_name, agent_type)
+
+
+def test_agentvista_session_template_does_not_get_a_legacy_relay(tmp_path: Path) -> None:
+    config = tmp_path / "agentvista.yaml"
+    config.write_text(
+        "agentvista_agent:\n  responses_api_agents:\n    agentvista_agent:\n      entrypoint: app.py\n      resources_server: null\n"
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before

@@ -1,0 +1,71 @@
+{
+  "harness_version": "5.0.0",
+  "model": "nvidia/moonshotai/kimi-k3",
+  "scope": "one public task per harness; integration smoke, not an accuracy estimate",
+  "loaded_configs": [
+    "benchmarks/agentvista_default/config.yaml",
+    "benchmarks/agentvista_opencode/config.yaml"
+  ],
+  "prepared_row_schema": "resources_servers/agentvista/task_data.py",
+  "prepared_row_validation": "clean",
+  "resource_implementation": "agentvista",
+  "resource_instance": "agentvista_resources",
+  "pipeline": [
+    "Environment Server",
+    "agent seed/activate/close",
+    "Resources Server",
+    "original judge"
+  ],
+  "budgets": {
+    "default_max_turns": 3,
+    "opencode_max_steps": 3,
+    "opencode_actor_seconds": 240,
+    "context_tokens": 65536,
+    "output_tokens": 32768
+  },
+  "results": [
+    {
+      "harness": "default",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 172.78,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_reason": null,
+      "execution_health": {},
+      "error": null
+    },
+    {
+      "harness": "opencode",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 257.31,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_reason": null,
+      "execution_health": {
+        "termination": "timeout",
+        "finish_reason": "tool-calls",
+        "output_tokens_limit": 32768,
+        "last_step_output_tokens": 131,
+        "returncode": -15,
+        "timed_out": true,
+        "native_errors": 0,
+        "tool_calls": 2,
+        "tool_errors": 0,
+        "execution_healthy": false,
+        "task_success": false
+      },
+      "error": null
+    }
+  ],
+  "limitations": [
+    "OpenCode reached its bounded actor deadline with retained output and was judged under the existing policy; this is not healthy-execution qualification.",
+    "No complete-dataset evaluation or image rebuild is claimed."
+  ],
+  "source_pin": "responses_api_agents/agentvista_agent/runtime/source-pin.json"
+}
