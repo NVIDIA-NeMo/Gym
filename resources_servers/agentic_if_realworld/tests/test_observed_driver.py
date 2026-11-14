@@ -10,7 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from aiohttp import ClientConnectorError, ClientPayloadError, ServerDisconnectedError, SocketTimeoutError
+from aiohttp import (
+    ClientConnectorError,
+    ClientPayloadError,
+    ClientResponseError,
+    ServerDisconnectedError,
+    SocketTimeoutError,
+)
 from fastapi.testclient import TestClient
 
 from benchmarks.agentic_if_realworld import rollout_driver
@@ -26,23 +32,29 @@ from resources_servers.agentic_if_realworld.benchmark.transport import Retryable
 from resources_servers.agentic_if_realworld.tests.test_transport import Response
 from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_response
 from responses_api_models.agentic_if_text.app import TextModel, TextModelConfig
+from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
 @pytest.mark.parametrize(
-    "observed,connection_failures,incomplete_first,text,stream_failure",
+    "observed,connection_failures,incomplete_first,text,stream_failure,standard",
     [
-        (True, 0, False, "OK.", None),
-        (False, 0, False, "OK.", None),
-        (True, 1, False, "OK.", None),
-        (True, 2, False, "OK..", None),
-        (True, 1, True, "OK.", None),
-        (True, 0, True, "OK.", SocketTimeoutError),
-        (True, 0, True, "OK.", ServerDisconnectedError),
-        (True, 0, True, "OK.", ClientPayloadError),
+        (True, 0, False, "OK.", None, False),
+        (False, 0, False, "OK.", None, False),
+        (True, 1, False, "OK.", None, False),
+        (True, 2, False, "OK..", None, False),
+        (True, 1, True, "OK.", None, False),
+        (True, 0, True, "OK.", SocketTimeoutError, False),
+        (True, 0, True, "OK.", ServerDisconnectedError, False),
+        (True, 0, True, "OK.", ClientPayloadError, False),
+        (True, 0, False, "OK.", None, True),
+        (False, 0, False, "OK.", None, True),
+        (True, 0, True, "OK.", None, True),
+        (True, 0, False, "OK..", None, True),
+        (True, 0, False, "context-overflow", None, True),
     ],
 )
 def test_http_resume_and_connection_recovery(
-    tmp_path, monkeypatch, observed, connection_failures, incomplete_first, text, stream_failure
+    tmp_path, monkeypatch, observed, connection_failures, incomplete_first, text, stream_failure, standard
 ):
     # Other CI workers change source files while installing and testing components.
     # Keep this synthetic run stable; exercise a deliberate runtime change below.
@@ -74,6 +86,17 @@ def test_http_resume_and_connection_recovery(
         "agentic_if_realworld_resources": {"resources_servers": {"agentic_if_realworld": resource}},
         "policy_model": {"responses_api_models": {"agentic_if_text": model}},
     }
+    if standard:
+        resource["response_source"] = "gym_response"
+        model = dict(
+            base_url="http://synthetic.invalid/v1",
+            api_key="synthetic",
+            model="synthetic-policy",
+            return_token_id_information=True,
+            uses_reasoning_parser=True,
+            chat_template_kwargs={"reasoning_effort": "max"},
+        )
+        settings["policy_model"]["responses_api_models"] = {"vllm_model": model}
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = settings
     server_client.assistant_message_header.return_value = None
@@ -83,10 +106,16 @@ def test_http_resume_and_connection_recovery(
         ),
         server_client=server_client,
     )
-    adapter = TextModel(
-        config=TextModelConfig(host="", port=0, name="policy_model", entrypoint="app.py", **model),
-        server_client=server_client,
-    )
+    if not standard:
+        adapter = TextModel(
+            config=TextModelConfig(host="", port=0, name="policy_model", entrypoint="app.py", **model),
+            server_client=server_client,
+        )
+    if standard:
+        adapter = VLLMModel(
+            config=VLLMModelConfig(host="", port=0, name="policy_model", entrypoint="app.py", **model),
+            server_client=server_client,
+        )
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     policy_calls, judge_calls, dispatched, verifications = [], [], [], []
 
@@ -127,6 +156,34 @@ def test_http_resume_and_connection_recovery(
         )
 
     monkeypatch.setattr(http_client, "request", upstream)
+    if standard:
+
+        async def engine(client, **body):
+            assert len(body["messages"]) == 1 and body["messages"][0]["role"] == "user"
+            prompt = body["messages"][0]["content"]
+            if isinstance(prompt, list):
+                prompt = "".join(part["text"] for part in prompt)
+            assert prompt == dataset.request(next(iter(dataset.inputs)))["messages"][0]["content"]
+            assert body["temperature"] == 0.7
+            assert body["chat_template_kwargs"] == {"reasoning_effort": "max"}
+            if text == "context-overflow":
+                policy_calls.append((body["seed"], body["max_tokens"]))
+                error = ClientResponseError(None, (), status=400, message="context length")
+                error.response_content = b'{"error":{"message":"maximum context length exceeded"}}'
+                raise error
+            value = (await upstream("POST", "http://synthetic.invalid/policy", json=body)).value
+            value.update(id="synthetic-completion", object="chat.completion", created=0, model="synthetic-policy")
+            choice = value["choices"][0]
+            choice["index"] = 0
+            choice["message"].update(
+                reasoning="Think first",
+                prompt_token_ids=[1, 2],
+                generation_token_ids=[3, 4],
+                generation_log_probs=[-0.1, -0.2],
+            )
+            return value
+
+        monkeypatch.setattr(type(adapter._clients[0]), "create_chat_completion", engine)
 
     def preprocess(self, rows, **kwargs):
         return [
@@ -221,6 +278,15 @@ def test_http_resume_and_connection_recovery(
         assert policy_calls == [core.PHASES[0]] * (connection_failures + 1) + (
             [core.PHASES[1]] if incomplete_first else []
         )
+        if text == "context-overflow":
+            assert not judge_calls
+            journal = core.read(next((receipts / "cells").glob("*.json")))
+            assert len(journal["attempts"]) == 1 and journal["attempts"][0]["terminal"]
+            assert journal["result"]["mask_sample"] is True
+            config.resume_from_cache = True
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+            assert len(policy_calls) == 1 and not judge_calls
+            return
         assert len(judge_calls) == 1
         identities = [maybe_rollout_id_from_run_body(row) for row in dispatched]
         assert len(set(identities)) == len(dispatched)
@@ -228,6 +294,15 @@ def test_http_resume_and_connection_recovery(
         assert len(set(receipt_ids)) == len(dispatched)
         record = core.read(tmp_path / "out.jsonl")
         assert record["item_verdict"] == ("pass" if text == "OK." else "fail") and record["mask_sample"] is False
+        if standard:
+            output = record["response"]["output"]
+            assert output[0]["type"] == "reasoning"
+            assert output[0]["summary"][0]["text"] == "Think first"
+            assert output[-1]["type"] == "message"
+            assert output[-1]["prompt_token_ids"] == [1, 2]
+            assert output[-1]["generation_token_ids"] == [3, 4]
+            assert output[-1]["generation_log_probs"] == [-0.1, -0.2]
+            assert len(list((receipts / "model").glob("*.response.json"))) == len(dispatched)
         inventory = materialized_path_for(tmp_path / "out.jsonl")
         assert len(inventory.read_text().splitlines()) == 1
         health = run_health_checks(tmp_path / "out.jsonl", workers=1).summary["run"]["artifacts"]
@@ -240,6 +315,8 @@ def test_http_resume_and_connection_recovery(
             path: path.read_bytes() for parent in [receipts, captures] for path in parent.rglob("*") if path.is_file()
         }
         config.resume_from_cache = True
+        if standard:
+            model["port"] = 12345
         asyncio.run(rollout_driver.run_rollout_collection(config, settings))
         assert all(path.read_bytes() == value for path, value in saved.items())
         assert core.read(tmp_path / "out.jsonl") == record
@@ -268,7 +345,7 @@ def test_http_resume_and_connection_recovery(
             journal = core.read(journal_path)
             assert journal["result"]["ng_verifier_invocations"] == verifications[0]["ng_verifier_invocations"]
             for field, value in [
-                ("reward", 0.0),
+                ("reward", 1.0 - record["reward"]),
                 ("mask_sample", True),
                 ("judge_model", "changed"),
                 ("judge_request_sha256", "changed"),
@@ -285,3 +362,14 @@ def test_http_resume_and_connection_recovery(
                 journal_path.write_bytes(saved[journal_path])
                 assert core.read(tmp_path / "out.jsonl") == record
                 assert len(policy_calls) == len(judge_calls) == 1
+
+        if standard:
+            response_path = next((receipts / "model").glob("*.response.json"))
+            original = response_path.read_bytes()
+            damaged = core.read(response_path)
+            damaged["output"][-1]["generation_token_ids"] = [99, 100]
+            core.write(response_path, damaged)
+            with pytest.raises(ValueError, match="Raw transport binding changed"):
+                asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+            response_path.write_bytes(original)
+            assert core.read(tmp_path / "out.jsonl") == record

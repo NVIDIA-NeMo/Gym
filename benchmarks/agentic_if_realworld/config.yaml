@@ -1,5 +1,9 @@
 config_paths:
   - resources_servers/agentic_if_realworld/configs/agentic_if_realworld.yaml
+agentic_if_realworld_resources:
+  resources_servers:
+    agentic_if_realworld:
+      response_source: gym_response
 rollout_collection_driver: benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection
 agentic_if_realworld_agent:
   responses_api_agents:
@@ -9,17 +13,9 @@ agentic_if_realworld_agent:
       model_server: {type: responses_api_models, name: policy_model}
       max_steps: 1
       skip_verification: true
+      execute_tools: false
 agentic_if_realworld_environment:
   environment_servers:
     legacy_agent:
       entrypoint: app.py
       agent_server: {type: responses_api_agents, name: agentic_if_realworld_agent}
-policy_model:
-  responses_api_models:
-    agentic_if_text:
-      entrypoint: app.py
-      endpoint: ${oc.env:AGENTIC_IF_POLICY_ENDPOINT,http://localhost:8000/v1/chat/completions}
-      model: ${oc.env:AGENTIC_IF_POLICY_MODEL,policy}
-      receipt_dir: ${agentic_if_realworld_resources.resources_servers.agentic_if_realworld.receipt_dir}
-      api_key_env: AGENTIC_IF_POLICY_API_KEY
-      reasoning_effort: null

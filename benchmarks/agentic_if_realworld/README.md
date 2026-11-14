@@ -85,8 +85,8 @@ enum remains in the local bounded schema and is enforced before accepting any
 grade. Both schemas and the request are bound to the private judge cache; this
 transport adaptation does not change the frozen prompt, criteria or validator.
 
-The default `adaptive_first_complete_v1` protocol uses temperature 0.7, streaming,
-and these (seed, maximum-output-token) attempts:
+The `adaptive_first_complete_v1` schedule uses temperature 0.7 and these
+(seed, maximum-output-token) attempts:
 `(17,32768), (17,65536), (17,131072), (29,131072), (43,131072)`.
 Advance only after incomplete delivery. Keep the first complete answer regardless
 of its grade. Judge recovery never regenerates that answer. Two HTTP 2xx judge
@@ -101,10 +101,10 @@ stays unscored. Judge endpoint, model and credential presence are checked before
 policy generation.
 
 For a vLLM-backed model requiring maximum reasoning effort, set
-`policy_model.responses_api_models.agentic_if_text.reasoning_effort=max` in the
-run configuration. The adapter sends `chat_template_kwargs.reasoning_effort: max`,
+`policy_model.responses_api_models.vllm_model.chat_template_kwargs.reasoning_effort=max` in the
+run configuration. The stock model server sends `chat_template_kwargs.reasoning_effort: max`,
 using the same wire field as Gym's vLLM adapter. This selects the distinct
-`adaptive_first_complete_max_effort_v1` profile. The default `null` omits that
+`adaptive_first_complete_max_effort_v1` profile. Leaving the setting unset omits that
 field and retains the original request. Temperature 0.7, the delivery schedule,
 wrapper, criteria and judge settings stay unchanged. Use a new run directory;
 resuming across these effort settings is rejected. This parameter requires an
@@ -159,13 +159,40 @@ identity alongside the benchmark metrics. Native collection and reverification
 use that same endpoint, including masked and unattempted tasks. Never substitute
 resolved-only mean reward for complete accuracy.
 
+## Model clients
+
+`config.yaml` uses Gym's standard `vllm_model` for the frozen seeded adaptive
+schedule. Select it with `--model-type vllm_model`, just like other benchmarks.
+The driver supplies each seed through the client's existing `metadata.extra_body`
+interface. Configure maximum reasoning through `chat_template_kwargs`; reasoning
+stays in Responses reasoning items, separate from the final answer.
+
+The full Responses output, including token IDs and log probabilities when enabled
+by the model server, passes unchanged through verification and saved rollouts.
+Only a separate copy is projected for judging. These are explicitly marked Gym
+Responses receipts, not raw upstream HTTP receipts. Model-call and token capture
+remain owned by the standard client. This changes delivery transport and its
+proof format; it is not a claim of historical score reproduction. Transport failures with no Responses delivery
+remain uncertain and require reconciliation; the driver does not resend them.
+
+`native.yaml` uses ordinary single-turn Gym collection and any compatible standard
+model client, including `openai_model`. It does not implement the seeded adaptive
+schedule: a native Responses provider without seed support cannot reproduce that
+protocol. Select the model client and its normal settings in the usual Gym way.
+Client interoperability does not authorize training on this evaluation-only data.
+
+`raw_receipt.yaml` retains the former `agentic_if_text` configuration for the raw
+streaming transport. Existing EFB pins and historical run directories retain their
+original runtime, configuration and receipt format. Start a new run directory for
+this refactor; do not migrate journals between profiles or runtime revisions.
+
 ## Run
 
 Replace these placeholders with approved values supplied through private channels:
 
 ```bash
 export MLFLOW_TRACKING_URI=https://your-approved-registry.example/api/v4/projects/PROJECT_ID/ml/mlflow
-export AGENTIC_IF_POLICY_ENDPOINT=https://your-approved-provider/v1/chat/completions
+export AGENTIC_IF_POLICY_BASE_URL=https://your-approved-provider/v1
 export AGENTIC_IF_POLICY_MODEL=your-policy-model
 export AGENTIC_IF_JUDGE_ENDPOINT=https://your-approved-judge.example/v1/chat/completions
 export AGENTIC_IF_JUDGE_MODEL=your-approved-judge-model
@@ -175,43 +202,35 @@ export AGENTIC_IF_RECEIPT_DIR=/private/agentic-if/run-01/receipts
 gym eval prepare --benchmark agentic_if_realworld
 gym env validate agentic_if_realworld
 gym env test agentic_if_realworld
-gym eval run --benchmark agentic_if_realworld --split benchmark --num-repeats 1 \
+gym eval run --benchmark agentic_if_realworld --model-type vllm_model --split benchmark --num-repeats 1 \
+  ++policy_base_url=$AGENTIC_IF_POLICY_BASE_URL ++policy_model_name=$AGENTIC_IF_POLICY_MODEL \
+  ++policy_api_key='${oc.env:AGENTIC_IF_POLICY_API_KEY}' \
   --concurrency 1 --output /private/agentic-if/run-01/rollouts.jsonl \
   ++observability_enabled=true ++model_call_capture_dir=/private/agentic-if/run-01/captures
 ```
 
 Repeat the final command with `--resume` and the same paths to resume generation
 and judging independently. Preserve saved response hashes and receipts.
-`--concurrency N` runs up to N tasks at once, each with its own journal. A policy
-transport error (429, 5xx, timeout) moves a task to its next attempt, as an
-incomplete delivery does, only when a response establishes the delivery outcome.
-A successful policy SSE response interrupted by a read timeout, disconnect or
-payload truncation is an incomplete delivery and advances within the same bounded
-schedule. Partial bytes and their receipt remain saved; an answer already saved
-through its terminal event and `[DONE]` remains selected.
-A connection refusal or connect timeout stops the run; explicit resume retries
-the same seed and token cap while retaining the failed receipt. A complete saved
-SSE answer remains selected even if the connection fails after its final event.
-Uncertain dispatch or a run stopped mid-generation requires
-[receipt reconciliation](reconciliation.md) before resume. The runbook identifies
-safe resume cases and how to preserve a run that cannot be recovered automatically.
-Keep N within the policy server's capacity.
+`--concurrency N` runs up to N tasks at once, each with its own journal. A returned incomplete Responses delivery advances the bounded schedule. A failed
+agent/model call without a response has an uncertain dispatch outcome: preserve
+its receipt and reconcile it before resume. There is no automatic regeneration
+of a saved complete answer. The older SSE-specific transport and connection
+recovery behavior applies only to `raw_receipt.yaml`.
 
 ### Private YAML configuration
 
-Model endpoints, model names and the receipt directory are ordinary Gym/Hydra
-configuration fields. Environment variables above are optional defaults for those
-fields. The adaptive profile reads `AGENTIC_IF_POLICY_ENDPOINT` and
-`AGENTIC_IF_POLICY_MODEL` directly; unrelated quickstart `policy_base_url` and
-`policy_model_name` values do not override them. To keep a reusable run configuration, save this YAML outside Git, for
-example as `/private/agentic-if/run-01/config.yaml`:
+Use the same model settings as other Gym benchmarks. Save credentials and a run
+configuration outside Git, for example `/private/agentic-if/run-01/config.yaml`:
 
 ```yaml
+policy_base_url: https://your-approved-provider/v1
+policy_model_name: your-policy-model
+policy_api_key: ${oc.env:AGENTIC_IF_POLICY_API_KEY}
 policy_model:
   responses_api_models:
-    agentic_if_text:
-      endpoint: https://your-approved-provider/v1/chat/completions
-      model: your-policy-model
+    vllm_model:
+      # Enable only when the serving engine supplies validated token information.
+      return_token_id_information: true
 agentic_if_realworld_resources:
   resources_servers:
     agentic_if_realworld:
@@ -223,7 +242,7 @@ agentic_if_realworld_resources:
 Compose it after the benchmark configuration:
 
 ```bash
-gym eval run --config benchmarks/agentic_if_realworld/config.yaml \
+gym eval run --config benchmarks/agentic_if_realworld/config.yaml --model-type vllm_model \
   --config /private/agentic-if/run-01/config.yaml --split benchmark \
   --num-repeats 1 --concurrency 1 --output /private/agentic-if/run-01/rollouts.jsonl \
   ++observability_enabled=true ++model_call_capture_dir=/private/agentic-if/run-01/captures
@@ -278,10 +297,9 @@ The [Gym benchmark guide](https://docs.nvidia.com/nemo/gym/latest/contribute/env
 supports external rollout drivers. The documented `gym eval run` command already
 uses this supported hook and the standard SimpleAgent for generation. The hook
 handles adaptive delivery selection, independent judging and saved-run accounting;
-it does not replace the CLI entrypoint. This contribution needs an explicit
-Gym maintainer decision on its recorded streaming model adapter and thin adaptive
-driver: stock repeat/resume does not preserve the frozen first-complete schedule
-and delivery receipts. The stock native profile is a separate protocol.
+it does not replace the CLI entrypoint. The adaptive driver now consumes standard Responses deliveries; it has no dependency
+on the recorded streaming model adapter. Stock repeat/resume alone does not
+preserve the frozen first-complete schedule and independent judge recovery. The stock native profile is a separate protocol.
 `app.py` delegates scoring to the verifier module. Verifier semantic metadata is
 checked against the frozen dataset; extra Gym trajectory/row fields pass through
 the transport model. Maintainers should confirm that metadata contract and the
@@ -308,8 +326,8 @@ export AGENTIC_IF_RECEIPT_DIR=/private/agentic-if/smoke/receipts
 export AGENTIC_IF_SYNTHETIC=1
 export AGENTIC_IF_POLICY_MODEL=synthetic-policy
 export AGENTIC_IF_JUDGE_MODEL=synthetic-judge
-export AGENTIC_IF_POLICY_ENDPOINT=http://127.0.0.1:19291/v1/chat/completions
-export AGENTIC_IF_JUDGE_ENDPOINT=$AGENTIC_IF_POLICY_ENDPOINT
+export AGENTIC_IF_POLICY_BASE_URL=http://127.0.0.1:19291/v1
+export AGENTIC_IF_JUDGE_ENDPOINT=$AGENTIC_IF_POLICY_BASE_URL/chat/completions
 export AGENTIC_IF_POLICY_API_KEY=synthetic
 export AGENTIC_IF_JUDGE_API_KEY=synthetic
 python -c 'import os; from pathlib import Path; from resources_servers.agentic_if_realworld.benchmark.synthetic import create; create(Path(os.environ["AGENTIC_IF_DATA_DIR"]))'
@@ -320,7 +338,9 @@ trap 'kill "$MOCK_PID"' EXIT
 gym eval prepare --benchmark agentic_if_realworld
 gym env validate agentic_if_realworld
 gym env test agentic_if_realworld
-gym eval run --benchmark agentic_if_realworld --split benchmark --limit 1 \
+gym eval run --benchmark agentic_if_realworld --model-type vllm_model --split benchmark --limit 1 \
+  ++policy_base_url=$AGENTIC_IF_POLICY_BASE_URL ++policy_model_name=$AGENTIC_IF_POLICY_MODEL \
+  ++policy_api_key='${oc.env:AGENTIC_IF_POLICY_API_KEY}' \
   --num-repeats 1 --concurrency 1 --output /private/agentic-if/smoke/rollouts.jsonl \
   ++observability_enabled=true ++model_call_capture_dir=/private/agentic-if/smoke/captures \
   ++overwrite_metrics_conflicts=true
