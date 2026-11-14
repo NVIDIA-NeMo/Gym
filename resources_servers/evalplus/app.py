@@ -34,6 +34,7 @@ benchmark dir (no server changes).
 """
 
 import pickle
+import re
 from asyncio import Semaphore, get_running_loop
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -96,32 +97,39 @@ class EvalPlusVerifyResponse(BaseVerifyResponse):
 # Code extraction
 # ----------------------------
 def extract_code_strict(completion: str, language: str = "python") -> str:
-    """Match Skills' `preprocess_code` last-fence + strict-mode semantics.
+    """Extract the last complete Python fence, falling back to an untagged fence.
 
     Skills additionally strips `<think>...</think>` reasoning preambles;
     we delegate that to the vLLM `--reasoning-parser` flag, so this function
     operates on already-clean output. If the model emits no closing fence,
-    the extracted code is empty (strict mode), matching Skills.
-
-    Picks the LAST occurrence of a fenced code block (preferring
-    ```python over a generic ```) so chain-of-thought scratch code blocks
-    don't shadow the final solution.
+    the extracted code is empty (strict mode). When both fence types are
+    present, a Python-tagged block takes precedence over an untagged block.
     """
     completion = completion.replace("\r", "")
-    specific_fence = f"```{language}"
-    generic_fence = "```"
-    start = completion.rfind(specific_fence)
-    fence_len = len(specific_fence)
-    if start == -1:
-        start = completion.rfind(generic_fence)
-        fence_len = len(generic_fence)
-    if start == -1:
-        return ""
-    rest = completion[start + fence_len :]
-    end = rest.find(generic_fence)
-    if end == -1:
-        return ""
-    return rest[:end].strip()
+    fences = list(re.finditer(r"```", completion))
+    python_blocks: List[Optional[str]] = []
+    generic_blocks: List[Optional[str]] = []
+    for index in range(0, len(fences), 2):
+        opening = fences[index]
+        closing = fences[index + 1] if index + 1 < len(fences) else None
+        line_end = completion.find("\n", opening.end())
+        if line_end == -1 or (closing is not None and line_end >= closing.start()):
+            tag_end = closing.start() if closing is not None else len(completion)
+            tag = completion[opening.end() : tag_end].strip()
+            code = None
+        else:
+            tag = completion[opening.end() : line_end].strip()
+            code = completion[line_end + 1 : closing.start()] if closing is not None else None
+        if tag == language:
+            python_blocks.append(code)
+        elif not tag:
+            generic_blocks.append(code)
+
+    for candidates in (python_blocks, generic_blocks):
+        if candidates:
+            code = candidates[-1]
+            return code.strip() if code is not None else ""
+    return ""
 
 
 # ----------------------------
