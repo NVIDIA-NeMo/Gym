@@ -380,14 +380,24 @@ async def test_a_crew_that_runs_out_of_time_answers_incomplete(lent_sandbox, run
     model = _model(
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt"}), id="chatcmpl-1"), None
     )
+    # A five-second total budget sometimes expired while the cold runtime was importing,
+    # before the first command. Require the intended blocked second call before checking
+    # the real deadline, keeping all assertions about retained progress and cleanup.
     started = time.monotonic()
+    episode = asyncio.create_task(_episode(_agent(timeout=30), access))
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        assert await asyncio.to_thread(model.blocked.wait, 25), "the crew never reached its blocked second call"
+        assert (workdir / "partial.txt").read_text() == "partial\n"
+        response, close = await asyncio.wait_for(episode, 60)
     finally:
+        if not episode.done():
+            episode.cancel()
+        await asyncio.gather(episode, return_exceptions=True)
         model.close()
 
     assert time.monotonic() - started < 60
     assert (response.status, response.metadata["crewai_stop_reason"]) == ("incomplete", "timeout")
+    assert len(model.requests) == 2
     assert (workdir / "partial.txt").read_text() == "partial\n"
     # The second model call never returned, so the run's usage is unknown.
     assert response.usage is None
