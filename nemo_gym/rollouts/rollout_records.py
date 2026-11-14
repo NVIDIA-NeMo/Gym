@@ -367,7 +367,7 @@ def _indexed_records(
     """Scan one record at a time, retaining its original byte coordinates.
 
     With ``skip_keys`` a row larger than ``PROJECTED_ROW_BYTES`` is read in chunks and parsed without those
-    top-level values, so a read-only selection never holds a whole large row.
+    top-level values. Digest-bound history validation may separately request complete records.
     """
     if not path.exists():
         return
@@ -474,6 +474,18 @@ def rejudge_predecessor_id(row: dict) -> str | None:
         failure_id = row.get("_ng_failure_id")
         return failure_id if isinstance(failure_id, str) and failure_id else None
     return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _complete_binding_row(row: dict, record: RolloutRecord | None) -> dict:
+    if record is None or not record.skip_keys or record.length <= PROJECTED_ROW_BYTES:
+        return row
+    # Projection is only a selection view. A digest-bound transition must still validate the original complete
+    # evidence, even when that requires temporarily loading a large row. Do not retain it on the selected record.
+    return replace(
+        record,
+        skip_keys=frozenset(),
+        expected_identity=(row.get(RUN_ID_KEY), logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0)),
+    ).read()
 
 
 def rejudgment_admission_closed_by(
@@ -606,6 +618,11 @@ class RolloutRecords:
 
     def check_outcome(self, row: dict, *, legacy: bool = False) -> tuple[str, int]:
         """Validate without mutation, before a writer appends the payload."""
+        return self._checked_outcome(row, legacy=legacy)[0]
+
+    def _checked_outcome(
+        self, row: dict, *, legacy: bool = False, record: RolloutRecord | None = None
+    ) -> tuple[tuple[str, int], bool]:
         key = self._key(row)
         self.check_run_identity(row, legacy=legacy)
         if "_ng_failure_record" in row:
@@ -628,16 +645,22 @@ class RolloutRecords:
         if not legacy and key[1] >= self.manifest.next_attempt.get(key[0], 0):
             raise ConfigError(f"Saved outcome {key!r} has no reserved attempt in the run manifest.")
         previous = self.payloads.get(key)
+        rejudgment_failure = False
         if previous is not None:
             saved = previous.record.read()
-            if saved != row and not (
-                is_rejudgment_of(saved, row) or is_rejudgment_of(row, saved) or is_rejudgment_failure_of(saved, row)
+            if (REJUDGED_FAILURE_ID_KEY in saved or REJUDGED_FAILURE_ID_KEY in row) and (
+                saved.get("_ng_failure_class") is None
             ):
-                raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
-        return key
+                saved = _complete_binding_row(saved, previous.record)
+                row = _complete_binding_row(row, record)
+            if saved != row:
+                rejudgment_failure = is_rejudgment_failure_of(saved, row)
+                if not (is_rejudgment_of(saved, row) or is_rejudgment_of(row, saved) or rejudgment_failure):
+                    raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
+        return key, rejudgment_failure
 
     def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False, count_failure: bool = True) -> None:
-        key = self.check_outcome(row, legacy=legacy)
+        key, rejudgment_failure = self._checked_outcome(row, legacy=legacy, record=record)
         previous = self.payloads.get(key)
         if previous is not None and previous.failure_class is None and row.get("_ng_failure_class") is not None:
             # The judge failure that a re-judgment of the same attempt already settled: its debit stays and the
@@ -646,7 +669,7 @@ class RolloutRecords:
                 self.attempt_counts[key[0]] += 1
             self.replay_blocked.add(key[0])
             return
-        if previous is not None and count_failure and is_rejudgment_failure_of(previous.record.read(), row):
+        if previous is not None and count_failure and rejudgment_failure:
             # A failed re-judgment spends the same failure budget as the judge failure it re-judged; the model
             # attempt and its reservation stay as they were.
             self.attempt_counts[key[0]] += 1
@@ -744,7 +767,8 @@ class RolloutRecords:
     ) -> "RolloutRecords":
         """Index outcomes, optionally restricted to prefixes captured before the manifest read.
 
-        ``skip_keys`` names top-level row values that no selection rule reads; large rows are parsed without them.
+        ``skip_keys`` omits top-level values from large selection views. Digest-bound rejudgment validation
+        temporarily reads complete records so omitted evidence cannot change their predecessor identity.
         """
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:

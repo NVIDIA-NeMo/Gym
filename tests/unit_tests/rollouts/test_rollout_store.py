@@ -16,6 +16,7 @@
 """Exercise artifact ownership and interruption at persistence boundaries."""
 
 import gc
+import hashlib
 import tracemalloc
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -1637,3 +1638,158 @@ def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepa
         assert (coverage["failed"], coverage["failed_final"], coverage["failed_masked"]) == (1, 1, 1)
         assert (coverage["masked"], coverage["final_zeros"], coverage["open"]) == (0, 0, 0)
         assert coverage["complete"] is False
+
+
+def test_projected_read_of_large_duplicate_results_keeps_observations_out_of_memory(prepared_run) -> None:
+    from nemo_gym.orchestration.recovery import STORE_SKIP_KEYS
+
+    output, prepare = prepared_run
+    observations = [{"observation": "x" * (65 << 20)}]
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        result = row | {"response": {}, "reward": 0.0, "ng_agent_observations": observations}
+        store.record_outcome(result)
+        store.record_outcome(result)
+    before = output.stat()
+    gc.collect()
+    tracemalloc.start()
+    try:
+        projected = RolloutStore.read(output, skip_keys=STORE_SKIP_KEYS)
+        [selected] = projected.selected("success")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert selected == row | {"response": {}, "reward": 0.0}
+    assert projected.manifest.next_attempt == {"0-0": 1}
+    # The projector buffers at most its threshold; duplicate delivery must not load both complete observations.
+    assert peak < before.st_size
+    after = output.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+
+
+@pytest.mark.parametrize("failure_id_fields", [{"_ng_failure_id": "f-1"}], ids=["id"])
+@pytest.mark.parametrize("judge_failed", [False, True], ids=["scored", "failed-again"])
+def test_projected_read_preserves_large_rejudgment_binding(
+    prepared_run, failure_id_fields: dict[str, object], judge_failed: bool
+) -> None:
+    from nemo_gym.orchestration.recovery import STORE_SKIP_KEYS
+    from nemo_gym.rollouts.rollout_recovery import run_lock
+
+    output, prepare = prepared_run
+    answer = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
+    # Exercise the production 64 MiB projection threshold, including its real skipped observation field.
+    observations = [{"observation": "x" * (65 << 20)}]
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = (
+            row
+            | {"_ng_failure_class": "judge_failed", "response": answer, "ng_agent_observations": observations}
+            | failure_id_fields
+        )
+        store.record_outcome(failure)
+        reservations = dict(store.manifest.next_attempt)
+    assert failures_path_for(output).stat().st_size > (65 << 20)
+    with failures_path_for(output).open("rb") as stream:
+        original_failure_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    original_inputs = materialized_path_for(output).read_bytes()
+    with run_lock(output), RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        result = row | {
+            "response": answer,
+            "reward": 0.0,
+            "_ng_rejudged_failure_id": pending.predecessor_failure_id,
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        if judge_failed:
+            result |= {"_ng_failure_class": "judge_failed", "evaluation_completed": False, "mask_sample": True}
+            result |= {"_ng_failure_id": "f-2"} if failure_id_fields.get("_ng_failure_id") else failure_id_fields
+        assert store.record_rejudgment(failure, result)
+        store.close_rejudgment("0-0", pending.operation_id)
+    with failures_path_for(output).open("rb") as stream:
+        assert hashlib.sha256(stream.readline()).hexdigest() == original_failure_digest
+        if not judge_failed:
+            assert stream.read(1) == b""
+
+    def file_digests() -> dict[str, str]:
+        digests = {}
+        for path in output.parent.iterdir():
+            if path.is_file():
+                with path.open("rb") as stream:
+                    digests[path.name] = hashlib.file_digest(stream, "sha256").hexdigest()
+        return digests
+
+    before = file_digests()
+    unprojected = RolloutStore.read(output)
+    expected = unprojected.failures() if judge_failed else unprojected.selected("success")
+    projected = RolloutStore.read(output, skip_keys=STORE_SKIP_KEYS)
+    selected = projected.failures() if judge_failed else projected.selected("success")
+    assert selected == [{key: value for key, value in item.items() if key not in STORE_SKIP_KEYS} for item in expected]
+    [settled] = selected
+    assert "ng_agent_observations" not in settled
+    assert settled["response"] == answer and settled["reward"] == 0.0
+    assert settled["_ng_rejudged_failure_id"] == pending.predecessor_failure_id
+    assert projected.coverage() == unprojected.coverage()
+    assert projected.manifest.next_attempt == unprojected.manifest.next_attempt == reservations
+    assert projected._state.failure_count("0-0") == unprojected._state.failure_count("0-0") == 1 + judge_failed
+    assert projected.unresolved_rejudgments() == unprojected.unresolved_rejudgments() == []
+    assert materialized_path_for(output).read_bytes() == original_inputs
+    assert file_digests() == before
+
+
+def test_projected_saved_result_rejudgment_binds_complete_evidence(prepared_run) -> None:
+    from nemo_gym.orchestration.recovery import STORE_SKIP_KEYS
+    from nemo_gym.rollouts.rollout_recovery import run_lock
+
+    output, prepare = prepared_run
+    answer = {"object": "response", "id": "saved", "status": "completed", "output": []}
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        original = row | {
+            "response": answer,
+            "reward": 0.0,
+            "ng_agent_observations": [{"observation": "x" * (65 << 20)}],
+        }
+        store.record_outcome(original)
+        reservations = dict(store.manifest.next_attempt)
+    with run_lock(output), RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(original)
+        result = row | {
+            "response": answer,
+            "reward": 1.0,
+            "_ng_rejudged_failure_id": pending.predecessor_failure_id,
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        assert store.record_rejudgment(original, result)
+        store.close_rejudgment("0-0", pending.operation_id)
+    before = hashlib.sha256(output.read_bytes()).hexdigest()
+    expected = RolloutStore.read(output)
+    projected = RolloutStore.read(output, skip_keys=STORE_SKIP_KEYS)
+    assert projected.selected("success") == [
+        {key: value for key, value in item.items() if key not in STORE_SKIP_KEYS}
+        for item in expected.selected("success")
+    ]
+    assert projected.manifest.next_attempt == reservations
+    assert projected.coverage() == expected.coverage()
+    assert projected.unresolved_rejudgments() == []
+    assert projected._state.failure_count("0-0") == 0
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == before
+    with output.open("r+b") as stream:
+        offset = stream.read(4096).index(b"x" * 32)
+        stream.seek(offset)
+        stream.write(b"y")
+    tampered = hashlib.sha256(output.read_bytes()).hexdigest()
+    assert tampered != before
+    for skip_keys in (frozenset(), STORE_SKIP_KEYS):
+        with pytest.raises(ConfigError, match="Conflicting outcomes"):
+            RolloutStore.read(output, skip_keys=skip_keys)
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == tampered
