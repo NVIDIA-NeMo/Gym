@@ -547,13 +547,16 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 "-m 'prefix pass@K: working tree'",
                 timeout_s=300,
             )
-        except Exception:
-            print("prefix_pass_k: worktree commit failed", format_exc(), file=sys.stderr)
-            return
-        if result.return_code != 0:
-            print(
-                f"prefix_pass_k: worktree commit exited {result.return_code}: {(result.stdout or '')[-500:]}",
-                file=sys.stderr,
+        except Exception as exc:
+            kind = (
+                TRANSPORT_PEER_DROP if isinstance(exc, (ConnectionError, ClientConnectionError)) else AGENT_RUN_ERROR
+            )
+            raise SandboxExecError(kind, f"worktree commit failed: {type(exc).__name__}: {exc}"[:500]) from exc
+        if result.return_code != 0 or result.error_type:
+            raise SandboxExecError(
+                AGENT_RUN_ERROR,
+                f"worktree commit failed (exit={result.return_code}, error={result.error_type}): "
+                f"{result.stderr or result.stdout or 'no details'}"[:500],
             )
 
     async def _worktree_patch(self, sandbox: AsyncSandbox, base: Optional[str]) -> Optional[str]:
@@ -865,8 +868,12 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 # rollout later, under a different collector, needs neither model nor sandbox.
                 stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
                 if self.config.commit_worktree:
-                    await self._commit_worktree(sandbox)
-                if self.config.uncommit_worktree:
+                    try:
+                        await self._commit_worktree(sandbox)
+                    except SandboxExecError as exc:
+                        aborted = True
+                        stats.update(exec_errors=1, failure_kind=exc.failure_kind, failure_reason=str(exc))
+                if self.config.uncommit_worktree and not aborted:
                     # After record_git_state, so the diagnostic still shows what the model did.
                     await self._uncommit_worktree(sandbox, initial_head)
 

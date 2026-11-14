@@ -895,3 +895,178 @@ class TestSandboxIsReleasedOnEveryExit:
         result = asyncio.run(agent.run(request, body))
         assert result.reward == 1.0
         self._assert_released(agent, stops)
+
+
+@pytest.mark.parametrize(
+    "failure,kind",
+    [
+        (_result(stdout="fatal: cannot commit", return_code=128), "agent_run_error"),
+        (_result(stderr="provider error", error_type="sandbox"), "agent_run_error"),
+        (_result(stderr="timed out", error_type="timeout"), "agent_run_error"),
+        (ConnectionResetError("peer reset"), "transport_peer_drop"),
+        (RuntimeError("provider error"), "agent_run_error"),
+        (TimeoutError("commit timed out"), "agent_run_error"),
+    ],
+)
+def test_failed_required_commit_masks_attempt_and_releases_sandbox(monkeypatch, failure, kind):
+    """A failed commit never produces an ordinary score, including a lucky pass."""
+    helper = TestSandboxIsReleasedOnEveryExit()
+
+    async def responses(request, params):
+        """Complete generation before the required commit is attempted."""
+        return helper._response()
+
+    agent, stops, request, body = helper._agent(monkeypatch, responses, lambda req: req | {"reward": 1.0})
+    agent.config.commit_worktree = True
+    agent.config.uncommit_worktree = True
+    connect = agent._connect_sandbox
+
+    async def exec_command(command, timeout_s=None):
+        """Inject a provider failure into the required commit command."""
+        assert "git add -A" in command
+        assert timeout_s == 300
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    async def connect_with_exec(seed):
+        """Attach the failing command transport to the tracked sandbox."""
+        sandbox = await connect(seed)
+        sandbox.exec = exec_command
+        return sandbox
+
+    async def must_not_uncommit(*args):
+        """Reject further Git mutations after a required commit fails."""
+        raise AssertionError("uncommit ran after a failed required commit")
+
+    object.__setattr__(agent, "_connect_sandbox", connect_with_exec)
+    object.__setattr__(agent, "_uncommit_worktree", must_not_uncommit)
+    result = asyncio.run(agent.run(request, body))
+    assert (result.reward, result.mask_sample, result.exec_errors, result.failure_kind) == (0.0, True, 1, kind)
+    assert "worktree commit failed" in result.failure_reason
+    helper._assert_released(agent, stops)
+
+
+def test_successful_required_commit_completes():
+    """A successful commit remains available to committed-only collectors."""
+    sandbox = FakeSandbox(_result())
+    asyncio.run(_bare_agent()._commit_worktree(sandbox))
+    assert len(sandbox.commands) == 1
+    assert "git add -A" in sandbox.commands[0]
+
+
+def _write_decisive_capture(root, batch, bisect, traces):
+    """Write a synthetic on-disk bisect and its captured requests and responses."""
+    result_dir = root / "results" / f"{batch}.bisect"
+    result_dir.mkdir(parents=True)
+    (result_dir / "earliest_passing.json").write_text(json.dumps(bisect))
+    for instance, turns in traces.items():
+        trace_dir = root / "traces_decisive" / batch / instance
+        trace_dir.mkdir(parents=True)
+        for index, turn in reversed(list(enumerate(turns, start=1))):
+            (trace_dir / f"turn_{index:02}.json").write_text(json.dumps(turn))
+
+
+def _captured_turn(messages, content="", calls=None, status=200):
+    """Construct one captured backend exchange without contacting a model."""
+    return {
+        "request": {"messages": messages},
+        "response_status": status,
+        "response": {"choices": [{"message": {"content": content, "tool_calls": calls}}]},
+    }
+
+
+@pytest.mark.parametrize("benchmark", ["verified", "pro"])
+def test_backticks_builders_join_tasks_and_exclude_decisive_turn(tmp_path, monkeypatch, benchmark):
+    """Build complete rows with transport retries and a captured format-error observation."""
+    from benchmarks.prefix_pass_k import prepare, prepare_pro
+
+    batch = "synthetic"
+    tasks, bisect, traces = [], {}, {}
+    for label in ("b", "a"):
+        bare_id = f"repo__{label}"
+        instance_id = f"instance_{bare_id}" if benchmark == "pro" else bare_id
+        bisect[f"instance_{bare_id}"] = {"full_patch_resolved": True, "earliest_turn": 4}
+        opening = [{"role": "system", "content": "sys"}, {"role": "user", "content": f"task {label}"}]
+        retry_messages = opening + [{"role": "user", "content": f"command output {label}"}]
+        traces[instance_id] = [
+            _captured_turn(opening, "```mswea_bash_command\nls\n```"),
+            _captured_turn(retry_messages, status=504),
+            _captured_turn(retry_messages, "not an action"),
+            _captured_turn(
+                opening + [{"role": "user", "content": f"format error {label}"}],
+                "```mswea_bash_command\nDECISIVE\n```",
+            ),
+        ]
+        tasks.append({"instance_id": instance_id, "repo": f"repo/{label}", "base_commit": f"base-{label}"})
+    _write_decisive_capture(tmp_path, batch, bisect, traces)
+    output = tmp_path / "output.jsonl"
+    if benchmark == "verified":
+        monkeypatch.setattr(prepare, "load_dataset", lambda *args, **kwargs: tasks)
+        monkeypatch.setattr(prepare, "get_hf_token", lambda: None)
+        prepare.build(tmp_path, batch, None, output)
+    else:
+        task_file = tmp_path / "tasks.jsonl"
+        task_file.write_text("".join(json.dumps(task) + "\n" for task in tasks))
+        prepare_pro.build(tmp_path, batch, None, output, task_file)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 2
+    for row, label in zip(rows, ("a", "b"), strict=True):
+        assert (row["repo"], row["base_commit"]) == (f"repo/{label}", f"base-{label}")
+        assert row["responses_create_params"]["input"][-1]["content"] == f"task {label}"
+        block = row["prefix_pass_k"]
+        assert (block["target_turn"], block["n_prefix_turns"], block["n_prefix_actions"]) == (4, 2, 1)
+        assert [step["turn"] for step in block["prefix"]] == [1, 3]
+        assert block["prefix"][0]["action"] == "ls"
+        assert block["prefix"][1]["observation"] == f"format error {label}"
+        assert block["target"]["action"] == "DECISIVE"
+
+
+def test_deepswe_builder_joins_full_task_names_and_preserves_multicall_observations(tmp_path):
+    """Trials with the same truncated name retain their own tasks, calls and observations."""
+    from benchmarks.prefix_pass_k import prepare_deepswe
+
+    batch = "synthetic"
+    common = "shared-task-name-" + "x" * 16
+    tasks, bisect, traces, trials = [], {}, {}, []
+    calls = [_call("first", "bash", '{"command": "ls"}'), _call("second", "bash", '{"command": "pwd"}')]
+    for label in ("b", "a"):
+        task_id, trial = f"{common}-{label}", f"{common}__{label}"
+        trials.append(trial)
+        tasks.append({"task_id": task_id, "image": f"image-{label}", "verifier_metadata": {"label": label}})
+        bisect[trial] = {"task_name": task_id, "earliest_turn": 4}
+        opening = [{"role": "user", "content": f"task {label}"}]
+        observations = opening + [
+            {"role": "tool", "tool_call_id": "second", "content": f"pwd {label}"},
+            {"role": "tool", "tool_call_id": "first", "content": f"ls {label}"},
+        ]
+        traces[trial] = [
+            _captured_turn(opening, calls=calls),
+            _captured_turn(observations, status=504),
+            _captured_turn(observations, "retry without calls"),
+            _captured_turn(
+                opening + [{"role": "user", "content": f"format error {label}"}],
+                calls=[_call("target", "bash", '{"command": "DECISIVE"}')],
+            ),
+        ]
+    _write_decisive_capture(tmp_path, batch, bisect, traces)
+    task_file, pool, output = (tmp_path / name for name in ("tasks.jsonl", "pool.txt", "output.jsonl"))
+    task_file.write_text("".join(json.dumps(task) + "\n" for task in reversed(tasks)))
+    pool.write_text("\n".join(trials))
+    prepare_deepswe.build(tmp_path, batch, pool, output, task_file)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 2
+    for row, label in zip(rows, ("b", "a"), strict=True):
+        assert (row["task_id"], row["image"], row["verifier_metadata"]) == (
+            f"{common}-{label}",
+            f"image-{label}",
+            {"label": label},
+        )
+        assert row["responses_create_params"]["input"] == [{"role": "user", "content": f"task {label}"}]
+        block = row["prefix_pass_k"]
+        assert (block["target_turn"], block["n_prefix_turns"], block["n_prefix_actions"]) == (4, 2, 2)
+        assert [step["turn"] for step in block["prefix"]] == [1, 3]
+        assert block["prefix"][0]["tool_calls"] == calls
+        assert block["prefix"][0]["captured_observations"] == [f"ls {label}", f"pwd {label}"]
+        assert block["prefix"][1]["observation"] == f"format error {label}"
+        assert block["target"]["action"] == "DECISIVE"
