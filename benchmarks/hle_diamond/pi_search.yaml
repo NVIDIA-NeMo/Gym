@@ -1,6 +1,10 @@
-# Pi preset with Tavily search, excluding the HLE-Diamond answer-exposure list.
+# Pi preset with Tavily search, excluding the HLE-Diamond answer-exposure list. The Environment Server seeds the
+# Tavily server for every episode and grants its MCP tools to the agent (the agent's tool_servers), and the
+# agent's sandbox reaches only the model and that server.
 config_paths:
 - benchmarks/hle_diamond/pi.yaml
+# The sandbox reaches the Tavily server's MCP tools by address, so the Resources servers leave loopback too.
+absolute_ip_server_types: [responses_api_models, resources_servers]
 tavily:
   resources_servers:
     tavily_search:
@@ -16,7 +20,7 @@ tavily:
       verified: false
 hle_diamond_pi_agent:
   responses_api_agents:
-    pi_sandboxed_agent:
+    pi_agent:
       network_access: model_and_tools
       system_prompt: |
         Direct internet access is disabled on this machine. Tavily search and browsing tools are available if useful for the task.
