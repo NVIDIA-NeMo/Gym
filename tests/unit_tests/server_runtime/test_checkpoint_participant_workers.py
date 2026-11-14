@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -1158,41 +1159,43 @@ async def test_restoring_many_sessions_rewrites_their_owners_without_holding_up_
         await before.controller.resume(CheckpointRequest(**control()))
 
     real_replace = os.replace
+    event_loop_thread = threading.get_ident()
+    write_started = threading.Event()
+    release_write = threading.Event()
 
-    def slow_replace(source: str, target: str) -> None:
-        # Each claim takes a few milliseconds to replace, as on a slow or busy filesystem.
+    def held_replace(source: str, target: str) -> None:
         if "session-owners" in target:
-            time.sleep(0.005)
+            write_started.set()
+            assert threading.get_ident() != event_loop_thread, "owner-file writes must not run on the event loop"
+            assert release_write.wait(timeout=30), "the test did not release the owner-file write"
         real_replace(source, target)
 
     routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
-    gaps: list[float] = []
     try:
         async with coordinated(socket_dir, routed(agent_worker, routing_dir)) as after:
-            monkeypatch.setattr(os, "replace", slow_replace)
-            stop = asyncio.Event()
-
-            async def tick() -> None:
-                last = time.monotonic()
-                while not stop.is_set():
-                    await asyncio.sleep(0.005)
-                    now = time.monotonic()
-                    gaps.append(now - last)
-                    last = now
-
-            ticker = asyncio.create_task(tick())
-            await after.controller.restore(
-                RestoreRequest(
-                    **control(
-                        "r1",
-                        timeout=30,
-                        checkpoint_dir=str(tmp_path / "ckpt"),
-                        episode_ids=[{"rollout_id": key} for key in keys],
+            monkeypatch.setattr(os, "replace", held_replace)
+            restoring = asyncio.create_task(
+                after.controller.restore(
+                    RestoreRequest(
+                        **control(
+                            "r1",
+                            timeout=30,
+                            checkpoint_dir=str(tmp_path / "ckpt"),
+                            episode_ids=[{"rollout_id": key} for key in keys],
+                        )
                     )
                 )
             )
-            stop.set()
-            await ticker
+            try:
+                assert await asyncio.to_thread(write_started.wait, 10), "no owner-file write reached the gate"
+                assert not restoring.done()
+                progressed = asyncio.Event()
+                asyncio.get_running_loop().call_soon(progressed.set)
+                await asyncio.wait_for(progressed.wait(), timeout=10)
+                assert not release_write.is_set() and not restoring.done()
+            finally:
+                release_write.set()
+                await asyncio.wait_for(restoring, timeout=30)
             monkeypatch.setattr(os, "replace", real_replace)
             await after.controller.resume(CheckpointRequest(**control("r1")))
             owned = {
@@ -1204,8 +1207,6 @@ async def test_restoring_many_sessions_rewrites_their_owners_without_holding_up_
         shutil.rmtree(routing_dir, ignore_errors=True)
 
     assert all(owned.values())
-    # About half a second of owner files per worker, which the event loop does not wait for.
-    assert max(gaps) < 0.2, max(gaps)
 
 
 async def test_a_worker_whose_readiness_regressed_refuses_to_export(socket_dir: str, tmp_path: Path) -> None:
