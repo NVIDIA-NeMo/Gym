@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Resources server for the SWE-bench Pro v2 split (scaleapi/SWE-bench_Pro-os, v2/).
+swebench_pro_v2_resources_server:
+  resources_servers:
+    swebench_pro_v2:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # Upstream v2 gives the verifier a 3000s budget. The agent keeps the harness's 10800s default, as in v1.
+      evaluation_timeout: 3000
+      # Each attempt covers allocation (1200s), the full test budget, execution margin and artifact reads.
+      verification_attempt_timeout: 4800
+      verification_total_timeout: 14400
+      # v2 images ship a sanitised git history, and each task's test.sh does its own repairs.
+      apply_anti_cheating: false
+      is_verifying_golden_patch: false
+      prefetch_go_modules: false
+      # Only this v1 repair is kept: redis files an agent's test run leaves in the repo break redis start-up
+      # in the verifier sandbox (e.g. NodeBB tasks).
+      environment_repairs: [stale_database_state]
+
+      # The agent can reach the policy model only. Grading keeps network access.
+      task_network_policy:
+        model_server:
+          type: responses_api_models
+          name: policy_model
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 4
+            memory_mib: 30720
+            disk_gib: 30
+        metadata:
+          benchmark: swebench-pro-v2

@@ -24,14 +24,14 @@ from nemo_gym.config import get_global_config_dict
 from resources_servers.swebench_pro.client import EMPTY_RESPONSE
 
 
-async def main(examples: list[dict], concurrency: int, output_fpath: Path) -> None:
+async def main(examples: list[dict], concurrency: int, output_fpath: Path, server_name: str) -> None:
     client = ServerClient.load_from_global_config()
     semaphore = asyncio.Semaphore(concurrency)
 
     async def verify(example: dict) -> dict:
         async with semaphore:
             response = await client.post(
-                server_name="swebench_pro_resources_server",
+                server_name=server_name,
                 url_path="/verify",
                 json=example,
             )
@@ -64,5 +64,6 @@ if __name__ == "__main__":
             rows,
             concurrency=int(config.get("concurrency", 4)),
             output_fpath=Path(config.get("output_fpath", "results/swebench_pro_golden.jsonl")),
+            server_name=config.get("server_name", "swebench_pro_resources_server"),
         )
     )

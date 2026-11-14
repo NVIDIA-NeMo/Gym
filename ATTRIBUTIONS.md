@@ -27,6 +27,28 @@ external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
 
+## SWE-bench Pro v2 example inputs
+
+`resources_servers/swebench_pro_v2/data/example.jsonl` packages five genuine inputs from
+[ScaleAI/SWE-bench_Pro, revision 2d52cb3df914a3fcf80c7f66738b3a88ae37fc50](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro/tree/2d52cb3df914a3fcf80c7f66738b3a88ae37fc50)
+with unchanged task assets from
+[scaleapi/SWE-bench_Pro-os, revision 66f92766bba642462d4bbe5479e83f91f9211862](https://github.com/scaleapi/SWE-bench_Pro-os/tree/66f92766bba642462d4bbe5479e83f91f9211862/v2/tasks).
+The embedded files are each task's `instruction.md`, `solution/gold_patch.diff`, and
+`tests/{test.sh,run_script.sh,parser.py,config.json,test_patch.patch}`.
+The evaluation harness and tooling are MIT licensed, Copyright (c) 2026 Scale AI, Inc.;
+the original notice is retained in `resources_servers/swebench_pro_v2/data/LICENSE`.
+
+The selected task text and code patches originate from Teleport under Apache-2.0 at these exact bases:
+[4d7c51b4f535cecfd139625e6af1746c46abc712](https://github.com/gravitational/teleport/blob/4d7c51b4f535cecfd139625e6af1746c46abc712/LICENSE),
+[2e7b253d55a1b6da5673ea5846503c43fa53cf37](https://github.com/gravitational/teleport/blob/2e7b253d55a1b6da5673ea5846503c43fa53cf37/LICENSE),
+[6f2f17a7f6749418d0bb329169b9181dba446845](https://github.com/gravitational/teleport/blob/6f2f17a7f6749418d0bb329169b9181dba446845/LICENSE),
+[8ee8122b10b3a0a53cb369503ed64d25a6ad1f34](https://github.com/gravitational/teleport/blob/8ee8122b10b3a0a53cb369503ed64d25a6ad1f34/LICENSE), and
+[42beccb27e0e5797a10db05bf126e529273d2d95](https://github.com/gravitational/teleport/blob/42beccb27e0e5797a10db05bf126e529273d2d95/LICENSE).
+Their identical license text is retained in `resources_servers/swebench_pro_v2/data/LICENSE-TELEPORT`.
+Each row records its repository, base commit, upstream task path, image digest and immutable task-license URL.
+The task and verifier files are unmodified; local changes are JSONL packaging and provenance fields.
+The upstream task content is not attributed wholesale to the MIT harness license.
+
 ## ether0 reward overrides
 
 `resources_servers/ether0/graders.py` adapts `oracle_solubility_eval` from

@@ -233,10 +233,10 @@ def build_environment_repairs(names: Iterable[str]) -> str:
 
 
 # The agent runs the same suites, so its container needs the same repairs.
-def build_seed_normalization(names: Iterable[str]) -> str:
+def build_seed_normalization(names: Iterable[str], *, repository_dir: str = REPOSITORY_DIR) -> str:
     """The repairs worth applying to the agent container, as one script."""
     selected = [n for n in names if n in AGENT_ENVIRONMENT_REPAIRS]
-    return "cd /app 2>/dev/null || exit 0\n" + build_environment_repairs(selected)
+    return f"cd {shlex.quote(repository_dir)} 2>/dev/null || exit 0\n" + build_environment_repairs(selected)
 
 
 # `git apply` is all-or-nothing, so retry excluding the paths it reported, then GNU patch.
