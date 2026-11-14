@@ -3,7 +3,7 @@ title: "Integrate external libraries"
 description: ""
 position: 8
 ---
-Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py). For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.
+Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py), which an Environment Server such as `single_agent_turn` calls for each episode's agent turn. For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.
 
 Integrating external training environments, benchmarks, or agents into a NeMo Gym environment requires additional considerations beyond native NeMo Gym environments. We provide a rough template of integration form factor below and best practices for ensuring that the integration is correct.
 
@@ -13,14 +13,15 @@ Integrating external training environments, benchmarks, or agents into a NeMo Gy
 2. You can add a dependency from your NeMo Gym agent server to the third-party library by adding it to the `pyproject.toml` and committing the updated `uv.lock`.
 3. After you add a dependency, you can import it in app.py like a normal Python script.  
 4. You can run the `gym env test` command to run tests on your agent server. Refer to the [gym env test CLI reference](/reference/cli-commands#gym-env-test) for details.   
-5. Typically you can just wrap the external library in the `/run` function and omit the `/responses` function.  
-6. In the `/run` function before calling into the third-party library, you will need to preprocess from NeMo Gym schema into a config for the external library.  
-7. In the `/run` function after calling into the third-party library, you will need to postprocess from the external library result into a NeMo Gym response.
+5. Run the library inside the agent turn. The agent server serves agent sessions (`/v1/agent_sessions`, `/v1/responses`, and `/v1/agent_sessions/close`), and an Environment Server such as `single_agent_turn` opens the session, calls `/v1/responses`, and then has a Resources Server's `/verify` score the response. See [Add or Update a Harness](/agent-server/add-or-update-a-harness) for the session contract. Do not wrap the library in a `/run` function behind a `legacy_agent` relay in new work.  
+6. When the tasks bring their own environment and verifier, task folders in the Harbor format, run by the `harbor` Environment Server, are an equal choice; see [Author Task Folders](/data/task-folders/harbor-tasks).  
+7. Before calling into the third-party library, you will need to preprocess from the NeMo Gym request into a config for the external library.  
+8. After calling into the third-party library, you will need to postprocess from the external library result into a NeMo Gym response.
 
 ## Best practices
 
 1. Technical design  
-   1. Follow NeMo Gym async first-party server design: the `/run` endpoint should be async to maximize efficiency.  
+   1. Follow NeMo Gym async first-party server design: the agent server's endpoints should be async to maximize efficiency.  
       1. Avoid using extra threads or processes unless absolutely necessary. If you need to scale, use Ray workers and await the ray.remote call.  
       2. For example, a single NeMo Gym instance that consists of three FastAPI server instances can handle 65,000 concurrent math rollouts without crashing and is not terribly inefficient.  
    2. Use the [NeMo Gym custom OpenAI client](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/client/openai_client.py) rather than other popular LLM clients including OpenAI, Anthropic, and LiteLLM.  
