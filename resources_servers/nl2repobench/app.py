@@ -330,6 +330,11 @@ _WORKSPACE_EXCLUDES = "--exclude=.git --exclude=__pycache__ --exclude=.venv --ex
 # (older tar) or rejected outright (newer tar, exit code 2).
 _COLLECT_COMMAND = f"tar czf /tmp/workspace.tar.gz {_WORKSPACE_EXCLUDES} -C /workspace ."
 
+
+def _collect_command(workdir: str) -> str:
+    """_COLLECT_COMMAND for a task's own project directory (identical for /workspace)."""
+    return _COLLECT_COMMAND.replace("-C /workspace .", f"-C {shlex.quote(workdir)} .")
+
 # Upstream NL2RepoBench runs the agent in a generic, task-agnostic OpenHands
 # sandbox image - no pre-installed deps, no existing scaffold, nothing but
 # start.md. The paper's grading image (task_image() below) is only ever
@@ -516,6 +521,10 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # (a different test_commands.json, a different verify image, etc.) can re-verify against the
     # already-generated code without re-running the agent/LLM at all.
     save_workspace_dir: Path | None = None
+    # Trace generation: run the agent and save its workspace (save_workspace_dir), but grade nothing. The row gets
+    # reward 0, graded=false, evaluation_completed=false; grade later from the saved workspace (for nl2repo-tasks: its
+    # own grade.py). Mirrors the ProgramBench resources server's trace-only mode. Added 2026-11-03.
+    trace_only: bool = False
 
 
 class NL2RepoBenchInstanceRequest(BaseModel):
@@ -593,6 +602,7 @@ class AgentSandboxSession:
     sandbox: AsyncSandbox
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
+    workdir: str = "/workspace"
 
 
 def _resolve_task_id(body: NL2RepoBenchInstanceRequest) -> str:
@@ -812,10 +822,10 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             # all - so letting this call default to /workspace, the very directory
             # it's trying to create, fails with "working directory does not exist"
             # before mkdir ever runs. "/" is guaranteed to exist in any image.
-            mkdir_result = await sandbox.exec(command="mkdir -p /workspace", cwd="/", timeout_s=60)
+            mkdir_result = await sandbox.exec(command=f"mkdir -p {shlex.quote(task.workdir)}", cwd="/", timeout_s=60)
             if mkdir_result.return_code != 0:
                 raise RuntimeError(
-                    f"Failed to create /workspace in agent sandbox for {task_id(task)!r}: "
+                    f"Failed to create {task.workdir} in agent sandbox for {task_id(task)!r}: "
                     f"{mkdir_result.stderr or mkdir_result.stdout or '(no output)'}"
                 )
             if mode == "no_internet_preinstalled":
@@ -846,7 +856,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 # side effect to work around - it is never supposed to have the real
                 # implementation available at all.
                 wipe_result = await sandbox.exec(
-                    command="find /workspace -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
+                    command=f"find {shlex.quote(task.workdir)} -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
                     cwd="/",
                     timeout_s=60,
                 )
@@ -908,7 +918,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 f.write(task.start_md)
                 local_start_md_path = Path(f.name)
             try:
-                await sandbox.upload(local_start_md_path, "/workspace/start.md")
+                await sandbox.upload(local_start_md_path, f"{task.workdir}/start.md")
             finally:
                 local_start_md_path.unlink(missing_ok=True)
         return sandbox
@@ -1028,6 +1038,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 sandbox=sandbox,
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
+                workdir=task.workdir,
             )
             return NL2RepoBenchSeedSessionResponse(
                 sandbox_handle=sandbox_handle,
@@ -1041,17 +1052,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 # explicitly so opencode actually runs from where start.md was written,
                 # regardless of what the booted image's default happens to be. This
                 # sandbox is always phase="agent" (see _create_sandbox call above).
-                workdir="/workspace",
+                workdir=task.workdir,
             )
         except Exception:
             if sandbox is not None:
                 await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
             raise
 
-    async def _collect_workspace(self, sandbox: AsyncSandbox) -> tuple[bytes | None, str | None]:
-        """Tar up /workspace in the agent sandbox and download it. Returns (tar_bytes, error)."""
+    async def _collect_workspace(
+        self, sandbox: AsyncSandbox, workdir: str = "/workspace"
+    ) -> tuple[bytes | None, str | None]:
+        """Tar up the task's project directory in the agent sandbox and download it. Returns (tar_bytes, error)."""
 
-        result = await sandbox.exec(_COLLECT_COMMAND, timeout_s=WORKSPACE_COLLECT_TIMEOUT_S)
+        result = await sandbox.exec(_collect_command(workdir), cwd="/", timeout_s=WORKSPACE_COLLECT_TIMEOUT_S)
         if result.return_code != 0:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
             return None, f"Workspace collection exited with code {result.return_code}: {details[-4000:]}"
@@ -1190,7 +1203,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         f"NL2RepoBench session image {agent_session.image!r} does not match verify image "
                         f"{current_task_image!r}"
                     )
-                collected, collect_error = await self._collect_workspace(agent_session.sandbox)
+                collected, collect_error = await self._collect_workspace(agent_session.sandbox, agent_session.workdir)
                 if collect_error is not None:
                     workspace_error = collect_error
                 else:
@@ -1227,7 +1240,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             verifier_error=workspace_error,
             test_case_count=task.test_case_count,
         )
-        if workspace_error is None:
+        if workspace_error is None and self.config.trace_only:
+            result = VerifierResult(evaluation_completed=False, reward=0.0, test_case_count=task.test_case_count)
+        elif workspace_error is None:
             try:
                 started = monotonic()
                 sandbox = await self._create_sandbox(task, phase="verifier")
@@ -1274,6 +1289,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 "workspace_collection_time_s": workspace_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
+                "graded": not self.config.trace_only,
             }
         )
 

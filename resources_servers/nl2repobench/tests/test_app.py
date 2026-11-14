@@ -443,3 +443,51 @@ async def test_default_protocol_still_zeroes_on_install_failure(task_assets: Pat
     assert result.verifier_error == "install command failed: pip install -e ."
     assert result.tests_passed == 0
     assert result.reward == 0.0
+
+
+async def test_trace_only_saves_the_workspace_and_grades_nothing(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    config = _config(task_assets).model_copy(update={"trace_only": True, "save_workspace_dir": tmp_path / "ws"})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    create = AsyncMock(side_effect=[agent_sandbox])  # a verifier sandbox would be a second call
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    monkeypatch.setattr(server, "_collect_workspace", AsyncMock(return_value=(b"tar-bytes", None)))
+    run_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s1"}
+
+    await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0 and response.evaluation_completed is False and response.verifier_error is None
+    assert response.model_dump()["graded"] is False
+    assert create.await_count == 1 and run_verifier.await_count == 0
+    assert (tmp_path / "ws" / "example-task" / "s1.tar.gz").read_bytes() == b"tar-bytes"
+
+
+async def test_task_workdir_is_where_the_agent_works(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    (task_assets / "example-task" / "workdir.txt").write_text("/workspace/example\n", encoding="utf-8")
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s1"}
+
+    response = await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+
+    assert response.workdir == "/workspace/example"
+    commands = [c.kwargs.get("command") or c.args[0] for c in sandbox.exec.await_args_list]
+    assert "mkdir -p /workspace/example" in commands
+    assert sandbox.upload.await_args.args[1] == "/workspace/example/start.md"
+    assert server._agent_sessions["s1"].workdir == "/workspace/example"
+    assert "-C /workspace/example ." in app_module._collect_command("/workspace/example")
+    assert app_module._collect_command("/workspace") == app_module._COLLECT_COMMAND

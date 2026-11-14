@@ -57,6 +57,13 @@ class Task:
         self.test_files = TestFiles.model_validate_json_flexible(
             (self.task_dir / "test_files.json").read_text(encoding="utf-8")
         )
+        # Optional workdir.txt: the project directory the agent works in (start.md goes there, the workspace is collected
+        # from there). Upstream's 104 have none and use /workspace; other task sets name their own, e.g.
+        # /workspace/<repo> in nl2repo-tasks (converted by nl2repo-runner's datagen/tracegen/convert.py).
+        workdir_file = self.task_dir / "workdir.txt"
+        self.workdir = workdir_file.read_text(encoding="utf-8").strip() if workdir_file.is_file() else "/workspace"
+        if not self.workdir.startswith("/workspace"):
+            raise ValueError(f"NL2RepoBench task {self.name!r}: workdir must be /workspace or under it, got {self.workdir!r}")
 
 
 def _parse_test_case_count(raw: str) -> int:
