@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from mmrl/render.py in NVIDIA's visual-coding RL research code. Candidate execution is remote-only.
+# Adapted from mmrl/render.py at revision b0d39e87f3a30391ae5aeaa02a08ff3cc539f9cc of NVIDIA's visual-coding RL
+# research code, an NVIDIA-internal repository with no public URL. NVIDIA releases this file under Apache-2.0.
+# Candidate execution is remote-only.
 """Run only INSIDE a disposable execution sandbox, never on the trainer host."""
 
 import os

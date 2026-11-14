@@ -111,7 +111,9 @@ licenses and access controls. Register the approved training and validation
 data separately.
 
 `renderer.py`, `extraction.py` and `contract.json` come from NVIDIA's
-visual-coding RL research code. `renderer.py` adapts `mmrl/render.py`.
+visual-coding RL research code at revision `b0d39e87f3a30391ae5aeaa02a08ff3cc539f9cc`.
+That repository is NVIDIA-internal and has no public URL.
+`renderer.py` adapts `mmrl/render.py`.
 `extraction.py` adapts `extract_answer` from `mmrl/artifacts.py`.
 `contract.json` keeps the judge instructions and rubrics from
 `mmrl/judge_contract.py` and the verdict schema from `mmrl/reward.py`. They have
