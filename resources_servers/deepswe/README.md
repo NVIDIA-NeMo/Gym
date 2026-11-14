@@ -58,9 +58,11 @@ Finally it calls verify and closes the resources session, which stops the agent 
 The agent sandbox has no internet access, so the pinned OpenCode runtime cannot be downloaded into it. Set
 `sandbox_executable_path` to an OpenCode 1.17.11 binary already inside the sandbox, for example on a read-only mount,
 and `sandbox_executable_sha256` to its digest; session setup refuses any other file.
-`benchmarks/nemotron_3.5_super/sandbox_utils.yaml` does this for its mounted copy. Pin ripgrep and OpenCode's plugin
-dependencies the same way (`sandbox_ripgrep_*`, `sandbox_plugin_dependencies_*`, see the `opencode_agent` README):
-without them OpenCode's `glob` and `grep` tools need an image that provides `rg`, and each start waits for a plugin
+`benchmarks/nemotron_3.5_super/sandbox_utils.yaml` does this for its mounted copy. The benchmark stages ripgrep
+itself: `prepare.py` downloads ripgrep 15.1.0 (x86_64 musl) and checks its digest, the resources server copies it into
+each agent sandbox (`agent_runtime_files`), and the agent pins that copy (`sandbox_ripgrep_*`), so OpenCode's `glob`
+and `grep` tools work without network. Pin OpenCode's plugin dependencies the same way
+(`sandbox_plugin_dependencies_*`, see the `opencode_agent` README): without them each start waits for a plugin
 install that cannot reach npm. Launch Gym with `+use_absolute_ip=true` when OpenSandbox needs a host-routable
 model-server address.
 

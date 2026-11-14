@@ -89,6 +89,8 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 # The task repository in every DeepSWE image; the agent works and commits here.
 AGENT_WORKDIR = "/app"
+# Where agent_runtime_files land in the agent sandbox, readable by every user.
+AGENT_RUNTIME_DIR = "/tmp/nemo-gym-deepswe"
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -118,6 +120,10 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: dict[str, Any]
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
+    # Host files copied into every agent sandbox under AGENT_RUNTIME_DIR by file name; relative paths are under the
+    # Gym root. benchmarks/deepswe/opencode.yaml stages OpenCode's ripgrep this way, since the agent sandbox has no
+    # network, and opencode_agent checks the copy against its pinned digest.
+    agent_runtime_files: list[Path] = Field(default_factory=list)
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -127,6 +133,15 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("agent_runtime_files")
+    @classmethod
+    def require_distinct_runtime_file_names(cls, paths: list[Path]) -> list[Path]:
+        """The files land in one directory, so their names must differ."""
+        names = [path.name for path in paths]
+        if len(set(names)) != len(names):
+            raise ValueError(f"agent_runtime_files must have distinct file names, got {names}")
+        return paths
 
     @field_validator("outcome_policy")
     @classmethod
@@ -290,6 +305,11 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         )
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
         self._episode_agent_sandboxes: dict[str, AgentSandboxSession] = {}
+        self._agent_runtime_files = [_resolve_repo_path(path) for path in self.config.agent_runtime_files]
+        if missing := [str(path) for path in self._agent_runtime_files if not path.is_file()]:
+            raise ValueError(
+                f"agent_runtime_files are missing: {missing}; for the benchmark, run `gym eval prepare --benchmark deepswe`"
+            )
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
@@ -387,9 +407,26 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                     f"DeepSWE agent git setup failed with code {setup_result.return_code}, "
                     f"error_type={setup_result.error_type!r}: {setup_result.stderr or ''}"
                 )
+            if self._agent_runtime_files:
+                await self._stage_agent_runtime_files(started)
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
+
+    async def _stage_agent_runtime_files(self, sandbox: AsyncSandbox) -> None:
+        """Copy agent_runtime_files into AGENT_RUNTIME_DIR, readable by every user."""
+        mkdir_result = await sandbox.exec(f"mkdir -p {AGENT_RUNTIME_DIR}", timeout_s=60)
+        if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
+            raise RuntimeError(f"DeepSWE could not create {AGENT_RUNTIME_DIR}: {mkdir_result.stderr or ''}")
+        targets = [f"{AGENT_RUNTIME_DIR}/{path.name}" for path in self._agent_runtime_files]
+        await asyncio.gather(
+            *(sandbox.upload(path, target) for path, target in zip(self._agent_runtime_files, targets))
+        )
+        mode_result = await sandbox.exec(
+            f"chmod 0755 {AGENT_RUNTIME_DIR} && chmod 0644 {' '.join(targets)}", timeout_s=60
+        )
+        if mode_result.return_code != 0 or mode_result.error_type is not None:
+            raise RuntimeError(f"DeepSWE could not stage agent_runtime_files: {mode_result.stderr or ''}")
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:

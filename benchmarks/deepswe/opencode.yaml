@@ -15,6 +15,10 @@ deepswe_opencode_resources_server:
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
+      # The agent sandbox has no network: stage the ripgrep that prepare.py downloads and checks, for OpenCode's
+      # grep and glob tools (pinned on the agent below).
+      agent_runtime_files:
+        - resources_servers/deepswe/data/cache/opencode-runtime/rg
 
 deepswe_opencode_agent:
   _inherit_from: opencode_agent
@@ -32,6 +36,9 @@ deepswe_opencode_agent:
       max_output_tokens: ${.context_window}
       # As before, OpenCode reads the task repository's AGENTS.md or CLAUDE.md.
       session_project_config: true
+      # ripgrep 15.1.0 (x86_64 musl), the build OpenCode 1.17.11 downloads, staged by the resources server above.
+      sandbox_ripgrep_path: /tmp/nemo-gym-deepswe/rg
+      sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2  # pragma: allowlist secret
       datasets:
         - name: deepswe_v1_1
           type: benchmark

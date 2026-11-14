@@ -1364,6 +1364,81 @@ async def test_failed_agent_git_setup_cannot_start_a_session(
     assert "|| true" not in sandbox.exec.await_args.args[0]
 
 
+async def test_agent_runtime_files_are_staged_readable_into_the_agent_sandbox(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_runtime_files = [ripgrep]
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    setup = sandbox.start_with_setup.await_args.args[1]
+    await setup(sandbox)
+    sandbox.upload.assert_awaited_once_with(ripgrep, "/tmp/nemo-gym-deepswe/rg")
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    assert commands[-1] == "chmod 0755 /tmp/nemo-gym-deepswe && chmod 0644 /tmp/nemo-gym-deepswe/rg"
+
+
+async def test_the_verifier_sandbox_gets_no_agent_runtime_files(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_runtime_files = [ripgrep]
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="verifier")
+    await sandbox.start_with_setup.await_args.args[1](sandbox)
+    sandbox.upload.assert_not_awaited()
+
+
+async def test_a_failed_runtime_file_staging_cannot_start_a_session(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_runtime_files = [ripgrep]
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    sandbox.exec.side_effect = [ok, ok, SimpleNamespace(return_code=1, error_type=None, stderr="read-only")]
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    with pytest.raises(RuntimeError, match="could not stage agent_runtime_files"):
+        await sandbox.start_with_setup.await_args.args[1](sandbox)
+
+
+def test_missing_agent_runtime_file_refuses_to_start_the_server(task_assets: Path, tmp_path: Path) -> None:
+    config = _config(task_assets, golden=False)
+    config.agent_runtime_files = [tmp_path / "rg"]
+    with pytest.raises(ValueError, match="gym eval prepare --benchmark deepswe"):
+        DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_agent_runtime_files_need_distinct_names(task_assets: Path, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="distinct file names"):
+        DeepSWEResourcesServerConfig(
+            **_config(task_assets).model_dump(exclude={"agent_runtime_files"}),
+            agent_runtime_files=[tmp_path / "a" / "rg", tmp_path / "b" / "rg"],
+        )
+
+
 @pytest.mark.parametrize("return_code,error_type", [(1, None), (0, "timeout")])
 async def test_failed_patch_capture_is_never_downloaded(
     task_assets: Path, return_code: int, error_type: str | None
