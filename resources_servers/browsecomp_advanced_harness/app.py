@@ -468,9 +468,42 @@ def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
     return n429, n_other
 
 
+# A 403 either refuses one request on content-safety grounds or rejects the account. Exa says which in the body's
+# `tag` (https://docs.exa.ai/reference/error-codes): PROHIBITED_CONTENT and CONTENT_FILTER_ERROR refuse one request,
+# while TEAM_BLOCKED and FEATURE_DISABLED reject the account. A body without a tag counts as a refusal only with Exa's
+# refusal wording ("Sorry, we've detected unsafe content and can't ..."); Tavily documents no refusal. A refusal must
+# fail only that tool call, and an account rejection must still abort the run.
+_CONTENT_REFUSAL_TAGS = frozenset({"PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"})
+_CONTENT_REFUSAL = re.compile(r"unsafe content", re.IGNORECASE)
+
+
+class SearchProviderRefusal(Exception):
+    """The search provider refused one request; the API key is fine."""
+
+
+def _is_content_refusal(body: str) -> bool:
+    """Whether a 403 body refuses one request rather than rejecting the account."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    tag = parsed.get("tag") if isinstance(parsed, dict) else None
+    if tag is not None:
+        return tag in _CONTENT_REFUSAL_TAGS
+    return _CONTENT_REFUSAL.search(body) is not None
+
+
+def _check_auth_failure(provider: str, status: int, body: str) -> None:
+    """A 401/403: raise SearchProviderRefusal for a content refusal, otherwise abort as a bad key."""
+    if status == 403 and _is_content_refusal(body):
+        print(f"[browsecomp][tool_fail][{provider}_refused] HTTP {status}: {body[:300]}", flush=True)
+        raise SearchProviderRefusal(f"{provider} refused this request: {body[:200]}")
+    _abort_on_invalid_api_key(provider, status, body)
+
+
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
-    """A 401/403 from the search provider means the API key is bad — every search in the
-    run would silently degrade, so kill the benchmark instead of producing a garbage score."""
+    """A 401, or a 403 that is not a content refusal, means the API key is bad: every search in
+    the run would silently degrade, so kill the benchmark instead of producing a garbage score."""
     print(
         f"[browsecomp][fatal][{provider}_invalid_api_key] HTTP {status}: search-provider API key "
         f"rejected — aborting benchmark. body={body[:300]}",
@@ -517,7 +550,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("tavily", response.status, (await response.content.read()).decode())
+                _check_auth_failure("tavily", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 # A rate limit does not spend an attempt, but only while the wait budget lasts.
@@ -598,7 +631,7 @@ class ExaAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("exa", response.status, (await response.content.read()).decode())
+                _check_auth_failure("exa", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
@@ -1567,6 +1600,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
+        except SearchProviderRefusal as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
+            print(f"[browsecomp][tool_fail][tavily_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
         except Exception as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(
@@ -1602,6 +1639,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         except BadRequestError as e:
             self._record_call(metrics, "search", "tavily", "error", call_start)
             print(f"[browsecomp][tool_fail][tavily_search_bad_request] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        except SearchProviderRefusal as e:
+            self._record_call(metrics, "search", "tavily", "error", call_start)
+            print(f"[browsecomp][tool_fail][tavily_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
 
