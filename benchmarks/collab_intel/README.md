@@ -17,9 +17,16 @@ safety corner, a faked result, a hard bargain, a compromised handoff, ...). 8 di
   `COLLAB_INTEL_JUDGE_MODEL`, both required). `judge_extra` defaults to DeepSeek's thinking-off flag: change it with
   the judge model. The upstream leaderboard uses Claude/GPT/Qwen3 partners and Claude judges, so scores here are not
   comparable to it.
-- Coding scenarios run pytest on model-written files in a local temp dir, unsandboxed: give the job a memory cap. The
-  harness gets only PATH, LANG, LC_ALL, TMPDIR, its own HARNESS_* settings and HOME set to the row's temp dir, never
-  the server's tokens or keys. Run it on a host with nothing else worth reading.
+- Coding scenarios run model-written code (pytest in the policy's workspace, a few checkers' probes). By default
+  (`code_execution: sandbox`) each phase gets one sandbox from Gym's sandbox providers (`sandbox_provider`: the name of
+  a provider config block such as `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`, or an inline
+  mapping; `sandbox_spec`: the image, which needs python, and `provider_options`). The sandbox must have no network: set
+  a deny-by-default policy in `sandbox_spec.provider_options` (OpenSandbox: `network_policy: {defaultAction: deny}`). A
+  probe when the sandbox starts (a connection to a public address on port 443) refuses one that can reach out, unless
+  `sandbox_spec.require_no_egress` is false; OpenSandbox's policy still lets port 53 through. A sandbox failure ends the episode as an
+  `agent_run_error`, never a run on the host. `code_execution: host` runs the code unsandboxed in a temp dir on the
+  agent's host, for trusted models only: give the job a memory cap. Either way the harness gets only PATH, LANG, LC_ALL,
+  TMPDIR, its own HARNESS_* settings and HOME set to the row's temp dir, never the server's tokens or keys.
 - Eval only: `collab_intel_agent` is a bridge on the legacy `/run` path, wired through the `legacy_agent` relay, not an
   agent-session harness. The rollout's `response.output` is empty. The policy turns live in `collab_intel.*.messages` and in
   `ng_trajectory`, one invocation per phase. `ng_trajectory` is written only with `++rollout_correlation=true`.

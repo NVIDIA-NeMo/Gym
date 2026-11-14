@@ -35,16 +35,23 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from anyio import CancelScope
 from fastapi import FastAPI, Request, Response
-from pydantic import ConfigDict
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, get_server_url, raise_for_status, rollout_path_prefix
-from nemo_gym.config import ROLLOUT_PATH_PREFIX, TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import (
+    ROLLOUT_PATH_PREFIX,
+    TASK_INDEX_KEY_NAME,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_global_config_dict,
+)
 from nemo_gym.core import (
     AGENT_RUN_ERROR,
     AGENT_TIMEOUT,
@@ -52,10 +59,12 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     current_rollout_id,
 )
+from nemo_gym.sandbox import SandboxResources, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.collab_intel.task_data import TaskData
+from responses_api_agents.collab_intel_agent.boxed_exec import BoxedExec, SandboxExecError
 
 
 PARTNERS = ["ci-partner-1", "ci-partner-2", "ci-partner-3"]
@@ -65,6 +74,8 @@ POLICY = "ci-policy"
 THINK = re.compile(r"^\s*<think>(.*?)(?:</think>\s*|\Z)", re.S)
 # the only parts of the server's environment the harness gets: no tokens or keys reach model-written code
 ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "TMPDIR")
+# the harness entry point that sends the policy's code to the sandbox (code_execution: sandbox)
+BOXED_CLI = Path(__file__).resolve().parent / "boxed_cli.py"
 
 
 KEY_METRICS = (
@@ -93,6 +104,25 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+class SandboxSpecConfig(BaseModel):
+    """The SandboxSpec of the sandbox that runs the policy's code, one per phase. The image needs python on its PATH:
+    pytest and its pure-python dependencies come from the harness venv. The sandbox must not be able to open
+    connections to other hosts, which is checked when it starts (set the policy in provider_options for a provider that
+    takes one). require_no_egress: false runs the code in a sandbox that can, which is an operator's decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str = "python:3.12-slim"
+    workdir: str = "/tmp"
+    ready_timeout_s: float | None = 600.0
+    ttl_s: float | None = 10800.0
+    resources: dict[str, Any] = Field(default_factory=lambda: {"cpu": 1, "memory_mib": 2048})
+    env: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+    require_no_egress: bool = True
+
+
 class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     resources_server: ResourcesServerRef
@@ -104,6 +134,12 @@ class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
     policy_extra: dict[str, Any] = {}
     max_concurrent: int = 16
     episode_timeout_s: int = 7200
+    # where the policy's code runs in the coding scenarios (pytest in its workspace, a few checkers' probes): "sandbox",
+    # one sandbox per phase through Gym's sandbox providers, or "host", a subprocess of the harness on this machine,
+    # which is only for trusted models
+    code_execution: Literal["sandbox", "host"] = "sandbox"
+    sandbox_provider: str | dict[str, Any] = "sandbox"
+    sandbox_spec: SandboxSpecConfig = Field(default_factory=SandboxSpecConfig)
 
 
 class CollabIntelRunRequest(BaseRunRequest, TaskData):
@@ -135,6 +171,26 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
         # response ids the policy route saw, per running phase (the key is in the phase's policy URL)
         self._response_ids: dict[str, list[str]] = {}
+        self._boxes = self._start_boxes() if self.config.code_execution == "sandbox" else None
+
+    def _start_boxes(self) -> BoxedExec:
+        cfg, provider = self.config.sandbox_spec, self.config.sandbox_provider
+        named = get_global_config_dict() if isinstance(provider, str) else None
+        spec = SandboxSpec(
+            image=cfg.image,
+            ttl_s=cfg.ttl_s,
+            ready_timeout_s=cfg.ready_timeout_s,
+            workdir=cfg.workdir,
+            env=dict(cfg.env),
+            metadata={
+                **resolve_provider_metadata(provider, named),
+                **cfg.metadata,
+                "nemo_gym_server": (self.config.name or "collab_intel_agent")[:63],
+            },
+            resources=SandboxResources.from_mapping(cfg.resources),
+            provider_options=dict(cfg.provider_options),
+        )
+        return BoxedExec(resolve_provider_config(provider, named), spec, require_no_egress=cfg.require_no_egress)
 
     def _env(self, home: Path, phase_key: str) -> dict[str, str]:
         seat = {
@@ -156,7 +212,7 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         }
         compat = {POLICY: policy, **{name: seat for name in PARTNERS + JUDGES}}
         judge, second, tiebreak = JUDGES
-        return {k: os.environ[k] for k in ENV_ALLOWLIST if k in os.environ} | {
+        env = {k: os.environ[k] for k in ENV_ALLOWLIST if k in os.environ} | {
             "HOME": str(home),
             "CI_GYM_KEY": "dummy",
             "HARNESS_OPENAI_COMPAT": json.dumps(compat),
@@ -167,14 +223,19 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             "HARNESS_PRICES": json.dumps({n: [0, 0] for n in compat}),
             "HARNESS_USAGE_LOG": str(self._tmp / "usage.jsonl"),
         }
+        if self._boxes is not None:  # where boxed_cli.py sends the policy's code
+            exec_url = get_server_url(self.config.name).rstrip("/") + rollout_path_prefix(current_rollout_id())
+            env["CI_EXEC_URL"] = exec_url + f"/ci_exec/{phase_key}/run"
+        return env
 
     async def _run(self, path: Path, version: str, seed: int, out: Path, phase_key: str = "") -> dict[str, Any]:
         """One upstream episode (collab_intel.harness.cli): returns its pass and outcome from the saved transcript, or
         pass false with a failure_kind and failure_reason when it did not finish."""
+        # in sandbox mode the harness starts through boxed_cli.py, which sends the policy's code to the sandbox
+        entry = [str(BOXED_CLI)] if self._boxes is not None else ["-m", "collab_intel.harness.cli"]
         cmd = [
             self._python,
-            "-m",
-            "collab_intel.harness.cli",
+            *entry,
             str(path),
             "--version",
             version,
@@ -238,6 +299,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/ci_policy/{{phase_key}}/v1/chat/completions")(
             self.policy_chat
         )
+        app.post("/ci_exec/{phase_key}/run")(self.exec_in_sandbox)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/ci_exec/{{phase_key}}/run")(self.exec_in_sandbox)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -247,6 +310,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
                     yield state
                 finally:
                     shutil.rmtree(self._tmp, ignore_errors=True)
+                    if self._boxes is not None:
+                        await self._boxes.close()
 
         app.router.lifespan_context = lifespan
         return app
@@ -273,6 +338,16 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             ids.append(out["id"])
         return out
 
+    async def exec_in_sandbox(self, request: Request) -> Any:
+        """One python command of a harness phase (boxed_cli.py), run in that phase's sandbox. A failure of the sandbox is
+        a 502 the harness turns into a failed episode, never a run on this host."""
+        if self._boxes is None:
+            return JSONResponse({"error": "code_execution is host"}, status_code=404)
+        try:
+            return await self._boxes.run(request.path_params["phase_key"], await request.json())
+        except SandboxExecError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=502)
+
     async def _phase(self, path: Path, version: str, seed: int, out: Path) -> dict[str, Any]:
         """_run plus what the trajectory needs: the start time and the policy response ids of this phase."""
         key, started = uuid4().hex, time.time()
@@ -281,6 +356,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             result = await self._run(path, version, seed, out, key)
         finally:
             ids = self._response_ids.pop(key)
+            if self._boxes is not None:
+                await self._boxes.release(key)
         return {"version": version, "started": started, "response_ids": ids, "result": result}
 
     def _trajectory(self, body: CollabIntelRunRequest, phases: list[dict[str, Any]]) -> TrajectoryRecord | None:
