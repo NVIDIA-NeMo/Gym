@@ -96,7 +96,6 @@ NeMo Gym is designed to run on standard development machines:
 
 - **API Keys**: OpenAI API key with available credits (for the quickstart examples)
   - Other model providers supported (Azure OpenAI, self-hosted models via vLLM)
-- **Ray**: Automatically installed as a dependency (no separate setup required)
 
 ## 🚀 Quick Start
 

@@ -1,0 +1,87 @@
+---
+title: "Scale CPU-Heavy Work with Ray"
+description: "Opt a server into Ray to spread CPU-intensive work across nodes, and set up Ray where Gym runs."
+position: 3.5
+---
+
+# Scale CPU-Heavy Work with Ray
+
+Ray is optional in NeMo Gym. A server that spreads CPU-intensive work across nodes can opt into Ray, and NeMo Gym then starts or joins a Ray cluster for it. Servers don't use Ray to talk to each other: they communicate over HTTP whether or not Ray is running.
+
+Check the other options first. If the work needs isolation or its own runtime, such as running generated code, use the [Sandbox API](/infrastructure/sandbox): remote sandbox providers run that work on their own machines, off the server's host. If the work runs a model, such as a judge or reward model, call a [model server](/model-server) instead of loading the model in the server. See [Distributing Heavy Work](/about/architecture#distributing-heavy-work) for how these options compare.
+
+## Upgrade from 0.7.0 or Earlier
+
+If your own server calls Ray, declare `ray_enabled = True` on its server class and add the `ray` extra to its dependencies. Without the declaration, Ray calls fail with "Ray has not been started yet". `pip install nemo-gym` no longer installs Ray; use `pip install "nemo-gym[ray]"`.
+
+## Ray Setup in NeMo Gym
+
+### Automatic Initialization
+NeMo Gym starts or joins a Ray cluster only when a configured server needs it:
+
+```bash
+gym env start --config $config_paths
+```
+
+Ray is involved in two places:
+1. **Main process** (`RunHelper.start()` in `nemo_gym/server_runtime/supervisor/server_supervisor.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`. Otherwise no Ray cluster is created.
+2. **Server process** (`SimpleServer.run_webserver()` in `nemo_gym/server_runtime/base_server.py`, with the Ray helpers in `nemo_gym/server_runtime/ray_support.py`): each server process, including Uvicorn managers and workers, connects only when its implementation declares `ray_enabled = True`.
+
+`ray_enabled` defaults to `False`. Server implementations that use Ray declare it as a class attribute:
+```python
+class MyResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
+```
+
+Declare `ray_enabled = True` on the class your entrypoint calls `run_webserver()` on, even if a parent class already declares it. Gym reads only that class's own source before launching servers, and a server whose `ray_enabled` resolves to `True` only through inheritance fails at startup with an error asking you to declare it.
+
+Gym launches servers that don't declare `ray_enabled = True` with `RAY_ENABLE_AUTO_CONNECT=0`. If such a server calls Ray anyway, the call fails with "Ray has not been started yet" instead of starting a private Ray cluster in each server process. Declare `ray_enabled = True` to fix it.
+
+### Installing Ray
+Servers that use Ray need Ray installed both where `gym` runs and in their own environment. Install it with the `ray` extra:
+
+```bash
+pip install "nemo-gym[ray]"
+```
+
+A server that declares `ray_enabled = True` requests the extra in its own dependency file, for example `nemo-gym[dev,ray]` in its `pyproject.toml`, so its environment gets Ray. Gym pins the server's Ray to the exact version installed where `gym` runs.
+
+If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. A plain `pip install nemo-gym` doesn't include Ray.
+
+### Ray Configuration
+You can also specify a custom Ray cluster address in your config:
+```yaml
+ray_head_node_address: "ray://your-cluster-address:10001"
+```
+Training frameworks like [Nemo-RL](https://github.com/NVIDIA-NeMo/RL) will configure the Ray head node address, allowing remote tasks to run across all nodes in the cluster.
+
+If no address is specified and a configured server needs Ray, NeMo Gym starts a local Ray cluster and stores the address in the global config. Only servers that need Ray connect to it.
+
+## Using Ray for CPU-Intensive Tasks
+
+Here's how to parallelize CPU-intensive functions using Ray's `@ray.remote` decorator. Refer to [Ray documentation](https://docs.ray.io/en/latest/ray-core/api/doc/ray.remote.html) for more options.
+
+```python
+import asyncio
+
+import ray
+
+# Decorate your CPU-intensive function
+# Spread tasks across different nodes for better parallelization
+@ray.remote(scheduling_strategy="SPREAD")
+def cpu_intensive_task(data):
+    # Your expensive computation here
+    result = expensive_computation(data)
+    return result
+
+# Use it in your async server code
+async def process_data_parallel(data_list):
+    # Submit all tasks to Ray
+    futures = [cpu_intensive_task.remote(data) for data in data_list]
+
+    # Ray futures are awaitable, so waiting on them doesn't block the event loop
+    results = await asyncio.gather(*futures)
+    return results
+```
+
+Don't call `ray.get()` in async server code: it blocks the event loop, and every other request the server is handling waits until it returns.
