@@ -88,6 +88,31 @@ class RecordingExporter(BaseExporter):
         self.rollouts.append(rollouts)
 
 
+@pytest.mark.parametrize("reopened", [False, True])
+def test_exported_config_omits_runtime_roots_without_changing_worker_config(reopened: bool) -> None:
+    config = OmegaConf.create(
+        {
+            "_input_read_roots": ["/controller-source", "/installed-source"],
+            "agent": {"datasets": [{"jsonl_fpath": "data/tasks.jsonl"}]},
+            "task": {"_input_read_roots": ["task-owned value"]},
+        }
+    )
+    exporter = RecordingExporter(config)
+    exporter.reopened = reopened
+    exporter.export_config()
+    if reopened:
+        assert exporter.configs == []
+        exporter.export_metrics({})
+
+    assert len(exporter.configs) == 1
+    logged = OmegaConf.to_container(exporter.configs[0], resolve=False)
+    assert logged == {
+        "agent": {"datasets": [{"jsonl_fpath": "data/tasks.jsonl"}]},
+        "task": {"_input_read_roots": ["task-owned value"]},
+    }
+    assert list(config["_input_read_roots"]) == ["/controller-source", "/installed-source"]
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry() -> Any:
     teardown_exporters()

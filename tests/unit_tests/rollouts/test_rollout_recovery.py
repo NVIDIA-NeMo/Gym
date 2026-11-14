@@ -25,7 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 
 import nemo_gym.rollouts.rollout_collection as collection
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.config_types import INPUT_READ_ROOTS_KEY_NAME, ConfigError
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
@@ -2610,3 +2610,32 @@ async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_n
     assert len(calls) == 1
     assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
     assert outcome.exception_type == "ServerDisconnectedError"
+
+
+@pytest.mark.parametrize("declaration", ["literal", "list-reference", "item-reference"])
+def test_resume_identity_ignores_controller_roots_without_changing_dataset_semantics(
+    saved_manifest, declaration: str
+) -> None:
+    source, rows, _, config, _, _, _ = saved_manifest
+    dataset = {"name": "tasks", "type": "example", "jsonl_fpath": "data/tasks.jsonl", "num_repeats": 1}
+    settings = {"datasets": [dataset], "tools": [{"name": "tool", INPUT_READ_ROOTS_KEY_NAME: "task-owned"}]}
+    servers = {"resource": {"resources_servers": {"example": settings}}}
+    if declaration == "list-reference":
+        servers["shared_datasets"] = [dataset]
+        settings["datasets"] = "${shared_datasets}"
+    elif declaration == "item-reference":
+        servers["shared_dataset"] = dataset
+        settings["datasets"] = ["${shared_dataset}"]
+    before = RunManifest.create(source, rows, config, servers).config_digest
+    servers[INPUT_READ_ROOTS_KEY_NAME] = ["/controller", "/install"]
+    assert RunManifest.create(source, rows, config, servers).config_digest == before
+    servers[INPUT_READ_ROOTS_KEY_NAME] = ["/another-host"]
+    assert RunManifest.create(source, rows, config, servers).config_digest == before
+    dataset["jsonl_fpath"] = "data/another-dataset.jsonl"
+    assert RunManifest.create(source, rows, config, servers).config_digest != before
+    dataset["jsonl_fpath"] = "data/tasks.jsonl"
+    dataset["num_repeats"] = 2
+    assert RunManifest.create(source, rows, config, servers).config_digest != before
+    dataset["num_repeats"] = 1
+    settings["tools"][0][INPUT_READ_ROOTS_KEY_NAME] = "changed task-owned value"
+    assert RunManifest.create(source, rows, config, servers).config_digest != before

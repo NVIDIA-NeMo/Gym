@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.artifacts.exporters import setup_exporters
 from nemo_gym.config.config_types import (
+    INPUT_READ_ROOTS_KEY_NAME,
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
@@ -166,6 +167,7 @@ ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
 # When unset, Gym generates a legacy_agent relay for the agent and logs a deprecation warning.
 ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
+    INPUT_READ_ROOTS_KEY_NAME,
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
     DEFAULT_HOST_KEY_NAME,
@@ -1934,6 +1936,11 @@ Set the keys individually, in a config or as overrides, e.g.:
             # trees don't relocate safely once built, and the key is independently
             # overridable for deployments that want them elsewhere.
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
+
+        # Capture only read origins: dataset paths stay lazy and authored declarations stay untouched.
+        # Workers reload this config directly, retaining controller precedence after cwd/import changes.
+        with open_dict(global_config_dict):
+            global_config_dict[INPUT_READ_ROOTS_KEY_NAME] = [str(root.absolute()) for root in component_search_roots()]
 
         if parse_config.hide_secrets:  # pragma: no cover
             recursively_hide_secrets(global_config_dict)

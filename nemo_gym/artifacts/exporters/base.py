@@ -28,7 +28,12 @@ from pydantic import TypeAdapter, ValidationError
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
 from nemo_gym.artifacts.run_artifacts import RunArtifacts, accepted_stage_omission
-from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
+from nemo_gym.config.config_types import (
+    DEPRECATED_UPLOAD_ROLLOUTS_KEY,
+    INPUT_READ_ROOTS_KEY_NAME,
+    RunExportConfig,
+    UploadRolloutsConfigMixin,
+)
 from nemo_gym.config.secret_utils import hide_secrets_in_container
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
@@ -276,9 +281,10 @@ class BaseExporter(Exporter):
     def export_config(self) -> None:
         # `global_config_dict` holds live credentials (the backend needs its own API key to connect),
         # so mask a copy rather than shipping it to a tracking server as-is.
-        config_dict_to_log = OmegaConf.create(
-            hide_secrets_in_container(OmegaConf.to_container(self.global_config_dict, resolve=False))
-        )
+        container = OmegaConf.to_container(self.global_config_dict, resolve=False)
+        # Match the saved config artifact; read-origin metadata is only for running workers.
+        container.pop(INPUT_READ_ROOTS_KEY_NAME, None)
+        config_dict_to_log = OmegaConf.create(hide_secrets_in_container(container))
         if self.reopened:
             # Collection may still find nothing to resume and start the output over (`start_over`): the earlier
             # job's run must not get this job's config then.

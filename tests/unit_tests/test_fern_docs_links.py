@@ -252,7 +252,14 @@ class TestFernDocsLinks(unittest.TestCase):
                 canonical_links += line.count("/tutorials/evaluation-tutorials")
 
         self.assertEqual([], broken_links)
-        self.assertEqual(21, canonical_links)
+        self.assertEqual(23, canonical_links)
+        index = read("fern/versions/latest/pages/evaluation-tutorials/index.mdx")
+        self.assertIn('<Card title="Evaluate MCP-Atlas" href="/main/tutorials/evaluation-tutorials/mcp-atlas">', index)
+        self.assertIn(
+            '<Card title="Evaluate Visual Coding with OpenCode" '
+            'href="/tutorials/evaluation-tutorials/visual-coding-opencode">',
+            index,
+        )
 
     def test_main_training_tutorial_links_include_the_tutorials_section(self):
         """`training-tutorials` sits under the same `section: Tutorials` as `evaluation-tutorials`.

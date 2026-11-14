@@ -39,6 +39,38 @@ one, looking helpers up on `ether0.rewards` at call time, and comment formatting
 functions of the same name. The ether0 package itself is not vendored: `setup_ether0.py` clones
 it into an ignored local directory at runtime.
 
+## MCP-Atlas
+
+The MCP-Atlas integration adapts material from
+[scaleapi/mcp-atlas](https://github.com/scaleapi/mcp-atlas/tree/5c11ac44e96d31b91b92a0affad5f2648255907a),
+revision `5c11ac44e96d31b91b92a0affad5f2648255907a`:
+
+| Upstream file | Gym file | Adapted material |
+|---|---|---|
+| `services/scoring/score_claims.py` | `benchmarks/mcp_atlas/prepare.py` | Claim normalization and extraction rules. |
+| `services/scoring/score_claims.py` | `resources_servers/mcp_atlas/verifier.py` | Claim prompt, structured verdict schema, response truncation and coverage rules. |
+| `services/agent-environment/src/agent_environment/mcp_server_template.json` | `resources_servers/mcp_atlas/credentials.py` | Server-to-credential variable-name registry. |
+
+The upstream material is MIT licensed, Copyright (c) 2026 Scale. The full upstream permission and warranty
+notice is retained in all three affected files. NVIDIA modifications are licensed under Apache-2.0: NeMo Gym
+dataset download, row preparation, catalog validation, response extraction, judge requests, verdict validation,
+credential validation, task scoping and dataset preflight.
+
+The dataset and example rows originate from
+[ScaleAI/MCP-Atlas](https://huggingface.co/datasets/ScaleAI/MCP-Atlas/tree/8c563b55d7c967755f474299848049834d624617),
+revision `8c563b55d7c967755f474299848049834d624617`, by Scale AI, under
+[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). NeMo Gym reformats the rows, normalizes claims,
+and selects the image-supported tool schemas. The external `ghcr.io/scaleapi/mcp-atlas:1.2.7` runtime image
+is not vendored; `resources_servers/mcp_atlas/tool_catalog.json` contains its exported MCP tool schemas.
+Its 5 `slack_*` schemas are copied from the upstream list-tools export
+(https://gist.githubusercontent.com/geobio/d0272d41ea395376233f1617a3988860/raw/4444343be47c0874fd19631b20caf2738b0168a4/list-tools.json,
+Gist revision `3c562bd9468516a1d80dfadfc8a4dc1e24ed967a`). They are the tool definitions of
+[korotovsky/slack-mcp-server](https://github.com/korotovsky/slack-mcp-server/tree/21eaf72a3be33e7f3fd44c61a07645bedc376ff4)
+`1.1.23` (revision `21eaf72a3be33e7f3fd44c61a07645bedc376ff4`), MIT licensed, Copyright (c) 2025 Dmitrii
+Korotovskii. The catalog header retains the exact source revision and full
+[MIT notice](https://github.com/korotovsky/slack-mcp-server/blob/21eaf72a3be33e7f3fd44c61a07645bedc376ff4/LICENSE);
+these static schemas do not establish authenticated runtime access.
+
 ## Python Package Dependencies
 
 | Component | Version | License | URL |

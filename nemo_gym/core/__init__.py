@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         EpisodeId,
         MaterializedTask,
         TaskId,
+        is_materialized_task_row,
     )
     from nemo_gym.core.failure_kinds import (
         AGENT_INVALID_OUTPUT,
@@ -296,6 +297,7 @@ _PUBLIC_API = {
     "current_verifier_invocation_id": "episode_context",
     "encode_model_sampling": "model_call_sampling",
     "failure_report_for": "typed_exceptions",
+    "is_materialized_task_row": "episode_types",
     "is_namespaced": "failure_kinds",
     "is_registered": "failure_kinds",
     "maybe_rollout_id_from_run_body": "episode_context",

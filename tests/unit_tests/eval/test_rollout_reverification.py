@@ -78,6 +78,7 @@ from nemo_gym.rollouts.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERM
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
+from tests.helpers.reverification import build_reverification_payload
 
 
 _TOOL_TRAJECTORY_SHA256 = (
@@ -800,6 +801,31 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    @pytest.mark.parametrize("errors", [[], ["service_error: HTTP 429"]])
+    def test_preserves_original_mcp_environment_without_reusing_its_grade(self, errors: list[str]) -> None:
+        pair = InputRolloutPair(
+            input={
+                "task_id": {"taskset": "mcp_atlas", "task_id": "a"},
+                "task_input": {"verifier_metadata": {"task_id": "a", "claims": ["A claim"]}},
+            },
+            rollout={
+                "response": {"output": []},
+                "service_errors": errors,
+                "tool_calls": 1,
+                "reward": 0.0,
+                "coverage": 0.0,
+                "mask_sample": True,
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
+            },
+        )
+
+        assert build_reverification_payload(input_row=pair.input, saved_row=pair.rollout) == {
+            "verifier_metadata": {"task_id": "a", "claims": ["A claim"]},
+            "response": {"output": []},
+            "service_errors": errors,
+            "tool_calls": 1,
+        }
+
     @pytest.mark.parametrize("forward", [None, False, True])
     def test_saved_agent_evidence_requires_explicit_opt_in(self, forward):
         evidence = {"schema_version": "2.0", "source": "opencode", "records": []}

@@ -1,0 +1,219 @@
+---
+title: "Evaluate MCP-Atlas"
+description: "Prepare MCP-Atlas tasks, configure service accounts and inspect claim-coverage results."
+---
+
+# Evaluate MCP-Atlas
+
+MCP-Atlas evaluates multi-step tool use against real MCP services. The NeMo Gym integration targets
+the 500 public tasks from [ScaleAI/MCP-Atlas](https://huggingface.co/datasets/ScaleAI/MCP-Atlas/tree/8c563b55d7c967755f474299848049834d624617),
+at revision `8c563b55d7c967755f474299848049834d624617`, with the upstream
+`ghcr.io/scaleapi/mcp-atlas:1.2.7` agent-environment image.
+
+<Warning>
+This integration is pending runtime validation. The catalog includes the five Slack definitions recovered
+from the upstream export and matched to the pinned package, and preparation covers all 500 tasks.
+An authenticated listing, account scopes and seeded workspace still require validation. The OpenSandbox
+exec transport and network policy also require deployment validation: evaluated code must be unable to
+reach other rollouts or the NeMo Gym control plane before benchmark scoring. Unit tests and a policy
+request do not establish that boundary.
+</Warning>
+
+## Prepare the runtime and accounts
+
+Complete [installation](/main/get-started/installation) and configure a policy endpoint that supports
+function calls. The benchmark includes the shared OpenSandbox provider config and references its named
+`sandbox` block. Configure approved host-side `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` through normal
+secret configuration, and use the OCI image `ghcr.io/scaleapi/mcp-atlas:1.2.7` or its approved deployment
+rewrite. Follow the [resources-server setup](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#setup)
+to validate image architecture, user permissions and filesystem access on the deployment.
+
+Supply an operator-reviewed YAML overlay that sets `mcp_atlas_sandbox_options.network_policy` with
+explicit `defaultAction: deny`. The server rejects fields the installed OpenSandbox SDK drops or changes,
+including unsupported port restrictions. Allow only the task-service and bootstrap endpoints actually
+needed on the deployment; cached tools may start without package downloads. The deployed boundary must
+protect peer, host, provider and NeMo Gym destinations.
+Verify IP-level enforcement, IPv6 handling and policy-management protection from evaluated code; DNS-only
+filtering is insufficient. Run simultaneous A/B private-marker tests with trusted host-proxy positive
+controls under the same deployment and policy before scoring. No service allowlist is invented here.
+
+Provision the service credentials in the runtime environment using the upstream variable names listed in
+[`SERVICE_ENV_NAMES`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/credentials.py).
+Airtable, Google Calendar, Notion, MongoDB and Slack also require accounts populated with the upstream
+`data_exports/` fixtures. Use approved secret configuration; do not put credential values in commands or commits.
+Each sandbox receives only known service credentials for its enabled servers, including filtering known
+credential names supplied through `sandbox_env`. Startup preflight reads available datasets declared by
+this resources server or agents using it, including materialized task inputs and canonical `task_data`
+rows. Relative JSONL paths follow the controller's search root order captured before worker launch,
+including configured `--search-dir` roots. The resolved files must be readable on the resources server host.
+A resolution failure gives guidance to supply an absolute `jsonl_fpath` or an appropriate `--search-dir`.
+Missing required credentials fail startup. Inputs awaiting a declared preparation script are checked
+before each sandbox allocation; missing credentials, unknown
+server names or an empty server list reject the seed with HTTP 422. Recognized authentication failures in
+health or tool listing reject configuration after sandbox cleanup instead of becoming masked startup
+failures.
+Credential presence does not validate scopes, seeded accounts or quotas. Keep model, judge and provider
+credentials host-side rather than adding them to the task's `sandbox_env`.
+
+The default `sandbox_files: null` selects provider-specific package configuration with the existing
+July 17, 2026 resolution cutoff. OpenSandbox keeps the image's private uv and npm cache locations;
+Apptainer development uses writable `/tmp/uv-cache` and `/tmp/npm-cache`. A supplied `sandbox_files`
+mapping replaces these defaults, including an empty mapping. The required OpenSandbox HTTP helper
+is still staged.
+
+Validate the committed Slack schemas against an authenticated image export using
+[`export_tool_catalog.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/export_tool_catalog.py).
+The exporter combines saved `/list-tools` responses. Preserve every supported tool requested by the tasks;
+do not remove Slack tasks or replace their schemas with guesses.
+
+## Prepare all 500 tasks
+
+Run from the repository root:
+
+```bash
+gym eval prepare --benchmark mcp_atlas
+```
+
+Preparation downloads the pinned public Parquet file and writes
+`benchmarks/mcp_atlas/data/mcp_atlas_benchmark.jsonl`. It requires 500 rows and refuses requested tools
+missing from an image-supported server's catalog. Tools belonging to servers the image does not ship
+are recorded in `verifier_metadata.dropped_tools`, following the upstream integration.
+
+The pinned dataset has one tool-version mismatch: task `6887c6d4614f06dc73af2411` requests
+`clinicaltrialsgov-mcp-server_clinicaltrials_search_studies`. The upstream configuration pins
+`clinicaltrialsgov-mcp-server@1.0.8`, which does not register that name. NeMo Gym keeps this task and records it in
+`dropped_tools`, without inventing an alias or upgrading the server. This exception matches only that
+task/tool pair; every other missing tool of a supported server still fails preparation. The
+[pinned package source](https://github.com/cyanheads/clinicaltrialsgov-mcp-server/blob/abd96801b84eaea0b7e1db952d434a393730a5c5/src/mcp-server/server.ts)
+is Apache-2.0 licensed. The
+[pinned Atlas harness](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/services/agent-harness/src/mcp-agent/helpers/mcp-client/sandbox-client.ts#L107-L115),
+licensed under MIT, likewise offers only tools actually listed by the image. This handling is implemented
+independently; no package code or replacement schema is copied.
+
+## Configure and collect
+
+These keys control the benchmark's runtime:
+
+| Key | Purpose |
+|---|---|
+| `mcp_atlas_sandbox_image` | OCI image reference for OpenSandbox. |
+| `mcp_atlas_sandbox_provider` | Named or inline provider configuration; defaults to `sandbox`. |
+| `mcp_atlas_sandbox_options` | Provider create options, including the reviewed network policy. |
+| `mcp_atlas.resources_servers.mcp_atlas.sandbox_max_concurrency` | Maximum simultaneous task sandboxes. |
+| `mcp_atlas_judge_base_url` | OpenAI-compatible judge endpoint. |
+| `mcp_atlas_judge_model_name` | Exact judge model name served by that endpoint. |
+| `mcp_atlas_judge_api_key` | Judge credential; resolve it from the runtime environment. |
+
+The defaults select Gemini 3.1 Pro (`gemini-3.1-pro-preview`) on Google's OpenAI-compatible endpoint.
+Changing the judge, sampling or task set changes the comparison protocol. The
+[`benchmark config`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/mcp_atlas/config.yaml)
+selects the Simple Agent, its resources server and one repeat per task.
+
+Once the credential, catalog and network prerequisites are satisfied, the benchmark command starts
+the resources, agent and model-wrapper servers, collects responses and verifies final answers:
+
+```bash
+gym eval run --benchmark mcp_atlas \
+  --config /absolute/path/mcp-atlas-network.yaml \
+  --model-type vllm_model --model-url http://POLICY_HOST:8000/v1 --model POLICY_MODEL \
+  --output results/mcp_atlas/rollouts.jsonl \
+  ++mcp_atlas_sandbox_image=ghcr.io/scaleapi/mcp-atlas:1.2.7 \
+  ++mcp_atlas_judge_api_key='${oc.env:MCP_ATLAS_JUDGE_API_KEY}'
+```
+
+Set `MCP_ATLAS_JUDGE_API_KEY` through approved secret configuration before starting the command. Use
+`--limit 3` for a small smoke; a limited run is not the 500-task benchmark. The development-only
+`mcp_atlas_sandbox_url` connects every task to one shared environment. This and the explicit
+Apptainer development config require `mcp_atlas_development_mode: true` (or the equivalent resources-server
+field) and must not be used for scores. The resources-server README documents the local SIF development
+path. Custom Apptainer providers must specify `--cleanenv`/`-e` or `--containall`/`-C` for both instance-start
+and exec. Externally inherited `APPTAINERENV_`/`SINGULARITYENV_` variables are rejected; unset them.
+Raw `--env`/`--env-file` extra arguments are also rejected on both paths. Set workload values through
+`sandbox_env` so task credential scoping applies; the provider's internal environment file generated from
+`SandboxSpec.env` is retained. These guards do not establish deployment isolation.
+
+Tool calls within one rollout run serially under its session lock. Verification and close wait for the
+active call. `tool_call_timeout_s` is a fresh per-call bridge/provider budget (1860 s by default);
+cancellation cleanup can add delay, and the sandbox's remaining TTL can expire earlier. Different
+rollouts can run concurrently.
+The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/run_eval.py#L344-L345)
+uses a default 1800 s per-task request deadline and records timeout as an `ERROR` response. This resources
+server sets no per-task wall-clock deadline. The bridge default gives a response that task budget plus
+60 s of transport headroom; it is not a limit enforced on every tool's program. The bridge timeout and
+sandbox TTL do not reproduce the upstream task deadline. Real program deadlines and model-caused
+environment destruction still need runtime qualification before scores are accepted.
+
+## Inspect results and failures
+
+The verifier judges each ground-truth claim against the final assistant answer. A fulfilled claim scores
+1, a partial claim 0.5 and an unfulfilled claim 0. Coverage is the mean claim score rounded to three places.
+`reward` is 1 when coverage reaches 0.75. Thus `mean/reward` is pass rate, while `mean/coverage` measures
+claim coverage; neither is a percentage unless multiplied by 100 for display.
+
+Read the saved trajectories, `verdicts`, `coverage`, `reward`, `tool_calls` and `service_errors` alongside
+the [rollout-health artifacts](/main/evaluation/rollout-health). Environment or judge failures are masked
+separately from model failures. An execution-deadline error actually returned by an MCP tool for
+model-written code is scored. Returned errors from local program, command, file and state tools also
+remain model observations even when their text says `Client failed to connect` or `session was closed`.
+An actual bridge/provider transport timeout is an infrastructure failure.
+The order of a program tool call followed by transport loss does not establish that the program caused
+the loss: provider failure, sandbox TTL expiry and a terminated bridge can report the same error.
+Keep such unknown infrastructure failures separate from model zeroes until runtime evidence supplies
+reliable attribution.
+For servers outside the [local-tool list](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#who-failed),
+a returned error with a recognized leading connection/session diagnostic remains `service_error`, masked when
+`mask_service_errors` is set. Returned errors from those local tools are still scored; a returned
+connection error from `memory` or `filesystem`, for example, remains a model observation.
+Legacy saved `tool_timeout` markers do not establish a model-program timeout; re-verification preserves
+their historical service-failure masking policy rather than relabeling them as model outcomes.
+Recognized authentication errors from credentialed, enabled services on trusted startup or tool-error
+paths reject configuration with HTTP 422 at the resources boundary before judging or producing a reward.
+Successful HTTP 200 content remains opaque, even when its text resembles an authentication or service
+error; errors from tools that need no credentials do not establish a credential failure. On tool calls to
+a credentialed, enabled service, a trusted HTTP 401 is an authentication failure. A bare HTTP 403 or
+`Forbidden` diagnostic remains a service failure unless it provides explicit credential or scope evidence.
+Recognized GitHub primary or secondary rate-limit diagnostics with HTTP 403 remain service failures
+subject to `mask_service_errors`.
+During startup, a 403 without credential/scope evidence does not establish an authentication failure;
+failed health or tool listing instead remains a masked `sandbox_start_failed` outcome.
+An API auth or quota error inside HTTP 200 content without an MCP error flag is not automatically
+classified as a failure. Before benchmark scoring, make a known-good call to each credentialed service
+used by the task set and capture its actual success and error formats without credential values.
+Ordinary closed/lost sessions verify as masked `session_lost`; closing an authentication-rejected session
+does not erase its rejection during the configured close retry window. HTTP 422 is a resource-boundary
+signal: Simple Agent presents the tool's 422 body to the model as tool output and may continue model
+turns. The later `/verify` 422 becomes `/run` HTTP 500; a startup `/seed_session` 422 can instead produce
+`/run` HTTP 500 before model turns. The collector default
+`route_failures_to_sidecar: false` stops collection at this failed `/run` after preserving unscored failure
+evidence. With the option set to `true`, collection records an ungraded, nonterminal agent failure row and
+continues. Inspect that evidence and fix credentials and scopes before using results. Confirm the complete
+expected task set and inspect failed rows before reporting an aggregate. The integration has not yet been baselined;
+retain `verified: false` until review and representative real model rollouts support it. Collect and inspect
+five genuine example rollouts with a model before treating the integration as validated.
+
+Before committing actual rollout artifacts, scan every JSONL being published, including failure and
+materialized-input sidecars, using the service credential values used for collection and supplied through
+approved environment configuration. For a dedicated output directory:
+
+```bash
+python -m resources_servers.mcp_atlas.validate_rollouts results/mcp_atlas/*.jsonl
+```
+
+The scanner checks raw JSONL and decoded JSON strings for exact nonblank values. Output contains only
+file/line locations, credential names and counts. Check the reported number of credential values:
+a zero-value scan is legitimate for key-free tasks, but does not establish that credentials are absent
+from artifacts. Confirm the count matches the actual configured services. This check cannot detect
+arbitrary encoded exfiltration and does not replace scoped credentials or network isolation.
+Absent or synthetic example rollouts are not genuine artifacts to publish.
+
+Use the generated materialized inputs and rollout files for repeat analysis:
+
+```bash
+gym eval profile \
+  --inputs results/mcp_atlas/rollouts_materialized_inputs.jsonl \
+  --rollouts results/mcp_atlas/rollouts.jsonl
+```
+
+Profiling cannot repair missing tasks, credentials or incomplete rollouts. The
+[implementation README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md)
+records tool limits, timeout behavior, masking rules, upstream differences and source/data attribution.

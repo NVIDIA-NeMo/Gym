@@ -14,6 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
+import pytest
 import yaml
 from omegaconf import OmegaConf
 
@@ -89,6 +90,25 @@ def test_write_resolved_config_overwrites_and_leaves_no_temp_files(tmp_path: Pat
 
     assert yaml.safe_load(path.read_text()) == {"attempt": 2}
     assert [p.name for p in tmp_path.iterdir()] == ["rollouts_resolved_config.yaml"]
+
+
+@pytest.mark.parametrize("as_dict_config", [False, True])
+def test_saved_config_omits_controller_roots_and_keeps_lazy_authored_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, as_dict_config: bool
+) -> None:
+    monkeypatch.delenv("UNSET_DATASET_FOR_TEST", raising=False)
+    authored = {
+        "agent": {"datasets": [{"jsonl_fpath": "${oc.env:UNSET_DATASET_FOR_TEST}"}]},
+        "task": {"_input_read_roots": ["task-owned value"]},
+    }
+    original = {**authored, "_input_read_roots": ["/controller-source", "/installed-source"]}
+    config = OmegaConf.create(original) if as_dict_config else original
+
+    saved = write_resolved_config(config, tmp_path / "rollouts.jsonl")
+
+    assert yaml.safe_load(saved.read_text()) == authored
+    assert "/controller-source" not in saved.read_text()
+    assert list(config["_input_read_roots"]) == original["_input_read_roots"]
 
 
 def test_hide_secrets_in_container_masks_every_header_value_and_keeps_header_names() -> None:
