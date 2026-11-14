@@ -524,18 +524,19 @@ async def test_activation_stop_or_deadline_cancels_model_retry_after_sleep(
 ):
     _, access = lent_sandbox
     model = _model(monkeypatch, (429, {"error": {"message": "busy"}}, {"Retry-After": "60"}))
-    agent, request = _agent(timeout=10 if stop_method == "deadline" else 1800), _request()
+    agent, request = _agent(timeout=30 if stop_method == "deadline" else 1800), _request()
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
         activation = asyncio.create_task(agent.responses(request, _body()))
-        async with asyncio.timeout(30):
+        # Leave cold-import time before testing cancellation of the actual retry sleep.
+        async with asyncio.timeout(25):
             while not model.requests:
                 await asyncio.sleep(0.05)
         await asyncio.sleep(0.2)
         if stop_method == "rollout_stop":
             stop = await agent.stop_rollout(_EPISODE.capture_key)
             assert stop.stopped
-        response = await asyncio.wait_for(activation, 15)
+        response = await asyncio.wait_for(activation, 35 if stop_method == "deadline" else 15)
         close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 10)
     finally:
         model.close()
