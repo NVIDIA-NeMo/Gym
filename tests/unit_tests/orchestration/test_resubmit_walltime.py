@@ -123,6 +123,28 @@ def test_a_walltime_raise_renders_the_run_again_and_keeps_rows_and_budgets(tmp_p
     assert not (run_dir / REPIN_JOURNAL_NAME).exists()
 
 
+def test_a_walltime_raise_adds_no_field_the_saved_record_did_not_hold(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _timed_run(tmp_path)
+    run_dir = job_dir.parent
+    # A record saved by a Gym that predates a defaulted field (here `driver.policy_host`).
+    saved_path = run_dir / "resolved-config.yaml"
+    saved = yaml.safe_load(saved_path.read_text())
+    del saved["driver"]["policy_host"]
+    saved_path.write_text(yaml.safe_dump(saved, sort_keys=False))
+
+    out = recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="slow but healthy policy")
+    assert out.dispatched == "resubmit", out.decision.reason
+
+    after = yaml.safe_load(saved_path.read_text())
+    assert "policy_host" not in after["driver"]
+    # Only the walltime and the chain cap differ from the record as launched.
+    after["compute"]["cluster"]["walltime"] = saved["compute"]["cluster"]["walltime"]
+    after["driver"]["benchmarks"]["gsm8k"]["resumable"]["max_walltime"] = "16:00:00"
+    assert after == saved
+
+
 def test_a_walltime_raise_lets_a_chain_that_spent_its_old_cap_plan_again(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import recover
 
