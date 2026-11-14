@@ -93,3 +93,13 @@ gym env start --config resources_servers/swe_internal_v1/configs/swe_internal_v1
 
 `sandbox_config.env`, `files` and `setup_command` add toolchain setup to the sandboxes; see
 [Sandbox toolchain setup](../swe_rebench/README.md#sandbox-toolchain-setup).
+
+## Agent network restrictions
+
+`enforce_agent_no_network: true` limits the agent's sandbox to the `sandbox_model_server` host. It
+needs the OpenSandbox provider and a model host reachable from the sandbox (`use_absolute_ip`); a
+loopback host fails at `seed_session`.
+
+The agent sandbox cannot download anything, and MCP tool hosts are blocked. With
+`swe_internal_v1_opencode.yaml`, set `preinstalled_opencode` or `remote_opencode_*`, or OpenCode's
+download fails at seed. `setup_command` also runs there, so it must not download anything.

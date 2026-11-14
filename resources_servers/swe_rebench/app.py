@@ -114,8 +114,8 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     overwrite_maven_settings: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
-    # Deny the agent sandbox's egress except sandbox_model_server's host, extending any
-    # provider_options.network_policy. Evaluation sandboxes never get a network_policy.
+    # Deny the agent sandbox's egress except sandbox_model_server's host. Cannot be combined with
+    # provider_options.network_policy; evaluation sandboxes keep their network.
     enforce_agent_no_network: bool = False
     sandbox_model_server: ModelServerRef | None = None
 
@@ -188,6 +188,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
             check_agent_network_config(
                 resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()),
                 self.config.sandbox_model_server,
+                self.config.sandbox_config,
             )
 
     @property
@@ -236,15 +237,11 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
             env = JVM_MIRROR_ENV | env
 
         provider_options = dict(self.config.sandbox_config.get("provider_options", {}))
-        if self.config.enforce_agent_no_network:
-            # Only task sandboxes carry a session_id; the agent works in them.
-            if session_id is not None:
-                provider_options["network_policy"] = agent_network_policy(
-                    provider_config, self.config.sandbox_model_server, provider_options.get("network_policy")
-                )
-            else:
-                # The configured network_policy is extended for the agent; evaluation keeps its network.
-                provider_options.pop("network_policy", None)
+        # Only task sandboxes carry a session_id; the agent works in them.
+        if self.config.enforce_agent_no_network and session_id is not None:
+            provider_options["network_policy"] = agent_network_policy(
+                provider_config, self.config.sandbox_model_server
+            )
 
         spec = SandboxSpec(
             # The row names its own image; there is no repository template to apply.

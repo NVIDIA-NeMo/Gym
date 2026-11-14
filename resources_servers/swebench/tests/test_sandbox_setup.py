@@ -41,13 +41,14 @@ class TestReadSandboxFiles:
 
 
 class _ExecSandbox:
-    def __init__(self, return_code: int) -> None:
+    def __init__(self, return_code: int, error_type: str | None = None) -> None:
         self.return_code = return_code
+        self.error_type = error_type
         self.commands: list[str] = []
 
     async def exec(self, command: str) -> SandboxExecResult:
         self.commands.append(command)
-        return SandboxExecResult(stdout="", stderr="boom", return_code=self.return_code)
+        return SandboxExecResult(stdout="", stderr="boom", return_code=self.return_code, error_type=self.error_type)
 
 
 class TestSetupCommandRunner:
@@ -59,3 +60,7 @@ class TestSetupCommandRunner:
     async def test_failure_raises_with_stderr(self) -> None:
         with pytest.raises(RuntimeError, match="exited 2: boom"):
             await setup_command_runner("false")(_ExecSandbox(2))
+
+    async def test_an_error_type_raises_even_with_exit_0(self) -> None:
+        with pytest.raises(RuntimeError, match=r"exited 0 \(timeout\): boom"):
+            await setup_command_runner("sleep 999")(_ExecSandbox(0, "timeout"))

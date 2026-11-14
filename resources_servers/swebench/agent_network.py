@@ -18,40 +18,31 @@ With open egress, agents learn to fetch the task's upstream fix. The servers cre
 agent's sandbox themselves, so the agent's own ``network_access`` cannot apply a policy there.
 """
 
-from copy import deepcopy
-from typing import Any, Mapping, cast
+from typing import Any, Mapping
 
+from nemo_gym.agents import restricted_network_policy, sandbox_server_url
 from nemo_gym.config import ModelServerRef
-from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url
 
 
-def check_agent_network_config(provider_config: Mapping[str, Any], model_server: ModelServerRef | None) -> None:
+def check_agent_network_config(
+    provider_config: Mapping[str, Any], model_server: ModelServerRef | None, sandbox_config: Mapping[str, Any]
+) -> None:
     """Fail at server startup on an ``enforce_agent_no_network`` config that cannot work."""
     if model_server is None:
         raise ValueError(
             "enforce_agent_no_network requires sandbox_model_server: the agent in the sandbox must reach the policy model"
         )
+    if "network_policy" in (sandbox_config.get("provider_options") or {}):
+        raise ValueError("Set enforce_agent_no_network or sandbox_config.provider_options.network_policy, not both")
     (provider_name,) = provider_config
     # Raises for providers without network-policy support.
     restricted_network_policy(provider_name, [])
 
 
-def agent_network_policy(
-    provider_config: Mapping[str, Any],
-    model_server: ModelServerRef,
-    configured: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Deny all egress except ``model_server``'s host, or append that host to ``configured``.
+def agent_network_policy(provider_config: Mapping[str, Any], model_server: ModelServerRef) -> dict[str, Any]:
+    """Deny all egress except ``model_server``'s host.
 
     Raises ValueError for providers without network policies or an unreachable model host.
     """
     (provider_name,) = provider_config
-    policy = restricted_network_policy(provider_name, [sandbox_server_url(model_server.name, require_reachable=True)])
-    if configured is None:
-        return policy
-    merged = deepcopy(dict(configured))
-    egress = merged.setdefault("egress", [])
-    if not isinstance(egress, list):
-        raise TypeError("provider_options.network_policy.egress must be a list")
-    egress.extend(rule for rule in cast(list[dict[str, str]], policy["egress"]) if rule not in egress)
-    return merged
+    return restricted_network_policy(provider_name, [sandbox_server_url(model_server.name, require_reachable=True)])

@@ -22,15 +22,20 @@ MODEL_SERVER = ModelServerRef(type="responses_api_models", name="policy_model")
 
 
 def test_a_workable_config_passes() -> None:
-    check_agent_network_config({"opensandbox": {}}, MODEL_SERVER)
+    check_agent_network_config({"opensandbox": {}}, MODEL_SERVER, {})
 
 
 def test_a_missing_model_server_fails_at_startup() -> None:
     # Deny-all egress would cut the agent in the sandbox off from the policy model.
     with pytest.raises(ValueError, match="sandbox_model_server"):
-        check_agent_network_config({"opensandbox": {}}, None)
+        check_agent_network_config({"opensandbox": {}}, None, {})
 
 
 def test_a_provider_without_network_policies_fails_at_startup() -> None:
     with pytest.raises(ValueError, match="OpenSandbox"):
-        check_agent_network_config({"docker": {}}, MODEL_SERVER)
+        check_agent_network_config({"docker": {}}, MODEL_SERVER, {})
+
+
+def test_a_configured_network_policy_fails_at_startup() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        check_agent_network_config({"opensandbox": {}}, MODEL_SERVER, {"provider_options": {"network_policy": {}}})

@@ -39,13 +39,12 @@ def read_sandbox_files(sources: Mapping[str, str]) -> dict[str, str]:
 
 
 def setup_command_runner(command: str) -> Callable[[AsyncSandbox], Awaitable[None]]:
-    """Return a ``start_with_setup`` hook that runs ``command`` and raises on a non-zero exit."""
+    """Return a ``start_with_setup`` hook that runs ``command`` and raises unless it exits 0."""
 
     async def run(sandbox: AsyncSandbox) -> None:
         result = await sandbox.exec(command)
-        if result.return_code != 0:
-            raise RuntimeError(
-                f"sandbox_config.setup_command exited {result.return_code}: {(result.stderr or '')[-2000:]}"
-            )
+        if result.return_code != 0 or result.error_type is not None:
+            how = f"exited {result.return_code}" + (f" ({result.error_type})" if result.error_type else "")
+            raise RuntimeError(f"sandbox_config.setup_command {how}: {(result.stderr or '')[-2000:]}")
 
     return run

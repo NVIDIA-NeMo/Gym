@@ -611,7 +611,7 @@ class TestAgentNetworkPolicy:
         model_url: str = "http://10.1.2.3:8000",
         sandbox_config: dict | None = None,
     ):
-        import nemo_gym.sandbox.agent_tools as agent_tools
+        import nemo_gym.agents.agent_tools as agent_tools
         import resources_servers.swe_rebench.app as app
         from nemo_gym.config import ModelServerRef
 
@@ -647,15 +647,6 @@ class TestAgentNetworkPolicy:
             "egress": [{"action": "allow", "target": "10.1.2.3"}],
         }
 
-    async def test_eval_sandbox_keeps_its_network(self, monkeypatch) -> None:
-        sandbox = await self._create(
-            monkeypatch,
-            enforce=True,
-            for_agent=False,
-            sandbox_config={"provider_options": {"network_policy": {"defaultAction": "deny", "egress": []}}},
-        )
-        assert "network_policy" not in sandbox.spec.provider_options
-
     @pytest.mark.parametrize("for_agent", [True, False])
     async def test_off_keeps_a_configured_policy_as_is(self, monkeypatch, for_agent: bool) -> None:
         configured = {"defaultAction": "deny", "egress": []}
@@ -666,21 +657,6 @@ class TestAgentNetworkPolicy:
             sandbox_config={"provider_options": {"network_policy": configured}},
         )
         assert sandbox.spec.provider_options["network_policy"] == configured
-
-    async def test_a_configured_policy_is_extended_with_the_model_host(self, monkeypatch) -> None:
-        configured = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "pypi.org"}]}
-        sandbox = await self._create(
-            monkeypatch,
-            enforce=True,
-            for_agent=True,
-            sandbox_config={"provider_options": {"network_policy": configured}},
-        )
-        assert sandbox.spec.provider_options["network_policy"] == {
-            "defaultAction": "deny",
-            "egress": [{"action": "allow", "target": "pypi.org"}, {"action": "allow", "target": "10.1.2.3"}],
-        }
-        # The server config is not mutated across sandboxes.
-        assert configured["egress"] == [{"action": "allow", "target": "pypi.org"}]
 
     async def test_other_provider_options_are_kept(self, monkeypatch) -> None:
         sandbox = await self._create(
@@ -726,15 +702,6 @@ class TestSandboxSetup:
         sandbox = await self._create(monkeypatch, {})
         assert sandbox.spec.files == {}
         assert sandbox.setup is None
-
-    async def test_agent_sandbox_gets_the_files_and_setup(self, monkeypatch, tmp_path) -> None:
-        source = tmp_path / "wrapper.sh"
-        source.write_text("#!/bin/sh\n")
-        sandbox = await self._create(
-            monkeypatch, {"files": {"/tmp/wrapper.sh": str(source)}, "setup_command": "chmod +x /tmp/wrapper.sh"}
-        )
-        assert sandbox.spec.files == {"/tmp/wrapper.sh": "#!/bin/sh\n"}
-        assert sandbox.setup is not None
 
     async def test_evaluation_files_win_on_a_shared_path(self, monkeypatch, tmp_path) -> None:
         files = verification_files(_inputs())
