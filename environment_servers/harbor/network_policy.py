@@ -61,7 +61,11 @@ def _egress_target(host: str) -> str:
 
 
 def phase_network_policy(
-    provider_name: str | None, network_mode: str | None, allowed_hosts: Sequence[str] | None = None
+    provider_name: str | None,
+    network_mode: str | None,
+    allowed_hosts: Sequence[str] | None = None,
+    *,
+    harness_hosts: Sequence[str] = (),
 ) -> dict[str, object] | None:
     """The provider's create-time network policy for one Harbor phase; ``None`` when the phase is public.
 
@@ -69,6 +73,8 @@ def phase_network_policy(
     ``*.domain`` wildcards and bare IP literals as Harbor spells them, in order and without repeats). Like
     :func:`restricted_network_policy`, it fails closed: a provider other than OpenSandbox cannot enforce
     an egress policy, and an entry the policy cannot express is refused rather than dropped.
+    ``harness_hosts`` are allowed after them under either restricted mode: the hosts the phase's harness itself
+    calls (the agent's model endpoints, as Harbor's ``--allow-agent-host`` adds them).
     """
     if network_mode in (None, "public"):
         if allowed_hosts:
@@ -83,5 +89,5 @@ def phase_network_policy(
         )
     if network_mode == "no-network" and allowed_hosts:
         raise ValueError("allowed_hosts is only valid when network_mode='allowlist'")
-    targets = list(dict.fromkeys(_egress_target(host) for host in (allowed_hosts or ())))
+    targets = list(dict.fromkeys(_egress_target(host) for host in (*(allowed_hosts or ()), *harness_hosts)))
     return {"defaultAction": "deny", "egress": [{"action": "allow", "target": target} for target in targets]}

@@ -400,6 +400,17 @@ class HarborTaskConfig(HarborSettings):
         return HARBOR_STEP_VERIFIER_TIMEOUT_SEC * self._timeout_multiplier
 
     @property
+    def agent_network_mode(self) -> Literal["public", "no-network", "allowlist"]:
+        """The rule the agent's phase runs under: ``[agent].network_mode`` when set, else ``[environment]``'s."""
+        return self.agent.network_mode or self.environment.network_mode
+
+    @property
+    def agent_allowed_hosts(self) -> list[str]:
+        """The ``allowed_hosts`` of the table :attr:`agent_network_mode` comes from."""
+        phase = self.agent if self.agent.network_mode is not None else self.environment
+        return list(phase.allowed_hosts or ())
+
+    @property
     def is_shared_verifier(self) -> bool:
         """Harbor runs the verifier in the agent's container unless the task says otherwise.
 

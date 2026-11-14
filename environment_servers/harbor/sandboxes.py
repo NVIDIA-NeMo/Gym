@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from fastapi import HTTPException
@@ -47,6 +48,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.data.tasks.harbor import (
     MAIN_SERVICE,
+    ORACLE_AGENT,
     RECORD_VERSION,
     HarborEnvironment,
     HarborTask,
@@ -210,10 +212,10 @@ class HarborSandboxMixin:
         """The agent's sandbox by default; pass the verifier's environment for a separate verifier.
 
         ``network_policy`` is the provider's egress policy for this sandbox (the separate verifier's
-        ``[verifier].network_mode``, see :meth:`_verifier_network_policy`); it replaces the deployment's
-        ``sandbox_provider_options.network_policy`` for that sandbox (never widening a deny-by-default one, which
-        :meth:`_verifier_network_policy` refuses), as Harbor's explicit phase policy replaces
-        the environment baseline.
+        ``[verifier].network_mode``, see :meth:`_verifier_network_policy`, or the agent's rule, see
+        :meth:`_agent_network_policy`); it replaces the deployment's ``sandbox_provider_options.network_policy`` for
+        that sandbox (never widening a deny-by-default one, which both refuse), as Harbor's explicit phase policy
+        replaces the environment baseline.
         """
         global_config_dict = get_global_config_dict()
         if environment is None:
@@ -293,18 +295,62 @@ class HarborSandboxMixin:
         # passes. OpenSandbox reads a policy that names no `defaultAction` as deny (its NetworkPolicy default),
         # so an empty mapping `{}` is a present deny-all policy (the 0.1.15 SDK), not an absent one; only no
         # policy at all is allow-all.
-        deployment = self.config.sandbox_provider_options.get("network_policy")
-        if deployment is not None and not isinstance(deployment, Mapping):
-            raise ValueError(
-                f"sandbox_provider_options.network_policy must be a mapping, got {type(deployment).__name__}"
-            )
-        denies = deployment is not None and deployment.get("defaultAction", "deny") == "deny"
-        if denies and policy is not None and policy["egress"]:
+        if self._deployment_denies_by_default() and policy is not None and policy["egress"]:
             hosts = ", ".join(rule["target"] for rule in policy["egress"])
             raise ValueError(
                 f"allowed_hosts {hosts} would widen this deployment's deny-by-default "
                 "sandbox_provider_options.network_policy for the verifier; run the task on an allow-by-default "
                 "deployment (its deny rules still apply to the agent's sandbox)"
+            )
+        return policy
+
+    def _deployment_denies_by_default(self) -> bool:
+        """Whether ``sandbox_provider_options.network_policy`` denies by default (one without ``defaultAction``, ``{}``
+        included, reads as deny); raises ``ValueError`` for a policy that is not a mapping."""
+        deployment = self.config.sandbox_provider_options.get("network_policy")
+        if deployment is not None and not isinstance(deployment, Mapping):
+            raise ValueError(
+                f"sandbox_provider_options.network_policy must be a mapping, got {type(deployment).__name__}"
+            )
+        return deployment is not None and deployment.get("defaultAction", "deny") == "deny"
+
+    def _agent_network_policy(self, task: HarborTask) -> dict[str, Any] | None:
+        """The agent's sandbox egress policy from the task's agent rule; ``None`` when that rule is public.
+
+        The rule is :attr:`~nemo_gym.data.tasks.harbor.HarborTaskConfig.agent_network_mode` (``[agent]``'s, else
+        ``[environment]``'s), admitted by the loader only for a dataset with ``restricted_agent_network``. The sandbox
+        is created under it, for its whole life (setup included), with the hosts the harness calls its model on
+        allowed besides the task's own: every ``agent_model_servers`` host and every ``agent_allowed_hosts`` entry,
+        as Harbor's ``--allow-agent-host`` adds the agent's. Raises ``ValueError`` when the deployment configures no
+        such host (every episode would score 0 on a harness that cannot reach its model; the oracle, which calls no
+        model, needs none), when the provider is not OpenSandbox, for a Compose task, and when the deployment's own
+        ``network_policy`` denies by default (the task's policy would replace, and so widen, it).
+        """
+        mode = task.config.agent_network_mode
+        if mode == "public":
+            return None
+        if self._uses_compose(task):
+            raise ValueError("a restricted agent network is not supported for a Compose task")
+        harness_hosts = list(self.config.agent_allowed_hosts)
+        for server in self.config.agent_model_servers:
+            try:
+                url = sandbox_server_url(server, require_reachable=True)
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"agent_model_servers entry {server!r}: {exc}") from exc
+            harness_hosts.append(urlsplit(url).hostname)
+        if not harness_hosts and self._agent_implementation() != ORACLE_AGENT:
+            raise ValueError(
+                f"network_mode={mode!r} leaves the harness no route to its model: set agent_model_servers (the Gym "
+                "servers it calls, such as policy_model) or agent_allowed_hosts on the Harbor environment server"
+            )
+        task_hosts = task.config.agent_allowed_hosts if mode == "allowlist" else None
+        policy = phase_network_policy(self._task_provider_name(task), mode, task_hosts, harness_hosts=harness_hosts)
+        if self._deployment_denies_by_default() and policy is not None and policy["egress"]:
+            hosts = ", ".join(rule["target"] for rule in policy["egress"])
+            raise ValueError(
+                f"the agent's hosts {hosts} would widen this deployment's deny-by-default "
+                "sandbox_provider_options.network_policy, which the task's policy replaces; run the task on an "
+                "allow-by-default deployment"
             )
         return policy
 
@@ -352,7 +398,7 @@ class HarborSandboxMixin:
     async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
         """Start the agent's sandbox, with the in-server image pull retries."""
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
-        spec = self._sandbox_spec(task, workdir)
+        spec = self._sandbox_spec(task, workdir, network_policy=self._agent_network_policy(task))
         return await self._start_with_pull_retries(
             task,
             key=episode_key,

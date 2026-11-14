@@ -21,6 +21,7 @@ import nemo_gym.data.tasks.harbor.manifest as manifest_module
 import nemo_gym.data.tasks.harbor.materialize as materialize_module
 import nemo_gym.data.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import DIGEST_KEY, content_hash, context_digest
 from nemo_gym.data.tasks.harbor.dockerfile import (
     DEFAULT_PATH,
@@ -2560,6 +2561,41 @@ def test_loader_rejects_unenforced_network_policies(tmp_path, section, policy):
         assert "shared verifier mode" in str(excinfo.value) and 'environment_mode = "separate"' in str(excinfo.value)
 
 
+def opted_in_task(tmp_path: Path, toml: str) -> Path:
+    """A task in a dataset whose [gym] table sets restricted_agent_network."""
+    (tmp_path / "dataset.toml").write_text("[gym]\nrestricted_agent_network = true\n")
+    return write_task(tmp_path / "t", toml=toml)
+
+
+@pytest.mark.parametrize(
+    ("policy", "mode", "hosts"),
+    [
+        ('network_mode = "no-network"', "no-network", None),
+        ('network_mode = "allowlist"\nallowed_hosts = ["pypi.org"]', "allowlist", ["pypi.org"]),
+    ],
+)
+def test_a_verifier_environment_network_rule_is_the_separate_verifiers_rule(tmp_path, policy, mode, hosts):
+    """Harbor applies `[verifier.environment]`'s rule to the verifier's own container, as `[verifier]`'s does in Gym."""
+    task = load_task(opted_in_task(tmp_path, f'[verifier.environment]\ndocker_image = "org/v:1"\n{policy}\n'))
+    assert not task.config.is_shared_verifier
+    assert (task.config.verifier.network_mode, task.config.verifier.allowed_hosts) == (mode, hosts)
+    assert task.config.verifier.environment.network_mode == "public"
+
+
+def test_a_verifier_environment_rule_that_differs_from_the_verifiers_is_refused(tmp_path):
+    toml = '[verifier]\nnetwork_mode = "allowlist"\n[verifier.environment]\ndocker_image = "org/v:1"\nnetwork_mode = "no-network"\n'
+    with pytest.raises(
+        HarborTaskError, match=r"\[verifier\] and \[verifier.environment\] name different network rules"
+    ):
+        load_task(opted_in_task(tmp_path, toml))
+
+
+def test_a_verifier_environment_allowed_hosts_needs_an_allowlist(tmp_path):
+    toml = '[verifier.environment]\ndocker_image = "org/v:1"\nallowed_hosts = ["pypi.org"]\n'
+    with pytest.raises(HarborTaskError, match="allowed_hosts is only valid when network_mode='allowlist'"):
+        load_task(opted_in_task(tmp_path, toml))
+
+
 SEPARATE_VERIFIER_TOML = HELLO_TOML.replace(
     "[verifier]\ntimeout_sec = 120.0", '[verifier]\ntimeout_sec = 120.0\nenvironment_mode = "separate"'
 ).replace("[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\n')
@@ -2597,6 +2633,132 @@ def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, po
     )
     with pytest.raises(HarborTaskError, match="allowed_hosts is only valid when network_mode='allowlist'"):
         load_task(write_task(tmp_path / "t", toml=toml))
+
+
+class TestRestrictedAgentNetwork:
+    """``[gym] restricted_agent_network`` admits tasks whose agent rule restricts the network; without it they are
+    refused as before, with the key named."""
+
+    OPT_IN = "[gym]\nrestricted_agent_network = true\n"
+
+    @staticmethod
+    def restrict(toml: str, section: str, rule: str) -> str:
+        return toml.replace(f"[{section}]\n", f"[{section}]\n{rule}\n", 1)
+
+    def load(self, tmp_path: Path, toml: str, *, opt_in: bool = True):
+        folder = tmp_path / "ds"
+        path = write_task(folder / "t", toml=toml)
+        if opt_in:
+            (folder / "dataset.toml").write_text(self.OPT_IN)
+        return load_task(path)
+
+    @pytest.mark.parametrize("section", ["agent", "environment"])
+    def test_without_the_key_a_restricted_agent_rule_is_refused_naming_the_key(self, tmp_path, section):
+        toml = self.restrict(SEPARATE_VERIFIER_TOML, section, 'network_mode = "no-network"')
+        with pytest.raises(HarborTaskError, match=f"{section} network restrictions are not supported yet") as excinfo:
+            self.load(tmp_path, toml, opt_in=False)
+        assert "restricted_agent_network = true" in str(excinfo.value)
+
+    def test_the_key_admits_an_agent_without_network(self, tmp_path):
+        task = self.load(tmp_path, self.restrict(SEPARATE_VERIFIER_TOML, "agent", 'network_mode = "no-network"'))
+        assert (task.config.agent_network_mode, task.config.agent_allowed_hosts) == ("no-network", [])
+        assert task.config.environment.network_mode == "public"
+
+    def test_the_key_admits_an_empty_agent_allowlist_under_a_public_environment(self, tmp_path):
+        toml = self.restrict(
+            SEPARATE_VERIFIER_TOML, "agent", 'network_mode = "allowlist"\nallowed_hosts = []'
+        ).replace("[environment]\n", '[environment]\nnetwork_mode = "public"\n', 1)
+        task = self.load(tmp_path, toml)
+        assert (task.config.agent_network_mode, task.config.agent_allowed_hosts) == ("allowlist", [])
+
+    def test_the_key_admits_an_environment_rule_the_agent_and_a_shared_verifier_inherit(self, tmp_path):
+        toml = self.restrict(HELLO_TOML, "environment", 'network_mode = "allowlist"\nallowed_hosts = ["pypi.org"]')
+        task = self.load(tmp_path, toml)
+        assert task.config.is_shared_verifier
+        assert (task.config.agent_network_mode, task.config.agent_allowed_hosts) == ("allowlist", ["pypi.org"])
+
+    def test_a_shared_verifier_allowlist_within_the_agents_is_admitted(self, tmp_path):
+        toml = self.restrict(HELLO_TOML, "agent", 'network_mode = "allowlist"\nallowed_hosts = ["pypi.org", "a.io"]')
+        toml = self.restrict(toml, "verifier", 'network_mode = "allowlist"\nallowed_hosts = ["PyPI.org."]')
+        task = self.load(tmp_path, toml)
+        assert task.config.is_shared_verifier and task.config.verifier.allowed_hosts == ["PyPI.org."]
+
+    def test_the_key_leaves_the_digest_alone(self, tmp_path):
+        plain = load_task(write_task(tmp_path / "plain" / "t"))
+        assert self.load(tmp_path, HELLO_TOML).digest == plain.digest
+        config = read_dataset_config(tmp_path / "ds")
+        assert config.restricted_agent_network and not config.shapes_tasks and not config.is_empty
+
+    def test_the_key_is_a_strict_bool(self, tmp_path):
+        (tmp_path / "dataset.toml").write_text('[gym]\nrestricted_agent_network = "yes"\n')
+        with pytest.raises(ValueError, match="restricted_agent_network"):
+            read_dataset_config(tmp_path)
+
+    @pytest.mark.parametrize(
+        ("rules", "message"),
+        [
+            (
+                [("environment", 'network_mode = "no-network"'), ("agent", 'network_mode = "public"')],
+                "cannot widen after setup",
+            ),
+            ([("agent", 'allowed_hosts = ["pypi.org"]')], r"\[agent\] allowed_hosts is only valid"),
+            (
+                [("agent", 'network_mode = "no-network"\nallowed_hosts = ["pypi.org"]')],
+                r"\[agent\] allowed_hosts is only valid",
+            ),
+            ([("environment", 'allowed_hosts = ["pypi.org"]')], r"\[environment\] allowed_hosts is only valid"),
+            # A shared verifier inherits the public [environment] rule while the agent is restricted.
+            ([("agent", 'network_mode = "no-network"')], "shared verifier's network rule is public"),
+            (
+                [("environment", 'network_mode = "no-network"'), ("verifier", 'network_mode = "public"')],
+                "shared verifier's network rule is public",
+            ),
+            (
+                [
+                    ("agent", 'network_mode = "allowlist"\nallowed_hosts = ["pypi.org"]'),
+                    ("verifier", 'network_mode = "allowlist"\nallowed_hosts = ["pypi.org", "judge.example"]'),
+                ],
+                "shared verifier's allowed_hosts judge.example are outside the agent's allowlist rule",
+            ),
+            (
+                [
+                    ("agent", 'network_mode = "no-network"'),
+                    ("verifier", 'network_mode = "allowlist"\nallowed_hosts = ["pypi.org"]'),
+                ],
+                "shared verifier's allowed_hosts pypi.org are outside the agent's no-network rule",
+            ),
+            (
+                [("agent", 'network_mode = "no-network"'), ("verifier", 'allowed_hosts = ["pypi.org"]')],
+                r"\[verifier\] allowed_hosts is only valid",
+            ),
+        ],
+        ids=[
+            "public-agent-under-restricted-environment",
+            "agent-hosts-without-mode",
+            "agent-hosts-under-no-network",
+            "environment-hosts-without-allowlist",
+            "shared-verifier-inherits-public",
+            "shared-verifier-explicitly-public",
+            "shared-verifier-host-outside-agent-allowlist",
+            "shared-verifier-host-under-agent-no-network",
+            "shared-verifier-hosts-without-allowlist",
+        ],
+    )
+    def test_rules_the_agents_sandbox_cannot_carry_are_refused(self, tmp_path, rules, message):
+        toml = HELLO_TOML
+        for section, rule in rules:
+            toml = self.restrict(toml, section, rule)
+        with pytest.raises(HarborTaskError, match=message):
+            self.load(tmp_path, toml)
+
+    def test_a_multi_step_task_is_still_refused(self, tmp_path):
+        toml = self.restrict(HELLO_TOML, "agent", 'network_mode = "no-network"')
+        toml += f'\n[[steps]]\nname = "plan"\n{STEP_GRADER_IMAGE}'
+        folder = tmp_path / "ds"
+        path = _with_steps(write_task(folder / "t", toml=toml), ["plan"])
+        (folder / "dataset.toml").write_text(self.OPT_IN)
+        with pytest.raises(HarborTaskError, match="agent network restrictions are not supported yet in a multi-step"):
+            load_task(path)
 
 
 def test_declared_sidecar_inputs_come_from_dataset_toml_and_are_plain_file_names(tmp_path):

@@ -23,6 +23,14 @@ harbor_environment_server:
       # Sandbox lifetime covers the full episode, final cleanup, and this slack.
       sandbox_ttl_slack_s: 900
       sandbox_provider_options: {}
+      # For a dataset with `restricted_agent_network`: a task whose [agent] (else [environment]) network_mode is
+      # restricted runs in an agent sandbox created under that rule (OpenSandbox only), with these hosts allowed so
+      # the harness can reach its model, as Harbor's `--allow-agent-host`. `agent_model_servers` are Gym server
+      # instances (such as `policy_model`) whose URL host is allowed; it must be sandbox-reachable (use_absolute_ip).
+      # `agent_allowed_hosts` are further hosts, such as an external endpoint the harness calls directly. With
+      # neither, such a task is refused at seed (the oracle, which calls no model, needs none).
+      agent_model_servers: []
+      agent_allowed_hosts: []
       sandbox_metadata:
         benchmark: harbor
       artifacts_dir: ${results_dir}/harbor/verifier

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.data.tasks.harbor.dataset_config import (
+    DATASET_FILE,
     GymDatasetConfig,
     GymTaskOverride,
     apply_dataset_config,
@@ -395,6 +396,77 @@ def read_instruction(path: Path) -> str:
     return "\n".join(lines)
 
 
+def _check_agent_network(path: Path, config: HarborTaskConfig) -> None:
+    """Refuse an agent-phase network rule the agent's sandbox cannot carry (a dataset with ``restricted_agent_network``).
+
+    The agent's sandbox is created under :attr:`HarborTaskConfig.agent_network_mode` and keeps that rule for life
+    (OpenSandbox cannot change a running sandbox's ``defaultAction``). Setup runs under it too, a narrower network
+    than Harbor's public setup phase. So an ``[environment]`` restriction with an explicitly public ``[agent]`` is
+    refused (the sandbox cannot widen after setup), and a shared verifier, which grades in that sandbox, must declare
+    a rule the sandbox satisfies: not public, and an allowlist only of hosts the agent's allowlist names.
+    """
+    environment, agent, verifier = config.environment, config.agent, config.verifier
+    for name, phase in (("environment", environment), ("agent", agent)):
+        if phase.allowed_hosts and phase.network_mode != "allowlist":
+            raise HarborTaskError(f"{path}: [{name}] allowed_hosts is only valid when network_mode='allowlist'")
+    if environment.network_mode != "public" and agent.network_mode == "public":
+        raise HarborTaskError(
+            f"{path}: [environment] network_mode = {environment.network_mode!r} with [agent] network_mode = 'public' "
+            "is not supported: the agent's sandbox is created under one rule and cannot widen after setup; drop "
+            "[agent].network_mode or restrict it"
+        )
+    mode = config.agent_network_mode
+    if mode == "public" or not config.is_shared_verifier:
+        return
+    if verifier.allowed_hosts and verifier.network_mode != "allowlist":
+        raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
+    verifier_mode = verifier.network_mode or environment.network_mode
+    if verifier_mode == "public":
+        raise HarborTaskError(
+            f"{path}: the shared verifier's network rule is public but it grades in the agent's {mode} sandbox, a "
+            "narrower network than it declares; restrict [verifier].network_mode, or declare separate verification "
+            '([verifier].environment_mode = "separate")'
+        )
+    if verifier_mode != "allowlist":
+        return
+    hosts = verifier.allowed_hosts if verifier.network_mode is not None else environment.allowed_hosts
+    agent_hosts = {_host_key(host) for host in config.agent_allowed_hosts} if mode == "allowlist" else set()
+    outside = [host for host in hosts or () if _host_key(host) not in agent_hosts]
+    if outside:
+        raise HarborTaskError(
+            f"{path}: the shared verifier's allowed_hosts {', '.join(outside)} are outside the agent's {mode} rule, "
+            "which the agent's sandbox it grades in keeps; add them to the agent's allowed_hosts, or declare "
+            'separate verification ([verifier].environment_mode = "separate")'
+        )
+
+
+def _verifier_environment_network(path: Path, config: HarborTaskConfig) -> HarborTaskConfig:
+    """Read a ``[verifier.environment]`` network rule as the separate verifier's own ``[verifier]`` rule.
+
+    Harbor applies that table's ``network_mode`` and ``allowed_hosts`` to the verifier's own container, which is what
+    ``[verifier].network_mode`` sets for Gym's separate verifier sandbox; so the rule moves there and the checks
+    below treat it the same way. Both tables naming different rules is refused. Multi-step tasks keep refusing it,
+    and so does a dataset without ``restricted_agent_network``, so no other dataset loads a task it skipped before.
+    """
+    environment = config.verifier.environment
+    if config.steps or environment is None or (environment.network_mode == "public" and not environment.allowed_hosts):
+        return config
+    verifier = config.verifier
+    rule = (environment.network_mode, environment.allowed_hosts or None)
+    if verifier.network_mode is not None and (verifier.network_mode, verifier.allowed_hosts or None) != rule:
+        raise HarborTaskError(
+            f"{path}: [verifier] and [verifier.environment] name different network rules; keep one of them"
+        )
+    moved = environment.model_copy(update={"network_mode": "public", "allowed_hosts": None})
+    update = {"network_mode": rule[0], "allowed_hosts": rule[1], "environment": moved}
+    return config.model_copy(update={"verifier": verifier.model_copy(update=update)})
+
+
+def _host_key(host: str) -> str:
+    """An ``allowed_hosts`` entry as it compares with another: trimmed, lower-case, without a trailing dot."""
+    return str(host).strip().rstrip(".").lower()
+
+
 def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[str, Any] | None = None) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one.
 
@@ -434,6 +506,8 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     except ValueError as exc:
         raise HarborTaskError(str(exc)) from exc
 
+    if dataset.restricted_agent_network:
+        config = _verifier_environment_network(path, config)
     phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
     if config.verifier.environment is not None:
         phases["verifier.environment"] = config.verifier.environment
@@ -445,14 +519,29 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
             # the step's verifier sandbox from it with no egress policy, so a restriction there is refused like the
             # task-level one rather than dropped.
             phases[f"steps.{step.name}.verifier.environment"] = step.verifier.environment
+    # A dataset that opts in has the agent's sandbox created under the agent's rule (`_check_agent_network`); a
+    # multi-step task is not covered, its steps' rules would need the running sandbox's policy switched.
+    agent_network = dataset.restricted_agent_network and not config.steps
+    agent_restricted = agent_network and config.agent_network_mode != "public"
     for name, phase in phases.items():
         if phase.network_mode in (None, "public") and not phase.allowed_hosts:
             continue
+        if name in ("environment", "agent") and agent_network:
+            continue
         if name != "verifier":
-            # The agent's sandbox is created public and a running sandbox's egress policy cannot be switched, so
-            # only the separate verifier's own sandbox can carry a phase policy (multi-step tasks verify in the
-            # agent's sandbox).
-            raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
+            # Without the opt-in the agent's sandbox is created public and a running sandbox's egress policy cannot
+            # be switched, so only the separate verifier's own sandbox can carry a phase policy (multi-step tasks
+            # verify in the agent's sandbox).
+            if name not in ("environment", "agent"):
+                remedy = ""
+            elif dataset.restricted_agent_network:
+                remedy = " in a multi-step task (`restricted_agent_network` covers tasks without [[steps]])"
+            else:
+                remedy = (
+                    " unless the dataset sets `restricted_agent_network = true` in the [gym] table of its "
+                    f"{DATASET_FILE}, which creates the agent's sandbox under the rule (OpenSandbox only)"
+                )
+            raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet{remedy}")
         # The task-wide [verifier] restriction applies to every grader that runs: for a multi-step task those are the
         # steps' verifiers in their resolved modes (the task-level default is never run by itself), for a task without
         # steps the task's own verifier.
@@ -460,6 +549,8 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
             shared_grader = any(step_verifier_mode(config, step) == "shared" for step in config.steps)
         else:
             shared_grader = config.is_shared_verifier
+        if shared_grader and agent_restricted:
+            continue  # grades in the agent's restricted sandbox: `_check_agent_network` compares the two rules
         if shared_grader:
             raise HarborTaskError(
                 f"{path}: [verifier] network restrictions are not supported in Harbor's shared verifier mode: a "
@@ -470,6 +561,8 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
             )
         if phase.allowed_hosts and phase.network_mode != "allowlist":
             raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
+    if agent_network:
+        _check_agent_network(path, config)
     environments = [("environment", config.environment), ("verifier.environment", config.verifier.environment)]
     environments += [(f"steps.{step.name}.verifier.environment", step.verifier.environment) for step in config.steps]
     for name, environment in environments:
@@ -763,9 +856,10 @@ def task_digest(
     ``dataset.toml``'s ``[gym]`` table can change the effective task without touching the folder, so the
     defaults and the task's own override are folded in whenever the table shapes tasks
     (:attr:`GymDatasetConfig.shapes_tasks`). A dataset whose table shapes none, because it has no table or
-    declares only identity, run and catalog keys (``license``, ``type``, ``allowed_agents``, ``domain``,
-    ``verified``, ``[gym.defaults].num_repeats``), keeps the plain folder hash, which is also what the
-    package store checks: none of those keys says what the task is, so none enters its digest.
+    declares only identity, run, admission and catalog keys (``license``, ``type``, ``allowed_agents``,
+    ``restricted_agent_network``, ``domain``, ``verified``, ``[gym.defaults].num_repeats``), keeps the plain folder
+    hash, which is also what the package store checks: none of those keys says what the task is, so none enters its
+    digest.
     ``shared_verifier_digest`` is the digest of the dataset root's ``verifier.py`` when it grades the task:
     grading code outside the folder is part of the task's identity too.
     """

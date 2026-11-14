@@ -121,7 +121,7 @@ Unit tests are not enough for a behavior change: also run
 | `users.py` | Which user an exec runs as: the image's `USER`, `[agent].user`, root on every provider |
 | `steps.py` | Prepare a `[[steps]]` turn: its `workdir/`, `setup.sh` and health check |
 | `verifier.py` | The `test.sh` wrapper, the reward files and the verifier sandbox |
-| `network_policy.py` | A `[verifier]` `network_mode` and `allowed_hosts` as an OpenSandbox egress policy |
+| `network_policy.py` | A `[verifier]` or agent `network_mode` and `allowed_hosts` as an OpenSandbox egress policy |
 | `task_data.py` | The row's task-data schema: the reserved `_ng_digest` and `_ng_dataset_digest` keys |
 | `configs/harbor.yaml` | The shipped server block |
 | `data/` | The example tasks and their recorded rows, rollouts and metrics |

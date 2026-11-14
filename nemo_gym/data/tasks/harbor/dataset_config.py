@@ -5,7 +5,8 @@
 
 ``task.toml`` is the task author's file and, once fetched, read-only. What a dataset needs on top
 of it goes here, as data: the facts Harbor has no field for (``license`` and ``type``, which say
-which split the rows may enter; ``allowed_agents``, the harnesses admitted to run it; ``domain`` and
+which split the rows may enter; ``allowed_agents``, the harnesses admitted to run it;
+``restricted_agent_network``, whether tasks that restrict the agent's network are admitted; ``domain`` and
 ``verified``, catalog metadata; ``source``, the hub reference a committed entry under ``environments/harbor/``
 is pulled from), defaults that scale every task or set how many rollouts an
 evaluation takes per task, and per-task overrides expressed with Harbor's own ``[environment]``
@@ -93,6 +94,11 @@ class GymDatasetConfig(BaseModel):
     # fetches it into the entry's folder, and a pull of the reference itself lands there too, so one dataset never
     # lives in two sibling folders. Unset for a dataset whose task folders are its own (the usual authored dataset).
     source: str | None = None
+    # Admit tasks whose `[agent]` (or, unset, `[environment]`) `network_mode` restricts the agent's network: the
+    # Harbor server creates the agent's sandbox under that rule, plus the hosts its harness needs to reach the model,
+    # on OpenSandbox only. Off refuses such tasks at load, as before. An admission key, not a task fact: the task's
+    # own task.toml carries the restriction, so the key never enters a task's digest.
+    restricted_agent_network: bool = Field(default=False, strict=True)
     defaults: GymDatasetDefaults = Field(default_factory=GymDatasetDefaults)
     tasks: dict[str, GymTaskOverride] = Field(default_factory=dict)
     # The dataset.toml this table was read from, so that errors in applying it name the file.
@@ -179,6 +185,7 @@ class GymDatasetConfig(BaseModel):
             and self.domain is None
             and not self.verified
             and self.source is None
+            and not self.restricted_agent_network
         )
 
     @property

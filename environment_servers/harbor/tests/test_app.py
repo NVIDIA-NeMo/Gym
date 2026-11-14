@@ -4066,6 +4066,8 @@ def test_server_config_holds_only_deployment_settings():
         "sandbox_ready_timeout_s",
         "sandbox_ttl_slack_s",
         "sandbox_provider_options",
+        "agent_model_servers",
+        "agent_allowed_hosts",
         "sandbox_metadata",
         "sandbox_resources_override",
         "gpu_sandbox_provider",
@@ -5559,3 +5561,145 @@ def test_an_episode_that_skips_token_capture_activates_the_agent_without_the_tra
     request = episode(task).model_copy(update={"skip_token_capture": skip_token_capture})
 
     assert server._agent_responses_path(request) == agent_path
+
+
+class TestAgentNetwork:
+    """A task's agent rule (``[agent].network_mode``, else ``[environment]``'s), admitted by a dataset with
+    ``restricted_agent_network``, is the agent sandbox's egress policy from its creation, with the hosts the harness
+    calls its model on (``agent_model_servers``, ``agent_allowed_hosts``) allowed besides the task's own."""
+
+    # The environment's rule, which the agent and the shared verifier inherit.
+    NO_NETWORK_TOML = TASK_TOML.replace("[environment]\n", '[environment]\nnetwork_mode = "no-network"\n')
+    # The agent's own allowlist under a public environment; the shared verifier grades within it.
+    ALLOWLIST_TOML = TASK_TOML.replace(
+        "[agent]\n", '[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["PyPI.org", "pypi.org"]\n'
+    ).replace("[verifier]\n", '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["pypi.org"]\n')
+    MODEL_URLS = {"policy_model": "http://10.1.2.3:8000"}
+    HOSTS = {"agent_model_servers": ["policy_model"], "agent_allowed_hosts": ["models.example.com"]}
+
+    def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", **config):
+        agent = FakeSandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, **config)
+        (task.path.parent / "dataset.toml").write_text("[gym]\nrestricted_agent_network = true\n")
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.sandbox_server_url",
+            lambda name, *, require_reachable=False: self.MODEL_URLS[name],
+        )
+        # The real `_create_sandbox` builds the agent's spec; it reaches the provider through `start`.
+        monkeypatch.delattr(server, "_create_sandbox")
+        specs: list[SandboxSpec] = []
+
+        async def start_with_pull_retries(task, *, key, what, make, start):
+            class Starter:
+                async def start(self, spec):
+                    specs.append(spec)
+
+            await start(Starter())
+            agent.created_in(specs[-1].workdir)
+            server._sandboxes[key] = agent
+            return agent
+
+        monkeypatch.setattr(server, "_start_with_pull_retries", start_with_pull_retries)
+        return server, task, agent, specs
+
+    def refused(self, response, specs):
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "Task 'hello' [agent] network policy" in failure.failure_reason
+        assert specs == []  # refused before any sandbox
+        return failure.failure_reason
+
+    async def test_the_agent_sandbox_is_created_under_a_deny_policy_with_the_model_hosts(self, tmp_path, monkeypatch):
+        server, task, agent, specs = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, **self.HOSTS)
+        response = await run_episode(server, task)
+        result = response.result
+        assert result is not None, response.failure
+        assert (result.reward, result.verifier_mode, result.agent_network) == (1.0, "shared", "no-network")
+        (spec,) = specs
+        assert spec.provider_options == {
+            "network_policy": {
+                "defaultAction": "deny",
+                "egress": [
+                    {"action": "allow", "target": "models.example.com"},
+                    {"action": "allow", "target": "10.1.2.3"},
+                ],
+            }
+        }
+        assert agent.stopped
+
+    async def test_an_agent_allowlist_adds_the_tasks_hosts_and_its_shared_verifier_grades_within_it(
+        self, tmp_path, monkeypatch
+    ):
+        server, task, _, specs = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, **self.HOSTS)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert (response.result.agent_network, response.result.verifier_network) == ("allowlist", "allowlist")
+        assert [rule["target"] for rule in specs[0].provider_options["network_policy"]["egress"]] == [
+            "pypi.org",
+            "models.example.com",
+            "10.1.2.3",
+        ]
+
+    async def test_no_agent_hosts_is_refused_at_seed(self, tmp_path, monkeypatch):
+        server, task, _, specs = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        reason = self.refused(await run_episode(server, task), specs)
+        assert "leaves the harness no route to its model" in reason and "agent_model_servers" in reason
+
+    def test_the_oracle_needs_no_agent_hosts(self, tmp_path, monkeypatch):
+        server, task, _, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, agent_implementation="harbor_oracle_agent"
+        )
+        assert server._agent_network_policy(task) == {"defaultAction": "deny", "egress": []}
+
+    def test_a_loopback_model_server_is_refused(self, tmp_path, monkeypatch):
+        server, task, _, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, **self.HOSTS)
+
+        def loopback(name, *, require_reachable=False):
+            assert require_reachable
+            raise ValueError("Model/tool endpoint must advertise a sandbox-reachable host")
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.sandbox_server_url", loopback)
+        with pytest.raises(ValueError, match="agent_model_servers entry 'policy_model': Model/tool endpoint"):
+            server._agent_network_policy(task)
+
+    @pytest.mark.parametrize("provider", ["docker", "daytona"])
+    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider):
+        server, task, _, specs = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, provider=provider, **self.HOSTS
+        )
+        reason = self.refused(await run_episode(server, task), specs)
+        assert "requires the OpenSandbox network-policy provider" in reason
+
+    @pytest.mark.parametrize(
+        "deny", [{"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]}, {}]
+    )
+    async def test_a_deny_by_default_deployment_is_refused_at_seed(self, tmp_path, monkeypatch, deny):
+        server, task, _, specs = self.prepared(
+            tmp_path,
+            monkeypatch,
+            toml=self.NO_NETWORK_TOML,
+            sandbox_provider_options={"network_policy": deny},
+            **self.HOSTS,
+        )
+        reason = self.refused(await run_episode(server, task), specs)
+        assert "would widen this deployment's deny-by-default" in reason
+        assert server.config.sandbox_provider_options["network_policy"] == deny
+
+    async def test_a_compose_task_is_refused_at_seed(self, tmp_path, monkeypatch):
+        server, task, _, specs = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, **self.HOSTS)
+        monkeypatch.setattr(server, "_uses_compose", lambda task: True)
+        reason = self.refused(await run_episode(server, task), specs)
+        assert "not supported for a Compose task" in reason
+
+    async def test_a_public_task_creates_the_agent_sandbox_without_a_policy(self, tmp_path, monkeypatch):
+        server, task, _, specs = self.prepared(tmp_path, monkeypatch, toml=TASK_TOML, **self.HOSTS)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.agent_network == "public"
+        assert "network_policy" not in specs[0].provider_options
