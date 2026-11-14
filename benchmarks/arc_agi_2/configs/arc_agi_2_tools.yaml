@@ -1,0 +1,63 @@
+# ARC-AGI-2 public evaluation set with the code-execution harness, model code run in remote sandboxes through Gym's
+# sandbox API (OpenSandbox; set OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY). configs/arc_agi_2_tools_local.yaml runs it
+# in a local process instead. arc_code_agent builds the prompt (digits plus one
+# image per grid), runs the model's Python in its sandbox and auto-submits a transform that passes every example pair.
+# The arc_code resources server grades the final grid by exact match. Pair it with a vision-language policy served with
+# a reasoning parser. Set the model's thinking switch with arc_code_agent.thinking_template_kwargs and
+# final_template_kwargs, and native_tools: true for models trained for native function calling.
+config_paths:
+  - resources_servers/arc_code/configs/arc_code.yaml
+  - responses_api_agents/arc_code_agent/configs/arc_code_agent.yaml
+
+arc_agi_2_resources_server:
+  _inherit_from: arc_code_resources_server
+
+arc_agi_2_arc_code_agent:
+  _inherit_from: arc_code_agent
+  responses_api_agents:
+    arc_code_agent:
+      resources_server:
+        name: arc_agi_2_resources_server
+      # Code runs in OpenSandbox sandboxes: num_sandbox_workers of them per agent server, each created on first use with
+      # numpy/scipy/networkx installed (cached by the cell's package mirror). The model sees only its code's output.
+      sandbox_backend: sandbox_api
+      num_sandbox_workers: 16
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY}
+            request_timeout_s: 300
+            use_server_proxy: true
+          create:
+            request_timeout_s: 1200
+            timeout_s: 1500
+            skip_health_check: false
+            retries: 10
+            retry_delay_s: 5.0
+            retry_max_delay_s: 90.0
+      sandbox_spec:
+        image: docker.io/library/python:3.12-slim
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        workdir: /tmp
+        resources: {cpu: 1, memory_mib: 4096, disk_gib: 10}
+        metadata:
+          harness: arc_code_agent
+          sandbox-api: opensandbox-sdk
+          nemo.nvidia.com/resources: custom
+          nemo.nvidia.com/sandbank: "true"
+      datasets:
+      - name: arc_agi_2_tools
+        type: benchmark
+        jsonl_fpath: benchmarks/arc_agi_2/data/arc_agi_2_tools.jsonl
+        prepare_script: benchmarks/arc_agi_2/prepare.py
+        num_repeats: 4
+
+arc_agi_2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: arc_agi_2_arc_code_agent

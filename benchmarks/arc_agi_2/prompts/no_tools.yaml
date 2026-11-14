@@ -1,0 +1,13 @@
+# ARC-AGI-2 without tools: the model reasons and writes the test output grid in an <answer> block, which the
+# arc_code resources server grades by exact match. {question} holds the puzzle as digit grids (benchmarks/arc_agi_2/prepare.py).
+user: |-
+  Solve this ARC-AGI puzzle by finding the hidden rule and writing the output grid for the test input. A grid is a rectangle of digits 0-9, where 0 is the background colour and the other digits are distinct colours (1 blue, 2 red, 3 green, 4 yellow, 5 grey, 6 magenta, 7 orange, 8 sky, 9 brown). Every example pair was produced by the same hidden transformation.
+
+  {question}
+
+  Finish with the output grid for the test input inside <answer> and </answer>, one row per line, digits separated by single spaces, and nothing else between the tags. Only this block is scored, and it is correct only if every cell matches. Example for a rule that reflects the input left to right:
+
+  <answer>
+  2 1 0 0
+  0 0 3 0
+  </answer>

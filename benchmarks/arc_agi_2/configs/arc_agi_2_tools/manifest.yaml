@@ -1,0 +1,30 @@
+name: arc_agi_2/configs/arc_agi_2_tools
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: knowledge
+description: ARC-AGI-2 public evaluation set with the arc_code_agent code-execution harness, model code run in OpenSandbox
+  sandboxes (images of the grids, auto-submitted answers), exact-match grid answers
+modality: multimodal
+licensing: Apache-2.0
+authors:
+- dhanley
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../arc_agi_2_tools.yaml
+resources_server: arc_code
+agent_server: arc_code_agent
+datasets:
+- name: arc_agi_2_tools
+  type: benchmark
+  jsonl_fpath: benchmarks/arc_agi_2/data/arc_agi_2_tools.jsonl
+  prepare_script: benchmarks/arc_agi_2/prepare.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared

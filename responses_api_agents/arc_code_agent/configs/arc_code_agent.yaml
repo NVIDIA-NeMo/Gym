@@ -1,0 +1,69 @@
+# ARC code agent. Pair it with the arc_code resources server (resources_servers/arc_code/configs/arc_code.yaml) and a
+# vision-language policy model served with a reasoning parser (responses_api_models/vllm_model).
+# Defaults reproduce the harness setting used for the original runs; every knob below is a config field.
+arc_code_agent:
+  responses_api_agents:
+    arc_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: arc_code_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Token budget
+      effort: xhigh
+      cap: 73728             # tokens generated plus tokens added to the conversation after the first prompt
+      answer_tokens: 4096    # reserved for the forced final answer
+      turn_cap: null         # per-turn cap; null means cap
+      margin: 64
+      max_runs: 24           # code runs per attempt
+      max_cuts: 6            # cut turns before going straight to the forced final answer
+      chars_per_token: 3.0   # estimate for harness text before the model server counts it
+
+      # Sampling
+      temperature: 0.7
+      top_p: 0.95
+      top_k: 20
+      seed_mode: per_row     # per_row | none
+      seed_offset: 141
+      stop_strings: ["</code>"]
+      include_stop_str_in_output: true
+      thinking_template_kwargs: null          # null: {enable_thinking: true, reasoning_effort: <effort>}
+      final_template_kwargs: {enable_thinking: false}
+      extra_body: {}
+      keep_thinking: true
+
+      # Images of the first user message
+      image_px: 336
+      image_scale: 12
+      image_style: pad32
+      record_images: true
+
+      # Harness behaviour
+      auto_answer: true
+      answer_resend: 2
+      clean_final: true
+      runs_cap_final: true
+      nocode_nudge: 0
+      parse_tool_calls: true
+      native_tools: false    # true: offer a `python` function tool (native function calling) instead of <code> blocks
+
+      # Sandbox
+      timeout_s: 30
+      out_chars: 4000
+      mem_mb: 6144
+      drop_timed_out: true
+      tool_fixes: true
+      helpers_v2: true
+      helpers_v3_new: true
+      sandbox_hygiene: true
+      num_sandbox_workers: 8
+      sandbox_python: null
+      sandbox_command_prefix: []
+
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arc_code/data/example.jsonl
