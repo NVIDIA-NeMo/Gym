@@ -291,6 +291,25 @@ class TestEpisode:
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
 
+    @pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+    @pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+    def test_run_rejects_unsupported_agent_context_before_setup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+    ) -> None:
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        body = episode(task).model_dump(mode="json")
+        task_input = body["task"]["task_input"]
+        target = task_input["task_data"] if nested else task_input
+        target["agent_context"] = context
+
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/run", json=body)
+
+        assert response.status_code == 422, response.text
+        assert "agent_context" in response.text
+        assert created == [] and sandbox.execs == []
+        assert server.server_client.calls == []
+
     async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
         """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
         `responses_create_params` (the flat shape `SingleAgentTurnTaskInput` accepted before `HarborTaskInput`

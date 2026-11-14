@@ -86,6 +86,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
@@ -962,9 +963,15 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, AGENT_CONTEXT_KEY_NAME)
                 and key not in _IDENTITY_KEYS
             }
+            # Agent context belongs only to the agent, including when a flat row keeps it in task_data.
+            # Filter at the shared HTTP boundary so native and ATIF inputs preserve the same separation.
+            if isinstance(request_row.get("task_data"), dict):
+                request_row["task_data"] = {
+                    key: value for key, value in request_row["task_data"].items() if key != AGENT_CONTEXT_KEY_NAME
+                }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a

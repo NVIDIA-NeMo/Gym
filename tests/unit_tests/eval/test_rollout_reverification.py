@@ -16,6 +16,7 @@ import asyncio
 import json
 from asyncio import Semaphore
 from collections import defaultdict
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1589,6 +1590,76 @@ class TestRunVerificationPayloads:
         sent = mock_client.post.await_args.kwargs["json"]
         assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
         assert returned["_ng_environment_server"] == "env_a"
+
+    @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
+    @pytest.mark.parametrize("materialized", [False, True])
+    async def test_agent_context_is_omitted_from_native_verify_requests(
+        self, monkeypatch: pytest.MonkeyPatch, context_location: str, materialized: bool
+    ) -> None:
+        context = {"agent": {"artifacts": {"media": {"path": "figs/1"}}}}
+        task_input = {
+            "responses_create_params": {"input": "q1"},
+            "task_data": {"answer": 42},
+            "verifier_metadata": {"answer": "sunny"},
+        }
+        expected_fields = deepcopy(task_input)
+        if context_location in ("top_level", "both"):
+            task_input["agent_context"] = context
+        if context_location in ("task_data", "both"):
+            task_input["task_data"]["agent_context"] = context
+        input_row = self._make_row("agent_a") | ({"task_input": task_input} if materialized else task_input)
+        original_input = deepcopy(input_row)
+        response = {"output": [{"type": "message", "role": "assistant", "content": []}]}
+        payload = _build_verify_payload(InputRolloutPair(input=input_row, rollout={"response": response}))
+        original_payload = deepcopy(payload)
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(returned, result)] = await self._collect(_run_verification_payloads([payload]))
+
+        if materialized:
+            expected_fields |= expected_fields.pop("task_data")
+        assert mock_client.post.await_args.kwargs["json"] == (
+            self._make_row("agent_a") | expected_fields | {"response": response}
+        )
+        assert result == {"reward": 1.0}
+        assert returned == original_payload
+        assert input_row == original_input
+
+    @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
+    async def test_agent_context_is_omitted_from_atif_verify_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context_location: str
+    ) -> None:
+        materialized, manifest = TestPrepareAtifPayloads()._write_inputs_and_manifest(tmp_path)
+        row = orjson.loads(materialized.read_bytes())
+        row |= {"verifier_metadata": {"answer": "sunny"}, "task_data": {"answer": 42}}
+        expected_fields = deepcopy(row)
+        context = {"agent": {"values": {"tag": "figqa2"}}}
+        if context_location in ("top_level", "both"):
+            row["agent_context"] = context
+        if context_location in ("task_data", "both"):
+            row["task_data"]["agent_context"] = context
+        materialized.write_bytes(orjson.dumps(row) + b"\n")
+        [payload] = _prepare_atif_payloads(materialized, manifest)
+        original_payload = deepcopy(payload)
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"fixture-agent": "rs"}, response_json={"reward": 1.0})
+
+        [(returned, result)] = await self._collect(_run_verification_payloads([payload]))
+
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert sent == expected_fields | {"response": original_payload["response"]}
+        assert [item["type"] for item in sent["response"]["output"]] == [
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert result == {"reward": 1.0}
+        assert returned == original_payload
+        assert ATIF_PROVENANCE_KEY not in sent and ATIF_PROVENANCE_KEY in returned
+        assert orjson.loads(materialized.read_bytes()) == row
 
     async def test_returns_row_and_response_json_for_each_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [self._make_row("agent_a", i) for i in range(3)]

@@ -76,6 +76,14 @@ checksum again, extracts it, checks the version Goose reports and publishes it, 
 is never trusted. The sandbox needs only bash, `sha256sum`, `tar`, `gzip` and `timeout`, and no internet access. The
 agent server needs access to GitHub releases.
 
+Goose needs CA certificates to construct its HTTP client, even when the model endpoint uses HTTP. When the
+task image has no trust store (no `SSL_CERT_FILE` or `SSL_CERT_DIR`, and none of the standard bundle files such
+as `/etc/ssl/certs/ca-certificates.crt`), setup uploads Certifi's public CA bundle into the private session
+directory and selects it with `SSL_CERT_FILE`. Goose's tool shells inherit that variable, so an image with
+its own trust store is left alone: the task, and any certificate the agent adds to it, keep working as they
+would under another harness. Certificate verification stays enabled, and an explicit
+`SandboxAccess.env.SSL_CERT_FILE` is preserved for endpoints that use a custom trust store.
+
 Goose runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` under the process supervisor. Its
 config, sessions and state live under `GOOSE_PATH_ROOT` in a private session directory, so tool shells keep the
 task's `HOME` and `XDG_*` directories. `SandboxAccess.env` is forwarded, except `GOOSE_*`, `OPENAI_*`, `OTEL_*` and
