@@ -31,6 +31,7 @@ from nemo_gym.artifacts.run_files import (
     QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_VERDICTS_FILENAME,
 )
+from nemo_gym.core.failure_kinds import MODEL_CONTEXT_LIMIT
 from nemo_gym.rollouts.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -40,6 +41,7 @@ from nemo_gym.rollouts.health.checks import (
     CHECK_REGISTRY,
     _bind_policy_call_views,
     _canonical_trajectory,
+    _context_limit_refusals,
     _ended_on_failed_call,
     _is_failed,
     _is_failed_attempt,
@@ -281,6 +283,7 @@ def evaluate_record(
     identities = [identity for call in calls if (identity := _replay_identity(call)) is not None]
     duplicated = sum(count - 1 for count in Counter(identities).values() if count > 1)
     transcript_prompt, transcript_completion, _ = _transcript_tokens(record)
+    refusals, refusals_final, refusals_recovered = _context_limit_refusals(calls)
 
     return RolloutDigest(
         task_index=task_index,
@@ -310,6 +313,9 @@ def evaluate_record(
         ),
         errors_by_status=dict(errors_by_status),
         ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
+        context_limit_refusals=refusals,
+        context_limit_refusals_final=refusals_final,
+        context_limit_refusals_recovered=refusals_recovered,
         context_window_exceeded=_context_window_exceeded(record),
         verification_skipped=(
             record.get("verification_skipped") if isinstance(record.get("verification_skipped"), bool) else None
@@ -629,6 +635,19 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    "by_failure_kind": {
+                        MODEL_CONTEXT_LIMIT: {
+                            "calls": sum(digest.context_limit_refusals for digest in digests),
+                            "final": sum(digest.context_limit_refusals_final for digest in digests),
+                            "recovered": sum(digest.context_limit_refusals_recovered for digest in digests),
+                            "rollouts_final": sum(bool(digest.context_limit_refusals_final) for digest in digests),
+                            "rollouts_recovered_only": sum(
+                                bool(digest.context_limit_refusals_recovered)
+                                and not digest.context_limit_refusals_final
+                                for digest in digests
+                            ),
+                        }
+                    },
                     # Rows by their own step_usage: a sub-step recorded context_window_exceeded, none, or no step_usage.
                     "context_window_exceeded": {
                         "true": sum(digest.context_window_exceeded is True for digest in digests),
@@ -945,6 +964,14 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "unobserved": digest.unobserved,
                 "responses": digest.responses,
             }
+            if digest.context_limit_refusals:
+                row["model_call_failures"] = {
+                    MODEL_CONTEXT_LIMIT: {
+                        "calls": digest.context_limit_refusals,
+                        "final": digest.context_limit_refusals_final,
+                        "recovered": digest.context_limit_refusals_recovered,
+                    }
+                }
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index
             handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))

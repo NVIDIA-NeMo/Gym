@@ -172,6 +172,10 @@ class RolloutDigest(BaseModel):
     model_call_errors_usage_unknown: int = 0
     errors_by_status: dict[str, int] = Field(default_factory=dict)
     ended_on_error: bool = False
+    # Context-length refusals: all, last in the model chain, and followed by another call.
+    context_limit_refusals: int = 0
+    context_limit_refusals_final: int = 0
+    context_limit_refusals_recovered: int = 0
     # The row's own `verification_skipped` when written as a boolean, else None (absent is not False).
     verification_skipped: bool | None = None
     # Whether a sub-step of the row's `step_usage` (scicode_agent) has status `context_window_exceeded`, a
