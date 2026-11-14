@@ -39,6 +39,7 @@ migration = load_migration()
         "pool_agent",
         "simple_strands_agent",
         "goose_agent",
+        "qwen_code_agent",
         "kimi_code_agent",
         "codex_agent",
         "openclaw_agent",

@@ -248,6 +248,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "openhands_agent",
         "pi_agent",
         "pool_agent",
+        "qwen_code_agent",
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
