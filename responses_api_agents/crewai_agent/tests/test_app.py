@@ -382,11 +382,12 @@ async def test_a_crew_that_runs_out_of_time_answers_incomplete(lent_sandbox, run
     )
     started = time.monotonic()
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        # The activation budget also covers harness startup and the first shell command.
+        response, close = await _episode(_agent(timeout=30), access)
     finally:
         model.close()
 
-    assert time.monotonic() - started < 60
+    assert time.monotonic() - started < 90
     assert (response.status, response.metadata["crewai_stop_reason"]) == ("incomplete", "timeout")
     assert (workdir / "partial.txt").read_text() == "partial\n"
     # The second model call never returned, so the run's usage is unknown.
