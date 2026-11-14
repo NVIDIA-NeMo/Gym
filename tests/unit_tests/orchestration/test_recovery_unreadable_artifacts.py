@@ -21,6 +21,7 @@ import sys
 
 import pytest
 
+from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
@@ -28,6 +29,8 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     gate_summary_from_collected,
 )
+from tests.unit_tests.orchestration.test_eval_resubmit_decision import FakeExecutor
+from tests.unit_tests.orchestration.test_eval_resubmit_decision import fake_executor as fake_executor
 
 
 pytestmark = pytest.mark.skipif(
@@ -94,3 +97,25 @@ def test_unreadable_saved_rows_stop_the_decision_instead_of_reading_as_absent(tm
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert decision.action == RecoveryAction.STOP
     assert decision.reason == f"saved rows are unreadable ({name}), so what they hold is unknown"
+
+
+@pytest.mark.parametrize("name", ["rollouts_aggregate_metrics.json", "quality_summary.json"])
+def test_the_verdict_of_an_unreadable_metric_or_summary_is_to_make_it_readable_not_a_fresh_submit(
+    tmp_path, fake_executor, name
+):
+    collected = _run(tmp_path / "job", unreadable=name)  # a complete run; the file is readable again after
+    assert collected.unreadable_files == [f"artifacts/{name}"]
+    FakeExecutor.job_dir = tmp_path / "job"
+    target = tmp_path / "job" / "artifacts" / name
+    target.chmod(0)
+    try:
+        out = submit.inspect_recovery("gym-job-unreadable", "bench")
+    finally:
+        target.chmod(0o600)
+
+    assert out.decision.action == RecoveryAction.NOOP and out.gate_task["status"] == "FAILED"
+    assert out.operator_verdict == {
+        "state": "unknown",
+        "reason": f"unreadable artifacts, read as unknown: ['artifacts/{name}']",
+        "action": "make those files readable again and inspect again",
+    }
