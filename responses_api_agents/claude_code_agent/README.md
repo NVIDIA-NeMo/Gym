@@ -225,6 +225,12 @@ seeds `/v1/agent_sessions`, sends one text activation to the rollout-scoped
 Retries of the same activation reuse its result; a different activation requires a
 new session. Unseeded requests retain the existing local behavior.
 
+When the provider's safety classifier ends a response (`stop_reason: "refusal"`), Claude Code exits. With
+`refusal_resumes: N` (default 0, off), the agent resumes the conversation in the same sandbox with
+`claude --resume <session>` and `refusal_resume_prompt`, up to N times within the activation's time left. With or
+without resumes, a response with a refusal reports `safety_refusals`, `safety_refusal_resumes` and
+`ended_on_safety_refusal` in its `metadata`, so an environment can mask and count it.
+
 For an agent-owned sandbox, add these fields to the agent config:
 
 ```yaml

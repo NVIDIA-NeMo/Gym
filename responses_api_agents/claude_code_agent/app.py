@@ -86,13 +86,19 @@ from responses_api_agents.claude_code_agent.observability import (
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
+    ClaudeCodeArtifacts,
     ClaudeCodeSandboxSession,
     parse_artifact_observations,
+    with_final_newline,
 )
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
 LOG = logging.getLogger(__name__)
+# A resume needs time to reload the conversation before it can do anything.
+_MIN_RESUME_SECONDS = 60.0
+
+
 # Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
 _BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
     [ "$(id -u)" = 0 ] || { echo "Claude Code sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
@@ -159,6 +165,15 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Copy the stream-json output to this sandbox path after each turn, for task verifiers that read it.
+    sandbox_transcript_path: str | None = None
+    # Sandbox sessions only. When the provider's safety classifier ends a response (stop_reason "refusal"), Claude
+    # Code exits; resume the conversation with `claude --resume` up to this many times within the time left. 0 keeps
+    # the exit; the response metadata reports the refusals either way.
+    refusal_resumes: int = Field(default=0, ge=0)
+    refusal_resume_prompt: str = (
+        "Your previous response was stopped by the model provider's safety filter, not by you. Continue the task."
+    )
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -288,6 +303,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
+        *,
+        resume_session: Optional[str] = None,
     ) -> list[str]:
         """Construct the ``claude`` CLI argv from config.
 
@@ -331,6 +348,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
+        if resume_session:
+            cmd += ["--resume", resume_session]
         cmd += ["--", instruction]
         return cmd
 
@@ -548,6 +567,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         run_metadata: dict[str, Any],
         *,
         status: str | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> NeMoGymResponse:
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -576,6 +596,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
         return NeMoGymResponse(
             **({"status": status} if status is not None else {}),
+            **({"metadata": metadata} if metadata else {}),
             id=response_id,
             created_at=int(time()),
             model=model_name,
@@ -667,6 +688,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 harness="Claude Code",
                 owns_sandbox=owns_sandbox,
             ),
+            transcript_path=self.config.sandbox_transcript_path,
         )
         try:
             async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
@@ -763,7 +785,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         env = {
-            "CLAUDE_CONFIG_DIR": directory + "/config",
+            "CLAUDE_CONFIG_DIR": state.claude_config_dir(),
             "IS_SANDBOX": "1",
             "ANTHROPIC_API_KEY": "gym" if self.config.model_server else self.config.anthropic_api_key or "EMPTY",
             "ANTHROPIC_MODEL": model,
@@ -782,6 +804,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         artifacts = None
         failure = None
+        # The refused activation's receipt, when a resume could not start after begin_resume reset the session.
+        settled_cleanup = None
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         try:
             # Close can fence the staging phase just as it fences the execution phase.
             async with self.sem:
@@ -791,21 +818,55 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
                 )
                 command[0] = state.runtime + "/claude"
+                payload = {
+                    "command": command,
+                    "cwd": state.session.workdir,
+                    "env": env,
+                    "settings": self._build_settings(),
+                    "mcp_config": self._get_static_mcp_config() if mcp_config else None,
+                    "skills_path": skills_path,
+                }
                 artifacts = await state.execute(
-                    {
-                        "command": command,
-                        "cwd": state.session.workdir,
-                        "env": env,
-                        "settings": self._build_settings(),
-                        "mcp_config": self._get_static_mcp_config() if mcp_config else None,
-                        "skills_path": skills_path,
-                    },
-                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
-                    close_timeout=self.config.session_close_timeout_seconds,
+                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
+                resume = self._refusal_resume_session(state, artifacts, timeout - (loop.time() - started))
+                while resume is not None:
+                    refused_cleanup = state.session.cleanup
+                    try:
+                        await state.begin_resume(timeout=self.config.session_close_timeout_seconds)
+                    except Exception:
+                        if state.session.closing:
+                            raise
+                        # The refused activation finished; a resume that cannot start leaves it as the result.
+                        LOG.warning("Could not rearm Claude Code to resume a refused session", exc_info=True)
+                        settled_cleanup = refused_cleanup
+                        resume = None
+                        continue
+                    state.earlier_events += with_final_newline(artifacts.events)
+                    command = self._build_command(
+                        model,
+                        self.config.refusal_resume_prompt,
+                        system,
+                        mcp_config=mcp_config,
+                        skills_active=bool(skills_path),
+                        resume_session=resume,
+                    )
+                    command[0] = state.runtime + "/claude"
+                    artifacts = await state.execute(
+                        {**payload, "command": command},
+                        timeout=timeout - (loop.time() - started),
+                        close_timeout=self.config.session_close_timeout_seconds,
+                    )
+                    resume = self._refusal_resume_session(state, artifacts, timeout - (loop.time() - started))
         except BaseException as error:
             failure = error
             artifacts = state.session.artifacts
+        if state.earlier_events:
+            # The response and the observations cover every activation of the conversation.
+            artifacts = ClaudeCodeArtifacts(
+                events=state.earlier_events + (artifacts.events if artifacts is not None else ""),
+                transcripts=artifacts.transcripts if artifacts is not None else None,
+            )
         items, run_metadata = ([], {})
         if artifacts is not None:
             items, run_metadata = await asyncio.to_thread(
@@ -813,7 +874,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 artifacts.events,
                 fold_thinking=self._fold_thinking(),
             )
-        cleanup = state.session.cleanup
+        cleanup = settled_cleanup or state.session.cleanup
         if cleanup and cleanup["timed_out"]:
             status, reason = "incomplete", "timeout"
         elif isinstance(failure, asyncio.CancelledError):
@@ -861,7 +922,37 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        metadata = {}
+        if run_metadata.get("safety_refusals"):
+            metadata = {
+                "safety_refusals": str(run_metadata["safety_refusals"]),
+                "safety_refusal_resumes": str(state.resumes),
+                "ended_on_safety_refusal": "true" if run_metadata.get("ended_on_safety_refusal") else "false",
+            }
+        if state.transcript_unavailable:
+            metadata["transcript_unavailable"] = "true"
+        return self._response_from_output(body, items, model, run_metadata, status=status, metadata=metadata or None)
+
+    def _refusal_resume_session(
+        self, state: ClaudeCodeSandboxSession, artifacts: ClaudeCodeArtifacts | None, remaining: float
+    ) -> str | None:
+        """The Claude Code session to resume when the provider's safety filter ended the last activation.
+
+        None when resumes are off or spent, too little time is left, the activation timed out, or it ended
+        otherwise.
+        """
+        cleanup = state.session.cleanup
+        if (
+            artifacts is None
+            or state.resumes >= self.config.refusal_resumes
+            or remaining < _MIN_RESUME_SECONDS
+            or (cleanup and cleanup["timed_out"])
+        ):
+            return None
+        _, metadata = parse_stream_json(artifacts.events)
+        if not metadata.get("ended_on_safety_refusal"):
+            return None
+        return metadata.get("session_id")
 
     async def responses(
         self,
