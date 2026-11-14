@@ -24,7 +24,7 @@ import os
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -198,6 +198,18 @@ class RolloutRecord:
             if actual != self.expected_identity:
                 raise ConfigError(f"Saved record identity changed after indexing {self.path} at byte {self.offset}.")
         return row
+
+
+def read_record_rows(records: Iterable[RolloutRecord]) -> list[dict]:
+    """Read records in order through one open handle per file, for random access without an open per record."""
+    with ExitStack() as files:
+        handles = {}
+        rows = []
+        for record in records:
+            if record.path not in handles:
+                handles[record.path] = files.enter_context(record.path.open("rb"))
+            rows.append(record._read(handles[record.path]))
+        return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,14 +848,7 @@ class RolloutRecords:
     def selected(self, disposition: str) -> list[dict]:
         # Existing consumers explicitly request materialized results. Keep reads
         # out of reconciliation/coverage and reuse handles for random access.
-        with ExitStack() as files:
-            handles = {}
-            rows = []
-            for record in self.selected_records(disposition).values():
-                if record.path not in handles:
-                    handles[record.path] = files.enter_context(record.path.open("rb"))
-                rows.append(record._read(handles[record.path]))
-            return rows
+        return read_record_rows(self.selected_records(disposition).values())
 
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))
@@ -889,6 +894,31 @@ class RolloutRecords:
             and payload.rerun_approved
             and self.disposition(identity) == "success"
         }
+
+    def masked_retryable(self, identity: str) -> bool:
+        """Whether this rollout's selected success is masked by infrastructure and still within its attempt cap.
+
+        A resume runs such a rollout again and a later attempt supersedes it, so it is selected but not complete.
+        """
+        return (
+            self.disposition(identity) == "success"
+            and self.payloads[(identity, self.latest[identity])].masked_infrastructure
+            and self._retryable(identity)
+            and self.failure_count(identity) < self.attempt_cap
+        )
+
+    def settled(self, identity: str) -> bool:
+        """Whether this rollout's outcome is final: a success no resume reruns, or a failure or omission none retries.
+
+        The complement of ``pending`` for a rollout with an outcome, so a later attempt can never change a settled one.
+        A settled judge failure keeps its saved answer, which the saved-answer re-judge pass can still grade again.
+        """
+        disposition = self.disposition(identity)
+        if disposition == "success":
+            return not self.masked_retryable(identity)
+        if disposition in ("failure", "omitted"):
+            return not self._retryable(identity) or self.failure_count(identity) >= self.attempt_cap
+        return False
 
     def failure_count(self, identity: str) -> int:
         return self.attempt_counts[identity] + (
@@ -1015,13 +1045,7 @@ class RolloutRecords:
         # the score rather than counted as a zero. It is a failure, so it is never in ``masked``: report it here.
         failed_masked = sum(self.payloads[key].masked for key in failures)
         # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
-        masked_retryable = sum(
-            self.payloads[(identity, self.latest[identity])].masked_infrastructure
-            and self._retryable(identity)
-            and self.failure_count(identity) < max_attempts
-            for identity in self.expected
-            if self.disposition(identity) == "success"
-        )
+        masked_retryable = sum(self.masked_retryable(identity) for identity in self.expected)
         settled = counts["success"] - masked_retryable + final_zeros
         # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
         # (terminal, at their attempt cap, or ``stopped_not_retried``, which resume does not run again) are not open,

@@ -38,6 +38,37 @@ or the original producer name saved in `_ng_failure_legacy_class`, when present.
 kind `gdpval:reference_missing` still matches an existing `reference_missing` selection. Selecting both names counts
 the task once. Collection and offline aggregation use the same rule; see [evaluation resume](/main/evaluation/resume).
 
+## Per-agent completion files
+
+When one `gym eval run` collects rollouts for several agents with aggregation enabled, each agent is aggregated as soon as every one of its expected rollouts is settled, without waiting for the other agents, and its entry is written to `<output>_agent_complete/<agent>.json`. Characters other than letters, digits, `.`, `_` and `-` in the agent name are percent-encoded in the filename. A run with a single agent or `disable_aggregation` writes no completion files.
+
+| Field | Value |
+| --- | --- |
+| `schema_version` | `"1"` |
+| `agent_ref` | `{"name": <label>}`, the label the run-wide entry uses |
+| `_ng_environment_server` | The environment server the agent's rollouts ran through |
+| `expected_rollouts` | The agent's materialized rollouts |
+| `completed_rollouts` | Rollouts with a scored success |
+| `failed_rollouts` | Rollouts settled by a failure no resume retries, or by an intentional omission |
+| `completed_at` | UTC time the file was written, in ISO 8601 |
+| `aggregation_status` | `complete`, or `error` when `/aggregate_metrics` failed or gave no answer within 30 minutes; the entry then carries the error |
+| `aggregate` | The entry `<output>_aggregate_metrics.json` gives the agent, apart from `_ng_run_health_metrics`, a run-level health summary added to the first run-wide entry after the run |
+
+When an agent is complete:
+
+- A rollout is settled when its outcome is final: a scored success, or a failure no resume retries (a terminal class or an exhausted attempt budget). A result masked by infrastructure, or a failure a resume will retry, keeps the agent pending until a resumed run reruns that rollout.
+- Failures enter the entry as they do at the end of the run: `count_failure_classes_as_zero` decides whether they count as zeros.
+- An agent with a persisted result that carries no reward gets no file.
+- Rollouts routed to an environment server and rows naming the agent behind it count as one agent. An agent fronted by several environment servers is labeled by the environment server in its file, while the run-wide file falls back to the agent name when only one of those servers ends with scored rollouts.
+
+What changes the files:
+
+- A fresh run deletes `<output>_agent_complete/`.
+- A resumed run rewrites the file of an agent an earlier job finished before it dispatches, so that file's `completed_at` is the resuming job's time. It deletes the file of an agent it still has rollouts to run for, which the agent writes again once they settle.
+- After collection, `gym eval run` grades saved judge failures again and recomputes `<output>_aggregate_metrics.json`. Each completion file then takes its agent's recomputed entry and rollout counts, and `completed_at` changes only for a file whose entry or counts changed. The judge-only recovery job does the same after it recomputes the run's metrics. If the metrics cannot be recomputed, or the files cannot be refreshed, the completion files are removed, as they are when a run that requires every rollout stays incomplete after the pass and so gets no recomputed metrics.
+- `<output>_aggregate_metrics.json` is first written after every agent is done. Once it exists it is authoritative: a later `gym eval aggregate` repair rewrites it but not the completion files, so a completion file that recorded an aggregation error can be stale, and the run-wide entry wins.
+- If a job is killed before the run-wide file is written, the completion files are what it leaves. `gym eval aggregate` with `+merge_shards=false` can compute metrics from the saved rollouts afterwards; it needs the environment servers running again, scores unfinished agents from the rollouts they have, and is a manual step.
+
 ## Output Format
 
 The output file is a JSON array with one entry per agent:

@@ -700,6 +700,14 @@ class RolloutStore:
         """Return the newest allocated attempt's disposition for this rollout."""
         return self._state.disposition(logical_rollout_id(row))
 
+    def masked_retryable(self, row: dict) -> bool:
+        """Whether this rollout's selected success is masked by infrastructure and a resume will run it again."""
+        return self._state.masked_retryable(logical_rollout_id(row))
+
+    def settled(self, row: dict) -> bool:
+        """Whether this rollout's outcome is final, so no resume runs it again (``RolloutRecords.settled``)."""
+        return self._state.settled(logical_rollout_id(row))
+
     def selected(self, disposition: str) -> list[dict]:
         """Load selected payloads; use selected_records for metadata-only access."""
         return self._state.selected(disposition)

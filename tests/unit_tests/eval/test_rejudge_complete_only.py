@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A strict run that was rejected as incomplete recomputes no metrics after its re-judge pass until it is complete."""
+"""After its re-judge pass, a strict run that was rejected as incomplete recomputes no metrics until it is complete,
+and a run whose metrics are recomputed refreshes or removes its per-agent completion files."""
 
 from types import SimpleNamespace
 
@@ -97,3 +98,50 @@ def test_disabled_aggregation_is_still_respected_when_the_pass_raised(
     )
 
     assert pass_settles_one_row == []
+
+
+@pytest.mark.parametrize("failing_step", [None, "recompute", "refresh"])
+def test_completion_files_follow_the_recomputed_metrics_or_are_removed(
+    tmp_path, monkeypatch, pass_settles_one_row, failing_step
+) -> None:
+    """Completion files written during collection never keep the scores from before the re-judge pass."""
+    output = tmp_path / "rollouts.jsonl"
+    complete_dir = tmp_path / "rollouts_agent_complete"
+    complete_dir.mkdir()
+    (complete_dir / "alpha.json").write_text("{}")
+    refreshed = []
+
+    class Helper:
+        async def run_from_config(self, config):
+            if failing_step == "recompute":
+                raise OSError("disk full")
+
+    def refresh(path, global_config_dict):
+        if failing_step == "refresh":
+            raise OSError("disk full")
+        refreshed.append(path)
+
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.RolloutAggregationHelper", Helper)
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.refresh_agent_complete_files", refresh)
+
+    eval_cli._rejudge_saved_judge_failures({}, output, SimpleNamespace(disable_aggregation=False))
+
+    assert refreshed == ([output] if failing_step is None else [])
+    assert complete_dir.exists() is (failing_step is None)
+
+
+def test_a_strict_run_left_incomplete_by_the_pass_removes_its_completion_files(
+    tmp_path, monkeypatch, pass_settles_one_row
+) -> None:
+    """No run-wide metrics follow the pass, so files written during collection would keep the scores from before it."""
+    complete_dir = tmp_path / "rollouts_agent_complete"
+    complete_dir.mkdir()
+    (complete_dir / "alpha.json").write_text("{}")
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: False)
+
+    eval_cli._rejudge_saved_judge_failures(
+        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=True
+    )
+
+    assert pass_settles_one_row == []
+    assert not complete_dir.exists()

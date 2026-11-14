@@ -236,3 +236,34 @@ def test_a_health_check_that_reads_the_store_selection_gets_the_settled_history_
     assert call["rollout_paths"] == output and call["output_dir"] == output.parent
     assert call["run_coverage"][0]["masked"] == 0
     assert not (Path(config.settle_receipt_fpath).parent / "selected_rollouts.jsonl").exists()
+
+
+@pytest.mark.parametrize("failing_step", [None, "recompute", "refresh"])
+def test_the_settled_run_refreshes_or_removes_its_completion_files(
+    tmp_path, monkeypatch, aggregation, failing_step
+) -> None:
+    """The judge-only job recomputes the run-wide metrics in place, so the completion files follow them or go."""
+    output = tmp_path / "rollouts.jsonl"
+    complete_dir = tmp_path / "rollouts_agent_complete"
+    complete_dir.mkdir()
+    (complete_dir / "alpha.json").write_text("{}")
+    refreshed = []
+
+    async def failing_aggregation(self, config):
+        raise OSError("disk full")
+
+    def refresh(path, global_config_dict):
+        if failing_step == "refresh":
+            raise OSError("disk full")
+        refreshed.append(path)
+
+    if failing_step == "recompute":
+        monkeypatch.setattr(RolloutAggregationHelper, "run_from_config", failing_aggregation)
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.refresh_agent_complete_files", refresh)
+
+    eval_cli._refresh_settled_source(
+        {"config_paths": ["fixture.yaml"], "disable_health_check": True}, output, workdir=tmp_path / "work"
+    )
+
+    assert refreshed == ([output] if failing_step is None else [])
+    assert complete_dir.exists() is (failing_step is None)
