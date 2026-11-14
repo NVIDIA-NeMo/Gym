@@ -370,6 +370,29 @@ class TestApp:
         assert calls[0].request == {"input": "hello"}
         assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
 
+    @pytest.mark.parametrize("summary", [pytest.param(None, id="null"), pytest.param("missing", id="missing")])
+    async def test_responses_normalizes_missing_reasoning_summary(self, summary: object) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        response_data = {
+            **_response_data(),
+            "output": [
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "encrypted_content": "opaque",
+                    **({} if summary == "missing" else {"summary": summary}),
+                }
+            ],
+        }
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=response_data)
+
+        response = client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        assert response.json()["output"][0]["summary"] == []
+
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
