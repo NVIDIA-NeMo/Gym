@@ -1,0 +1,60 @@
+# Nemotron Decide checklist judge. Each checklist item is a yes/no question; the reward is the weighted mean of the
+# yes-probabilities (reward_mode: probability) or the weighted pass rate (reward_mode: pass).
+# The API key is read from the environment variable named by decide.api_key_env; it is never stored in config.
+decide_judge:
+  resources_servers:
+    decide_judge:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Checklist judge on Nemotron Decide (yes-probabilities as reward), drop-in for LLM-judge rewards
+      value: Dense, calibrated judge rewards at decision-model latency (one forward pass, no generated text)
+      decide:
+        base_url: ${oc.env:DECIDE_BASE_URL,http://localhost:8770}
+        api: ${oc.env:DECIDE_API,systemone}
+        model: nemotron-decide
+        api_key_env: DECIDE_API_KEY
+        timeout_s: 30
+        max_retries: 3
+        max_concurrency: 32
+      reward_mode: probability
+      pass_threshold: 0.5
+      required_fail_reward: 0.0
+      reference_fields: [expected_answer]
+      include_tool_calls: true
+      allow_row_checklist: true
+      checklist:
+        - name: follows_task
+          question: Does the response do what the task asked for?
+          weight: 1.0
+        - name: correct
+          question: >-
+            Is the response factually correct and, when a reference answer is given, consistent with the
+            reference answer?
+          weight: 2.0
+        - name: complete
+          question: Does the response address every part of the task?
+          weight: 1.0
+decide_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: decide_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/decide_judge/data/example.jsonl
+
+decide_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: decide_judge_simple_agent
