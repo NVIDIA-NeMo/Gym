@@ -473,3 +473,40 @@ async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
         assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
         saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert saved.failure_id == failure.event_id
+
+
+@pytest.mark.parametrize("close_error_kind", ["timeout", "typed"])
+async def test_failed_agent_close_is_recorded_even_when_final_cleanup_recovers(close_error_kind):
+    from nemo_gym.core import FailureReport
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+
+    environment, client = _environment_server()
+    primary = NgFailureEvent(
+        boundary="agent", failure_kind="model_transport_error", failure_reason="agent failed", stage="agent"
+    )
+    close_error = (
+        TimeoutError("first close timed out")
+        if close_error_kind == "timeout"
+        else NgFailureEvent(
+            boundary="agent", failure_kind="session_release_failed", failure_reason="close failed", stage="cleanup"
+        )
+    )
+    client.responses = [*client.responses[:2], primary, close_error, client.responses[3], client.responses[5]]
+    result = await environment.run_request(_request())
+    assert result.result is None and result.failure.stage == "agent"
+    assert sum(path == "/v1/agent_sessions/close" for _, path, _ in client.calls) == 2
+    report = FailureReport.model_validate_json(result.failure_report.model_dump_json())
+    selected = report.events[report.failure_id]
+    assert selected.cause_id == primary.event_id
+    assert report.events[primary.event_id] == primary.event
+    cleanup = [event for event in report.events.values() if event.operation == "episode.cleanup"]
+    assert len(cleanup) == 1
+    assert cleanup[0].stage == "cleanup" and cleanup[0].failure_kind == "session_release_failed"
+    if close_error_kind == "typed":
+        assert cleanup[0].cause_id == close_error.event_id
+        assert report.events[close_error.event_id] == close_error.event
+    else:
+        assert cleanup[0].foreign_error.exception_type == "TimeoutError"
+    row = _episode_record(result.model_dump(mode="json"))
+    assert row["_ng_failure_id"] == selected.event_id
+    assert cleanup[0].event_id in row["_ng_failure_events"]

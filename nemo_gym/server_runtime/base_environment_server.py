@@ -21,7 +21,13 @@ from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId
-from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, FailureStage
+from nemo_gym.core.failure_kinds import (
+    ENVIRONMENT_ADMISSION_TIMEOUT,
+    ENVIRONMENT_EPISODE_TIMEOUT,
+    EPISODE_FAILED,
+    SESSION_RELEASE_FAILED,
+    FailureStage,
+)
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, encode_model_sampling
@@ -128,18 +134,19 @@ class CleanupContext:
                 async with asyncio.timeout(self.cleanup_timeout_seconds):
                     await entry.close()
             except TimeoutError as error:
-                self._observe_failure(entry, error)
+                self.observe_failure(entry.name, error)
                 # The owner's expiry or reaping takes over; the earlier-registered callbacks still run.
                 LOGGER.error(f"Episode cleanup timed out: {entry.name} episode_id={self.episode_id}")
             except Exception as error:
-                self._observe_failure(entry, error)
+                self.observe_failure(entry.name, error)
                 LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
-    def _observe_failure(self, entry: _CleanupEntry, error: Exception) -> None:
+    def observe_failure(self, name: str, error: Exception) -> None:
+        """Retain a failed cleanup attempt, including one recovered by final unwinding."""
         observed = NgFailureEvent(
             boundary=FailureBoundary.ENVIRONMENT,
             failure_kind=SESSION_RELEASE_FAILED,
-            failure_reason=f"Episode cleanup failed: {entry.name}"[:2000],
+            failure_reason=f"Episode cleanup failed: {name}"[:2000],
             stage="cleanup",
             operation="episode.cleanup",
         )
@@ -340,14 +347,22 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 # The semaphore applies queue_timeout_seconds and counts the timeout.
                 await self._admission.acquire()
             except TimeoutError as error:
+                observed = NgFailureEvent(
+                    boundary=FailureBoundary.ENVIRONMENT,
+                    failure_kind=ENVIRONMENT_ADMISSION_TIMEOUT,
+                    failure_reason="Episode admission timed out",
+                    stage="admission",
+                    operation="episode.admission",
+                )
+                observed.__cause__ = error
                 return self.failure_response(
                     request,
                     EpisodeFailure(
-                        failure_reason="Episode admission timed out",
+                        failure_reason=observed.failure_reason,
                         terminal=False,
                         stage="admission",
                     ),
-                    report=reply_failure_report(error),
+                    report=reply_failure_report(observed),
                 )
             acquired = True
 
@@ -384,13 +399,20 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                         response = await self.run(request, cleanup)
                 except TimeoutError as error:
                     if deadline is not None and deadline.expired():
+                        observed = NgFailureEvent(
+                            boundary=FailureBoundary.ENVIRONMENT,
+                            failure_kind=ENVIRONMENT_EPISODE_TIMEOUT,
+                            failure_reason="Episode timed out",
+                            operation="episode",
+                        )
+                        observed.__cause__ = error
                         response = self.failure_response(
                             request,
                             EpisodeFailure(
-                                failure_reason="Episode timed out",
+                                failure_reason=observed.failure_reason,
                                 terminal=False,
                             ),
-                            report=reply_failure_report(error),
+                            report=reply_failure_report(observed),
                         )
                     else:
                         response = self._unhandled_failure_response(request, error)

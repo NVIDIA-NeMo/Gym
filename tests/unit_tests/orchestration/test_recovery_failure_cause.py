@@ -19,6 +19,7 @@ an unregistered producer class whose saved failure events are failed model reque
 that says whose call each one was. The remote collector reads them from the run directory as the gate does.
 """
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -281,3 +282,40 @@ def test_a_scored_zero_that_ended_on_the_policys_context_limit_is_named_so():
         (1, 0): "model_request_error",
         (3, 0): "non_policy_model_rejection",
     }
+
+
+@pytest.mark.parametrize("stage", ["admission", "episode"])
+def test_recorded_environment_deadlines_are_retryable_on_resume(tmp_path, stage):
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+    from tests.unit_tests.server_runtime.test_environment_server import (
+        _environment_server,
+        _EnvironmentServer,
+        _request,
+    )
+
+    class Environment(_EnvironmentServer):
+        async def run(self, request, cleanup):
+            await asyncio.sleep(60)
+
+    template = _environment_server(
+        max_concurrent_episodes=1, queue_timeout_seconds=0.01, default_episode_timeout_seconds=0.01
+    )
+    server = Environment(config=template.config, server_client=template.server_client)
+
+    async def run():
+        if stage == "admission":
+            async with server._admission:
+                return await server.run_request(_request())
+        return await server.run_request(_request())
+
+    response = asyncio.run(run())
+    row = _episode_record(response.model_dump(mode="json")) | {
+        "_ng_task_index": 1,
+        "_ng_rollout_index": 0,
+        "_ng_failure_max_attempts": 3,
+    }
+    decision = _decide(tmp_path, [row], n=2)
+    assert decision.counts == {"scored": 1, "retryable": 1}
+    assert decision.evidence[1].state == IdentityState.RETRYABLE
+    assert decision.evidence[1].failure_kind == f"environment_{stage}_timeout"
+    assert decision.action == RecoveryAction.RESUBMIT
