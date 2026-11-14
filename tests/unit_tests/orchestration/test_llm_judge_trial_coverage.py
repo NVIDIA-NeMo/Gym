@@ -456,3 +456,258 @@ def test_a_completed_grade_on_a_cut_judge_reply_is_a_grading_without_a_valid_ver
     assert len(faults) == 1
     # A caller that does not count gradings without a valid verdict still cannot accept the trial.
     assert _observed_trial_operations(d, collected) is False
+
+
+def _verifier_retried_judge(*, event=True, earlier=True, same_model=True):
+    """A judge request the verifier itself retried: a failed call it owns, then the completed reply the grade rests on."""
+    collected = copy.deepcopy(fixture("healthy"))
+    observed = collected.results[0]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    grade["kind"] = "llm_judge"
+    final = _judge_call(observed)
+    final["started_at"] = 20.0
+    failed = copy.deepcopy(final)
+    failed_meta = failed["response_metadata"]
+    failed["model_call_id"], failed["started_at"] = "failed-judge-call", 10.0 if earlier else 30.0
+    failed_meta.update(response_id=None, status_code=500, error_category="upstream_error")
+    if not same_model:
+        failed_meta["model_ref"] = {"type": "responses_api_models", "name": "another_model"}
+    failed_meta["model_operations"] = [
+        dict(
+            failed_meta["model_operations"][0],
+            operation_id="failed-judge-op",
+            final_attempt_id="failed-judge-attempt",
+            outcome="failed",
+            failure_id="failed-judge-event",
+        )
+    ]
+    failed_meta["failure_report"] = {
+        "failure_id": "failed-judge-event",
+        "omitted": False,
+        "events": {
+            "failed-judge-event": dict(
+                event_id="failed-judge-event",
+                boundary="model",
+                operation="model_request",
+                operation_id="failed-judge-op",
+                attempt_id="failed-judge-attempt",
+                cause_id=None,
+                failure_kind="model_request_error",
+                http_status=500,
+            )
+        }
+        if event
+        else {},
+    }
+    observed["model_calls"].append(failed)
+    _own(observed, failed)
+    _own(observed, final)
+    grade["dependencies"] = [_dep(final)]
+    return collected
+
+
+def _covered(collected):
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    counters = {}
+    return _observed_trial_operations(decision, collected, judge_recovery=counters), counters
+
+
+def test_a_judge_request_the_verifier_retried_is_a_recovered_grading_attempt():
+    covered, counters = _covered(_verifier_retried_judge())
+
+    assert covered is True
+    assert counters == {
+        "judge_recovered_attempts": 1,
+        "judge_recovered_operations": 1,
+        "observed_grading_attempt_errors": 1,
+        "observed_grading_failed_operations": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "change", [{"event": False}, {"earlier": False}, {"same_model": False}], ids=["unrecorded", "later", "other_model"]
+)
+def test_a_retried_judge_request_that_is_not_wholly_recorded_stays_unknown(change):
+    assert _covered(_verifier_retried_judge(**change))[0] is False
+
+
+def _retried_parts(collected):
+    observed = collected.results[0]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    failed = next(call for call in observed["model_calls"] if call["model_call_id"] == "failed-judge-call")
+    final = next(call for call in observed["model_calls"] if call["model_call_id"] == "judge-call")
+    return observed, grade, failed, final
+
+
+def _second_failed(collected, suffix="2", started=11.0):
+    observed, _, failed, _ = _retried_parts(collected)
+    other = copy.deepcopy(failed)
+    other["model_call_id"], other["started_at"] = f"failed-judge-call-{suffix}", started
+    meta = other["response_metadata"]
+    event = copy.deepcopy(next(iter(meta["failure_report"]["events"].values())))
+    event.update(
+        event_id=f"failed-judge-event-{suffix}",
+        operation_id=f"failed-judge-op-{suffix}",
+        attempt_id=f"failed-judge-attempt-{suffix}",
+    )
+    meta["model_operations"][0].update(
+        operation_id=f"failed-judge-op-{suffix}",
+        final_attempt_id=f"failed-judge-attempt-{suffix}",
+        failure_id=f"failed-judge-event-{suffix}",
+    )
+    meta["failure_report"] = {"failure_id": event["event_id"], "omitted": False, "events": {event["event_id"]: event}}
+    observed["model_calls"].append(other)
+    _own(observed, other)
+    return other
+
+
+def _all_counters(count):
+    return {
+        "judge_recovered_attempts": count,
+        "judge_recovered_operations": count,
+        "observed_grading_attempt_errors": count,
+        "observed_grading_failed_operations": count,
+    }
+
+
+def _set_failed(collected, *, operation=None, event=None):
+    _, _, failed, _ = _retried_parts(collected)
+    meta = failed["response_metadata"]
+    meta["model_operations"][0].update(operation or {})
+    if event:
+        ((_, recorded),) = meta["failure_report"]["events"].items()
+        recorded.update(event)
+    return collected
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {"http_attempts": 2},
+        {"http_attempts": 0},
+        {"http_attempts": True},
+        {"http_attempts": None},
+        {"transport_failures": 1},
+        {"transport_failures": None},
+        {"transport_failures": "0"},
+    ],
+)
+def test_a_retried_judge_request_with_unrecorded_attempts_stays_unknown(operation):
+    covered, counters = _covered(_set_failed(_verifier_retried_judge(), operation=operation))
+
+    assert covered is False
+    assert counters == {}
+
+
+def test_a_retried_judge_request_missing_its_counters_stays_unknown():
+    collected = _verifier_retried_judge()
+    _, _, failed, _ = _retried_parts(collected)
+    del failed["response_metadata"]["model_operations"][0]["transport_failures"]
+
+    assert _covered(collected) == (False, {})
+
+
+def test_a_terminal_transport_failure_of_a_retried_judge_request_is_recovered():
+    collected = _set_failed(
+        _verifier_retried_judge(),
+        operation={"http_attempts": 1, "transport_failures": 1},
+        event={"http_status": None},
+    )
+
+    assert _covered(collected) == (True, _all_counters(1))
+
+
+@pytest.mark.parametrize(
+    "operation, event",
+    [({"transport_failures": 1}, {}), ({}, {"http_status": None})],
+    ids=["transport_count_without_transport_event", "transport_event_without_transport_count"],
+)
+def test_inconsistent_transport_counts_of_a_retried_judge_request_stay_unknown(operation, event):
+    assert _covered(_set_failed(_verifier_retried_judge(), operation=operation, event=event)) == (False, {})
+
+
+@pytest.mark.parametrize("identity", ["operation", "attempt"])
+def test_a_retried_judge_request_cannot_share_an_id_with_the_completed_dependency(identity):
+    if identity == "operation":
+        mutation = dict(operation={"operation_id": "judge-op"}, event={"operation_id": "judge-op"})
+    else:
+        mutation = dict(operation={"final_attempt_id": "judge-attempt"}, event={"attempt_id": "judge-attempt"})
+
+    assert _covered(_set_failed(_verifier_retried_judge(), **mutation)) == (False, {})
+
+
+@pytest.mark.parametrize("shared", ["operation", "attempt", "event"])
+def test_two_retried_judge_requests_cannot_share_an_id(shared):
+    collected = _verifier_retried_judge()
+    other = _second_failed(collected)
+    meta = other["response_metadata"]
+    operation = meta["model_operations"][0]
+    ((key, event),) = meta["failure_report"]["events"].items()
+    if shared == "operation":
+        operation["operation_id"] = event["operation_id"] = "failed-judge-op"
+    elif shared == "attempt":
+        operation["final_attempt_id"] = event["attempt_id"] = "failed-judge-attempt"
+    else:
+        meta["failure_report"] = {
+            "failure_id": "failed-judge-event",
+            "omitted": False,
+            "events": {"failed-judge-event": dict(event, event_id="failed-judge-event")},
+        }
+        operation["failure_id"] = "failed-judge-event"
+
+    assert _covered(collected) == (False, {})
+
+
+def test_two_retried_judge_requests_with_distinct_ids_are_both_recovered():
+    collected = _verifier_retried_judge()
+    _second_failed(collected)
+
+    assert _covered(collected) == (True, _all_counters(2))
+
+
+@pytest.mark.parametrize("starts", [(None, None), (None, 20.0), (20.0, None)])
+def test_completed_judge_dependencies_need_no_timestamps_when_nothing_was_retried(starts):
+    def mutate(observed, grade):
+        grade["dependencies"] = []
+        for number, started in enumerate(starts):
+            call = _judge_call(observed)
+            meta = call["response_metadata"]
+            call["model_call_id"], call["started_at"] = f"two-judge-{number}", started
+            meta["response_id"] = f"two-response-{number}"
+            meta["model_operations"][0].update(
+                operation_id=f"two-op-{number}", final_attempt_id=f"two-attempt-{number}"
+            )
+            _own(observed, call)
+            grade["dependencies"].append(_dep(call))
+
+    assert _judged(mutate) is True
+
+
+def _earlier_dependency(collected, started=5.0):
+    observed, grade, _, _ = _retried_parts(collected)
+    call = _judge_call(observed)
+    meta = call["response_metadata"]
+    call["model_call_id"], call["started_at"] = "first-pass-call", started
+    meta["response_id"] = "first-pass-response"
+    meta["model_operations"][0].update(operation_id="first-pass-op", final_attempt_id="first-pass-attempt")
+    _own(observed, call)
+    grade["dependencies"].insert(0, _dep(call))
+    return call
+
+
+def test_a_retry_of_a_later_pass_is_recovered_beside_an_earlier_completed_pass():
+    collected = _verifier_retried_judge()
+    _earlier_dependency(collected)
+
+    assert _covered(collected) == (True, _all_counters(1))
+
+
+def test_a_retry_after_every_same_model_dependency_stays_unknown_even_if_another_model_is_later():
+    collected = _verifier_retried_judge(earlier=False)
+    _earlier_dependency(collected)
+    later = _earlier_dependency(collected, started=40.0)
+    later["response_metadata"]["model_ref"] = {"type": "responses_api_models", "name": "another_model"}
+    grade = _retried_parts(collected)[1]
+    grade["dependencies"][0] = _dep(later)
+
+    assert _covered(collected)[0] is False

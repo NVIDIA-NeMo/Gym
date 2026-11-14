@@ -3524,6 +3524,60 @@ def _observed_trial_operations(
             and (ref.get("response_id") is None or ref["response_id"] == meta["response_id"])
         )
 
+    def failed_judge_attempt(call, judge_ref, final_started):
+        """One judge request the verifier itself retried: a failed operation with its recorded event, before the answer.
+
+        The verifier owns it but the grading does not depend on it. It is a recovered grading attempt only when it is
+        wholly recorded: one failed operation of the judge model whose single model-request event names that operation
+        and attempt, ids unique in the run, and it started before the completed reply that the grading rests on.
+        """
+        meta = call["response_metadata"]
+        operations, report = meta["model_operations"], meta["failure_report"]
+        if (
+            meta.get("model_ref") != judge_ref
+            or not isinstance(operations, list)
+            or len(operations) != 1
+            or not isinstance(report["events"], dict)
+            or len(report["events"]) != 1
+            or report["omitted"] is not False
+            or not nonempty(call["model_call_id"])
+            or call["model_call_id"] in populations[0]
+            or not isinstance(call.get("started_at"), (int, float))
+            or not call["started_at"] < final_started
+        ):
+            return None
+        operation = operations[0]
+        ((key, event),) = report["events"].items()
+        op_id, attempt_id = operation.get("operation_id"), operation.get("final_attempt_id")
+        status = event.get("http_status") if isinstance(event, dict) else None
+        if (
+            operation.get("outcome") != "failed"
+            # One recorded event is the whole operation: one failed HTTP attempt, or one terminal transport failure
+            # (which the producer counts inside the same retry-loop entry). Any further attempt is unrecorded.
+            or type(operation.get("http_attempts")) is not int
+            or operation["http_attempts"] != 1
+            or type(operation.get("transport_failures")) is not int
+            or operation["transport_failures"] != int(status is None)
+            or not nonempty(op_id)
+            or not nonempty(attempt_id)
+            or op_id in populations[2]
+            or attempt_id in populations[4]
+            or operation.get("failure_id") != key
+            or report["failure_id"] != key
+            or not isinstance(event, dict)
+            or key != event.get("event_id")
+            or key in recovered_events
+            or event.get("attempt_id") != attempt_id
+            or event.get("operation_id") != op_id
+            or event.get("boundary") != "model"
+            or event.get("operation") != "model_request"
+            or event.get("failure_kind") != "model_request_error"
+            or event.get("cause_id") is not None
+            or not (status is None or (type(status) is int and 400 <= status <= 599))
+        ):
+            return None
+        return key, event, op_id, attempt_id
+
     def completed_once(call, *, judge=False, valid_grade=True, truncated=False):
         """One successful HTTP response with one completed physical attempt, ids unique in the run.
 
@@ -3884,6 +3938,7 @@ def _observed_trial_operations(
             observed = row["ng_trial_observations"]
             verifiers, calls = observed["verifier_invocations"], observed.get("model_calls")
             judge_calls = None
+            failed_attempts = []
             single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
             graded = single.get("grading_operations") if isinstance(single, dict) else None
             # Without a grading operation, a saved grading artifact or the model's own failed answer records the
@@ -3924,9 +3979,37 @@ def _observed_trial_operations(
                     if sum(1 for item in owned if matches(item, hit[0])) != 1:
                         return False
                     judge_calls.append(hit[0])
-                if len(owned) != len(judge_calls):
+                # An owned call the grading does not depend on is a judge request the verifier retried: it counts
+                # as a recovered grading attempt when it failed and is wholly recorded, anything else is unknown.
+                retried = [item for item in owned if not any(matches(item, call) for call in judge_calls)]
+                if len(owned) - len(retried) != len(judge_calls):
                     return False
-                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
+                failed_attempts = []
+                for ref in retried:
+                    hit = [call for call in calls if matches(ref, call)]
+                    if len(hit) != 1 or any(
+                        hit[0] is seen for seen in [*judge_calls, *(c for c, *_ in failed_attempts)]
+                    ):
+                        return False
+                    # A retry belongs to a later completed dependency of the same judge model; timestamps are
+                    # inspected only here, so a grading without retries needs none.
+                    found = None
+                    for judge in judge_calls:
+                        started = judge.get("started_at")
+                        if type(started) not in (int, float) or not math.isfinite(started):
+                            continue
+                        found = failed_judge_attempt(hit[0], judge["response_metadata"]["model_ref"], started)
+                        if found is not None:
+                            break
+                    if found is None:
+                        return False
+                    failed_attempts.append((hit[0], *found))
+                calls = [
+                    call
+                    for call in calls
+                    if not any(call is judge for judge in judge_calls)
+                    and not any(call is failed[0] for failed in failed_attempts)
+                ]
             # Grading coverage: the trial's one verifier (none only beside an environment reward) and how it graded.
             if not isinstance(verifiers, list) or len(verifiers) != (
                 0 if not verifiers and (artifact == "environment_reward" or resource is None) else 1
@@ -3999,6 +4082,26 @@ def _observed_trial_operations(
                 )
             ):
                 return False
+            for failed, key, event, op_id, attempt_id in failed_attempts:
+                # Recheck against the dependencies and the failed calls registered so far: the evidence must not
+                # contradict itself about one call, operation, attempt or event.
+                if (
+                    failed["model_call_id"] in populations[0]
+                    or op_id in populations[2]
+                    or attempt_id in populations[4]
+                    or key in recovered_events
+                ):
+                    return False
+                # A judge request the verifier retried is a recovered grading attempt, joined once like any other.
+                populations[0].add(failed["model_call_id"])
+                populations[2].add(op_id)
+                populations[4].add(attempt_id)
+                recovered_events[key] = event
+                recovered["observed_grading_attempt_errors"] += 1
+                recovered["observed_grading_failed_operations"] += 1
+                if grade["outcome"] == "completed" and not cut_reply:
+                    recovered["judge_recovered_attempts"] += 1
+                    recovered["judge_recovered_operations"] += 1
             if cut_reply:
                 invalid_grades.append(_identity(row))
             if (
