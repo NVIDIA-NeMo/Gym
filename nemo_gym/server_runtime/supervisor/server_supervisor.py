@@ -429,7 +429,7 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
         if not isinstance(server_config_dict, DictConfig):
             continue
 
-        if "entrypoint" not in server_config_dict:
+        if server_config_dict.get("entrypoint") is None:
             continue
 
         # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
