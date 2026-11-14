@@ -7505,10 +7505,79 @@ class TestSamplingOverrides:
         out = server._preprocess_chat_completion_create_params(
             MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 262144}
         )
-        assert out["max_completion_tokens"] is None
+        assert "max_completion_tokens" not in out
         assert "max_tokens" not in out
         # Not a Chat Completions field, and stricter endpoints reject it.
         assert "max_output_tokens" not in out
+
+    def test_a_null_override_removes_the_parameter(self) -> None:
+        """A null pin sends no value, so the engine's default replaces the request's and ``extra_body``'s."""
+        server = self._server({"temperature": None, "top_k": None, "top_p": 1.0}, extra_body={"top_k": 20})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5}
+        )
+        assert "temperature" not in out
+        assert "top_k" not in out
+        assert out["top_p"] == 1.0
+
+    @mark.parametrize("api", ["chat", "completions", "responses"])
+    @mark.parametrize("pinned_name", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+    def test_a_null_limit_pin_sends_no_limit_on_any_endpoint(self, api: str, pinned_name: str) -> None:
+        """A null limit pin removes the request's limit under every name and sends none, on every endpoint."""
+        server = self._server({pinned_name: None})
+        body = {"temperature": 0.2, "max_tokens": 500, "max_completion_tokens": 500, "max_output_tokens": 500}
+        assert server._apply_sampling_overrides(body, api=api) == {"temperature": 0.2}
+
+    @mark.parametrize("is_responses_native", [False, True])
+    def test_a_null_max_tokens_pin_lifts_a_responses_request_limit(self, is_responses_native: bool) -> None:
+        """A ``/v1/responses`` request that sets ``max_output_tokens`` reaches the engine with no limit under any name,
+        whether the server forwards it to the Chat endpoint or to the Responses endpoint."""
+        server = self._server({"max_tokens": None}, is_responses_native=is_responses_native)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        provider.create_response = AsyncMock(
+            return_value={
+                "id": "resp_1",
+                "object": "response",
+                "created_at": FIXED_TIME,
+                "model": "dummy_model",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        server._clients = [provider]
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "max_output_tokens": 500}
+        )
+
+        assert response.status_code == 200
+        call = provider.create_response if is_responses_native else provider.create_chat_completion
+        assert not {"max_tokens", "max_completion_tokens", "max_output_tokens"} & call.await_args.kwargs.keys()
+
+    def test_a_non_null_limit_pin_is_sent_next_to_a_null_one(self) -> None:
+        """The first pinned name in ``_OUTPUT_BUDGET_KEYS`` order still decides the limit. Here that name carries 200,
+        so every endpoint sends 200 and the null under the other name changes nothing."""
+        server = self._server({"temperature": 1.0, "max_tokens": None, "max_completion_tokens": 200})
+        sent = [
+            server._apply_sampling_overrides({"temperature": 0.2, "max_tokens": 500}, api=api)
+            for api in ("chat", "completions", "responses")
+        ]
+        assert sent == [
+            {"temperature": 1.0, "max_completion_tokens": 200},
+            {"temperature": 1.0, "max_tokens": 200},
+            {"temperature": 1.0, "max_output_tokens": 200},
+        ]
 
     def test_pinned_limit_reaches_the_responses_native_path_as_max_output_tokens(self) -> None:
         """vLLM's Responses endpoint reads only ``max_output_tokens``, so a Chat-spelled pin is sent under that name."""

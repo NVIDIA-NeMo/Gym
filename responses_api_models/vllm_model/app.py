@@ -689,6 +689,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # since a pin that covers some endpoints and not others is off-policy while reporting that sampling is pinned.
     #
     # Unset means no pin.
+    # A null value for a parameter removes it from the request, so the engine applies its own default.
     sampling_overrides: Optional[Dict[str, Any]] = None
 
     # Corresponds to the extra_body of OpenAI Client.
@@ -1320,6 +1321,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         from the pin reaches the engine with both, and the engine may read the request's. A pin that
         names the limit more than once sends the value of the first name in ``_OUTPUT_BUDGET_KEYS``
         order on every endpoint, so one config caps a run alike whichever endpoint serves it.
+
+        A null pin removes the parameter from the body instead of sending ``null``, so the engine
+        applies its own default. A null limit removes the request's limit under every name and
+        sends none.
         """
         if not self.config.sampling_overrides:
             return body_dict
@@ -1335,7 +1340,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
         overrides = dict(self.config.sampling_overrides)
         pinned_limits = {key: overrides.pop(key) for key in _OUTPUT_BUDGET_KEYS if key in overrides}
-        body_dict.update(overrides)
+        for key, value in overrides.items():
+            if value is None:
+                body_dict.pop(key, None)
+            else:
+                body_dict[key] = value
         if pinned_limits:
             for key in _OUTPUT_BUDGET_KEYS:
                 body_dict.pop(key, None)
@@ -1343,7 +1352,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 limit_key = next((key for key in _CHAT_BUDGET_KEYS if key in pinned_limits), "max_tokens")
             else:
                 limit_key = _OUTPUT_BUDGET_KEY_BY_API[api]
-            body_dict[limit_key] = next(iter(pinned_limits.values()))
+            limit = next(iter(pinned_limits.values()))
+            if limit is not None:
+                body_dict[limit_key] = limit
         return body_dict
 
     async def _responses_native(
