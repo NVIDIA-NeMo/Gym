@@ -1005,3 +1005,42 @@ async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeyp
     assert row["opencode_wall_exceeded"] is True and row["opencode_finished"] is False
     assert any("pkill -KILL -f 'opencode run'" in c for c in commands)
     assert row["opencode_tokens"]["main"]["input"] == 10  # exported after the cut-off
+
+
+async def test_finish_instruction_is_appended_to_the_first_prompt(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """idle_nudge.finish_instruction reaches the first `opencode run` after the task prompt; without it, the prompt is
+    sent as is."""
+    for instruction in ("Reply with exactly TASK_COMPLETE when done.", None):
+        commands: List[str] = []
+        written: Dict[str, str] = {}
+
+        async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+            commands.append(command)
+            ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+            if "session list" in command:
+                return ok('[{"id": "ses_main"}]')
+            if "opencode export" in command:
+                written[command.rsplit("> ", 1)[1].strip()] = json.dumps(_session("ses_main", [10], []))
+                return ok()
+            return ok("Shell: /bin/bash\nOpenCode run finished")
+
+        async def download(remote: str, local: Path) -> None:
+            Path(local).write_text(written[remote])
+
+        sandbox = MagicMock()
+        sandbox.exec = AsyncMock(side_effect=exec_)
+        sandbox.download = AsyncMock(side_effect=download)
+        nudge = app_module.IdleNudgeConfig(text="go on", stop_on_text="TASK_COMPLETE", finish_instruction=instruction)
+        config = TestOpenCodeSandboxedAgent()._create_config().model_copy(
+            update={"opencode_results_dir": str(tmp_path), "idle_nudge": nudge}
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "build it"}]),
+        )
+        [first] = [c for c in commands if "opencode run --title" in c]
+        expected = "build it\n\n" + instruction if instruction else "build it"
+        assert shlex.quote(expected) in first

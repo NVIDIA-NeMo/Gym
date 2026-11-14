@@ -403,6 +403,11 @@ class IdleNudgeConfig(BaseModel):
     # Put LENGTH_NOTE before `text` when the stopped turn hit the output token limit. False sends `text` alone every
     # time, as OpenHands' headless auto-continue does.
     length_note: bool = True
+    # Appended to the task prompt (after a blank line) on the FIRST run, so the model knows how to finish from turn 1.
+    # OpenHands' `finish` tool is in its tool list from the start; OpenCode has no such tool, so without this the model
+    # learns `stop_on_text` only from the first nudge (measured 2026-11-04: 99% of NL2Repo traces carried exactly one
+    # nudge, the finish handshake). The task prompt itself is left as the benchmark wrote it.
+    finish_instruction: Optional[str] = None
 
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -966,6 +971,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     query = input_item.content[0]["text"]
 
         assert query, body.input
+        if self.config.idle_nudge is not None and self.config.idle_nudge.finish_instruction:
+            query = f"{query}\n\n{self.config.idle_nudge.finish_instruction}"
 
         opencode_debug_str = ""
         if self.config.debug:

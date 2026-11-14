@@ -89,6 +89,12 @@ nl2repobench_opencode_sandboxed_agent:
       # failing action 3 times, an A-B-A-B-A-B alternation, 3 identical replies, 10 compactions in a row).
       stuck_detector: true
       idle_nudge:
+        # How to finish, from the start: OpenCode's stand-in for OpenHands' `finish` tool, which the model sees in its
+        # tool list from turn 1 ("Use this tool when you have successfully completed the user's requested task ... or
+        # cannot proceed further"). Appended to the (official, verbatim) task prompt. Added 2026-11-04.
+        finish_instruction: >-
+          When you have completed the task, or cannot proceed further, reply with exactly TASK_COMPLETE to finish the
+          interaction.
         max_nudges: 100
         stop_on_text: TASK_COMPLETE
         length_note: false
