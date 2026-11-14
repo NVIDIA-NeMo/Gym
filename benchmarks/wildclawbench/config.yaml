@@ -2,7 +2,7 @@ wildclaw_dataset_path: ${oc.env:WILDCLAW_DATASET_PATH}
 num_samples_in_parallel: 1
 wildclaw_output_root: ${oc.env:WILDCLAW_OUTPUT_ROOT}
 
-wildclaw_execution: &wildclaw_execution
+wildclaw_execution:
   source_root: ${oc.env:WILDCLAW_ROOT}
   worker_python: ${oc.env:WILDCLAW_PYTHON}
   output_root: ${wildclaw_output_root}
@@ -23,7 +23,16 @@ wildclaw_agent:
       domain: agent
       description: WildClawBench original OpenClaw agent sessions
       value: Evaluate end-to-end multimodal, coding, productivity, search, social and safety tasks.
-      <<: *wildclaw_execution
+      source_root: ${wildclaw_execution.source_root}
+      worker_python: ${wildclaw_execution.worker_python}
+      output_root: ${wildclaw_execution.output_root}
+      model_server: ${wildclaw_execution.model_server}
+      model_name: ${wildclaw_execution.model_name}
+      context_window: ${wildclaw_execution.context_window}
+      max_tokens: ${wildclaw_execution.max_tokens}
+      thinking: ${wildclaw_execution.thinking}
+      judge_model: ${wildclaw_execution.judge_model}
+      sandbox_runtime: ${wildclaw_execution.sandbox_runtime}
       datasets:
         - name: wildclawbench
           type: benchmark
@@ -41,7 +50,7 @@ wildclaw_resources:
       description: Original WildClawBench task state and native verifier
       value: Preserve native tasks, sandbox state and grading independently of agent activation.
       verified: false
-      execution: *wildclaw_execution
+      execution: ${wildclaw_execution}
 
 wildclaw_environment_server:
   environment_servers:

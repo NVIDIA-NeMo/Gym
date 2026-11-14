@@ -5,7 +5,7 @@ OpenClaw → the original task grader**. Gym owns preparation, episode dispatch,
 policy-call correlation, trace conversion and aggregation. Factory supplies
 launch composition. No OpenCode adapter or training changes are included.
 
-The `wildclawbench` Environment Server drives Gym's single-agent session protocol:
+The `wildclawbench_environment` Environment Server drives Gym's single-agent session protocol:
 Resources seed → agent seed → OpenClaw activation → agent close → native verification → Resources close.
 The agent has no benchmark `/run` or aggregation override. The Resources Server owns the
 native container and original graders; the Environment Server owns aggregation and retry identity.

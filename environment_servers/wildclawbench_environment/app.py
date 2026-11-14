@@ -12,13 +12,14 @@ from pathlib import Path
 
 import anyio
 from fastapi import HTTPException
+from omegaconf import OmegaConf
 from pydantic import PrivateAttr
 
 from environment_servers.single_agent_turn_legacy.app import (
     SingleAgentTurnLegacyEnvironmentServer,
     SingleAgentTurnLegacyEnvironmentServerConfig,
 )
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, get_first_server_config_dict
 from nemo_gym.core import maybe_rollout_id_from_run_body
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.wildclawbench_agent.metrics import benchmark_metrics
@@ -42,8 +43,12 @@ class WildClawEnvironment(SingleAgentTurnLegacyEnvironmentServer):
             raise HTTPException(422, "Native sampling is config-owned; per-row sampling overrides are unsupported")
         namespace = [str(Path(self.config.output_root).resolve()), row.get("_ng_run_id"), rollout_id]
         key = hashlib.sha256(json.dumps(namespace).encode()).hexdigest()
+        bound = {}
+        for name in (self.config.agent_server.name, self.config.resources_server.name):
+            config = get_first_server_config_dict(self.server_client.global_config_dict, name)
+            bound[name] = OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config
         fingerprint = hashlib.sha256(
-            json.dumps(dict(row=row, config=self.config.model_dump(mode="json")), sort_keys=True).encode()
+            json.dumps(dict(row=row, config=self.config.model_dump(mode="json"), bound=bound), sort_keys=True).encode()
         ).hexdigest()
         existing = self._inflight.get(key)
         if existing is not None and existing[0] != fingerprint:
