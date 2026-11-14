@@ -77,6 +77,8 @@ REJUDGE_OPERATION_ID_KEY = "_ng_rejudge_operation_id"
 REJUDGED_OBSERVATIONS_KEY = "_ng_rejudged_failure_observations"
 # A re-verified saved result is named by this prefix and the digest of the saved row (``rejudge_predecessor_id``).
 RESULT_PREDECESSOR_PREFIX = "result-sha256:"
+# An ID-less saved judge failure stays in the sidecar and is named by its complete row digest.
+FAILURE_PREDECESSOR_PREFIX = "failure-sha256:"
 
 
 def journal_path_for(output: Path) -> Path:
@@ -468,11 +470,18 @@ def _holds_saved_answer(row: dict) -> bool:
 
 
 def rejudge_predecessor_id(row: dict) -> str | None:
-    """The id a re-judgment names its predecessor by: a failure's ``_ng_failure_id``, else, for a saved result whose
-    grading is re-verified from its saved answer, the digest of the whole saved row."""
+    """Name the exact predecessor without changing its saved failure ID.
+
+    Existing failure IDs remain authoritative. An ID-less judge failure holding a saved answer and a saved result
+    each use the complete row digest, with separate namespaces for the failure sidecar and results file.
+    """
     if row.get("_ng_failure_class") is not None:
         failure_id = row.get("_ng_failure_id")
-        return failure_id if isinstance(failure_id, str) and failure_id else None
+        if failure_id is not None:
+            return failure_id if isinstance(failure_id, str) and failure_id else None
+        if row.get("_ng_failure_class") != "judge_failed" or not _holds_saved_answer(row):
+            return None
+        return FAILURE_PREDECESSOR_PREFIX + hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
     return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
@@ -529,16 +538,29 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
 
 def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
     """Whether ``row`` records that re-judging the saved answer of judge failure ``failure`` failed again."""
-    return (
+    if not (
         failure.get("_ng_failure_class") == "judge_failed"
         and _holds_saved_answer(failure)
-        and failure.get("_ng_failure_id") is not None
         and row.get("_ng_failure_class") == "judge_failed"
-        and row.get("_ng_failure_id") not in (None, failure["_ng_failure_id"])
         and row.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
-        and row.get(REJUDGED_FAILURE_ID_KEY) == failure["_ng_failure_id"]
         and row.get("response") == failure.get("response")
+    ):
+        return False
+    failure_id = failure.get("_ng_failure_id")
+    if failure_id is not None:
+        return row.get("_ng_failure_id") not in (None, failure_id) and row.get(REJUDGED_FAILURE_ID_KEY) == failure_id
+    predecessor = rejudge_predecessor_id(failure)
+    outcome = rejudge_predecessor_id(row)
+    operation = row.get(REJUDGE_OPERATION_ID_KEY)
+    # A changed row digest alone is not a new failed pass: it must name a fresh admitted operation.
+    return (
+        predecessor is not None
+        and outcome not in (None, predecessor)
+        and row.get(REJUDGED_FAILURE_ID_KEY) == predecessor
+        and isinstance(operation, str)
+        and bool(operation.strip())
+        and operation != failure.get(REJUDGE_OPERATION_ID_KEY)
     )
 
 

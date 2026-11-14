@@ -16,6 +16,7 @@
 """Exercise artifact ownership and interruption at persistence boundaries."""
 
 import gc
+import hashlib
 import tracemalloc
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -1464,25 +1465,39 @@ async def test_offline_dropped_summary_excludes_producer_and_selected_zeros(
     assert snapshot(output) == before
 
 
-def test_rejudgment_settles_the_saved_judge_failure_without_a_model_attempt(prepared_run):
+@pytest.mark.parametrize(
+    "failure_id_fields", [{"_ng_failure_id": "f-1"}, {}, {"_ng_failure_id": None}], ids=["id", "missing", "null"]
+)
+def test_rejudgment_settles_the_saved_judge_failure_without_a_model_attempt(
+    prepared_run, failure_id_fields: dict[str, object]
+) -> None:
     output, prepare = prepared_run
     answer = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending(3)[0]
         store.record_dispatch(row)
-        failure = row | {"_ng_failure_class": "judge_failed", "_ng_failure_id": "f-1", "response": answer}
+        failure = row | {"_ng_failure_class": "judge_failed", "response": answer} | failure_id_fields
         store.record_outcome(failure)
+    reference = (
+        failure.get("_ng_failure_id")
+        or "failure-sha256:" + hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest()
+    )
     failures_before = failures_path_for(output).read_bytes()
     # A re-judged result carries no failure fields of its own; the failure stays in the observations it retains.
     result = {k: v for k, v in failure.items() if not k.startswith("_ng_failure")} | {
         "reward": 0.0,
-        "_ng_rejudged_failure_id": "f-1",
+        "_ng_rejudged_failure_id": reference,
     }
     with RolloutStore.open_for_rejudgment(output) as store:
+        with pytest.raises(ConfigError, match="no longer the selected outcome"):
+            store.admit_rejudgment(failure | {"judge_error": "changed source row"})
         with pytest.raises(ConfigError, match="no matching admitted re-judgment"):
             store.record_rejudgment(failure, result)  # no admission: refused
     with RolloutStore.open_for_rejudgment(output) as store:
         pending = store.admit_rejudgment(failure)
+        assert pending.predecessor_failure_id == reference
+        if failure.get("_ng_failure_id") is None:
+            assert reference == "failure-sha256:" + pending.predecessor_sha256
         result = result | {
             "_ng_rejudge_operation_id": pending.operation_id,
             "_ng_rejudge_admitted_at": pending.admitted_at,
@@ -1505,10 +1520,245 @@ def test_rejudgment_settles_the_saved_judge_failure_without_a_model_attempt(prep
     (selected,) = reloaded.selected("success")
     assert selected["reward"] == 0.0 and selected["response"] == answer
     assert not [key for key in selected if key.startswith("_ng_failure")]  # the old judge cause is not selected
-    assert selected["_ng_rejudged_failure_observations"]["_ng_failure_id"] == "f-1"
+    retained = selected["_ng_rejudged_failure_observations"]
+    assert retained.get("_ng_failure_id") == failure.get("_ng_failure_id")
+    assert ("_ng_failure_id" in retained) == ("_ng_failure_id" in failure)
     assert reloaded.manifest.next_attempt == store.manifest.next_attempt  # no model attempt added
     assert reloaded._state.attempt_counts[next(iter(reloaded._state.expected))] == 1  # the failure's debit stays
     assert failures_path_for(output).read_bytes() == failures_before
+
+
+@pytest.mark.parametrize("failure_id", ["", False, 7, {}])
+def test_rejudge_admission_does_not_replace_malformed_failure_ids(prepared_run, failure_id: object) -> None:
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = row | {
+            "_ng_failure_class": "judge_failed",
+            "_ng_failure_id": failure_id,
+            "response": {"object": "response", "id": "saved", "status": "completed", "output": []},
+        }
+        store.record_outcome(failure)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        before = snapshot(output)
+        with pytest.raises(ConfigError, match="no failure id"):
+            store.admit_rejudgment(failure)
+        assert snapshot(output) == before
+
+
+@pytest.mark.parametrize(
+    "failure_class,answer",
+    [
+        ("agent_run_error", {"object": "response", "id": "saved", "status": "completed", "output": []}),
+        ("judge_failed", {}),
+    ],
+    ids=["other-failure", "no-generation"],
+)
+def test_digest_predecessor_requires_a_saved_judge_failure(
+    prepared_run, failure_class: str, answer: dict[str, object]
+) -> None:
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = row | {"_ng_failure_class": failure_class, "_ng_failure_id": None, "response": answer}
+        store.record_outcome(failure)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        before = snapshot(output)
+        with pytest.raises(ConfigError, match="no failure id"):
+            store.admit_rejudgment(failure)
+        assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("failure_id_fields", [{}, {"_ng_failure_id": None}], ids=["missing", "null"])
+@pytest.mark.parametrize("cap", [3, 4], ids=["exhausted", "final-zero"])
+async def test_idless_failed_rejudgments_keep_cold_history_and_spend_once(
+    prepared_run, monkeypatch: pytest.MonkeyPatch, failure_id_fields: dict[str, object], cap: int
+) -> None:
+    from nemo_gym.core.episode_context import rollout_context
+    from nemo_gym.rollouts.rollout_records import rejudge_predecessor_id
+    from nemo_gym.rollouts.rollout_recovery import run_lock
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier
+    from nemo_gym.trajectory.trajectory_record import grading_result_binding
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(cap))
+    output, prepare = prepared_run
+    answer = {
+        "object": "response",
+        "id": "saved",
+        "status": "incomplete",
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "unfinished"}]}
+        ],
+    }
+    prior = {
+        "task_id": "task",
+        "rollout_id": "0-0",
+        "verifier_invocations": [
+            {"invocation_id": "old", "status": "failed", "model_calls": [{"model_call_id": "old-judge"}]}
+        ],
+        "model_calls": [
+            {"model_call_id": "policy", "response_metadata": {"status_code": 200}},
+            {"model_call_id": "old-judge", "response_metadata": {"status_code": 400}},
+        ],
+    }
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = (
+            row | {"_ng_failure_class": "judge_failed", "response": answer, "ng_trajectory": prior} | failure_id_fields
+        )
+        store.record_outcome(failure)
+    original_bytes = failures_path_for(output).read_bytes()
+    original_inputs = materialized_path_for(output).read_bytes()
+    reservation = dict(store.manifest.next_attempt)
+    identity = "0-0"
+    for debit in (2, 3):
+        with run_lock(output):
+            with RolloutStore.open_for_rejudgment(output) as store:
+                pending = store.admit_rejudgment(failure)
+            assert RolloutStore.read(output).unresolved_rejudgments() == [identity]
+
+            async def failed_verify() -> dict[str, object]:
+                return {
+                    "response": answer,
+                    "reward": 0.0,
+                    "_ng_failure_class": "judge_failed",
+                    "failure_kind": "judge_failed",
+                    "evaluation_completed": False,
+                    "mask_sample": True,
+                } | failure_id_fields
+
+            with rollout_context(identity):
+                observed = await observe_verifier(failed_verify, enabled=True, verifier_name="resource")()
+            result = (
+                {
+                    key: failure[key]
+                    for key in ("_ng_task_index", "_ng_rollout_index", "_ng_run_id", "_ng_attempt_index")
+                }
+                | observed
+                | {
+                    "_ng_rejudged_failure_id": pending.predecessor_failure_id,
+                    "_ng_rejudge_operation_id": pending.operation_id,
+                    "_ng_rejudge_admitted_at": pending.admitted_at,
+                }
+            )
+            with RolloutStore.open_for_rejudgment(output) as store:
+                assert store.record_rejudgment(failure, result)
+                written = failures_path_for(output).read_bytes()
+                assert not store.record_rejudgment(failure, result)
+                assert failures_path_for(output).read_bytes() == written
+            cold = RolloutStore.read(output)
+            assert cold.unresolved_rejudgments() == []
+            assert cold._state.failure_count(identity) == debit and cold.manifest.next_attempt == reservation
+            [selected] = cold.failures()
+            assert selected["response"] == answer
+            assert [call["model_call_id"] for call in selected["ng_trajectory"]["model_calls"]] == ["policy"]
+            assert selected.get("_ng_failure_id") is None
+            assert ("_ng_failure_id" in selected) == ("_ng_failure_id" in failure_id_fields)
+            assert (
+                rejudge_predecessor_id(selected)
+                == "failure-sha256:" + hashlib.sha256(orjson.dumps(selected, option=orjson.OPT_SORT_KEYS)).hexdigest()
+            )
+            with RolloutStore.open_for_rejudgment(output) as store:
+                store.close_rejudgment(identity, pending.operation_id)
+                before = snapshot(output)
+                with pytest.raises(ConfigError, match="Conflicting outcomes"):
+                    store.record_outcome(
+                        selected
+                        | {
+                            "_ng_rejudged_failure_id": rejudge_predecessor_id(selected),
+                            "failure_reason": "changed replay, same operation",
+                        }
+                    )
+                assert snapshot(output) == before
+            assert failures_path_for(output).read_bytes().startswith(original_bytes)
+            failure = selected
+    with run_lock(output), RolloutStore.open_for_rejudgment(output) as store:
+        if cap == 3:
+            with pytest.raises(ConfigError, match="no saved failure attempt left"):
+                store.admit_rejudgment(failure)
+        else:
+            pending = store.admit_rejudgment(failure)
+
+            async def verify_zero() -> dict[str, object]:
+                return {"response": answer, "reward": 0.0, "evaluation_completed": True, "mask_sample": False}
+
+            with rollout_context(identity):
+                observed = await observe_verifier(verify_zero, enabled=True, verifier_name="resource")()
+            [invocation] = observed["ng_verifier_invocations"]
+            assert invocation["grading_record"]["result_binding_sha256"] == grading_result_binding(observed)
+            result = (
+                {
+                    key: failure[key]
+                    for key in ("_ng_task_index", "_ng_rollout_index", "_ng_run_id", "_ng_attempt_index")
+                }
+                | observed
+                | {
+                    "_ng_rejudged_failure_id": pending.predecessor_failure_id,
+                    "_ng_rejudge_operation_id": pending.operation_id,
+                    "_ng_rejudge_admitted_at": pending.admitted_at,
+                }
+            )
+            failures_before = failures_path_for(output).read_bytes()
+            assert store.record_rejudgment(failure, result)
+            assert not store.record_rejudgment(failure, result)
+            store.close_rejudgment(identity, pending.operation_id)
+            assert failures_path_for(output).read_bytes() == failures_before
+    cold = RolloutStore.read(output)
+    assert cold.unresolved_rejudgments() == [] and cold.manifest.next_attempt == reservation
+    assert cold._state.failure_count(identity) == 3
+    assert materialized_path_for(output).read_bytes() == original_inputs
+    assert len(list(read_records(failures_path_for(output)))) == 3
+    if cap == 4:
+        [settled] = cold.selected("success")
+        assert settled["response"] == answer and settled["reward"] == 0.0
+        assert settled["ng_trajectory"]["verifier_invocations"][0]["grading_record"] == invocation["grading_record"]
+
+
+@pytest.mark.parametrize(
+    "operation_fields",
+    [
+        {},
+        {"_ng_rejudge_operation_id": None},
+        {"_ng_rejudge_operation_id": ""},
+        {"_ng_rejudge_operation_id": " "},
+        {"_ng_rejudge_operation_id": 7},
+    ],
+    ids=["missing", "null", "empty", "blank", "nonstring"],
+)
+def test_idless_failure_replay_requires_a_recorded_operation(
+    prepared_run, operation_fields: dict[str, object]
+) -> None:
+    from nemo_gym.rollouts.rollout_records import rejudge_predecessor_id
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        failure = row | {
+            "_ng_failure_class": "judge_failed",
+            "_ng_failure_id": None,
+            "response": {"object": "response", "id": "saved", "status": "completed", "output": []},
+        }
+        store.record_outcome(failure)
+    changed = (
+        failure
+        | {
+            "_ng_rejudged_failure_id": rejudge_predecessor_id(failure),
+            "failure_reason": "different failure body without a valid rejudge operation",
+        }
+        | operation_fields
+    )
+    with RolloutStore.open_for_rejudgment(output) as store:
+        before = snapshot(output)
+        with pytest.raises(ConfigError, match="Conflicting outcomes"):
+            store.record_outcome(changed)
+        assert snapshot(output) == before
+    cold = RolloutStore.read(output)
+    assert cold.failures() == [failure]
+    assert cold._state.failure_count("0-0") == 1
 
 
 @pytest.mark.parametrize(
@@ -1534,25 +1784,33 @@ def test_rejudge_admission_rejects_malformed_facts(field, value):
 
 
 @pytest.mark.parametrize("mutation", ["exact", "hash", "predecessor", "time", "foreign"])
-def test_rejudge_cold_binding_is_shared_and_read_only(prepared_run, mutation):
+@pytest.mark.parametrize(
+    "failure_id_fields", [{"_ng_failure_id": "original"}, {"_ng_failure_id": None}], ids=["id", "null"]
+)
+def test_rejudge_cold_binding_is_shared_and_read_only(
+    prepared_run, mutation: str, failure_id_fields: dict[str, object]
+) -> None:
     from nemo_gym.rollouts.rollout_recovery import run_lock
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending(3)[0]
         store.record_dispatch(row)
-        failure = row | {
-            "_ng_failure_class": "judge_failed",
-            "_ng_failure_id": "original",
-            "response": {"id": "saved", "object": "response", "status": "completed", "output": []},
-        }
+        failure = (
+            row
+            | {
+                "_ng_failure_class": "judge_failed",
+                "response": {"id": "saved", "object": "response", "status": "completed", "output": []},
+            }
+            | failure_id_fields
+        )
         store.record_outcome(failure)
     with run_lock(output):
         with RolloutStore.open_for_rejudgment(output) as store:
             pending = store.admit_rejudgment(failure)
             result = {k: v for k, v in failure.items() if k != "_ng_failure_class"} | {
                 "reward": 0.0,
-                "_ng_rejudged_failure_id": "original",
+                "_ng_rejudged_failure_id": pending.predecessor_failure_id,
                 "_ng_rejudge_operation_id": pending.operation_id,
                 "_ng_rejudge_admitted_at": pending.admitted_at,
             }
