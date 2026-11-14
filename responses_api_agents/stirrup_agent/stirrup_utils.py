@@ -27,7 +27,14 @@ import uuid
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, cast
 
 from stirrup.clients.utils import to_openai_messages
-from stirrup.core.models import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, UserMessage
+from stirrup.core.models import (
+    AssistantMessage,
+    ChatMessage,
+    ImageContentBlock,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 
@@ -153,17 +160,66 @@ def to_provider_openai_messages(messages: list[ChatMessage]) -> list[NeMoGymChat
     return cast("list[NeMoGymChatCompletionMessageParam]", [_canonical_provider_message(m) for m in serialized])
 
 
+def _has_image(content: Any) -> bool:
+    return isinstance(content, list) and any(isinstance(block, ImageContentBlock) for block in content)
+
+
+def _image_parts(content: list[Any]) -> list[dict[str, Any]]:
+    """Message content that holds an image, as Responses input parts in the order the model got them.
+
+    Each image is the data URL the model was sent (``ImageContentBlock.to_base64_url``, the same call Stirrup's
+    serializer makes, so the same PNG bytes), and empty text parts are left out, as the serializer leaves them out.
+    """
+    parts: list[dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, ImageContentBlock):
+            parts.append({"type": "input_image", "image_url": block.to_base64_url(), "detail": "auto"})
+        elif isinstance(block, str):
+            if block:
+                parts.append({"type": "input_text", "text": block})
+        else:
+            # Video and audio blocks have no part type in a function call output or here; keep a trace of them.
+            parts.append({"type": "input_text", "text": str(block)})
+    return parts
+
+
+def _tool_output(content: Any) -> Any:
+    """A tool result's content as a function_call_output's ``output``: text stays text (a list of text blocks
+    joined by newlines), and content with an image is a list of input parts that keeps it."""
+    if isinstance(content, str):
+        return content
+    if _has_image(content):
+        return _image_parts(content)
+    if isinstance(content, list) and all(isinstance(block, str) for block in content):
+        return "\n".join(block for block in content if block)
+    return str(content)
+
+
+def _user_content(content: Any) -> Any:
+    """A user message's content: text as before, content with an image as input parts that keep it."""
+    if isinstance(content, str):
+        return content
+    if _has_image(content):
+        return _image_parts(content)
+    if isinstance(content, list):
+        return " ".join(part.text if hasattr(part, "text") else str(part) for part in content)
+    return str(content)
+
+
 def convert_stirrup_history_to_output_items(
     history: List[List[Any]],
 ) -> Tuple[List, List]:
     """Convert Stirrup message history into NeMoGym input/output items, as JSON objects.
 
-    Returns ``(input_items, output_items)`` where *input_items* are
-    system/user messages and *output_items* are assistant messages +
-    tool calls/results.
+    Returns ``(input_items, output_items)`` where *input_items* are the system message and the user messages before
+    the model's first turn, and *output_items* are everything after, in order: assistant messages, tool calls and
+    their results, and the user messages Stirrup adds during the run (an image a tool returned, which Stirrup sends
+    as a user message after the tool's text answer; a turn warning). An image stays an image: an ``input_image`` part
+    with the data URL the model was sent.
     """
     input_items: list = []
     output_items: list = []
+    started = False  # whether the model has taken a turn: later user messages are part of the run
 
     # Some serving layers mint tool_call_id per turn (e.g. "code_exec:0"), so the same id
     # recurs every turn and a trajectory ends up with many function_call / function_call_output
@@ -207,27 +263,20 @@ def convert_stirrup_history_to_output_items(
                 )
 
             elif isinstance(msg, NeMoUserMessage) and msg.tool_call_id:
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
                     {
                         "call_id": _disambiguate(msg.tool_call_id, output_seq),
-                        "output": content,
+                        "output": _tool_output(msg.content),
                         "type": "function_call_output",
                     }
                 )
 
             elif isinstance(msg, UserMessage):
-                content_text = ""
-                if isinstance(msg.content, str):
-                    content_text = msg.content
-                elif isinstance(msg.content, list):
-                    content_text = " ".join(part.text if hasattr(part, "text") else str(part) for part in msg.content)
-                else:
-                    content_text = str(msg.content)
-
-                input_items.append({"role": "user", "content": content_text, "type": "message"})
+                item = {"role": "user", "content": _user_content(msg.content), "type": "message"}
+                (output_items if started else input_items).append(item)
 
             elif isinstance(msg, AssistantMessage):
+                started = True
                 content_text = msg.content if isinstance(msg.content, str) else ""
                 if content_text:
                     output_items.append(
@@ -262,11 +311,10 @@ def convert_stirrup_history_to_output_items(
 
             elif isinstance(msg, ToolMessage):
                 call_id = msg.tool_call_id if hasattr(msg, "tool_call_id") else f"call-{uuid.uuid4().hex[:8]}"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
                     {
                         "call_id": _disambiguate(call_id, output_seq),
-                        "output": content,
+                        "output": _tool_output(msg.content),
                         "type": "function_call_output",
                     }
                 )

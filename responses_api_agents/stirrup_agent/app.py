@@ -279,6 +279,12 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=True,
         description="Give the model the code_exec shell tool. Off for tasks whose only tools are the request's.",
     )
+    view_image: bool = Field(
+        default=False,
+        description="Give the model the view_image tool, which shows it an image file from the working directory. "
+        "Stirrup sends the image in a user message after the tool's answer, as a PNG of at most one megapixel, and "
+        "the trajectory keeps it as an input_image part. For vision models; a text-only model refuses the image.",
+    )
     sandbox_provider: Optional[str] = Field(
         default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
     )
@@ -408,6 +414,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "tools": params["tools"],
             "finish_tool_names": self.config.finish_tool_names,
             "code_exec": self.config.code_exec,
+            "view_image": self.config.view_image,
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
             "stop_request_path": state.session.stop_request_path,
