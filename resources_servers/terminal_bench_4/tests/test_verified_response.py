@@ -358,3 +358,48 @@ async def test_other_sandbox_setup_failures_keep_no_kind(monkeypatch, status):
 
     assert session.termination.reason == "infrastructure_error"
     assert session.termination.failure_kind is None
+
+
+@pytest.mark.parametrize(
+    "exception_type,detail",
+    [
+        ("RuntimeError", "RuntimeError: Compose service 'loadgen' unhealthy: exit status 1"),
+        ("AgentInfrastructureError", "opencode harness termination was not confirmed"),
+    ],
+)
+def test_an_agent_infrastructure_failure_reports_its_detail_as_the_reason(tmp_path, exception_type, detail):
+    """The exception type still classifies the failure; the reason carries what happened, so a caller that sees only
+    the reason (an in-process caller's TaskFailure) can find the cause."""
+    verified = _verified(
+        tmp_path,
+        {"exception_info": {"exception_type": exception_type}},
+        AgentTermination(reason="infrastructure_error", detail=detail),
+        legacy=False,
+    )
+
+    assert verified["infrastructure_error"] == exception_type
+    assert verified["failure_reason"] == detail
+    assert verified["failure_kind"] == "infrastructure_error"
+
+
+def test_an_agent_infrastructure_failure_reason_is_bounded(tmp_path):
+    verified = _verified(
+        tmp_path,
+        {"exception_info": {"exception_type": "RuntimeError"}},
+        AgentTermination(reason="infrastructure_error", detail="RuntimeError: " + "x" * 5000),
+        legacy=False,
+    )
+
+    assert len(verified["failure_reason"]) == 2000
+    assert verified["failure_reason"].startswith("RuntimeError: x")
+
+
+def test_an_agent_infrastructure_failure_without_a_detail_keeps_the_type_as_the_reason(tmp_path):
+    verified = _verified(
+        tmp_path,
+        {"exception_info": {"exception_type": "RuntimeError"}},
+        AgentTermination(reason="infrastructure_error"),
+        legacy=False,
+    )
+
+    assert verified["failure_reason"] == "RuntimeError"
