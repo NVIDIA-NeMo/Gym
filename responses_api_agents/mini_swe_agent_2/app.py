@@ -56,11 +56,16 @@ E2B_PROVIDER_NAME = "e2b"
 E2B_API_KEY_ENV = "E2B_API_KEY"  # pragma: allowlist secret
 E2B_HEADERS_ENV = "NEMO_GYM_E2B_HEADERS"
 E2B_API_HEADERS_ENV = "NEMO_GYM_E2B_API_HEADERS"
+BOXD_PROVIDER_NAME = "boxd"
+BOXD_API_KEY_ENV = "BOXD_API_KEY"  # pragma: allowlist secret
 
 _SANDBOX_API_KEY_ENV_BY_PROVIDER = {
     OPENSANDBOX_PROVIDER_NAME: OPENSANDBOX_API_KEY_ENV,
     E2B_PROVIDER_NAME: E2B_API_KEY_ENV,
+    BOXD_PROVIDER_NAME: BOXD_API_KEY_ENV,
 }
+# Providers whose SDK reads its API key from the environment when the config names none.
+_SANDBOX_SDK_READS_API_KEY_ENV = {E2B_PROVIDER_NAME, BOXD_PROVIDER_NAME}
 _E2B_HEADER_ENV_BY_CONNECTION_FIELD = {
     "headers": E2B_HEADERS_ENV,
     "api_headers": E2B_API_HEADERS_ENV,
@@ -202,13 +207,13 @@ def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
         connection = _sandbox_provider_connection(provider, provider_name)
         api_key = connection.get("api_key") if connection is not None else None
         if (
-            provider_name == E2B_PROVIDER_NAME
+            provider_name in _SANDBOX_SDK_READS_API_KEY_ENV
             and not api_key
             and provider is not None
             and isinstance(provider.get(provider_name), dict)
         ):
-            # E2B's public SDK reads E2B_API_KEY directly. Preserve that
-            # fallback when an inline config omits connection.api_key.
+            # The E2B and boxd SDKs read their API key from the environment.
+            # Preserve that fallback when an inline config omits connection.api_key.
             api_key = os.getenv(env_name)
         if api_key:
             env_vars[env_name] = str(api_key)

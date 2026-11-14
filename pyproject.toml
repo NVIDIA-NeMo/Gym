@@ -367,6 +367,16 @@ openshell = [
     "openshell>=0.1.6,<0.2",
 ]
 
+# Keep boxd opt-in for the same reason: its SDK talks gRPC and brings grpcio and protobuf.
+boxd = [
+    # boxd SDK: used by the boxd sandbox provider for machine create/exec/delete and file operations.
+    # Lower bound 0.3.1: the provider uses AsyncBoxd with exec(timeout=...), wait_until_ready,
+    # streamed files.upload/download, labels on create, and hibernate/wake.
+    # Updated: Thu Nov 12, 2026 with boxd>=0.3.1
+    # License: MIT https://pypi.org/project/boxd/
+    "boxd>=0.3.1",
+]
+
 # Telemetry is opt-in: without this extra (or with `telemetry.enabled: false`) every
 # instrumentation site in nemo_gym is a ~0-cost no-op and Gym behaves identically.
 #
