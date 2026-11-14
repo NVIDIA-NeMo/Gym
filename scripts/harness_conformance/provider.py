@@ -76,6 +76,7 @@ class Probe:
     closed: int = 0
     finished: bool = False
     finish_call: dict | None = None
+    leaked_tool_call: bool = False
     compaction_summary: str = field(
         default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
     )
@@ -259,6 +260,26 @@ class Probe:
                             "content": [{"type": "output_text", "text": self.compaction_summary, "annotations": []}],
                         }
                     ]
+                elif self.scenario.tool_call_as_text and not self.leaked_tool_call:
+                    # What a wrong chat template or tool parser produces: the call stays in the answer text.
+                    markup = (
+                        f"<tool_call>\n{json.dumps({'name': 'bash', 'arguments': {'command': 'ls'}})}\n</tool_call>"
+                    )
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {"type": "output_text", "text": markup, "annotations": []},
+                                {"type": "output_text", "text": ANSWER, "annotations": []},
+                            ],
+                        }
+                    ]
+                    self.leaked_tool_call = True
+                    # A harness that ends only on a finish tool asks again; the next reply is that finish call.
+                    self.finished = self._finish(body) is None
                 elif len(self.tool_calls) < self.scenario.tool_steps:
                     name, arguments, namespaces = self._tool(body)
                     call = self.tool_calls[-1]
@@ -312,7 +333,7 @@ class Probe:
                 if request.url.path.endswith("/chat/completions"):
                     message = {
                         "role": "assistant",
-                        "content": None if calls_tool else output[0]["content"][0]["text"],
+                        "content": None if calls_tool else "\n".join(part["text"] for part in output[0]["content"]),
                     }
                     if not compacting:
                         message["reasoning_content"] = "Perform the prescribed check."
@@ -473,7 +494,17 @@ class Probe:
             answered = any(
                 item.get("type") == "message"
                 and item.get("role") == "assistant"
-                and any(part.get("text") == ANSWER for part in item.get("content", []) if isinstance(part, dict))
+                and any(
+                    part.get("text") == ANSWER
+                    # A Chat adapter may join this scenario's markup part and answer part into one text.
+                    or (
+                        self.scenario.tool_call_as_text
+                        and isinstance(part.get("text"), str)
+                        and part["text"].endswith(ANSWER)
+                    )
+                    for part in item.get("content", [])
+                    if isinstance(part, dict)
+                )
                 for item in output
             )
             # A harness that ends on a finish tool may never emit a final assistant message.

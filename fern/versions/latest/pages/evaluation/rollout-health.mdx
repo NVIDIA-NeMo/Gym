@@ -134,6 +134,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn- or invocation-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
 | `model_call_missing_token_counts` | Policy-model call | On an exactly bound policy-model call, `token_stats.prompt_tokens` or `token_stats.completion_tokens` is omitted or set to `null`. A value of zero counts as present. A failed call that produced no generation, such as a cancelled call or an HTTP error reply, is skipped: it has no tokens to account for. |
 | `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call explicitly stopped for repetition, even with a saved answer or tool call, or reached its output limit and its saved response holds no answer and no tool call. Reasoning alone does not count as usable output; upstream length refusals are excluded. |
+| `model_call_unparsed_tool_call` | Policy-model call | An exactly bound policy-model call was offered tools, its saved response holds no structured tool call, and its answer text contains tool-call markup of a common chat template (`<tool_call>`, `<function=`, `[TOOL_CALLS]`, `<\|python_tag\|>`, `<\|tool_call`). This is what a serving tool parser or chat template that does not match the model leaves behind: the agent takes the call as its final answer and the rollout scores as wrong. Reasoning is not answer text. |
 | `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. A failed call that produced no generation is skipped. |
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
 | `task_no_successful_model_calls` | Task | Every repeat has at least one turn-to-model-call reference, every turn reference resolves to exactly one captured call, and none of those turn-bound calls completed successfully. |
@@ -166,7 +167,7 @@ evaluated once. Unreferenced model calls are not assigned to the policy model be
 `rollout_ended_on_failed_model_call` is the exception: it reads the captured calls directly, so it still applies to a rollout whose producer published no trajectory at all.
 
 The per-call checks are `model_call_missing_token_counts`, `model_call_runaway_generation`,
-`model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
+`model_call_unparsed_tool_call`, `model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
 because each evaluates one call or one explicit reference independently.
 
 `rollout_token_count_mismatch` compares top-level response usage against all explicitly invocation- or turn-owned policy calls,

@@ -32,6 +32,7 @@ MODEL_CALL_CHECKS = {
     "trajectory_capture_mismatch",
     "rollout_token_count_mismatch",
     "model_call_runaway_generation",
+    "model_call_unparsed_tool_call",
 }
 RUNNER_CHECKS = {"check_execution_error", "record_unreadable"}
 # Unlike the bound-call checks, this one reads the captured calls directly, so it
@@ -99,6 +100,17 @@ def _call(**updates) -> dict:
     }
     call.update(updates)
     return call
+
+
+TOOLS = [{"type": "function", "name": "bash", "parameters": {"type": "object"}}]
+LEAKED_CALL = '<tool_call>\n{"name": "bash", "arguments": {"command": "ls"}}\n</tool_call>'
+
+
+def _leaked_tool_call(**updates) -> dict:
+    """A call that offered tools and got the tool call back as answer text, as a mismatched tool parser leaves it."""
+    return _call(
+        **{"request": {"input": "question", "tools": TOOLS}, "response": {"output_text": LEAKED_CALL}, **updates}
+    )
 
 
 def _trajectory_call(call: dict) -> dict:
@@ -193,6 +205,7 @@ def test_invocation_owned_calls_are_observed_without_turns(tmp_path: Path) -> No
         ("model_call_missing_token_counts", [{"model_call_id": "c1"}], _call(tokens_out=None)),
         ("trajectory_capture_mismatch", [{"model_call_id": "missing"}], _call()),
         ("model_call_runaway_generation", [{"model_call_id": "c1"}], _call(finish_reason="length", response={})),
+        ("model_call_unparsed_tool_call", [{"model_call_id": "c1"}], _leaked_tool_call()),
     ],
 )
 def test_invocation_owned_call_checks_fire_without_turns(
@@ -290,6 +303,7 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         ),
         (_record(8, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=500)]),
         (_record(8, 1, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=408)]),
+        (_record(10, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_leaked_tool_call()]),
     ]
     failed_tool = _record(9, 0)
     failed_tool["ng_trajectory"]["tool_calls"] = [
@@ -823,6 +837,7 @@ def test_current_producer_response_reference_binds_to_captured_call_id(tmp_path:
                 {
                     "model_call_id": "capture-uuid",
                     "model_ref": model_ref,
+                    "request": {"input": "question"},
                     "response_id": "resp-1",
                     "status_code": 200,
                     "response_status": "completed",
@@ -1323,7 +1338,13 @@ def test_provider_stop_reason_drives_runaway_health_and_response_faults(
             assert response["output"][0]["name"] == "lookup"
             assert response["output"][0]["call_id"] == "tool-1"
     call = build_model_call_record(
-        {"model_call_id": "c1", "status_code": 200, "response": response, "finish_reason": "stop"},
+        {
+            "model_call_id": "c1",
+            "status_code": 200,
+            "request": {"input": "question"},
+            "response": response,
+            "finish_reason": "stop",
+        },
         call_index=0,
     ).model_dump(mode="json")
     record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
@@ -1520,6 +1541,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "trajectory_capture_mismatch",
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
+        "model_call_unparsed_tool_call",
         "rollout_tool_call_failed",
     }
 
@@ -4463,3 +4485,191 @@ def test_interrupted_tool_label_preserves_failure_marker_health(tmp_path, status
     )
     assert len(findings) == 1
     assert findings[0].detail["count"] == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({"output_text": LEAKED_CALL}, id="responses_output_text"),
+        pytest.param(
+            {
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": LEAKED_CALL}]}
+                ]
+            },
+            id="responses_message",
+        ),
+        pytest.param({"choices": [{"message": {"role": "assistant", "content": LEAKED_CALL}}]}, id="chat"),
+        pytest.param({"content": [{"type": "text", "text": '[TOOL_CALLS][{"name": "bash"}]'}]}, id="messages"),
+        pytest.param(
+            {"choices": [{"message": {"content": "<function=bash><parameter=command>ls</parameter></function>"}}]},
+            id="function_tag",
+        ),
+        # The answer after the reasoning Gym wraps into Chat content is still answer text.
+        pytest.param(
+            {"choices": [{"message": {"content": "<think>I should list the files.</think>" + LEAKED_CALL}}]},
+            id="chat_after_wrapped_reasoning",
+        ),
+        # Compaction and tool outputs are not calls, so they do not hide the leak next to them.
+        pytest.param(
+            {
+                "output": [
+                    {"type": "compaction", "id": "cmp1", "encrypted_content": "opaque"},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": LEAKED_CALL}],
+                    },
+                ]
+            },
+            id="next_to_compaction",
+        ),
+        pytest.param(
+            {
+                "output": [
+                    {"type": "function_call_output", "call_id": "t0", "output": "done"},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": LEAKED_CALL}],
+                    },
+                ]
+            },
+            id="next_to_tool_output",
+        ),
+    ],
+)
+def test_tool_call_markup_left_in_the_answer_is_an_unparsed_tool_call(tmp_path: Path, response: dict) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [_leaked_tool_call(response=response)])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    [finding] = [f for f in digest.findings if f.check == "model_call_unparsed_tool_call"]
+    assert finding.locator == {"call_id": "c1"}
+    assert digest.verdict == "unhealthy"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        # The model may quote tool-call markup when it was offered no tools.
+        pytest.param(_call(response={"output_text": LEAKED_CALL}), id="no_tools_offered"),
+        # A parsed call next to text that still mentions the markup is a working parser.
+        pytest.param(
+            _leaked_tool_call(
+                response={
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": LEAKED_CALL}],
+                        },
+                        {"type": "function_call", "name": "bash", "call_id": "t1", "arguments": "{}"},
+                    ]
+                }
+            ),
+            id="structured_call_present",
+        ),
+        pytest.param(
+            _leaked_tool_call(
+                response={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": LEAKED_CALL,
+                                "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "bash"}}],
+                            }
+                        }
+                    ]
+                }
+            ),
+            id="chat_structured_call_present",
+        ),
+        # Reasoning is not the answer; a reasoning-parser mismatch is a different failure.
+        pytest.param(
+            _leaked_tool_call(
+                response={"output": [{"type": "reasoning", "content": [{"type": "text", "text": LEAKED_CALL}]}]}
+            ),
+            id="markup_only_in_reasoning",
+        ),
+        # Gym's model servers move a reasoning parser's output into Chat content as a leading <think> block.
+        pytest.param(
+            _leaked_tool_call(
+                response={
+                    "choices": [
+                        {"message": {"content": "<think>Consider " + LEAKED_CALL + "</think>The answer is 42."}}
+                    ]
+                }
+            ),
+            id="markup_only_in_wrapped_chat_reasoning",
+        ),
+        pytest.param(_leaked_tool_call(response={"output_text": "ls lists the files"}), id="plain_answer"),
+        *(
+            pytest.param(
+                _leaked_tool_call(
+                    response={
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": LEAKED_CALL}],
+                            },
+                            {"type": call_type, "call_id": "t1"},
+                        ]
+                    }
+                ),
+                id=f"{call_type}_present",
+            )
+            for call_type in ("custom_tool_call", "shell_call", "apply_patch_call", "tool_search_call", "program")
+        ),
+    ],
+)
+def test_an_answer_without_leaked_tool_call_markup_is_not_flagged(tmp_path: Path, call: dict) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [call])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "model_call_unparsed_tool_call" not in {finding.check for finding in digest.findings}
+    assert "model_call_unparsed_tool_call" not in digest.unobserved
+
+
+@pytest.mark.parametrize(
+    "calls,flagged",
+    [
+        pytest.param([_leaked_tool_call(request=None)], False, id="request_missing"),
+        pytest.param([_leaked_tool_call(response=None)], False, id="response_missing_with_tools"),
+        # A fully observed call still proves a leak next to a call whose evidence is missing.
+        pytest.param(
+            [_leaked_tool_call(response=None), _leaked_tool_call(call_index=1, model_call_id="c2", response_id="r2")],
+            True,
+            id="observed_leak_next_to_missing_response",
+        ),
+    ],
+)
+def test_a_call_without_its_payloads_leaves_the_unparsed_tool_call_check_unobserved(
+    tmp_path: Path, calls: list[dict], flagged: bool
+) -> None:
+    record = _record(
+        0,
+        0,
+        refs=[{"model_call_id": call["model_call_id"]} for call in calls],
+        usage={"input_tokens": 3 * len(calls), "output_tokens": 2 * len(calls)},
+    )
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "model_call_unparsed_tool_call" in digest.unobserved
+    assert flagged == ("model_call_unparsed_tool_call" in {finding.check for finding in digest.findings})
+
+
+def test_a_request_without_tools_needs_no_response_for_the_unparsed_tool_call_check(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(tmp_path, [(record, [_call(response=None)])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "model_call_unparsed_tool_call" not in digest.unobserved
+    assert "model_call_unparsed_tool_call" not in {finding.check for finding in digest.findings}
