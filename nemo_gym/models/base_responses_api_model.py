@@ -61,7 +61,7 @@ from nemo_gym.models._checkpoint_workers import (
     PolicyWorkerLink,
     coordinator_socket_path,
 )
-from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.anthropic_converter import AnthropicConverter, AnthropicRequestValidationError
 from nemo_gym.models.chat_completions_converter import CustomToolStrategy
 from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.models.model_call_capture import (
@@ -924,7 +924,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        try:
+            params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        except AnthropicRequestValidationError as error:
+            raise HTTPException(400, str(error)) from error
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
