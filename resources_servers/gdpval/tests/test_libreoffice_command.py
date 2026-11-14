@@ -222,6 +222,24 @@ def test_server_startup_probes_reference_deliverables_dirs(tmp_path, template_pd
     assert not refs.exists() if reference == "missing" else list(refs.iterdir()) == []
 
 
+@pytest.mark.parametrize("sees_cache", [True, False])
+def test_server_startup_probes_the_cache_s3_references_download_into(tmp_path, template_pdf, sees_cache):
+    cache = tmp_path / "reference-cache"
+    script, _ = _converter(tmp_path / "bin", template_pdf, unseen=None if sees_cache else cache)
+    server_args = {
+        "reward_mode": "comparison",
+        "reference_deliverables_dir": "s3://bucket/anchors/model",
+        "reference_cache_dir": str(cache),
+    }
+    if sees_cache:
+        server = _gdpval_server(tmp_path / "persist", script, **server_args)
+        # Startup reads nothing from S3.
+        assert server._s3_references._client is None
+    else:
+        with pytest.raises(RuntimeError, match="startup check"):
+            _gdpval_server(tmp_path / "persist", script, **server_args)
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
 def test_ensure_rejects_probe_directory_the_server_cannot_create(tmp_path, template_pdf, caplog):
     parent = tmp_path / "read-only"

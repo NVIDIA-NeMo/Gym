@@ -16,6 +16,7 @@ dependencies = [
     "trafilatura>=1.12",
     "PyMuPDF>=1.24",
     "httpx>=0.27",
+    "boto3",
 ]
 
 [tool.uv]
