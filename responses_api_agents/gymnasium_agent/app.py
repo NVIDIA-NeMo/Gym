@@ -38,6 +38,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRef
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
@@ -80,6 +81,11 @@ class GymnasiumRunResponse(BaseVerifyResponse):
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
+    # The environment's own reward record of a finished episode (``result.reward_info.reward``): the sum of the
+    # rewards its steps returned. Absent when the environment did not end the episode or reported its own failure.
+    result: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The agent's one invocation and the model responses it asked for, so a cut-off answer is the model's observed own.
+    ng_agent_observations: AgentObservationBundle | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
@@ -228,6 +234,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         model_server_cookies = None
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
         last_model_response = None
+        response_ids: list[str] = []
         finished = False
 
         for _ in range(self.config.max_steps):
@@ -239,6 +246,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 url_path=model_url_path,
             )
             last_model_response = model_response
+            if isinstance(model_response.id, str) and model_response.id:
+                response_ids.append(model_response.id)
 
             returned_outputs.extend(model_response.output)
             if self.config.text_only_history:
@@ -308,6 +317,26 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         last_model_response.output = returned_outputs if self.config.text_only_history else new_outputs
         last_model_response.usage = usage
 
+        environment_failed = step_data.mask_sample or step_data.failure_kind is not None
+        observations = None
+        if response_ids and self.rollout_id_from_run(body) is not None:
+            observations = AgentObservationBundle(
+                source="gymnasium_agent",
+                records=[
+                    AgentInvocation(
+                        invocation_id=f"gymnasium_{uuid.uuid4().hex}",
+                        # A cut-off last answer or an episode the step limit ended is incomplete, as other agents mark it.
+                        status="completed"
+                        if finished
+                        and getattr(last_model_response, "status", None) != "incomplete"
+                        and getattr(last_model_response, "incomplete_details", None) is None
+                        else "incomplete",
+                        model_calls=[
+                            ModelCallRef(model_ref=self.config.model_server, response_id=rid) for rid in response_ids
+                        ],
+                    )
+                ],
+            )
         return GymnasiumRunResponse(
             responses_create_params=base_body,
             response=last_model_response,
@@ -315,6 +344,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            result={"reward_info": {"reward": total_reward}} if finished and not environment_failed else None,
+            ng_agent_observations=observations,
             # An environment that ended the episode because of its own failure (a user simulator or judge
             # that never answered) reports it on the final step; carry it onto the rollout so the reward
             # is masked out of quality metrics and training data instead of counted as a policy outcome.
