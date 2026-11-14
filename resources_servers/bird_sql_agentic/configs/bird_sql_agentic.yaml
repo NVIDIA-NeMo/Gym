@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-turn BIRD text-to-SQL with a read-only execute_sql tool.
+# Same BIRD dev data and same execution-based reward as bird_sql.
+
+bird_sql_agentic_resources_server:
+  resources_servers:
+    bird_sql_agentic:
+      entrypoint: app.py
+      # Shares bird_sql's download so the BIRD databases are fetched only once.
+      bird_sql_dir: resources_servers/bird_sql/.bird_sql
+      max_concurrency: 32
+      sql_execution_timeout_s: 30.0
+      max_result_rows: 20
+      max_cell_chars: 100
+      domain: coding
+      verified: false
+      description: Multi-turn text-to-SQL on BIRD dev with a read-only execute_sql tool. Binary reward from unordered result-set equality, same as bird_sql.
+      value: Train and evaluate SQL agents that inspect data and fix errors before answering, with a reward comparable to single-turn bird_sql.
+
+bird_sql_agentic_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 8
+      resources_server:
+        type: resources_servers
+        name: bird_sql_agentic_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/bird_sql_agentic/data/example.jsonl
+          license: Creative Commons Attribution-ShareAlike 4.0 International
+
+bird_sql_agentic_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: bird_sql_agentic_simple_agent
