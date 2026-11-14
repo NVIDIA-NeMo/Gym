@@ -371,6 +371,13 @@ class ApptainerProvider:
                         with contextlib.suppress(Exception):
                             await proc.wait()
                     raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                except asyncio.CancelledError:
+                    # A cancelled caller (such as a usage read past its deadline) must not leave the CLI running.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
+                    raise
                 out_f.seek(0)
                 err_f.seek(0)
                 stdout_b, stderr_b = out_f.read(), err_f.read()

@@ -345,6 +345,25 @@ finally:
     await sandbox.stop()
 ```
 
+## Measured CPU and Memory
+
+A sandbox started through `AsyncSandbox.start()` records its measured CPU and memory when its provider implements
+`SupportsSandboxUsage`: one sample right after create, one in `stop()` before close, and, for a process-tree
+measurement, one every `NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS` (default 5; 0 disables periodic samples).
+`NEMO_GYM_SANDBOX_USAGE=0` disables sampling. A sandbox rebuilt with `connect()` records nothing; its creator does.
+
+After `stop()`, `sandbox.resource_usage` holds one summary per measured scope, and the `gym.sandbox.stop` span
+reports it as `nemo.gym.sandbox.usage.<scope>.<source>.<field>` attributes next to `nemo.gym.sandbox.id` and the
+rollout id, for every sandbox whatever stopped it.
+
+| Provider | Source | Scope |
+| --- | --- | --- |
+| Docker | the container's cgroup v2, on the host when the daemon is local, otherwise read from inside the container | `container` |
+
+Other providers, including OpenSandbox, report no usage yet.
+
+- `container` values are kernel counters for the sandbox's own cgroup; memory includes page cache.
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.
