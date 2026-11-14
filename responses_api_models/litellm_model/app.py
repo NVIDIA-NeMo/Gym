@@ -146,6 +146,15 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
         "reasoning_output_tokens",
     )
 
+    incomplete_details = None
+    for choice in data.get("choices", []):
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
+            incomplete_details = {"reason": "max_output_tokens"}
+        elif finish_reason == "content_filter":
+            incomplete_details = {"reason": "content_filter"}
+        break
+
     output = data.get("output")
     if not isinstance(output, list) or not output:
         output = None
@@ -177,6 +186,8 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
         "model": data.get("model", ""),
         "object": "response",
         "output": output,
+        "status": "incomplete" if incomplete_details is not None else "completed",
+        "incomplete_details": incomplete_details,
         "parallel_tool_calls": data.get("parallel_tool_calls", False),
         "tool_choice": data.get("tool_choice", "auto"),
         "tools": data.get("tools", []),
