@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+deepcad_opencode_agent:
+  responses_api_agents:
+    deepcad_opencode:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: deepcad_opencode
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+      max_steps: 10
+      concurrency: 4
+      opencode_version: 1.17.11
+      opencode_max_context_window: 65536
+      opencode_model_call_timeout: 600000
+      output_token_policy: remaining_context
+      execution_failure_reward_zero: true
+      sandbox_timeout: 1800
+      sandbox_provider: agent_sandbox
+      sandbox_config:
+        image: deepcad-opencode:latest
+        workdir: /workspace
+        ttl_s: 2400
+        ready_timeout_s: 600
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          MESA_SHADER_CACHE_DISABLE: 'true'
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+        permission:
+          '*': allow
+          task: deny
+          webfetch: deny
+          websearch: deny
+        agent:
+          build:
+            steps: 10
+          title:
+            disable: true
+          general:
+            disable: true
+          explore:
+            disable: true
+          compaction:
+            disable: true
+          summary:
+            disable: true
+      preinstalled_opencode: true
+deepcad_opencode:
+  resources_servers:
+    deepcad_opencode:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Final model.py verification for multi-turn OpenCode CAD episodes
+      reference_root: cad-data/references
+      sandbox_provider: sandbox
+      sandbox_image: deepcad-cadquery:2.8.0
+      sandbox_python: python
+      preload_cq: false
+      iou_backend: brep
+      alignment: rescale
+      reward_weights:
+        voxel_iou: 1.0
+sandbox:
+  docker:
+    create:
+      network: none
+      cap_drop:
+      - ALL
+      security_opt:
+      - no-new-privileges
+      pids_limit: 128
+      apply_resource_limits: true
+deepcad_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: deepcad_opencode_agent
+policy_model:
+  responses_api_models:
+    vllm_model:
+      supply_prefix_token_ids: true
+      return_token_id_information: true
+agent_sandbox:
+  docker:
+    create:
+      network: bridge
+      cap_drop:
+      - ALL
+      security_opt:
+      - no-new-privileges
+      pids_limit: 256
+      apply_resource_limits: true

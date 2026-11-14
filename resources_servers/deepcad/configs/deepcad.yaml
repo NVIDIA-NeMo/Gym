@@ -1,0 +1,34 @@
+deepcad:
+  resources_servers:
+    deepcad:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Reconstruct DeepCAD solids with Python and CadQuery from fixed sampled diagonal or front, side, and top views with optional dimensions
+      value: B-rep Boolean volume IoU after independent bbox normalization; invalid code earns zero
+      iou_backend: brep
+      alignment: rescale
+      voxel_resolution: 64
+      reference_root: cad-data/references
+      sandbox_provider: sandbox
+      sandbox_image: deepcad-cadquery:2.8.0
+
+deepcad_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: deepcad
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+sandbox:
+  docker:
+    create:
+      network: none
+      cap_drop: [ALL]
+      security_opt: [no-new-privileges]
+      pids_limit: 128
+      apply_resource_limits: true
