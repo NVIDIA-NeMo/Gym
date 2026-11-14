@@ -253,6 +253,27 @@ def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
     return task_id
 
 
+# The test limit is enforced inside the verifier sandbox, so that a deadline is confirmed by the process that enforced
+# it and not inferred from a provider's error type: a provider may report "timeout" for a request whose command never
+# ran. GNU timeout's --verbose notice plus its exit status (124, or 137 when it had to send KILL) is the confirmation.
+# An image without timeout runs the tests under the provider's deadline only, and such a deadline stays inconclusive.
+_VERIFIER_KILL_GRACE_S = 30.0
+_VERIFIER_PROVIDER_HEADROOM_S = 60.0
+_TEST_DEADLINE_EXIT_CODES = (124, 137)
+_TEST_DEADLINE_NOTICE = "timeout: sending signal TERM to command"
+
+
+def _verifier_command(limit_s: float) -> str:
+    """The verifier command: the task's test.sh, stopped by GNU timeout at the task's limit where the image has it."""
+    bounded = f"timeout --verbose --kill-after={_VERIFIER_KILL_GRACE_S:g} {limit_s:g} bash /tests/test.sh"
+    return f"if command -v timeout >/dev/null 2>&1; then exec {bounded}; else exec bash /tests/test.sh; fi"
+
+
+def _tests_hit_their_limit(return_code: int | None, output: str) -> bool:
+    """Whether the in-sandbox timeout stopped the tests at the task's limit (see ``_verifier_command``)."""
+    return return_code in _TEST_DEADLINE_EXIT_CODES and _TEST_DEADLINE_NOTICE in output
+
+
 def _inconclusive_reason(result: VerifierResult, error: Exception | None) -> str | None:
     """Why a verifier attempt produced no verdict that a fresh sandbox could still produce, or None.
 
@@ -462,26 +483,16 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         log_dir: Path,
     ) -> VerifierResult:
         await self._stage_verifier(sandbox, task, model_patch)
+        limit_s = task.config.verifier.timeout_sec
         command_result = await sandbox.exec(
-            "bash /tests/test.sh",
+            _verifier_command(limit_s),
             cwd=self._verifier_workdir(task),
-            timeout_s=task.config.verifier.timeout_sec,
+            timeout_s=limit_s + _VERIFIER_KILL_GRACE_S + _VERIFIER_PROVIDER_HEADROOM_S,
         )
 
         log_dir.mkdir(parents=True, exist_ok=True)
         combined_output = (command_result.stdout or "") + (command_result.stderr or "")
 
-        if command_result.error_type == "timeout" and not self.config.is_verifying_golden_patch:
-            # The tests did not finish on the model's patch within the task's limit, so the task is not resolved: a
-            # patch that hangs the tests scores 0 like one that fails them. Only a sandbox-confirmed deadline counts.
-            # A golden patch that cannot finish means the task itself is broken, so that case below stays ungraded.
-            return VerifierResult(
-                evaluation_completed=True,
-                reward=0.0,
-                verifier_exit_code=command_result.return_code,
-                verifier_timeout_s=task.config.verifier.timeout_sec,
-                test_output=combined_output,
-            )
         if command_result.error_type == "timeout":
             return VerifierResult(
                 evaluation_completed=False,
@@ -502,6 +513,25 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
             name: await self._download_if_present(sandbox, f"/logs/verifier/{name}", path)
             for name, path in artifact_paths.items()
         }
+        if not present["reward.json"] and _tests_hit_their_limit(command_result.return_code, combined_output):
+            if self.config.is_verifying_golden_patch:
+                # The reference patch must finish: a golden patch past the limit means the task itself is broken.
+                return VerifierResult(
+                    evaluation_completed=False,
+                    reward=0.0,
+                    verifier_exit_code=command_result.return_code,
+                    verifier_error=f"Tests did not finish within {limit_s:g}s on the golden patch",
+                    test_output=combined_output,
+                )
+            # The tests did not finish on the model's patch within the task's limit, so the task is not resolved: a
+            # patch that hangs the tests scores 0 like one that fails them.
+            return VerifierResult(
+                evaluation_completed=True,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_timeout_s=limit_s,
+                test_output=combined_output,
+            )
         if not present["reward.json"]:
             return VerifierResult(
                 evaluation_completed=False,

@@ -525,7 +525,7 @@ async def test_verifier_reward_json_must_hold_a_binary_reward(
         artifacts["reward.json"] = reward_json
 
     async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
-        if command == "bash /tests/test.sh":
+        if command.endswith("bash /tests/test.sh; fi"):
             return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
         assert command.startswith("test -f /logs/verifier/")
         return SimpleNamespace(return_code=0 if command.rsplit("/", 1)[1] in artifacts else 1, error_type=None)
@@ -1089,7 +1089,9 @@ async def test_verifier_status_timeout_propagates_without_scoring(
 
     assert caught.value is error
     sandbox.exec.assert_awaited_once_with(
-        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+        app_module._verifier_command(task.config.verifier.timeout_sec),
+        cwd="/app",
+        timeout_s=task.config.verifier.timeout_sec + 90,
     )
 
 
@@ -1109,7 +1111,9 @@ async def test_unclassified_verifier_timeout_preserves_its_exception(
         await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
     assert caught.value is error
     sandbox.exec.assert_awaited_once_with(
-        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+        app_module._verifier_command(task.config.verifier.timeout_sec),
+        cwd="/app",
+        timeout_s=task.config.verifier.timeout_sec + 90,
     )
 
 
@@ -1135,7 +1139,7 @@ async def test_non_oom_verifier_failure_never_returns_an_unmasked_main_row(
 
         async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(
-                return_code=0 if command == "bash /tests/test.sh" else 1,
+                return_code=0 if command.endswith("bash /tests/test.sh; fi") else 1,
                 error_type=None,
                 stdout="",
                 stderr="",
@@ -1164,6 +1168,7 @@ async def test_non_oom_verifier_failure_never_returns_an_unmasked_main_row(
         (0, None, '{"reward": true}', "{}", "non-binary reward"),
         (0, None, '{"reward": 2}', "{}", "non-binary reward"),
         (1, None, '{"reward": 0}', "{}", "Verifier command failed with code 1"),
+        (124, "timeout", '{"reward": 0}', "{}", "error_type='timeout'"),
         (0, None, '{"reward": 0}', "{", "Invalid verifier ctrf.json"),
     ],
 )
@@ -1184,7 +1189,7 @@ async def test_verifier_requires_completed_command_and_valid_artifacts(
     sandbox = AsyncMock()
 
     async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
-        if command == "bash /tests/test.sh":
+        if command.endswith("bash /tests/test.sh; fi"):
             return SimpleNamespace(return_code=return_code, error_type=error_type, stdout="", stderr="")
         assert command.startswith("test -f /logs/verifier/")
         return SimpleNamespace(return_code=0, error_type=None)
@@ -1208,57 +1213,103 @@ async def test_verifier_requires_completed_command_and_valid_artifacts(
     assert sandbox.download.await_count == (0 if error_type == "timeout" else 3)
 
 
-def _timed_out_test_run(command: str, **_kwargs: object) -> SimpleNamespace:
-    assert command == "bash /tests/test.sh"
-    return SimpleNamespace(
-        return_code=124,
-        error_type="timeout",
-        stdout="tests/test_mux.py::TestFlowControl::test_sender_pauses ",
-        stderr="Command timed out after 600s; Gym interrupted it",
-    )
+TIMEOUT_NOTICE = "timeout: sending signal TERM to command \u2018bash\u2019"
 
 
+def _test_run(return_code: int, *, error_type: str | None = None, notice: bool = True):
+    """A fake verifier sandbox exec: the test command ends as given, and no verifier artifact exists."""
+
+    async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
+        if command.startswith("test -f /logs/verifier/"):
+            return SimpleNamespace(return_code=1, error_type=None)
+        assert command.endswith("bash /tests/test.sh; fi")
+        output = "tests/test_mux.py::TestFlowControl::test_sender_pauses \n"
+        return SimpleNamespace(
+            return_code=return_code,
+            error_type=error_type,
+            stdout=output + (TIMEOUT_NOTICE + "\n" if notice else ""),
+            stderr=None,
+        )
+
+    return execute
+
+
+@pytest.mark.parametrize("return_code", [124, 137], ids=["term", "term-then-kill"])
 @pytest.mark.parametrize("golden", [False, True], ids=["model-patch", "golden-patch"])
-async def test_tests_that_hit_their_limit_score_the_model_patch_zero_and_leave_a_golden_patch_ungraded(
-    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, golden: bool
+async def test_tests_stopped_at_their_limit_score_the_model_patch_zero_and_leave_a_golden_patch_ungraded(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, golden: bool, return_code: int
 ) -> None:
     server = DeepSWEResourcesServer(
         config=_config(task_assets, golden=golden), server_client=MagicMock(spec=ServerClient)
     )
     monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
     sandbox = AsyncMock()
-    sandbox.exec.side_effect = _timed_out_test_run
+    sandbox.exec.side_effect = _test_run(return_code)
     task = server._task_store.get("example-task")
+    limit = task.config.verifier.timeout_sec
 
     result = await server._run_verifier(sandbox, task, b"patch", tmp_path)
 
+    command = sandbox.exec.await_args_list[0]
+    assert command.args[0] == (
+        f"if command -v timeout >/dev/null 2>&1; then exec timeout --verbose --kill-after=30 {limit:g} "
+        "bash /tests/test.sh; else exec bash /tests/test.sh; fi"
+    )
+    assert command.kwargs["timeout_s"] == limit + 90
     assert result.reward == 0.0
-    assert result.verifier_exit_code == 124
-    assert "Gym interrupted it" in (result.test_output or "")
+    assert result.verifier_exit_code == return_code
+    assert TIMEOUT_NOTICE in (result.test_output or "")
     sandbox.download.assert_not_awaited()
     if golden:
         assert result.evaluation_completed is False
-        assert "error_type='timeout'" in (result.verifier_error or "")
+        assert result.verifier_error == f"Tests did not finish within {limit:g}s on the golden patch"
         assert result.verifier_timeout_s is None
     else:
         assert result.evaluation_completed is True
         assert result.verifier_error is None
-        assert result.verifier_timeout_s == task.config.verifier.timeout_sec
+        assert result.verifier_timeout_s == limit
+
+
+@pytest.mark.parametrize(
+    "return_code,error_type,notice",
+    [
+        (124, "timeout", False),  # a provider timeout, which may mean the command never ran (Daytona, OpenShell)
+        (124, "timeout", True),
+        (124, None, False),  # exit 124 without the timeout notice: not a confirmed deadline (no timeout binary)
+        (137, None, False),  # killed by something else, for example the OOM killer
+    ],
+    ids=["provider-timeout", "provider-timeout-with-notice", "exit-124-without-notice", "kill-without-notice"],
+)
+async def test_an_unconfirmed_deadline_stays_an_ungraded_masked_result(
+    task_assets: Path, monkeypatch: MonkeyPatch, return_code: int, error_type: str | None, notice: bool
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch)
+    verifier_sandbox.exec.side_effect = _test_run(return_code, error_type=error_type, notice=notice)
+
+    response, _ = await _verify(server)
+
+    assert response.evaluation_completed is False and response.mask_sample is True
+    assert response.failure_kind == VERIFIER_ERROR
+    assert response.verifier_timeout_s is None
+
+
+def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch, **overrides) -> tuple:
+    config = _config(task_assets, golden=False).model_copy(update=overrides)
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
+    verifier_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=[agent_sandbox, *[verifier_sandbox] * 3]))
+    monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(return_value=b"agent patch\n"))
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    return server, verifier_sandbox
 
 
 async def test_a_model_patch_that_hangs_the_tests_is_a_graded_zero_in_one_attempt(
     task_assets: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
-    )
-    agent_sandbox = AsyncMock()
-    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
-    verifier_sandbox = AsyncMock()
-    verifier_sandbox.exec.side_effect = _timed_out_test_run
-    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=[agent_sandbox, verifier_sandbox]))
-    monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(return_value=b"agent patch\n"))
-    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch)
+    verifier_sandbox.exec.side_effect = _test_run(124)
 
     response, log = await _verify(server)
 
