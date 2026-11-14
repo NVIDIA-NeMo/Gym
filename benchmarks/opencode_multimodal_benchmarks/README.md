@@ -75,8 +75,22 @@ opencode_multimodal_benchmarks:
 ```
 
 The configured `visual_judge` route captures judge calls with Gym's rollout
-correlation. For direct HTTP judging, set `judge_server: null`, `judge_endpoint`
-and `judge_api_key_env` instead. Endpoints and credentials remain deployment inputs.
+correlation. For direct HTTP judging, also disable that imported model server.
+Pass these overrides to both preparation and evaluation (replace the endpoint
+and key-variable name with your deployment's values):
+
+```bash
+++visual_judge=null \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_server=null \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_endpoint=https://judge.example/v1/chat/completions \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_api_key_env=DIRECT_JUDGE_API_KEY
+```
+
+These settings can alternatively go in `env.yaml`. A plain `--config run.yaml`
+has lower priority than the selected benchmark and may have its judge route
+overwritten. With the overrides above, `GYM_JUDGE_BASE_URL` and
+`GYM_JUDGE_API_KEY` are unnecessary; only the selected direct judge's credential
+is needed. Endpoints and credentials remain deployment inputs.
 
 The shared verifier defaults to a 120-second timeout and three transport attempts
 per judge request. VTCBench additionally
@@ -87,6 +101,13 @@ For each evaluation, retain the resolved config and inspect rollout health,
 coverage and judge failures. Enable model-call capture when collecting evidence.
 A valid manifest and passing verifier fixtures do not establish score parity or
 harness conformance.
+
+The [2026-11-14 rollout evidence](evidence/visual-defaults-20261114.json) records
+representative real Qwen requests for all four catalogs, image delivery, the
+32768-token request limit, verifier outputs and a VTCBench judge call. It labels
+unfinished evaluations as partial and records the limits of cleanup telemetry.
+These runs use the execution settings above; they predate the static-validation
+and agent-replacement binding fixes.
 
 For vLLM-compatible model endpoints, add
 `--config benchmarks/opencode_multimodal_benchmarks/default_eval.yaml` to preparation

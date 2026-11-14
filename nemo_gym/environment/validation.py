@@ -8,6 +8,7 @@ import ast
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -205,7 +206,40 @@ class _ConfigWiring:
     harbor_target: str | None = None
 
 
-class _ServerLookupParser(GlobalConfigDictParser):
+class _StaticWiringParser(GlobalConfigDictParser):
+    """Supply deployment placeholders only when inspecting wiring, never when preparing or running tasks."""
+
+    def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
+        # Like NO_MODEL_GLOBAL_CONFIG_DICT, these values stand in for services static checks never start.
+        # Only explicitly recognized deployment leaves may be unset or read directly from the environment.
+        # Other missing values and broken config references must retain the normal parser's errors.
+        placeholders = (
+            (("*", "responses_api_agents", "*", "sandbox_config", "image"), "static-validation-image"),
+            (("*", "responses_api_models", "openai_model", "openai_base_url"), "https://judge.invalid/v1"),
+            (("*", "responses_api_models", "openai_model", "openai_api_key"), "static-validation"),
+            (("*", "opensandbox", "connection", "domain"), "sandbox.invalid"),
+            (("*", "opensandbox", "connection", "api_key"), "static-validation"),
+        )
+        raw = OmegaConf.to_container(global_config_dict, resolve=False)
+
+        def fill(node: Any, pattern: tuple[str, ...], path: tuple[str, ...], value: str) -> None:
+            if not pattern:
+                if node == "???" or (isinstance(node, str) and re.fullmatch(r"\$\{oc\.env:[^{}]+\}", node)):
+                    OmegaConf.update(global_config_dict, ".".join(path), value)
+                return
+            if not isinstance(node, dict):
+                return
+            head, *tail = pattern
+            for key in node if head == "*" else (head,):
+                if key in node:
+                    fill(node[key], tuple(tail), (*path, key), value)
+
+        for pattern, value in placeholders:
+            fill(raw, pattern, (), value)
+        super().raise_on_missing_values(global_config_dict)
+
+
+class _ServerLookupParser(_StaticWiringParser):
     """Reject partially valid server configs before the parser prints its almost-server banner.
 
     Catalog lookup remains strict even with ``error_on_almost_servers: false``: its caller falls back to raw names
@@ -230,7 +264,7 @@ def _resolve_config_wiring(
     from nemo_gym.data.tasks.harbor.prepare import AGENT_OVERRIDES, HARBOR_TARGET_KEY, harbor_benchmark
 
     config_paths = [str(config_path.resolve())]
-    parser = parser or GlobalConfigDictParser()
+    parser = parser or _StaticWiringParser()
     with _with_component_root(config_path), tempfile.TemporaryDirectory() as scratch:
         try:
             benchmark = harbor_benchmark(config_path)

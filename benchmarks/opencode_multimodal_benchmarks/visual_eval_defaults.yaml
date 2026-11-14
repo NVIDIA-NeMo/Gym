@@ -6,6 +6,9 @@ num_samples_in_parallel: 64
 visual_agent:
   responses_api_agents:
     opencode_agent:
+      resources_server:
+        type: resources_servers
+        name: opencode_multimodal_benchmarks
       concurrency: 64
       max_output_tokens: 32768
 opencode_multimodal_benchmarks:
