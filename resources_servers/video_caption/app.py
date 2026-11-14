@@ -4,8 +4,9 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,9 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge
 from resources_servers.video_caption.reward import (
+    VideoCaptionRewardResult,
     VisualRewardType,
     compute_video_caption_reward,
     degeneration_response_format,
@@ -35,6 +37,14 @@ from resources_servers.video_caption.reward import (
     visual_events_response_format,
     visual_hits_response_format,
 )
+
+
+logger = logging.getLogger(__name__)
+
+# A row the verifier cannot score (blank reference events, or precision/F1 without a reference caption).
+# The sample is masked rather than raised: a 5xx from /verify makes the environment server replay the
+# whole episode, which costs a new policy rollout for a row that can never be scored.
+UNSCORABLE_ROW = "video_caption:unscorable_row"
 
 
 class VisualAtomicEvents(BaseModel):
@@ -170,12 +180,15 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
                 # Queue waiting does not consume the attempt's serving deadline.
                 async with self._judge_semaphore:
                     async with asyncio.timeout(self.config.judge_attempt_timeout_seconds):
+                        # This loop owns the retry budget, so the shared client makes one attempt per
+                        # iteration; otherwise its own three attempts nest inside ours.
                         response = await call_judge(
                             self.server_client,
                             server_name=self.config.judge_model_server.name,
                             url_path="/v1/chat/completions",
                             json=params,
                             response_model=NeMoGymChatCompletion,
+                            max_attempts=1,
                         )
                 if len(response.choices) != 1 or response.choices[0].finish_reason != "stop":
                     raise ValueError("Judge did not return one completed choice")
@@ -191,7 +204,8 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
                 ).strip()
                 validate_output(text)
                 return text, attempt + 1
-            except (JudgeError, TimeoutError, ValueError) as error:
+            # JUDGE_FAILURES covers the transport failure call_judge raises as a judge_failed event.
+            except (*JUDGE_FAILURES, TimeoutError, ValueError) as error:
                 if attempt + 1 == total_attempts:
                     # The standard Gym verify wrapper tags this and returns total
                     # reward zero. No caption length bonus or RL mask is applied.
@@ -219,12 +233,21 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
         precision_attempts = 0
         degeneration_judge_text = None
         degeneration_judge_attempts = 0
-        if caption:
+        try:
             atomic_events = normalize_atomic_events(body.verifier_metadata.model_dump())
-            reference_caption = body.verifier_metadata.reference_caption
-            needs_precision = self.config.visual_reward_type in ("precision", "f1")
-            if needs_precision and (reference_caption is None or not reference_caption.strip()):
-                raise ValueError("Precision/F1 requires a nonempty verifier_metadata.reference_caption")
+        except ValueError as error:
+            return self._unscorable(body, caption, caption_length, reward_kwargs, reason=str(error))
+        reference_caption = body.verifier_metadata.reference_caption
+        needs_precision = self.config.visual_reward_type in ("precision", "f1")
+        if needs_precision and (reference_caption is None or not reference_caption.strip()):
+            return self._unscorable(
+                body,
+                caption,
+                caption_length,
+                reward_kwargs,
+                reason="Precision/F1 requires a nonempty verifier_metadata.reference_caption",
+            )
+        if caption:
             if self.config.visual_reward_type in ("recall", "f1"):
                 judge_text, judge_attempts = await self._judge(caption, atomic_events)
             if needs_precision:
@@ -262,6 +285,33 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
             precision_judge_response_text=precision_text,
             degeneration_judge_attempts=degeneration_judge_attempts,
             degeneration_judge_response_text=degeneration_judge_text,
+        )
+
+    @staticmethod
+    def _unscorable(
+        body: VideoCaptionVerifyRequest,
+        caption: str,
+        caption_length: int,
+        reward_kwargs: dict[str, Any],
+        *,
+        reason: str,
+    ) -> VideoCaptionVerifyResponse:
+        """A masked zero for a row the verifier cannot score; no judge is called and no length bonus is paid."""
+        logger.warning("Masking an unscorable video_caption row (source_index=%s): %s", body.source_index, reason)
+        zero: VideoCaptionRewardResult = empty_video_caption_reward(caption, caption_length, **reward_kwargs)
+        # Keep the caption's length for diagnostics, but pay nothing for it: the sample is masked.
+        result = replace(zero, reward=0.0, length_reward=0.0, reward_before_degeneration=0.0)
+        return VideoCaptionVerifyResponse(
+            **body.model_dump(),
+            **asdict(result),
+            mask_sample=True,
+            failure_kind=UNSCORABLE_ROW,
+            failure_reason=reason,
+            judge_attempts=0,
+            predicted_visual_events=None,
+            event_extraction_attempts=0,
+            precision_judge_attempts=0,
+            degeneration_judge_attempts=0,
         )
 
 

@@ -16,11 +16,12 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import NeMoGymChatCompletion, NeMoGymResponse
+from nemo_gym.core import FailureBoundary, NeMoGymChatCompletion, NeMoGymResponse, NgFailureEvent
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 from resources_servers.video_caption.app import (
+    UNSCORABLE_ROW,
     VideoCaptionResourcesServer,
     VideoCaptionResourcesServerConfig,
     VideoCaptionVerifyRequest,
@@ -267,6 +268,33 @@ async def test_third_attempt_success(judge):
     result = await server().verify(request("word " * 100))
     assert judge.await_count == result.judge_attempts == 3
     assert result.reward == 0.75
+
+
+def transport_failure():
+    """What call_judge raises when every attempt of one call failed over HTTP: a judge_failed event."""
+    return NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="connection reset"
+    )
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_is_retried_by_this_loop_with_single_attempt_calls(judge):
+    judge.side_effect = [transport_failure(), judge_response()]
+    result = await server().verify(request("word " * 100))
+    assert judge.await_count == result.judge_attempts == 2
+    assert result.reward == 0.75
+    # The loop owns the budget: the shared client must not add its own three attempts per call.
+    assert [call.kwargs["max_attempts"] for call in judge.await_args_list] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_exhaustion_is_tagged_judge_failed(judge):
+    judge.side_effect = [transport_failure(), transport_failure(), transport_failure()]
+    response = await judge_failsafe(server().verify)(request("word " * 100))
+    body = json.loads(response.body)
+    assert judge.await_count == 3
+    assert body["reward"] == 0
+    assert body["_ng_failure_class"] == "judge_failed"
 
 
 @pytest.mark.asyncio
@@ -530,8 +558,36 @@ def test_visual_reward_configuration_defaults_and_validation():
 @pytest.mark.parametrize("mode", ["precision", "f1"])
 @pytest.mark.parametrize("reference", [None, "", " \n\t"])
 async def test_precision_requires_human_reference_before_any_judging(mode, reference, judge):
-    with pytest.raises(ValueError, match="nonempty verifier_metadata.reference_caption"):
-        await server(visual_reward_type=mode).verify(request(reference_caption=reference))
+    result = await server(visual_reward_type=mode).verify(request("word " * 100, reference_caption=reference))
+    judge.assert_not_called()
+    assert result.reward == 0 and result.length_reward == 0
+    assert result.mask_sample is True
+    assert result.failure_kind == UNSCORABLE_ROW
+    assert "reference_caption" in result.failure_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("events", [[" "], ["Walking", ""]])
+async def test_blank_reference_events_mask_the_row_without_judging(events, judge):
+    # An empty list never reaches verify(): the request model's min_length=1 rejects it with a 422.
+    body = request("word " * 100)
+    body.verifier_metadata.atomic_events.visual_events = events
+    result = await server().verify(body)
+    judge.assert_not_called()
+    assert result.reward == 0 and result.mask_sample is True
+    assert result.failure_kind == UNSCORABLE_ROW
+    assert "visual_events" in result.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_unscorable_row_is_a_masked_sample_not_a_failsafe_error(judge):
+    # The failsafe wrapper only intercepts raised JudgeErrors; a masked sample passes through as an ordinary 200 body.
+    body = request(reference_caption=None)
+    result = await judge_failsafe(server(visual_reward_type="f1").verify)(body)
+    assert isinstance(result, VideoCaptionVerifyResponse)
+    payload = result.model_dump()
+    assert payload["reward"] == 0 and payload["mask_sample"] is True
+    assert "_ng_failure_class" not in payload
     judge.assert_not_called()
 
 
