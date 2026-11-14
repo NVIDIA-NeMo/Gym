@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from aiohttp import ClientTimeout
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -60,7 +60,12 @@ from resources_servers.eqbench4.metrics import (
     key_metrics,
 )
 from resources_servers.eqbench4.rating import Outcome
-from resources_servers.eqbench4.task_data import Opponent, SlottedPrompt, TranscriptMessage
+from resources_servers.eqbench4.task_data import (
+    CONVERSATION_METADATA_KEY,
+    Opponent,
+    SlottedPrompt,
+    TranscriptMessage,
+)
 from resources_servers.eqbench4.verifier_fixture import create_fixture_server, invoke_with_fixture_judge
 
 
@@ -119,6 +124,21 @@ class EQBench4VerifyRequest(EQBench4RunRequest, BaseVerifyRequest):
     conversation_error: str | None = None
     # Why the policy gave no visible reply, for a conversation it stopped.
     policy_stop_reason: PolicyStopReason | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _conversation_from_response(cls, data: Any) -> Any:
+        """Take the conversation from the response when the request lacks it, as a re-judge's request does.
+
+        Gym rebuilds a re-judge's verify request from the task row and the saved response, without the fields the
+        agent added; the response carries them in its metadata.
+        """
+        if not isinstance(data, dict) or "conversation_status" in data:
+            return data
+        response = data.get("response")
+        metadata = response.get("metadata") if isinstance(response, dict) else getattr(response, "metadata", None)
+        saved = (metadata or {}).get(CONVERSATION_METADATA_KEY)
+        return data | json.loads(saved) if isinstance(saved, str) else data
 
 
 class JudgeReading(BaseModel):

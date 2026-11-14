@@ -7,6 +7,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# The policy response that eqbench4_agent sends to /verify carries the conversation under this key of its metadata, as
+# a JSON string, as Gym's Simple Agent carries its outcome there. Gym re-judges a saved answer with a verify request
+# rebuilt from the task row and the saved response alone, so the conversation must be in the response for a re-judge
+# to grade it; the grading binding then covers the whole conversation, too.
+CONVERSATION_METADATA_KEY = "eqbench4_conversation"
+
+
 class TranscriptMessage(BaseModel):
     """One message of a conversation; ``user`` is the simulated persona and ``assistant`` the evaluated model."""
 

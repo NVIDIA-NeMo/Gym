@@ -82,6 +82,13 @@ the counts and the usual fix whenever any conversation was left out. In the publ
 happened to an evaluated model (3,360 conversations); with other models a high rate means the score covers only the
 scenarios the model finished, and should be fixed before the score is trusted.
 
+**Endpoint outages are retried, not masked.** A persona or judge endpoint that refuses connections for
+`eqbench4_connection_retry_timeout_s` (300 s by default; Gym's default would retry forever) fails the call. A persona
+outage fails the whole conversation: the benchmark sets `route_failures_to_sidecar: true`, so it is recorded in the
+failures sidecar as a retryable attempt, and the run exits 75. Once the endpoint is back, `--resume` (or
+`gym eval resubmit --recover` on Slurm) runs those conversations again. A judge outage masks the row as
+`judge_failed` with its conversation kept, and the resume re-judges it without calling the policy again.
+
 ## Prepare and validate
 
 ```bash

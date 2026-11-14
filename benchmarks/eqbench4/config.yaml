@@ -35,6 +35,10 @@ eqbench4_benchmark_environment_server:
         name: eqbench4_benchmark_agent
 
 # Judge and persona outages go to the failures sidecar, not the score; above these shares of expected rollouts the
-# run's health check reports it unhealthy.
+# run's health check reports it unhealthy. A persona endpoint that stays down fails the conversation (after
+# eqbench4_connection_retry_timeout_s, see eqbench4_models.yaml): routed to the sidecar, it is a retryable attempt that
+# a resume runs again once the endpoint is back. Unrouted, it would end the run, and Gym would not run the conversation
+# again, since the agent had already started it.
+route_failures_to_sidecar: true
 health_check_max_not_final_failure_fraction: 0.02
 health_check_max_final_failure_fraction: 0.02

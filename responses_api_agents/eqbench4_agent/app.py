@@ -17,6 +17,7 @@ The conversation follows EQ-Bench 4 (https://github.com/EQ-bench/eqbench4, revis
 The resources server then judges the transcript against published transcripts of the same scenario.
 """
 
+import json
 import logging
 import re
 from time import time
@@ -38,6 +39,7 @@ from nemo_gym.core import (
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 from resources_servers.eqbench4.judging import strip_thinking
+from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY
 
 
 LOG = logging.getLogger(__name__)
@@ -375,16 +377,21 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
         # The verifier echoes the last policy reply, with usage covering every model call of the conversation, the
         # policy's and the persona's: Gym's rollout usage covers the whole invocation tree, which includes the persona
         # simulator. It is set before verify, because the verifier binds its grading to the response it saw, so a
-        # response changed afterwards no longer matches the grading.
-        if policy_response is not None:
-            policy_response = policy_response | {"usage": usage.model_dump(mode="json") if usage else None}
-        verify_request = body.model_dump() | {
-            "response": policy_response,
+        # response changed afterwards no longer matches the grading. The response also carries the conversation, which
+        # a re-judge of the saved answer reads from it (see CONVERSATION_METADATA_KEY).
+        conversation = {
             "transcript": transcript,
             "conversation_status": status,
             "conversation_error": error,
             "policy_stop_reason": stop_reason if status == "policy_failed" else None,
         }
+        if policy_response is not None:
+            metadata = (policy_response.get("metadata") or {}) | {CONVERSATION_METADATA_KEY: json.dumps(conversation)}
+            policy_response = policy_response | {
+                "usage": usage.model_dump(mode="json") if usage else None,
+                "metadata": metadata,
+            }
+        verify_request = body.model_dump() | {"response": policy_response, **conversation}
         verify = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
