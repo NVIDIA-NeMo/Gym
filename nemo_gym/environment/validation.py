@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import orjson
@@ -39,6 +39,7 @@ from nemo_gym.environment.manifest import (
     EnvironmentKind,
     EnvironmentManifest,
     ManifestDataset,
+    PromptSource,
     dump_manifest,
     load_manifest,
     resolve_manifest_config_path,
@@ -840,6 +841,93 @@ def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManife
         )
 
 
+def _task_datasets(manifest: EnvironmentManifest) -> tuple[ManifestDataset, ...]:
+    """The datasets a setup shares with its target: the task datasets, or every dataset of an environment that
+    declares only examples."""
+    tasks = tuple(dataset for dataset in manifest.datasets if dataset.type != DatasetKind.EXAMPLE)
+    return tasks or tuple(manifest.datasets)
+
+
+def _task_files(manifest: EnvironmentManifest) -> set[tuple[str, str]]:
+    return {(dataset.type.value, dataset.jsonl_fpath) for dataset in _task_datasets(manifest)}
+
+
+def _prompt_templates(manifest: EnvironmentManifest) -> tuple[str | None, set[tuple[str, str | None]]]:
+    """The benchmark's own prompt: its standard template and the template each task dataset declares."""
+    datasets = {(dataset.jsonl_fpath, dataset.prompt_config) for dataset in _task_datasets(manifest)}
+    return manifest.standard_prompt_config, datasets
+
+
+def _validate_related_manifest(manifest_path: Path, manifest: EnvironmentManifest) -> None:
+    """Check that a setup or protocol names a manifest it can belong to.
+
+    A setup runs its target's tasks and scoring with another harness or runtime, so both declare the same kind,
+    task datasets or Harbor target, resources server and grading mode. When both build prompts from templates, they
+    also declare the same templates: a harness may add its own instructions, but the benchmark's template is part of
+    its rules. A protocol scores a benchmark's tasks under other rules, so its target is a benchmark's main manifest.
+    Whether a protocol's tasks match is left to review, because a protocol may run its own prepared copy of the data.
+    """
+    field, target_name = (
+        ("setup_of", manifest.setup_of) if manifest.setup_of is not None else ("protocol_of", manifest.protocol_of)
+    )
+    if target_name is None:
+        return
+    catalog_directory = _catalog_directory(manifest_path)
+    if catalog_directory is None:
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' is looked up in benchmarks/ or environments/, and {manifest_path} is in neither."
+        )
+    # A link is a name in this catalog, not a path: `../outside` would otherwise load a manifest outside the catalog
+    # that declares the same string, and the name check below would pass.
+    written = PurePosixPath(target_name)
+    if written.is_absolute() or ".." in written.parts or written.as_posix() != target_name:
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' must be written as the name of a manifest under {catalog_directory.name}/, "
+            "not as a path."
+        )
+    target_path = catalog_directory / target_name / "manifest.yaml"
+    if not target_path.is_file():
+        raise EnvironmentValidationError(f"{field} '{target_name}' has no manifest at {target_path}.")
+    target = load_manifest(target_path)
+    if target.name != target_name:
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' must be written as the name the manifest at {target_path} declares, "
+            f"'{target.name}'."
+        )
+    if target.kind != manifest.kind:
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' is a {target.kind.value}, but this manifest is a {manifest.kind.value}."
+        )
+    if target.setup_of is not None or (field == "protocol_of" and target.protocol_of is not None):
+        raise EnvironmentValidationError(
+            f"{field} '{target_name}' is itself a setup or protocol; name the manifest it belongs to instead."
+        )
+    if field == "protocol_of":
+        return
+    if _task_files(manifest) != _task_files(target):
+        raise EnvironmentValidationError(
+            f"setup_of '{target_name}' runs other task datasets; a config with other tasks is its own environment. "
+            f"If you changed a config both manifests use, run `gym env validate --sync` on '{target_name}' first."
+        )
+    if manifest.harbor_target != target.harbor_target:
+        raise EnvironmentValidationError(
+            f"setup_of '{target_name}' runs another Harbor target, '{manifest.harbor_target}' instead of "
+            f"'{target.harbor_target}'; a config with other tasks is its own environment."
+        )
+    if (manifest.resources_server, manifest.grading_mode) != (target.resources_server, target.grading_mode):
+        raise EnvironmentValidationError(
+            f"setup_of '{target_name}' scores with another resources server or grading mode; "
+            "declare protocol_of for a benchmark scored under other rules."
+        )
+    if manifest.prompt_source == target.prompt_source == PromptSource.TEMPLATE and (
+        _prompt_templates(manifest) != _prompt_templates(target)
+    ):
+        raise EnvironmentValidationError(
+            f"setup_of '{target_name}' uses another prompt template; "
+            "declare protocol_of for a benchmark prompted under other rules."
+        )
+
+
 def validate_environment(
     manifest_path: str | Path,
     config_path: str | Path | None = None,
@@ -887,6 +975,7 @@ def validate_environment(
                 f"Resolved config cannot satisfy the manifest at {location}: {issue['msg']}"
             ) from error
         synchronized = tuple(differences)
+    _validate_related_manifest(resolved_manifest_path, manifest)
 
     with _with_component_root(resolved_config_path):
         if composition.harbor_target is not None:

@@ -12,6 +12,7 @@ from nemo_gym.config.config_types import ConfigError, Domain
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,
+    IntendedUse,
     ManifestError,
     dump_manifest,
     load_manifest,
@@ -515,3 +516,121 @@ def test_an_environment_without_a_target_needs_its_datasets(backend: str) -> Non
     else:
         with pytest.raises(ValidationError, match="datasets"):
             EnvironmentManifest.model_validate(raw)
+
+
+CATALOG_FIELDS = (
+    "setup_of",
+    "protocol_of",
+    "maintainers",
+    "intended_use",
+    "overlaps_with",
+    "primary_metric",
+    "requirements",
+)
+
+
+def test_catalog_fields_are_unknown_by_default_and_left_out_of_dumps() -> None:
+    manifest = EnvironmentManifest.model_validate(_manifest())
+
+    assert all(getattr(manifest, field) is None for field in CATALOG_FIELDS)
+    dumped = yaml.safe_load(dump_manifest(manifest))
+    assert not set(CATALOG_FIELDS) & set(dumped)
+
+
+def test_catalog_fields_round_trip() -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(
+        name="my_eval/opencode",
+        setup_of="my_eval",
+        maintainers=["alice-nv"],
+        intended_use=["evaluation", "training"],
+        overlaps_with=["gpqa"],
+        primary_metric="pass@1",
+        requirements={"gpu": False, "network": "allowlist"},
+    )
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.intended_use == [IntendedUse.EVALUATION, IntendedUse.TRAINING]
+    assert manifest.requirements is not None and manifest.requirements.network == "allowlist"
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize(("written", "stored"), [("true", True), ("no", False), ("unknown", "unknown")])
+def test_gpu_takes_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
+    # YAML reads a bare `yes` or `no` as a boolean; "unknown" is how an author says that nobody knows.
+    raw = _manifest() | yaml.safe_load(f"requirements: {{gpu: {written}}}\n")
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.requirements is not None
+    assert manifest.requirements.gpu == stored
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("level", ["no-network", "allowlist", "public", "unknown"])
+def test_network_takes_a_harbor_network_mode_or_unknown(level: str) -> None:
+    raw = _manifest() | {"requirements": {"network": level}}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.requirements is not None and manifest.requirements.network == level
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+@pytest.mark.parametrize(
+    ("kind", "changes", "valid"),
+    [
+        ("environment", {"setup_of": "other"}, True),
+        ("benchmark", {"setup_of": "other"}, True),
+        ("benchmark", {"protocol_of": "other"}, True),
+        ("benchmark", {"setup_of": "other", "protocol_of": "other"}, False),
+        ("environment", {"protocol_of": "other"}, False),
+    ],
+)
+def test_setup_and_protocol_links_are_exclusive_and_protocols_are_benchmark_only(
+    backend: str, kind: str, changes: dict, valid: bool
+) -> None:
+    raw = _manifest(kind=kind) | changes
+    if backend == "schema":
+        assert (not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))) is valid
+    elif valid:
+        EnvironmentManifest.model_validate(raw)
+    else:
+        with pytest.raises(ValidationError, match="setup_of or protocol_of|only valid for benchmarks"):
+            EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize("field", ["setup_of", "protocol_of"])
+def test_manifest_cannot_link_to_itself(field: str) -> None:
+    raw = _manifest(kind="benchmark")
+    raw[field] = raw["name"]
+
+    with pytest.raises(ValidationError, match="of itself"):
+        EnvironmentManifest.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("maintainers", ["alice", "alice"]),
+        ("maintainers", ["Alice Smith"]),
+        ("maintainers", []),
+        ("intended_use", ["serving"]),
+        ("intended_use", ["training", "training"]),
+        ("overlaps_with", ["gpqa", "gpqa"]),
+        ("requirements", {"gpu": True, "vram_gb": 80}),
+        ("requirements", {"network": "sometimes"}),
+        # Network access is a level, not a yes or no, and `internet` is not a field.
+        ("requirements", {"network": True}),
+        ("requirements", {"internet": True}),
+    ],
+)
+def test_catalog_fields_reject_invalid_values(field: str, value: object) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError):
+        EnvironmentManifest.model_validate(raw)
