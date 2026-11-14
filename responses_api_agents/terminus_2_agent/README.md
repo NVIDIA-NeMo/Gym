@@ -31,15 +31,16 @@ to that worker; `concurrency` applies per worker. A sandbox failure never falls 
 
 At seed, the agent prepares the sandbox before any activation:
 
-1. It reuses or installs a private Python runtime with this server's Harbor, built on the Agent Server with
+1. It checks that `bash`, `script` (util-linux) and `tmux` run. A sandbox without `bash` or `script` is refused
+   with a 422 before anything is installed, since the runtime installer needs `bash` too.
+2. It reuses or installs a private Python runtime with this server's Harbor, built on the Agent Server with
    `SandboxPythonRuntime` and uploaded, so the sandbox needs no Python and no network for it. Packages are pinned
    to the versions in this server's environment. Harbor's sandbox backends, dataset tools and CLI are left out,
    because Terminus-2 never imports them. A runtime an earlier session left in the sandbox is reused when it
    passes its import check. The runtime lives under `/tmp/nemo-gym-terminus-2-runtime-<key>`.
-2. It uploads `sandbox_runner.py`, `terminus.py` and `llm.py` into the session directory,
+3. It uploads `sandbox_runner.py`, `terminus.py` and `llm.py` into the session directory,
    `/tmp/nemo-gym-terminus-2-sessions/<id>`, outside the task's working directory and `HOME`.
-3. It checks that `bash`, `script` (util-linux) and `tmux` run. A sandbox without `bash` or `script` is refused.
-   A sandbox without `tmux` gets it from Harbor's own installer, which uses the image's package manager, so such a
+4. A sandbox without `tmux` gets it from Harbor's own installer, which uses the image's package manager, so such a
    sandbox needs root and network access to its package index. Install `tmux` in the image to avoid this.
 
 In a sandbox it starts itself, the agent also creates `sandbox_config.workdir`, since providers need not.

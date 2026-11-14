@@ -137,14 +137,15 @@ class Terminus2SandboxSession(AgentSessionState):
         prepared = await sandbox.exec(f"mkdir -p {' '.join(map(quote, directories))}", cwd="/", timeout_s=30)
         if prepared.return_code != 0 or prepared.error_type is not None:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Terminus 2 sandbox paths")
+        # Probe before the runtime install, which itself runs bash: an image without bash or `script` gets a final
+        # refusal, not an installer failure. A provider error is not a missing tool.
+        probe = await sandbox.exec(_TERMINAL_PROBE, cwd="/", timeout_s=30)
+        if probe.return_code == 3 and probe.error_type is None:
+            raise AgentSeedRejectedError(f"Terminus 2 cannot run in this sandbox: {(probe.stdout or '').strip()}")
         if not await runtime.is_installed(sandbox):
             await runtime.install(sandbox, timeout_s=install_timeout)
         for name in _HARNESS_FILES:
             await sandbox.upload(Path(__file__).with_name(name), f"{self.harness_dir}/{name}")
-
-        probe = await sandbox.exec(_TERMINAL_PROBE, cwd="/", timeout_s=30)
-        if probe.return_code == 3:
-            raise AgentSeedRejectedError(f"Terminus 2 cannot run in this sandbox: {(probe.stdout or '').strip()}")
         if probe.return_code == 0 and probe.error_type is None:
             return
         # The same installer Terminus runs at its first command, moved to setup. It uses the image's package

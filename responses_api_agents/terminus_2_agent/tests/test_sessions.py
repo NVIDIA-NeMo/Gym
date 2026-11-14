@@ -202,6 +202,10 @@ class TestSeed:
         assert check_agent_seed_rejected(agent.setup_webserver(), _seed()).endswith(missing)
         assert not agent._session_records
         sandbox.disconnect.assert_awaited_once()
+        # The refusal comes before the runtime installer, which itself needs bash.
+        providers.is_installed.assert_not_awaited()
+        providers.install.assert_not_awaited()
+        sandbox.upload.assert_not_awaited()
 
     @pytest.mark.skipif(shutil.which("script") is None, reason="needs script")
     @pytest.mark.parametrize(
