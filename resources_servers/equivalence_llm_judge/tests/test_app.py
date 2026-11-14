@@ -15,6 +15,7 @@
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.encoders import jsonable_encoder
@@ -30,6 +31,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.verification import exercise_verifier_fixture, judge_failsafe
 from resources_servers.equivalence_llm_judge.app import (
@@ -40,6 +42,31 @@ from resources_servers.equivalence_llm_judge.app import (
     _extract_question_text,
     _match_verdict_labels,
 )
+
+
+def test_aggregation_hook_excludes_masked_and_preserves_headline_score():
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            report_slice_fields=["category", "raw_subject", "modality"],
+            report_slice_cross_fields=[("modality", "category")],
+        )
+    )
+    rows = [
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, "category": "Math", "reward": 1},
+        {"_ng_task_index": 1, "_ng_rollout_index": 0, "category": "Math", "reward": 0},
+        {"_ng_task_index": 2, "_ng_rollout_index": 0, "category": "Math", "reward": 1, "mask_sample": True},
+    ]
+    for row in rows:
+        row["judge_evaluations"] = [{"verdict_label": "equal", "judgement_parsing_issues": []}]
+    result = compute_aggregate_metrics(
+        rows, compute_metrics_fn=lambda tasks: LLMJudgeResourcesServer.compute_metrics(server, tasks)
+    )
+    assert result.agent_metrics["slices/category/Math/mean/reward"] == 0.5
+    assert result.agent_metrics["slices/category/Math/question_count"] == 2
+    assert result.key_metrics["mean/reward"] == 0.5
+    server.config.report_slice_fields = []
+    server.config.report_slice_cross_fields = []
+    assert not any(key.startswith("slices/") for key in LLMJudgeResourcesServer.compute_metrics(server, [[rows[0]]]))
 
 
 async def test_hle_verified_fixture() -> None:
@@ -754,6 +781,72 @@ class TestJudgeParsing:
         assert _match_verdict_labels(text, equal_label, not_equal_label, case_insensitive=True) == expected
         assert _match_verdict_labels(text, equal_label, not_equal_label) == []
 
+    @mark.parametrize(
+        "text,verdict",
+        [
+            ("Reasoning: the answers agree.\nJudgement: **no**\nConfidence: **95%**", "Judgement: no"),
+            ("Reasoning: the answers differ.\nJudgement: **yes**\nConfidence: **90%**", "Judgement: yes"),
+            ("**Judgement:** no", "Judgement: no"),
+            ("**Judgement: yes**", "Judgement: yes"),
+            ("Judgement: *no*", "Judgement: no"),
+            ("Judgement: _yes_", "Judgement: yes"),
+            ("`Judgement: no`", "Judgement: no"),
+            ("Judgement: `yes`", "Judgement: yes"),
+            ("Judgement:**No**", "Judgement: no"),
+            ("Judgement:\n**YES**", "Judgement: yes"),
+        ],
+    )
+    async def test_markup_around_the_verdict_does_not_hide_it(self, server, monkeypatch, text, verdict) -> None:
+        server.config.judge_labels_case_insensitive = True
+        recorded = []
+        monkeypatch.setattr(
+            "resources_servers.equivalence_llm_judge.app.record_parsed_judge_verdict", lambda: recorded.append(1)
+        )
+
+        is_equal, record = await self._judge(server, text)
+
+        assert is_equal is (verdict == "Judgement: yes")
+        assert record.verdict_label == verdict
+        assert record.judgement_parsing_issues == []
+        assert recorded == [1]
+
+    @mark.parametrize("text", ["Judgement: **no**", "**Judgement:** yes", "Judgement: `yes`"])
+    async def test_markup_around_the_verdict_stays_unparsed_without_the_opt_in(self, server, text) -> None:
+        is_equal, record = await self._judge(server, text)
+
+        assert (is_equal, record.verdict_label, record.judgement_parsing_issues) == (False, None, ["no_verdict"])
+
+    @mark.parametrize(
+        "text,verdict,issues",
+        [
+            ("Judgement: **yes**\nJudgement: **no**", "Judgement: no", ["conflicting_verdicts"]),
+            ("**Judgement:** no, wait, `Judgement: yes`", "Judgement: yes", ["conflicting_verdicts"]),
+            ("Judgement: **maybe**", None, ["no_verdict"]),
+            ("The answers match.", None, ["no_verdict"]),
+            ("Judgement: ****", None, ["no_verdict"]),
+        ],
+    )
+    async def test_ambiguous_or_missing_marked_up_verdicts_are_not_recorded_as_parsed(
+        self, server, monkeypatch, text, verdict, issues
+    ) -> None:
+        server.config.judge_labels_case_insensitive = True
+        recorded = []
+        monkeypatch.setattr(
+            "resources_servers.equivalence_llm_judge.app.record_parsed_judge_verdict", lambda: recorded.append(1)
+        )
+
+        is_equal, record = await self._judge(server, text)
+
+        assert is_equal is (verdict == "Judgement: yes")  # the last verdict wins, as without markup
+        assert (record.verdict_label, record.judgement_parsing_issues) == (verdict, issues)
+        assert recorded == []
+
+    def test_labels_differing_only_in_markup_are_rejected_when_markup_is_ignored(self, server) -> None:
+        fields = server.config.model_dump() | {"judge_equal_label": "**yes**", "judge_not_equal_label": "yes"}
+        LLMJudgeResourcesServerConfig.model_validate(fields)  # byte-exact matching tells them apart
+        with raises(ValidationError, match="differ only in case or markup"):
+            LLMJudgeResourcesServerConfig.model_validate(fields | {"judge_labels_case_insensitive": True})
+
     def test_labels_differing_only_in_case_are_rejected_when_case_is_ignored(self, server) -> None:
         fields = server.config.model_dump() | {"judge_equal_label": "YES", "judge_not_equal_label": "yes"}
         LLMJudgeResourcesServerConfig.model_validate(fields)  # byte-exact matching tells them apart
@@ -814,3 +907,100 @@ class TestJudgeParsing:
             metrics.update({"judgement_parsing_issue_rate": 0.4, "judgement_parsing_issue_rate/no_verdict": 0.4})
             expected["judgement_parsing_issue_rate"] = 0.4
         assert server.get_key_metrics(metrics) == expected
+
+
+@mark.parametrize("has_image,modality", [(False, "text"), (True, "vision")])
+async def test_verify_response_preserves_domain_labels_through_aggregation(has_image, modality):
+    config = LLMJudgeResourcesServerConfig(
+        host="127.0.0.1",
+        port=8080,
+        entrypoint="",
+        report_slice_fields=["category", "raw_subject", "modality"],
+        report_slice_cross_fields=[("modality", "category")],
+        judge_prompt_template_fpath=str(
+            Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+        ),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = LLMJudgeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    test = TestApp()
+    reply = MagicMock(ok=True)
+    reply.read = AsyncMock(return_value=test._create_response("judge", test._msg("[[A=B]]")).encode())
+    server.server_client.post = AsyncMock(return_value=reply)
+    request = LLMJudgeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=NeMoGymResponse.model_validate_json(test._create_response("policy", test._msg("answer"))),
+        expected_answer="answer",
+        category="Math",
+        raw_subject="Algebra/Geometry",
+        modality=modality,
+    )
+    verified = await server.verify(request)
+    payload = json.loads(verified.model_dump_json())
+    assert payload["reward"] == 1
+    assert payload["category"] == "Math"
+    assert payload["raw_subject"] == "Algebra/Geometry"
+    assert payload["modality"] == modality
+    assert "has_image" not in payload
+    reverified = await server.verify(
+        LLMJudgeVerifyRequest.model_validate(
+            {**request.model_dump(exclude={"has_image"}), "modality": payload["modality"]}
+        )
+    )
+    assert reverified.modality == modality
+    assert reverified.category == "Math"
+    payload.update(_ng_task_index=0, _ng_rollout_index=0)
+    result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[payload]))
+    assert result.agent_metrics[f"slices/modality/category/{modality}/Math/question_count"] == 1
+    assert result.agent_metrics["slices/category/missing_label_rollouts"] == 0
+    assert result.agent_metrics["slices/modality/missing_label_rollouts"] == 0
+    assert "mean/has_image" not in result.key_metrics
+    assert "mean/has_image" not in result.agent_metrics
+    # A non-HLE user keeps arbitrary labels and gets generic category slices.
+    config.report_slice_fields = ["category"]
+    config.report_slice_cross_fields = []
+    disabled = json.loads((await server.verify(request)).model_dump_json())
+    assert disabled["category"] == "Math"
+    assert disabled["raw_subject"] == "Algebra/Geometry"
+    assert disabled["modality"] == modality
+    disabled.update(_ng_task_index=0, _ng_rollout_index=0)
+    generic = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[disabled]))
+    assert generic.agent_metrics["slices/category/Math/mean/reward"] == 1
+    assert generic.agent_metrics["slices/category/missing_label_rollouts"] == 0
+    config.report_slice_fields = []
+    unsliced = json.loads((await server.verify(request)).model_dump_json())
+    assert unsliced["category"] == "Math"
+    assert unsliced["modality"] == modality
+
+
+async def test_domain_aggregation_runs_off_event_loop():
+    import asyncio
+    import threading
+    from unittest.mock import patch
+
+    from nemo_gym.config import AggregateMetrics
+
+    config = LLMJudgeResourcesServerConfig(
+        host="127.0.0.1",
+        port=8080,
+        entrypoint="",
+        report_slice_fields=["category", "raw_subject", "modality"],
+        report_slice_cross_fields=[("modality", "category")],
+        judge_prompt_template_fpath=str(
+            Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+        ),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = LLMJudgeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    loop_thread = threading.get_ident()
+    worker_threads = []
+
+    def aggregate(*args, **kwargs):
+        worker_threads.append(threading.get_ident())
+        return AggregateMetrics(agent_metrics={}, key_metrics={}, group_level_metrics=[])
+
+    with patch("resources_servers.equivalence_llm_judge.app.compute_aggregate_metrics", side_effect=aggregate):
+        await asyncio.wait_for(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[])), timeout=5)
+    assert worker_threads and worker_threads[0] != loop_thread

@@ -9,6 +9,7 @@ actions to the task's Harbor environment.
 """
 
 import asyncio
+import base64
 import inspect
 import json
 import shlex
@@ -181,7 +182,14 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
         # Keep the shell session independent of the provider's exec wrapper so
         # background services survive between actions. This is not a guarantee
         # that all descendants remain in this process group.
-        inner_command = f"bash -ic {shlex.quote(action_command)}"
+        # Do not expose action text in any ancestor's argv: pkill -f used to
+        # stop a task's server would otherwise also kill our command wrapper.
+        # Read the script from a separate fd so commands still have their normal
+        # stdin, and retain interactive Bash startup (.bashrc, conda, PATH).
+        script = base64.b64encode(action_command.encode()).decode("ascii")
+        inner_command = (
+            f"command -v base64 >/dev/null || exit 127; bash -i <(printf %s {shlex.quote(script)} | base64 -d)"
+        )
         command = f"setsid -w bash -c {shlex.quote(inner_command)}"
         with self.control.lock:
             if self.control.cancelled.is_set():

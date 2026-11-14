@@ -3,13 +3,15 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities
 from nemo_gym.agents.base_responses_api_agent import (
@@ -30,6 +32,7 @@ from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_r
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
 
@@ -42,12 +45,13 @@ class _Agent(SimpleResponsesAPIAgent):
         raise NotImplementedError
 
 
-def _seed_request(*, tool_accesses=None) -> AgentSeedSessionRequest:
+def _seed_request(*, tool_accesses=None, agent_context=None) -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
         agent_session_id="agent-session",
         episode_id=EpisodeId(rollout_id="rollout", attempt=2),
         task_id=TaskId(taskset="test", task_id="task"),
         tool_accesses=tool_accesses or [],
+        agent_context=agent_context,
     )
 
 
@@ -284,6 +288,182 @@ def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
         AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 0})
 
 
+class _MediaContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    media: AgentContextArtifact
+    tag: str = ""
+
+
+@dataclass
+class _MediaState(AgentSessionState):
+    context: _MediaContext | None = None
+
+
+class _MediaAgent(_Agent):
+    """Declares the context it reads: a required media artifact and an optional tag."""
+
+    agent_context_model = _MediaContext
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        return _MediaState(request=body, context=self.parse_agent_context(body))
+
+
+def _context_agent(agent_class: type[_Agent]) -> _Agent:
+    return agent_class.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+
+
+def test_a_seed_without_agent_context_keeps_its_wire_form() -> None:
+    without_context = _seed_request().model_dump(mode="json")
+    assert "agent_context" not in without_context
+    # An agent server that predates agent_context forbids the key, so an empty context is sent as none.
+    assert _seed_request(agent_context=AgentContext()).model_dump(mode="json") == without_context
+    seed = _seed_request(agent_context=AgentContext(values={"tag": "figqa2"}))
+    assert AgentSeedSessionRequest.model_validate(seed.model_dump(mode="json")) == seed
+
+
+def test_an_agent_that_declares_no_context_refuses_one() -> None:
+    agent = _context_agent(_GrantCheckingAgent)
+    app = agent.setup_webserver()
+
+    detail = check_agent_seed_rejected(
+        app, _seed_request(agent_context=AgentContext(artifacts={"media": {"path": "figs/1"}}))
+    )
+
+    assert detail == "This agent does not accept agent_context; it was sent ['media']"
+    assert agent._session_records == {}
+    # An empty context sends nothing, so the agent still seeds.
+    seed = _seed_request(agent_context=AgentContext())
+    assert TestClient(app).post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+
+
+def test_an_agent_reads_the_context_it_declares() -> None:
+    agent = _context_agent(_MediaAgent)
+    seed = _seed_request(agent_context=AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}}))
+
+    response = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+
+    assert response.status_code == 200
+    state = agent._session_state("agent-session")
+    assert state.context == _MediaContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
+
+
+def test_sessions_in_one_episode_keep_their_own_context() -> None:
+    agent = _context_agent(_MediaAgent)
+    client = TestClient(agent.setup_webserver())
+    seeds = [
+        _seed_request(
+            agent_context=AgentContext(values={"tag": role}, artifacts={"media": {"path": f"figs/{role}"}})
+        ).model_copy(update={"agent_session_id": role})
+        for role in ("user", "assistant")
+    ]
+    for seed in seeds:
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+
+    # Seeding another participant must not replace the first participant's context or break its retry.
+    assert client.post("/v1/agent_sessions", json=seeds[0].model_dump(mode="json")).status_code == 200
+    for seed in seeds:
+        state = agent._session_state(seed.agent_session_id)
+        assert state.request.episode_id == seeds[0].episode_id
+        assert state.context == _MediaContext(
+            media=AgentContextArtifact(path=f"figs/{seed.agent_session_id}"), tag=seed.agent_session_id
+        )
+    changed = seeds[0].model_copy(update={"agent_context": seeds[1].agent_context})
+    assert client.post("/v1/agent_sessions", json=changed.model_dump(mode="json")).status_code == 409
+    assert agent._session_state("user").context.tag == "user"
+    assert agent._session_state("assistant").context.tag == "assistant"
+
+
+@pytest.mark.parametrize(
+    ("context", "detail"),
+    [
+        (None, "agent_context does not satisfy _MediaContext: media: Field required"),
+        (
+            AgentContext(values={"tag": "figqa2"}),
+            "agent_context does not satisfy _MediaContext: media: Field required",
+        ),
+        (
+            AgentContext(values={"dpi": 170}, artifacts={"media": {"path": "figs/1"}}),
+            "This agent does not accept agent_context keys ['dpi']",
+        ),
+        (
+            AgentContext(values={"tag": 123}, artifacts={"media": {"path": "figs/1"}}),
+            "agent_context does not satisfy _MediaContext: tag: Input should be a valid string",
+        ),
+        (
+            AgentContext(values={"media": "figs/1"}),
+            "agent_context field 'media' must be supplied through artifacts",
+        ),
+    ],
+)
+def test_an_agent_refuses_missing_unknown_or_mistyped_context(context, detail) -> None:
+    agent = _context_agent(_MediaAgent)
+
+    assert check_agent_seed_rejected(agent.setup_webserver(), _seed_request(agent_context=context)) == detail
+    assert agent._session_records == {}
+
+
+@pytest.mark.parametrize(
+    "annotation", [AgentContextArtifact, AgentContextArtifact | None, Optional[AgentContextArtifact]]
+)
+def test_artifact_fields_require_the_artifacts_channel(annotation) -> None:
+    class Context(BaseModel):
+        media: annotation = None
+
+    class Agent(_MediaAgent):
+        agent_context_model = Context
+
+    agent = _context_agent(Agent)
+    assert agent.parse_agent_context(_seed_request()).media is None
+    seed = _seed_request(agent_context=AgentContext(artifacts={"media": {"path": "figs/1"}}))
+    assert agent.parse_agent_context(seed).media == AgentContextArtifact(path="figs/1")
+    detail = check_agent_seed_rejected(
+        agent.setup_webserver(),
+        _seed_request(agent_context=AgentContext(values={"media": {"path": "figs/1"}})),
+    )
+    assert detail == "agent_context field 'media' must be supplied through artifacts"
+    assert agent._session_records == {}
+
+
+def test_inline_json_keeps_its_channel_and_cannot_mutate_the_saved_seed() -> None:
+    class Context(BaseModel):
+        payload: Any
+
+    class Agent(_MediaAgent):
+        agent_context_model = Context
+
+    agent = _context_agent(Agent)
+    client = TestClient(agent.setup_webserver())
+    seed = _seed_request(agent_context=AgentContext(values={"payload": {"path": "ordinary-json", "items": [1]}}))
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+    state = agent._session_state("agent-session")
+    state.context.payload["items"].append(2)
+    assert state.request.agent_context == seed.agent_context
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+
+    other = _context_agent(Agent)
+    detail = check_agent_seed_rejected(
+        other.setup_webserver(), _seed_request(agent_context=AgentContext(artifacts={"payload": {"path": "figs/1"}}))
+    )
+    assert detail == "agent_context field 'payload' must be supplied through values"
+    assert other._session_records == {}
+
+
+def test_mixed_artifact_value_unions_are_rejected() -> None:
+    class Context(BaseModel):
+        media: AgentContextArtifact | str
+
+    class Agent(_MediaAgent):
+        agent_context_model = Context
+
+    agent = _context_agent(Agent)
+    detail = check_agent_seed_rejected(
+        agent.setup_webserver(), _seed_request(agent_context=AgentContext(artifacts={"media": {"path": "figs/1"}}))
+    )
+    assert "cannot mix artifact and value types" in detail
+    assert agent._session_records == {}
+
+
 class _StoppableAgent(_Agent):
     """Hands each session one fake sandbox session; seeding waits for ``installed``."""
 
@@ -409,3 +589,32 @@ def test_rollout_stop_marks_only_the_timeout_shaped_response_it_ended(status: st
         assert reported.model_dump(exclude={"metadata"}) == response.model_dump(exclude={"metadata"})
     else:
         assert reported is response
+
+
+def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
+    class LegacyAgent(SimpleResponsesAPIAgent):
+        pass
+
+    class SeedOnlyAgent(LegacyAgent):
+        async def _seed_agent_session_state(self, body):
+            raise RuntimeError("setup failed")
+
+    class SessionAgent(SeedOnlyAgent):
+        async def _close_agent_session_state(self, state):
+            raise RuntimeError("cleanup failed")
+
+    class InheritedSessionAgent(SessionAgent):
+        pass
+
+    class PublicSessionAgent(LegacyAgent):
+        async def seed_agent_session(self, body, request):
+            raise RuntimeError("setup failed")
+
+        async def close_agent_session(self, body, request):
+            raise RuntimeError("cleanup failed")
+
+    assert not LegacyAgent.supports_agent_sessions()
+    assert not SeedOnlyAgent.supports_agent_sessions()
+    assert SessionAgent.supports_agent_sessions()
+    assert InheritedSessionAgent.supports_agent_sessions()
+    assert PublicSessionAgent.supports_agent_sessions()

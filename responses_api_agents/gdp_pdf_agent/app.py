@@ -61,7 +61,9 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    failure_kinds,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -123,6 +125,13 @@ class GdpPdfAgentConfig(SimpleAgentConfig):
         "the row's result and goes to the verifier as is; regenerating would re-sample a model result. Turn it "
         "on only to reproduce the earlier behaviour for comparison. Each regeneration is counted in "
         "document_delivery.output_truncation_regenerations.",
+    )
+    mask_failed_attempts: bool = Field(
+        default=False,
+        description="For training: flag an attempt that scores zero because its input never fit (a context, "
+        "image-count or payload limit left after the backoff) with mask_sample, so the trainer leaves it out of "
+        "the loss; its zero says nothing about an answer. Keep it off for evaluation, where such an attempt counts "
+        "as a zero. A failed policy call or /verify is masked either way.",
     )
 
 
@@ -258,6 +267,13 @@ def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[in
         # this escape unclassified and take down the whole run over what was likely one document.
         return "payload", None
     return None, None
+
+
+def _failure_kind(terminal_limit: str) -> str:
+    """The shared failure kind for an attempt the agent ended without a gradable answer."""
+    if terminal_limit == "context":
+        return failure_kinds.MODEL_CONTEXT_LIMIT
+    return failure_kinds.MODEL_REQUEST_ERROR
 
 
 def _open_page_image(path: Path, *, source_dpi: int, image_dpi: int) -> "Image.Image":
@@ -640,6 +656,11 @@ class GdpPdfAgent(SimpleAgent):
             result.setdefault("verifier_metadata", meta)["pages_truncated"] = pages_truncated
         if terminal_limit and not result.get("mask_sample"):
             result["failure_reason"] = f"GDP.pdf terminal input limit: {terminal_limit}"
+            if self.config.mask_failed_attempts:
+                result["mask_sample"] = True
+                result["failure_kind"] = _failure_kind(terminal_limit)
+                # NeMo RL versions that predate the top-level field read instance_config.
+                result["instance_config"] = {**(result.get("instance_config") or {}), "mask_sample": True}
         if trajectory is not None:
             result["ng_trajectory"] = trajectory.model_dump(mode="json")
 
@@ -651,3 +672,6 @@ class GdpPdfAgent(SimpleAgent):
 
 if __name__ == "__main__":
     GdpPdfAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GdpPdfAgent.run_webserver()  # noqa: F401
