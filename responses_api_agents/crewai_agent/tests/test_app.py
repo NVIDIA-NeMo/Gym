@@ -688,12 +688,21 @@ async def test_a_deadline_during_a_command_answers_incomplete_with_the_call_canc
     model = _model(
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt; sleep 30"}), id="chatcmpl-1")
     )
+    # As above, distinguish a deadline in the command from one spent importing the runtime.
+    episode = asyncio.create_task(_episode(_agent(timeout=30), access))
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        async with asyncio.timeout(25):
+            while not (workdir / "partial.txt").exists():
+                await asyncio.sleep(0.05)
+        response, close = await asyncio.wait_for(episode, 60)
     finally:
+        if not episode.done():
+            episode.cancel()
+        await asyncio.gather(episode, return_exceptions=True)
         model.close()
 
     assert response.status == "incomplete"
+    assert len(model.requests) == 1
     assert (workdir / "partial.txt").read_text() == "partial\n"
     [invocation] = _records(close, "agent_invocation")
     [tool] = _records(close, "tool_call")
