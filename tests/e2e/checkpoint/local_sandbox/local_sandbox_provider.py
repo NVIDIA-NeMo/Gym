@@ -26,6 +26,7 @@ from typing import Any, Optional
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxSnapshotInfo,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
@@ -208,12 +209,16 @@ class LocalDirProvider(LocalDirPlainProvider):
     async def delete_snapshot(self, snapshot_id: str) -> None:
         shutil.rmtree(self.base / "snapshots" / snapshot_id, ignore_errors=True)
 
-    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
         listed = []
         for meta_file in (self.base / "snapshots").glob("*/meta.json"):
             meta = json.loads(meta_file.read_text())
             if meta["name"].startswith(prefix):
-                listed.append({"id": meta_file.parent.name, "name": meta["name"]})
+                listed.append(
+                    SandboxSnapshotInfo(
+                        snapshot_id=meta_file.parent.name, name=meta["name"], sandbox_id=meta["sandbox_id"]
+                    )
+                )
         return listed
 
 

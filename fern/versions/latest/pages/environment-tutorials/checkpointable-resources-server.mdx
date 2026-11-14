@@ -78,13 +78,13 @@ sandbox, whatever happened to the original since. The snapshot keeps **files, no
   The server refuses to start with checkpointing on and no `state_dir`, or a relative one.
 - The controller calls `release(kept)` after each checkpoint it saves, and `release([])` at the end of a run that
   will not be resumed. A job that ended for good without that final release leaves its last snapshots. Their names
-  start with `ng-<run id>-`, where the run id is the content of `<state_dir>/run_id`; on OpenSandbox, delete them with
-  `python -m nemo_gym.sandbox.providers.opensandbox.snapshots --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/run_id)-" --reap`
+  start with `ng-<state dir id>-`, where the id is the content of `<state_dir>/state_dir_id`; on OpenSandbox, delete them with
+  `python -m nemo_gym.sandbox.providers.opensandbox.snapshots --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/state_dir_id)-" --reap`
   (without `--reap` it only lists them).
 
 ## Check it
 
-`check_sandbox_session_checkpoints` (from `nemo_gym.server_runtime`) drives your server through its real routes
+`check_sandbox_session_checkpoints` (from `resources_servers.swebench.testing.checkpoint_conformance`) drives your server through its real routes
 against an in-process provider with durable snapshots: seed, retry and conflicts, commit, restore into a fork, the
 replacement attempt's seed, the captured patch surviving a restore, release (including snapshots a crashed process
 left), close, shutdown, and `restart_only` on a provider that cannot snapshot.
