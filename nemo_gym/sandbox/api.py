@@ -900,6 +900,11 @@ class AsyncSandbox:
             return
         if not self._connected:
             raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        # Some providers allocate a client per attachment. Release that client
+        # even when the provider itself is shared across many episodes.
+        detach = getattr(self._provider, "disconnect_handle", None)
+        if detach is not None and self._handle is not None:
+            await detach(self._handle)
         if self._owns_provider:
             await self._provider.aclose()
         self._handle = None

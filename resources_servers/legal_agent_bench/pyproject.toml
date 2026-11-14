@@ -6,7 +6,7 @@ name = "gym-resources-servers-legal-agent-bench"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev,ray]",
+    "nemo-gym[dev,ray,sandbox]",
     "requests>=2.32.5",
 ]
 

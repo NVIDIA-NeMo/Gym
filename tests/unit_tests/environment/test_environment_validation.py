@@ -1074,3 +1074,59 @@ def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: P
     _replace_manifest(manifest_path, resources_server="wrong_server")
     with pytest.raises(EnvironmentValidationError, match="composition is stale"):
         validate_environment(manifest_path, validate_datasets=False)
+
+
+@pytest.mark.parametrize("selected_input", [None, "benchmarks/demo/data/selected.jsonl"])
+def test_manifest_composition_resolves_dynamic_dataset_defaults(tmp_path: Path, selected_input: str | None) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text().replace(
+            "jsonl_fpath: benchmarks/demo/data/example.jsonl",
+            "jsonl_fpath: ${oc.select:prepare_script_args.input,benchmarks/demo/data/example.jsonl}",
+        )
+    )
+    expected_path = "benchmarks/demo/data/example.jsonl"
+    expected_rows = 1
+    if selected_input is not None:
+        config_path.write_text(config_path.read_text() + f"\nprepare_script_args:\n  input: {selected_input}\n")
+        manifest = load_manifest(manifest_path)
+        _replace_manifest(
+            manifest_path,
+            datasets=[manifest.datasets[0].model_copy(update={"jsonl_fpath": selected_input})],
+        )
+        original_data = (manifest_path.parent / "data/example.jsonl").read_text()
+        (manifest_path.parent / "data/selected.jsonl").write_text(original_data * 2)
+        expected_path = selected_input
+        expected_rows = 2
+
+    report = validate_environment(manifest_path)
+
+    assert Path(report.datasets[0].path) == tmp_path / expected_path
+    assert report.datasets[0].rows == expected_rows
+
+
+@pytest.mark.parametrize("value", ["${undefined_key}", "${oc.env:LAB_TEST_UNSET_VARIABLE}"])
+def test_dataset_path_resolution_uses_validation_error(
+    tmp_path: Path, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LAB_TEST_UNSET_VARIABLE", raising=False)
+    manifest = _asset(tmp_path, kind="benchmark")
+    config = manifest.with_name("config.yaml")
+    config.write_text(
+        config.read_text().replace("jsonl_fpath: benchmarks/demo/data/example.jsonl", f"jsonl_fpath: {value}")
+    )
+    with pytest.raises(ConfigInterpolationError):
+        validate_environment(manifest)
+
+
+def test_dataset_validation_ignores_undeclared_runtime_fields(tmp_path: Path) -> None:
+    manifest = _asset(tmp_path, kind="benchmark")
+    config = manifest.with_name("config.yaml")
+    from omegaconf import OmegaConf
+
+    raw = OmegaConf.load(config)
+    raw.demo_agent.responses_api_agents.simple_agent.datasets[0].ignored = "${runtime_only_value}"
+    OmegaConf.save(raw, config)
+
+    assert validate_environment(manifest).datasets[0].rows == 1

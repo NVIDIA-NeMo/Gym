@@ -244,6 +244,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 |-----------|---------|-------------|---------|
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
+| Harvey Legal Agent Benchmark (LAB) | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/legal_agent_bench/` (runtime adaptation; license and attribution under `vendor/harvey_labs/`) | https://github.com/harveyai/harvey-labs |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
 | ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template copied into `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml` — the user template byte-identical, the system prompt content-preserving with trailing whitespace stripped) | https://github.com/HaCTang/ReactionMechanismReasoning |
@@ -262,6 +263,19 @@ upstream copyright header and adds an NVIDIA modifications block.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
+
+### Harvey Legal Agent Benchmark (LAB)
+
+The runtime adaptation in `resources_servers/legal_agent_bench/` is based on
+[Harvey LAB revision f46ef86e4788545622db25dcffa3aebb7a139929](https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929).
+Original Harvey AI portions retain their MIT license; NVIDIA-authored code and
+NVIDIA modifications are licensed under Apache-2.0. The original
+[MIT license](resources_servers/legal_agent_bench/vendor/harvey_labs/LICENSE) is
+retained unchanged. Exact upstream source files, affected local modules, and
+modifications are recorded in the
+[local attribution notice](resources_servers/legal_agent_bench/vendor/harvey_labs/README.md).
+Task documents and public skills are downloaded at runtime rather than checked
+into this repository.
 
 ---
 

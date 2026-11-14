@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the Legal Agent Bench benchmark wrapper."""
-
-from __future__ import annotations
+"""Check preparation entrypoints and interchangeable harness configuration."""
 
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from omegaconf import OmegaConf
@@ -13,140 +12,172 @@ from omegaconf import OmegaConf
 from benchmarks.legal_agent_bench import prepare as benchmark_prepare
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.environment import BenchmarkConfig
-from resources_servers.legal_agent_bench.prepare import EXPECTED_TASK_COUNT, INDEX_FILENAME
+from resources_servers.legal_agent_bench.app import LegalAgentBenchEnvironmentConfig, _build_verifier_env
+from resources_servers.legal_agent_bench.prepare import INDEX_FILENAME
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]
-CONFIG_FPATH = BENCHMARK_DIR / "config.yaml"
+PRESETS = ["native"]
 
 
-def _write_task_index(parent: Path, count: int) -> tuple[Path, list[str]]:
-    tasks_dir = parent / "tasks"
-    tasks_dir.mkdir()
-    task_names = [f"practice-area__task-{index:04d}" for index in range(count)]
-    rows = []
-    for task_name in task_names:
-        rows.append(
-            {
-                "agent_ref": {
-                    "name": "legal_agent_bench_harbor_agent",
-                    "type": "responses_api_agents",
-                },
-                "instance_id": f"legal_agent_bench::{task_name}",
-                "responses_create_params": {
-                    "input": [],
-                    "temperature": 1.0,
-                    "top_p": 0.95,
-                },
-            }
-        )
-    (tasks_dir / INDEX_FILENAME).write_text(
-        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
-    return tasks_dir, task_names
-
-
-def _mock_asset_preparation(monkeypatch: pytest.MonkeyPatch, tasks_dir: Path) -> list[tuple[str, bool]]:
-    calls: list[tuple[str, bool]] = []
-
-    def fake_prepare_assets(asset: str, *, force: bool = False):
-        calls.append((asset, force))
-        return {"tasks": tasks_dir, "skills": tasks_dir.parent / "skills"}
-
-    monkeypatch.setattr(benchmark_prepare, "prepare_assets", fake_prepare_assets)
-    return calls
-
-
-def test_prepare_writes_deterministic_complete_benchmark_index(monkeypatch, tmp_path) -> None:
-    tasks_dir, task_names = _write_task_index(tmp_path, EXPECTED_TASK_COUNT)
-    output_path = tmp_path / "output" / "legal_agent_bench_benchmark.jsonl"
-    calls = _mock_asset_preparation(monkeypatch, tasks_dir)
-    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", output_path)
-
-    assert benchmark_prepare.prepare() == output_path
-    first_content = output_path.read_bytes()
-    assert benchmark_prepare.prepare(force=True) == output_path
-    assert output_path.read_bytes() == first_content
-    assert calls == [("all", False), ("all", True)]
-
-    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == EXPECTED_TASK_COUNT
-    assert [row["instance_id"].split("::", 1)[1] for row in rows] == task_names
-    assert all(
-        row["agent_ref"]
-        == {
-            "name": benchmark_prepare.BENCHMARK_AGENT_NAME,
-            "type": "responses_api_agents",
-        }
-        for row in rows
-    )
-
-
-def test_wrong_row_count_does_not_replace_existing_output(monkeypatch, tmp_path) -> None:
-    tasks_dir, _ = _write_task_index(tmp_path, 1)
-    output_path = tmp_path / "benchmark.jsonl"
-    output_path.write_text("existing output\n", encoding="utf-8")
-    _mock_asset_preparation(monkeypatch, tasks_dir)
-    monkeypatch.setattr(benchmark_prepare, "EXPECTED_TASK_COUNT", 2)
-    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", output_path)
-
-    with pytest.raises(ValueError, match="Expected 2 LAB benchmark rows, found 1"):
-        benchmark_prepare.prepare()
-    assert output_path.read_text(encoding="utf-8") == "existing output\n"
-
-
-def test_asset_preparation_failure_does_not_replace_existing_output(monkeypatch, tmp_path) -> None:
-    output_path = tmp_path / "benchmark.jsonl"
-    output_path.write_text("existing output\n", encoding="utf-8")
-    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", output_path)
-
-    def fail_preparation(*args, **kwargs):
-        raise RuntimeError("asset preparation failed")
-
-    monkeypatch.setattr(benchmark_prepare, "prepare_assets", fail_preparation)
-
-    with pytest.raises(RuntimeError, match="asset preparation failed"):
-        benchmark_prepare.prepare()
-    assert output_path.read_text(encoding="utf-8") == "existing output\n"
-
-
-def test_malformed_source_index_does_not_replace_existing_output(monkeypatch, tmp_path) -> None:
-    tasks_dir, _ = _write_task_index(tmp_path, 1)
-    (tasks_dir / INDEX_FILENAME).write_text("not JSON\n", encoding="utf-8")
-    output_path = tmp_path / "benchmark.jsonl"
-    output_path.write_text("existing output\n", encoding="utf-8")
-    _mock_asset_preparation(monkeypatch, tasks_dir)
-    monkeypatch.setattr(benchmark_prepare, "EXPECTED_TASK_COUNT", 1)
-    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", output_path)
-
-    with pytest.raises(ValueError, match="Invalid LAB task index JSON on line 1"):
-        benchmark_prepare.prepare()
-    assert output_path.read_text(encoding="utf-8") == "existing output\n"
-
-
-def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
-    benchmark = BenchmarkConfig.from_config_path(CONFIG_FPATH, strict=False)
-    assert benchmark is not None
-    assert benchmark.name == "legal_agent_bench"
-    assert benchmark.agent_name == "legal_agent_bench_benchmark_harbor_agent"
-    assert benchmark.num_repeats == 1
-    assert benchmark.dataset.prompt_config is None
-    assert benchmark.dataset.jsonl_fpath == Path("benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl")
-    assert benchmark.dataset.prepare_script == Path("benchmarks/legal_agent_bench/prepare.py")
-
-    initial_config = OmegaConf.merge(
-        OmegaConf.load(CONFIG_FPATH),
+def resolve(harness="native", **overrides):
+    initial = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / f"config_{harness}.yaml"),
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"default_host": "127.0.0.1"},
+        overrides,
     )
-    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
-    assert "legal_agent_bench" not in resolved
-    assert "legal_agent_bench_harbor_agent" not in resolved
+    return initial, GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
 
-    resource = resolved.legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench
-    agent = resolved.legal_agent_bench_benchmark_harbor_agent.responses_api_agents.harbor_agent
-    assert agent.harbor_datasets.legal_agent_bench.local_dataset_path == resource.harbor_tasks_dir
-    assert agent.harbor_agent_kwargs.skills_dir == resource.harness_skills_dir
-    assert agent.harbor_agent_kwargs.max_turns == 60
-    assert len(agent.datasets) == 1
-    assert agent.datasets[0].type == "benchmark"
+
+def environment_config(resolved):
+    values = OmegaConf.to_container(
+        resolved.legal_agent_bench_environment_server.environment_servers.harbor, resolve=True
+    )
+    return LegalAgentBenchEnvironmentConfig(name="lab", **values)
+
+
+def test_preparation_forwards_selection_cache_paths_and_preserves_input(monkeypatch, tmp_path):
+    selection = tmp_path / "selection.jsonl"
+    row = {
+        "instance_id": "legal_agent_bench::practice__task",
+        "responses_create_params": {"input": [], "temperature": 0.2},
+    }
+    selection.write_text(json.dumps(row) + "\n")
+    original = selection.read_bytes()
+    tasks, skills, output = tmp_path / "tasks", tmp_path / "skills", tmp_path / "output.jsonl"
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_TASK_CACHE_DIR", str(tasks))
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_SKILLS_DIR", str(skills))
+    assets = Mock(return_value={"tasks": tasks, "skills": skills})
+    materialize = Mock(return_value=output)
+    monkeypatch.setattr(benchmark_prepare, "prepare_assets", assets)
+    monkeypatch.setattr(benchmark_prepare, "prepare_environment", materialize)
+    monkeypatch.setattr(
+        benchmark_prepare,
+        "get_global_config_dict",
+        lambda: {"lab": {"agent_timeout_seconds": 300, "verifier_timeout_seconds": 600}},
+    )
+    assert benchmark_prepare.prepare(input=selection, output=output, image="prepared:image") == output
+    assets.assert_called_once_with(
+        "all", force=False, tasks_dir=str(tasks), skills_dir=str(skills), task_ids=("practice__task",)
+    )
+    materialize.assert_called_once_with(
+        tasks_dir=tasks,
+        skills_dir=skills,
+        rows=[row],
+        output=output,
+        image="prepared:image",
+        agent_timeout_seconds=300,
+        verifier_timeout_seconds=600,
+    )
+    assert selection.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "content,message",
+    [
+        ("not JSON\n", "Invalid LAB task index JSON on line 1"),
+        ("[]\n", "expected an object"),
+        ("{}\n", "Expected 2 LAB benchmark rows"),
+    ],
+)
+def test_invalid_index_does_not_publish(monkeypatch, tmp_path, content, message):
+    (tmp_path / INDEX_FILENAME).write_text(content)
+    output = tmp_path / "output.jsonl"
+    output.write_text("previous")
+    monkeypatch.setattr(
+        benchmark_prepare, "prepare_assets", Mock(return_value={"tasks": tmp_path, "skills": tmp_path})
+    )
+    monkeypatch.setattr(benchmark_prepare, "EXPECTED_TASK_COUNT", 2)
+    with pytest.raises(ValueError, match=message):
+        benchmark_prepare.prepare(output=output, image="prepared:image")
+    assert output.read_text() == "previous"
+
+
+def test_preparation_failure_preserves_previous_output(monkeypatch, tmp_path):
+    output = tmp_path / "output.jsonl"
+    output.write_text("previous")
+    monkeypatch.setattr(benchmark_prepare, "prepare_assets", Mock(side_effect=RuntimeError("asset failure")))
+    with pytest.raises(RuntimeError, match="asset failure"):
+        benchmark_prepare.prepare(output=output)
+    assert output.read_text() == "previous"
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("reward_mode", ["full_task", "criteria_pass_rate"])
+def test_harness_switch_preserves_grading_and_dataset(count, reward_mode, tmp_path):
+    judges = [
+        {"model_name": "route/claude-sonnet-4-6", "base_url": "https://claude.example/v1", "api_key": "test-c"},
+        {"model_name": "route/gpt-5.5", "reasoning_effort": "high"},
+    ][:count]
+    expected = None
+    for harness in PRESETS:
+        initial, resolved = resolve(
+            harness,
+            lab_judges=judges,
+            judge_base_url="https://shared.example/v1",
+            judge_api_key="test-shared",
+            prepare_script_args={"output": str(tmp_path / "selected.jsonl")},
+            lab={
+                "reward_mode": reward_mode,
+                "judge_parallelism": 2,
+                "agent_timeout_seconds": 300,
+                "verifier_timeout_seconds": 600,
+            },
+            num_samples_in_parallel=2,
+        )
+        config = environment_config(resolved)
+        verifier_env = _build_verifier_env(config)
+        assert json.loads(verifier_env["LAB_JUDGES"]) == judges
+        assert verifier_env["LAB_JUDGE_BASE_URL"] == "https://shared.example/v1"
+        assert verifier_env["LAB_JUDGE_API_KEY"] == "test-shared"
+        assert verifier_env["LAB_JUDGE_PARALLELISM"] == "2"
+        assert config.reward_mode == reward_mode
+        assert config.max_concurrent_episodes == 2
+        assert config.prepared_tasksets_file == str(tmp_path / "selected.jsonl.tasksets.json")
+        assert config.separate_verifier_for_artifacts
+        assert not set(resolved.get("responses_create_params", {})) & {"temperature", "top_p"}
+        benchmark = BenchmarkConfig.from_initial_config_dict(
+            path=BENCHMARK_DIR / f"config_{harness}.yaml", initial_config_dict=initial, strict=False
+        )
+        assert benchmark.agent_name == "legal_agent_bench_benchmark_agent"
+        assert benchmark.dataset.jsonl_fpath == tmp_path / "selected.jsonl"
+        assert benchmark.dataset.prepare_script == Path("benchmarks/legal_agent_bench/prepare.py")
+        current = verifier_env, benchmark.dataset
+        if expected is None:
+            expected = current
+        assert current == expected
+        agent = next(iter(resolved.legal_agent_bench_benchmark_agent.responses_api_agents.values()))
+        if harness == "native":
+            assert agent.agent_timeout_seconds == 300
+        else:
+            assert agent.concurrency == 2
+            assert (agent.sandbox_runner_timeout_seconds if harness == "hermes" else agent.timeout) == 300
+        assert config.agent_server.name == benchmark.agent_name
+
+
+@pytest.mark.parametrize("harness", PRESETS)
+def test_every_harness_requires_explicit_judges(harness):
+    _, resolved = resolve(harness)
+    with pytest.raises(ValueError, match="Configure lab_judges"):
+        environment_config(resolved)
+
+
+def test_default_alias_selects_lab_native():
+    def wiring(config):
+        result = []
+        for name in ("legal_agent_bench_benchmark_agent", "legal_agent_bench_environment_server"):
+            entry = OmegaConf.to_container(config[name], resolve=True)
+            settings = next(iter(next(iter(entry.values())).values()))
+            settings.pop("port", None)  # Config parsing allocates a fresh available port.
+            result.append(entry)
+        return result
+
+    _, native = resolve("native")
+    initial = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / "config.yaml"),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"default_host": "127.0.0.1"},
+    )
+    default = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+    assert wiring(default) == wiring(native)

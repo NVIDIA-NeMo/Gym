@@ -22,6 +22,11 @@ to it. The model endpoint is reached directly from the sandbox, or via the SSH r
 
 from __future__ import annotations
 
+import math
+import os
+import socket
+import string
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -94,8 +99,12 @@ def _apply_spec_overrides(cfg: engine.EcsFargateConfig, spec: SandboxSpec) -> en
         overrides["cpu"] = str(int(resources.cpu * 1024))
     if resources.memory_mib is not None:
         overrides["memory"] = str(int(resources.memory_mib))
-    if resources.disk_gib is not None:
-        overrides["ephemeral_storage_gib"] = int(resources.disk_gib)
+    if resources.disk_gib is not None and resources.disk_gib < 0:
+        raise SandboxCreateError("ECS Fargate disk_gib must be non-negative")
+    # Fargate supplies 20 GiB when ephemeralStorage is omitted and accepts only
+    # 21-200 GiB explicitly. The implicit default satisfies smaller requests.
+    if resources.disk_gib is not None and resources.disk_gib > 20:
+        overrides["ephemeral_storage_gib"] = math.ceil(resources.disk_gib)
     return replace(cfg, **overrides) if overrides else cfg
 
 
@@ -106,6 +115,7 @@ class EcsFargateProvider:
 
     def __init__(self, **config: Any) -> None:
         self._cfg = engine_config_from_mapping(config)
+        self._borrowed: list[engine.EcsFargateSandbox] = []
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         cfg = _apply_spec_overrides(self._cfg, spec)
@@ -119,6 +129,57 @@ class EcsFargateProvider:
             provider_name=self.name,
             raw=sandbox,
         )
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share the owner's local exec-server forward with same-host Gym workers.
+
+        The creator must stay alive to own the SSH tunnel. AWS credentials and
+        SSH private keys are resolved from provider configuration, never from this descriptor.
+        """
+        sandbox: engine.EcsFargateSandbox = handle.raw
+        port = sandbox.local_port
+        if port is None or sandbox.exec_client is None or not sandbox.is_running:
+            raise ValueError("ECS reconnect requires a running exec-server sandbox and live owner tunnel")
+        return {
+            "provider": self.name,
+            "sandbox_id": handle.sandbox_id,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "exec_port": port,
+            "exec_identity": sandbox.exec_identity,
+            "cluster": self._cfg.cluster,
+            "region": self._cfg.region,
+            "image": sandbox.spec.image,
+            "workdir": sandbox.spec.workdir,
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        if (
+            descriptor.get("provider") != self.name
+            or descriptor.get("hostname") != socket.gethostname()
+            or descriptor.get("uid") != os.getuid()
+        ):
+            raise ValueError("ECS reconnect requires the same host and UID as the owner tunnel")
+        if descriptor.get("cluster") != self._cfg.cluster or descriptor.get("region") != self._cfg.region:
+            raise ValueError("ECS reconnect requires the owner's cluster and region")
+        port = descriptor.get("exec_port")
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("Invalid ECS exec-server port")
+        task_arn = descriptor.get("sandbox_id")
+        if not isinstance(task_arn, str) or not task_arn:
+            raise ValueError("Missing ECS task identity")
+        identity = descriptor.get("exec_identity")
+        if not isinstance(identity, str) or len(identity) != 32 or any(c not in string.hexdigits for c in identity):
+            raise ValueError("Missing or invalid ECS exec-server identity; request a fresh owner descriptor")
+        sandbox = await engine.EcsFargateSandbox.attach_exec_server(
+            engine.SandboxSpec(image=descriptor["image"], workdir=descriptor.get("workdir")),
+            ecs_config=self._cfg,
+            task_arn=task_arn,
+            port=port,
+            sandbox_identity=identity,
+        )
+        self._borrowed.append(sandbox)
+        return SandboxHandle(sandbox_id=task_arn, provider_name=self.name, raw=sandbox)
 
     async def exec(
         self,
@@ -158,10 +219,24 @@ class EcsFargateProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         sandbox: engine.EcsFargateSandbox = handle.raw
-        await sandbox.stop()
+        if sandbox in self._borrowed:
+            await sandbox.disconnect_exec_server()
+            self._borrowed.remove(sandbox)
+        else:
+            await sandbox.stop()
+
+    async def disconnect_handle(self, handle: SandboxHandle) -> None:
+        """Release one borrowed connection while a shared provider stays in use."""
+        sandbox: engine.EcsFargateSandbox = handle.raw
+        if sandbox not in self._borrowed:
+            raise ValueError("Only borrowed ECS handles can be disconnected")
+        await sandbox.disconnect_exec_server()
+        self._borrowed.remove(sandbox)
 
     async def aclose(self) -> None:
-        return None
+        for sandbox in list(self._borrowed):
+            await sandbox.disconnect_exec_server()
+            self._borrowed.remove(sandbox)
 
 
 def engine_config_from_mapping(config: dict[str, Any]) -> engine.EcsFargateConfig:
