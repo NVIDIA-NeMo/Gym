@@ -23,6 +23,7 @@ def final_assistant_text(output: list[dict[str, Any]], *, block_separator: str =
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
+    shell_tool_name: str | None = "bash"
     correct_answer_reward_threshold: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     correct_tool_call_bonuses: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], ...] = Field(
         default=(0.0,), min_length=1
@@ -76,7 +77,7 @@ class OpenCodeToolReward(BaseModel):
         return self.model_copy(update={"base_reward": base_reward, "auxiliary_reward": auxiliary})
 
 
-def _identity(item: dict) -> tuple[str, str]:
+def _identity(item: dict, config: OpenCodeToolRewardConfig) -> tuple[str, str]:
     try:
         arguments = json.loads(item["arguments"])
     except json.JSONDecodeError:
@@ -84,7 +85,7 @@ def _identity(item: dict) -> tuple[str, str]:
         return item["name"], item["arguments"].strip()
     if not isinstance(arguments, dict):
         return item["name"], json.dumps(arguments, sort_keys=True)
-    if item["name"] == "bash":
+    if item["name"] == config.shell_tool_name:
         # Descriptions do not change the command that is executed.
         arguments.pop("description", None)
         if isinstance(arguments.get("command"), str):
@@ -114,18 +115,18 @@ def score_opencode_tools(
     exploration = penalties = 0.0
     successes = errors = duplicates = 0
     for item in calls:
-        identity = _identity(item)
+        identity = _identity(item, config)
         duplicate = identity == previous
         previous = identity
         record = records.get(item["call_id"])
         if record is None or record[0] != item["name"] or record[1] not in ("completed", "error"):
             raise ValueError(f"Missing or unfinished OpenCode tool record: {item['call_id']}")
         tool, status, exit_code = record
-        if tool == "bash" and status == "completed" and not isinstance(exit_code, int):
+        if tool == config.shell_tool_name and status == "completed" and not isinstance(exit_code, int):
             # Timeout/abort has a null exit code in OpenCode's shell tool.
             failed = True
         else:
-            failed = status == "error" or (tool == "bash" and exit_code != 0)
+            failed = status == "error" or (tool == config.shell_tool_name and exit_code != 0)
         if failed:
             errors += 1
             if config.invalid_tool_call_names is None or tool in config.invalid_tool_call_names:
@@ -135,7 +136,7 @@ def score_opencode_tools(
             duplicates += 1
             penalties += config.duplicate_tool_call_penalty
             exploration += config.duplicate_tool_call_penalty
-        elif tool == "bash":
+        elif tool == config.shell_tool_name:
             successes += 1
             exploration = min(exploration + config.tool_success_reward, config.tool_success_reward_cap)
     return OpenCodeToolReward(
@@ -147,7 +148,7 @@ def score_opencode_tools(
         tool_call_count=len(calls),
         tool_error_count=errors,
         duplicate_tool_call_count=duplicates,
-        bash_call_count=sum(item["name"] == "bash" for item in calls),
+        bash_call_count=sum(item["name"] == config.shell_tool_name for item in calls),
     ).for_answer(base_reward, config)
 
 

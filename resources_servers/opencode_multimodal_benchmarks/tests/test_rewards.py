@@ -202,6 +202,28 @@ def trajectory(status="completed", *, child=False):
     )
 
 
+@pytest.mark.parametrize("status,exit_code", [("completed", 0), ("completed", 1), ("error", None)])
+@pytest.mark.parametrize("base", [0.0, 0.65, 1.0])
+def test_configured_shell_name_preserves_reward_schedule(status, exit_code, base):
+    from copy import deepcopy
+
+    original = [call(i, arguments={"command": "echo hello", "description": str(i)}) for i in range(6)]
+    renamed = deepcopy(original)
+    for item in renamed:
+        item["name"] = "shell"
+    config = bonus_config()
+    expected = score_opencode_tools(
+        execution_records(original, statuses={"0": (status, exit_code)}), original, base, config
+    )
+    actual = score_opencode_tools(
+        execution_records(renamed, statuses={"0": (status, exit_code)}),
+        renamed,
+        base,
+        config.model_copy(update={"shell_tool_name": "shell"}),
+    )
+    assert actual == expected
+
+
 def tool_response(answer="A"):
     from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import completion
 
@@ -248,7 +270,7 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
-    from resources_servers.opencode_string_match_tool_rewards.app import (
+    from resources_servers.string_match_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,
@@ -312,14 +334,14 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
     from unittest.mock import AsyncMock, MagicMock
 
     from nemo_gym.client import ServerClient
-    from resources_servers.opencode_string_match_tool_rewards.app import (
-        ToolRewardConfig,
-        ToolRewardServer,
-        ToolRewardVerifyRequest,
-    )
     from resources_servers.string_match.app import (
         StringMatchResourcesServer,
         StringMatchVerifyResponse,
+    )
+    from resources_servers.string_match_tool_rewards.app import (
+        ToolRewardConfig,
+        ToolRewardServer,
+        ToolRewardVerifyRequest,
     )
 
     body = ToolRewardVerifyRequest(
@@ -357,7 +379,7 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
 
     if resource == "math_with_judge":
         pytest.importorskip("math_verify")
-    component = {"mcqa": "opencode_mcqa_tool_rewards", "math_with_judge": "opencode_math_tool_rewards"}[resource]
+    component = {"mcqa": "mcqa_tool_rewards", "math_with_judge": "math_tool_rewards"}[resource]
     entrypoint = importlib.import_module(f"resources_servers.{component}.app")
     request_type = entrypoint.ToolRewardVerifyRequest
     config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": "app.py"}
@@ -406,7 +428,7 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply
     from nemo_gym.core import rollout_context
     from nemo_gym.server_runtime import observe_verifier
     from nemo_gym.trajectory import grading_result_binding
-    from resources_servers.opencode_math_tool_rewards.app import (
+    from resources_servers.math_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,

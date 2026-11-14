@@ -91,11 +91,14 @@ class AdapterChecks:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("correct", [True, False])
     @pytest.mark.parametrize("status", ["completed", "failed"])
-    async def test_verifier_preserves_response_and_default_penalties(self, correct, status):
+    @pytest.mark.parametrize("shell_name", ["bash", "shell"])
+    async def test_verifier_preserves_response_and_default_penalties(self, correct, status, shell_name):
         module = importlib.import_module(f"resources_servers.{self.component}.app")
         config = OmegaConf.to_container(
             OmegaConf.load(self.component_dir() / "configs" / f"{self.component}.yaml"), resolve=True
         )[self.component]["resources_servers"][self.component]
+        if shell_name != "bash":
+            config["tool_rewards"] = {"shell_tool_name": shell_name, "invalid_tool_call_names": [shell_name]}
         server = module.ToolRewardServer(
             config=module.ToolRewardConfig.model_validate(config | {"name": "grader", "host": "127.0.0.1", "port": 1}),
             server_client=MagicMock(spec=ServerClient),
@@ -105,8 +108,11 @@ class AdapterChecks:
         if self.parent != "string_match":
             answer = "\\boxed{" + answer + "}"
         original = tool_response(answer)
+        original.output[0].name = shell_name
+        evidence = trajectory(status)
+        evidence.tool_calls[0].tool_name = shell_name
         request = module.ToolRewardVerifyRequest.model_validate(
-            row | {"response": original, "ng_trajectory": trajectory(status)}
+            row | {"response": original, "ng_trajectory": evidence}
         )
         result = await server.verify(request)
         expected = (0.95 if status == "failed" else 1.0) if correct else 0.0
@@ -114,3 +120,22 @@ class AdapterChecks:
         assert result.response.model_dump() == original.model_dump()
         assert result.reward_components["verifier"] == float(correct)
         assert result.opencode_tool_reward.base_reward == float(correct)
+
+    @pytest.mark.parametrize("worker", [False, True])
+    def test_entrypoint_exports_app_only_in_worker(self, monkeypatch, worker):
+        import runpy
+
+        from nemo_gym.server_runtime import SimpleResourcesServer
+
+        app = object()
+        start = MagicMock(return_value=app)
+        monkeypatch.setattr(SimpleResourcesServer, "run_webserver", start)
+        monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_WORKER", "1" if worker else "0")
+        monkeypatch.setenv("IS_NEMO_GYM_FASTAPI_ENTRYPOINT", f"{self.component}/app.py")
+        namespace = runpy.run_path(str(self.component_dir() / "app.py"), run_name="worker_fixture")
+        if worker:
+            assert namespace["app"] is app
+            start.assert_called_once_with()
+        else:
+            assert "app" not in namespace
+            start.assert_not_called()

@@ -392,3 +392,32 @@ Understand where shared tool implementations and verification logic belong.
 </Card>
 
 </Cards>
+
+## Training with tool rewards
+
+Use `string_match_tool_rewards`, `mcqa_tool_rewards` or `math_tool_rewards` to
+combine a native grader with optional tool rewards. Their dataset schemas and
+grading behavior match the corresponding standalone graders. Enable
+`forward_agent_evidence: true` on the paired environment so the wrapper receives
+Gym's canonical tool-execution observations.
+
+The default shell name is `bash`. For a harness that calls its shell tool `shell`,
+configure the resources server with:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+  invalid_tool_call_names: [shell]
+```
+
+Tool observations must record failures, including nonzero shell exits, accurately.
+Changing tool names does not supply missing execution evidence. OpenCode remains
+the currently validated tool-using pairing; matching names alone does not establish
+that another harness satisfies this contract.
+
+These components replace `opencode_string_match_tool_rewards`,
+`opencode_mcqa_tool_rewards` and `opencode_math_tool_rewards`. Update component
+keys, imports and config paths. Keep logical server-instance names unchanged to
+preserve environment bindings. The old component paths are removed. Reward
+defaults and saved reward fields such as `opencode_tool_reward` and
+`bash_call_count` are unchanged.
