@@ -76,6 +76,7 @@ class Probe:
     closed: int = 0
     finished: bool = False
     finish_call: dict | None = None
+    leaked_tool_call: bool = False
     compaction_summary: str = field(
         default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
     )
@@ -259,7 +260,7 @@ class Probe:
                             "content": [{"type": "output_text", "text": self.compaction_summary, "annotations": []}],
                         }
                     ]
-                elif self.scenario.tool_call_as_text:
+                elif self.scenario.tool_call_as_text and not self.leaked_tool_call:
                     # What a wrong chat template or tool parser produces: the call stays in the answer text.
                     markup = (
                         f"<tool_call>\n{json.dumps({'name': 'bash', 'arguments': {'command': 'ls'}})}\n</tool_call>"
@@ -276,7 +277,9 @@ class Probe:
                             ],
                         }
                     ]
-                    self.finished = True
+                    self.leaked_tool_call = True
+                    # A harness that ends only on a finish tool asks again; the next reply is that finish call.
+                    self.finished = self._finish(body) is None
                 elif len(self.tool_calls) < self.scenario.tool_steps:
                     name, arguments, namespaces = self._tool(body)
                     call = self.tool_calls[-1]
@@ -493,11 +496,11 @@ class Probe:
                 and item.get("role") == "assistant"
                 and any(
                     part.get("text") == ANSWER
-                    # A Chat adapter joins this scenario's markup part and answer part into one text.
+                    # A Chat adapter may join this scenario's markup part and answer part into one text.
                     or (
                         self.scenario.tool_call_as_text
                         and isinstance(part.get("text"), str)
-                        and part["text"].endswith("\n" + ANSWER)
+                        and part["text"].endswith(ANSWER)
                     )
                     for part in item.get("content", [])
                     if isinstance(part, dict)

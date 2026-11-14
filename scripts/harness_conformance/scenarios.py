@@ -103,6 +103,9 @@ SCENARIOS = (
         expected_reward=0.0,
         steps=False,
         expect_incomplete=True,
+        # Reported, not gating yet: some adapters retry a 503 until the episode deadline and then report a generic
+        # timeout without the model error, or re-raise it untyped. The run still ends without a score.
+        tier="P1",
         health_expectations={
             "rollout_ended_on_failed_model_call": "unhealthy",
             # The failure row keeps no finished response to reconcile counts against.

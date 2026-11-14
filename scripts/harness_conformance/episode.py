@@ -325,7 +325,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 ]
             inputs.write_text(json.dumps(task) + "\n")
             try:
-                async with asyncio.timeout(timeout + 10):
+                # Past the episode deadline plus its 10 s cleanup, so a timed-out episode still writes its row.
+                async with asyncio.timeout(timeout + 20):
                     await RolloutCollectionHelper().run_from_config(
                         RolloutCollectionConfig(
                             agent_name="probe_agent",

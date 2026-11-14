@@ -345,6 +345,33 @@ def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
     assert probe.finish_call["id"] == call["id"]
 
 
+def test_tool_call_as_text_leaks_the_call_once_then_finishes_on_the_finish_tool(tmp_path):
+    probe = Probe(SCENARIO["tool_call_as_text"], tmp_path)
+    body = {
+        "model": "conformance-model",
+        "messages": [{"role": "user", "content": "Run checks"}],
+        "tools": [FINISH_TOOL],
+    }
+    with TestClient(probe.model_app()) as client:
+        leaked = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]["message"]
+        # The harness needs the finish tool to end, so it asks again after the plain-text reply.
+        assert "<tool_call>" in leaked["content"] and leaked["content"].endswith("CONFORMANCE_DONE")
+        assert not leaked.get("tool_calls") and not probe.finished
+        (call,) = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]["message"][
+            "tool_calls"
+        ]
+    assert call["function"]["name"] == "finish"
+    assert probe.finished and probe.finish_call["id"] == call["id"] and not probe.violations
+
+
+def test_tool_call_as_text_finishes_on_the_text_without_a_finish_tool(tmp_path):
+    probe = Probe(SCENARIO["tool_call_as_text"], tmp_path)
+    body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]["message"]
+    assert "<tool_call>" in message["content"] and probe.finished and probe.finish_call is None
+
+
 @pytest.mark.parametrize("probe_cls", [Probe, OpenClawProbe])
 @pytest.mark.parametrize("replay", ["matched", "missing_call", "wrong_name", "wrong_arguments", "wrong_result"])
 def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, probe_cls, replay):
