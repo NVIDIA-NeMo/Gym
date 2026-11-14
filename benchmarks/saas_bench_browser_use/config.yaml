@@ -56,12 +56,16 @@ saas_bench_agent:
       source_root: ${oc.select:saas_bench_bundle_root,responses_api_agents/saas_bench_agent/data/runtime}
 saas_bench_environment_server:
   environment_servers:
-    legacy_agent:
+    saas_bench_environment:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: saas_bench_agent
+      source_root: ${oc.select:saas_bench_bundle_root,responses_api_agents/saas_bench_agent/data/runtime}
+      harness: browser_use
+      model_name: ${policy_model_name}
       default_episode_timeout_seconds: 7500
+      cleanup_timeout_seconds: 210
 prepare_script_args:
   harness: browser_use
   task_selector: ${oc.select:saas_bench_tasks,all}

@@ -14,9 +14,11 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
+from environment_servers.saas_bench_environment.app import SaasBenchEnvironmentConfig, SaasBenchEnvironmentServer
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
-from responses_api_agents.saas_bench_agent.app import SaasBenchAgent, SaasBenchConfig, SaasBenchRunRequest
+from nemo_gym.config import AgentServerRef, AggregateMetricsRequest, ModelServerRef
+from responses_api_agents.saas_bench_agent.app import SaasBenchAgent, SaasBenchConfig
+from responses_api_agents.saas_bench_agent.schemas import SaasBenchRunRequest
 
 
 @pytest.fixture
@@ -58,7 +60,25 @@ def agent(tmp_path, monkeypatch):
         model_name="policy",
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
     )
-    return SaasBenchAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    instance = SaasBenchAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    instance._prepare_runtime()
+    return instance
+
+
+@pytest.fixture
+def grader(agent):
+    return SaasBenchEnvironmentServer(
+        config=SaasBenchEnvironmentConfig(
+            name="saas_environment",
+            host="127.0.0.1",
+            port=1235,
+            entrypoint="app.py",
+            agent_server=AgentServerRef(type="responses_api_agents", name=agent.config.name),
+            harness=agent.config.harness,
+            model_name=agent.config.model_name,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
 
 
 def request(identity="repeat-0"):
@@ -87,8 +107,8 @@ def result(score=0.25, masked=False):
 
 
 @pytest.mark.parametrize("score", [0.0, 0.25, 1.0])
-def test_native_partial_and_zero_scores_remain_unmasked_with_grading_artifact(agent, score):
-    response = agent._response(request(), result(score))
+def test_native_partial_and_zero_scores_remain_unmasked_with_grading_artifact(grader, score):
+    response = grader._response(request(), result(score))
     assert response.reward == score and response.mask_sample is False
     assert response.native_metrics == {"weighted_score": score, "execution": 1.0}
     assert response.native_diagnostics["graded_response_id"] == response.response.id
@@ -99,10 +119,10 @@ def test_native_partial_and_zero_scores_remain_unmasked_with_grading_artifact(ag
     assert response.response.usage is None
 
 
-def test_infrastructure_failure_is_masked_and_keeps_native_diagnostics(agent):
+def test_infrastructure_failure_is_masked_and_keeps_native_diagnostics(grader):
     native = result(masked=True)
     native.update(failure_kind="saas_bench:verifier", error="readback unavailable")
-    response = agent._response(request(), native)
+    response = grader._response(request(), native)
     assert response.mask_sample is True and response.reward == 0.0
     assert response.failure_kind == "verifier_error"
     assert response.native_failure_kind == "saas_bench:verifier"
@@ -110,12 +130,12 @@ def test_infrastructure_failure_is_masked_and_keeps_native_diagnostics(agent):
 
 
 @pytest.mark.asyncio
-async def test_metrics_exclude_masked_but_include_legitimate_zero(agent):
+async def test_metrics_exclude_masked_but_include_legitimate_zero(grader):
     rows = [
         {"reward": reward, "mask_sample": masked, "category_id": "Fixture", "verify_status": "FAIL"}
         for reward, masked in [(0.0, False), (0.5, False), (0.0, True)]
     ]
-    metrics = (await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
+    metrics = (await grader.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
     assert metrics["saas_bench/mean_score"] == 0.25
     assert metrics["saas_bench/num_scored"] == 2 and metrics["saas_bench/num_masked"] == 1
 
@@ -127,12 +147,12 @@ async def test_duplicate_http_requests_share_episode_and_repeats_do_not(agent, m
     async def episode(body, output, fingerprint, identity):
         calls.append((identity, output))
         await asyncio.sleep(0)
-        return agent._response(body, result())
+        return result()
 
     monkeypatch.setattr(agent, "_episode", episode)
-    one, two = await asyncio.gather(agent.run(request()), agent.run(request()))
+    one, two = await asyncio.gather(agent._execute(request()), agent._execute(request()))
     assert one is two and len(calls) == 1
-    await agent.run(request("repeat-1"))
+    await agent._execute(request("repeat-1"))
     assert len(calls) == 2 and calls[0][1] != calls[1][1]
 
 
@@ -155,17 +175,17 @@ async def test_persisted_result_is_reused_and_binding_changes_are_refused(agent,
         pytest.fail("cached episode launched a worker")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected)
-    assert (await agent.run(body)).reward == 0.25
+    assert (await agent._execute(body))["verify"]["score"] == 0.25
     changed = body.model_copy(deep=True)
     changed.verifier_metadata["task_id"] = "other"
     with pytest.raises(HTTPException, match="different request"):
-        await agent.run(changed)
+        await agent._execute(changed)
 
 
 @pytest.mark.asyncio
 async def test_missing_identity_is_rejected_before_worker(agent):
     with pytest.raises(HTTPException, match="_ng_rollout_id"):
-        await agent.run(request(None))
+        await agent._execute(request(None))
 
 
 @pytest.mark.asyncio
@@ -182,7 +202,7 @@ async def test_cancellation_reaps_actual_worker_process(agent, monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
     monkeypatch.setattr(type(agent), "resolve_model_base_url", lambda *args: "http://localhost:9/v1")
-    task = asyncio.create_task(agent.run(request()))
+    task = asyncio.create_task(agent._execute(request()))
     await asyncio.wait_for(created.wait(), timeout=10)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -204,14 +224,14 @@ async def test_cancellation_reaps_actual_worker_process(agent, monkeypatch):
         ("permission_abort", "agent_command_not_allowed"),
     ],
 )
-def test_model_endings_keep_the_measured_grade(agent, ending, kind):
-    from responses_api_agents.saas_bench_agent.app import SaasBenchVerifyResponse
+def test_model_endings_keep_the_measured_grade(grader, ending, kind):
+    from responses_api_agents.saas_bench_agent.schemas import SaasBenchVerifyResponse
 
     native = result(score=0.75, masked=True)
     native.update(
         failure_kind="saas_bench:model_ending", execution_health={"termination": ending}, model_turn_observed=True
     )
-    response = agent._response(request(), native)
+    response = grader._response(request(), native)
     assert response.reward == 0.75 and response.mask_sample is False
     assert response.failure_kind == kind
     assert response.failure_outcome_action == "verify"
@@ -222,11 +242,11 @@ def test_model_endings_keep_the_measured_grade(agent, ending, kind):
 
 
 @pytest.mark.parametrize("kind", ["judge_failed", "judge_unparseable"])
-def test_exhausted_judge_fault_wins_and_reports_terminal_evaluation_failure(agent, kind):
+def test_exhausted_judge_fault_wins_and_reports_terminal_evaluation_failure(grader, kind):
     native = result(score=0.75)
     native["verify"]["judge_failures"] = [{"failure_kind": kind, "reason": "fixture"}]
     native["execution_health"] = {"termination": "timeout"}
-    response = agent._response(request(), native)
+    response = grader._response(request(), native)
     assert response.mask_sample is True and response.reward == 0
     assert response.failure_kind == kind
     assert response.failure_outcome_action == "fail"
@@ -234,11 +254,11 @@ def test_exhausted_judge_fault_wins_and_reports_terminal_evaluation_failure(agen
     assert response.native_metrics == {}
 
 
-def test_timeout_flag_with_model_turn_keeps_canonical_failure_kind(agent):
+def test_timeout_flag_with_model_turn_keeps_canonical_failure_kind(grader):
     native = result(score=0.75)
     native["timed_out"] = True
     native["model_turn_observed"] = True
-    response = agent._response(request(), native)
+    response = grader._response(request(), native)
     assert response.failure_kind == "agent_timeout"
     assert response.failure_outcome_action == "verify"
     assert response.failure_outcome_attribution == "model"
@@ -246,30 +266,30 @@ def test_timeout_flag_with_model_turn_keeps_canonical_failure_kind(agent):
 
 
 @pytest.mark.parametrize("infra_kind", [None, "saas_bench:infrastructure"])
-def test_timeout_without_model_turn_stays_retryable(agent, infra_kind):
+def test_timeout_without_model_turn_stays_retryable(grader, infra_kind):
     native = result(score=0.75)
     native.update(
         timed_out=True, failure_kind=infra_kind, native_trajectory=[], execution_health={"termination": "timeout"}
     )
-    response = agent._response(request(), native)
+    response = grader._response(request(), native)
     assert response.mask_sample and response.failure_outcome_action == "retry"
     assert response.failure_outcome_attribution == "evaluation"
     assert response.failure_kind == "agent_run_error"
 
 
 @pytest.mark.parametrize("origin,masked", [(None, True), ("model", False)])
-def test_browser_model_ending_requires_explicit_origin_even_for_cached_results(agent, origin, masked):
-    agent.config.harness = "browser_use"
+def test_browser_model_ending_requires_explicit_origin_even_for_cached_results(grader, origin, masked):
+    grader.config.harness = "browser_use"
     native = result(score=0.75)
     native.update(
         failure_kind="saas_bench:model_ending", failure_origin=origin, execution_health={"termination": "agent_error"}
     )
-    response = agent._response(request(), native)
+    response = grader._response(request(), native)
     assert response.mask_sample is masked
     assert response.failure_outcome_attribution == ("evaluation" if masked else "model")
 
 
-def test_start_failure_is_recoverable_without_a_saved_generation(agent):
+def test_start_failure_is_recoverable_without_a_saved_generation(grader):
     from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
 
     native = {
@@ -281,7 +301,7 @@ def test_start_failure_is_recoverable_without_a_saved_generation(agent):
         "mask_sample": True,
         "failure_kind": "saas_bench:infrastructure",
     }
-    row = agent._response(request(), native).model_dump(mode="json")
+    row = grader._response(request(), native).model_dump(mode="json")
     assert row["response"]["output"] == []
     assert masked_infrastructure_kind(row) == "agent_run_error"
 
@@ -290,7 +310,8 @@ def test_missing_judge_endpoint_fails_before_episodes(agent, monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("MINDRA_BASE_URL", raising=False)
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
-        SaasBenchAgent(config=agent.config, server_client=MagicMock(spec=ServerClient))
+        fresh = SaasBenchAgent(config=agent.config, server_client=MagicMock(spec=ServerClient))
+        fresh._prepare_runtime()
 
 
 @pytest.mark.asyncio
@@ -317,7 +338,7 @@ async def test_cancellation_stops_detached_apps(agent, monkeypatch, tmp_path):
     )
     monkeypatch.setattr(type(agent), "resolve_model_base_url", lambda *args: "http://localhost:9/v1")
     output = Path(agent.config.output_root) / hashlib.sha256(b"repeat-0").hexdigest()
-    task = asyncio.create_task(agent.run(request()))
+    task = asyncio.create_task(agent._execute(request()))
 
     async def wait_marker():
         while not (output / "app.pid").exists():
