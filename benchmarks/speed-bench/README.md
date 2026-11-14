@@ -80,7 +80,7 @@ alongside any split config, as shown below. It sets
 `policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.per_request_spec_decode_metrics`
 to `summary`. Selecting a benchmark alone does not enable metrics. Externally launched
 servers need `--per-request-spec-decode-metrics summary` (supported by the pinned
-vLLM 0.29.0).
+vLLM 0.33.0).
 Two common speculative-decoding configurations:
 
 - **ngram (model-agnostic, no draft model)**:

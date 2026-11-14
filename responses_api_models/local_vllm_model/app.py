@@ -27,12 +27,12 @@ from requests.exceptions import ConnectionError
 
 
 try:
-    # vLLM 0.29 moved the OpenAI server entry points from vllm.entrypoints.openai.api_server to
-    # vllm.entrypoints.launchers; the old module is a deprecated shim that no longer exports these.
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    # vLLM 0.33 serves these CLI helpers from vllm.entrypoints.common.
+    # Its vllm.entrypoints.openai.api_server module is a deprecated shim that does not export them.
+    from vllm.entrypoints.common.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.entrypoints.common.startup import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:  # Older vLLM, such as the macOS pin in setup.py.
+except ImportError:  # Older vLLM, such as the macOS pin in this server's pyproject.toml.
     from vllm.entrypoints.openai.api_server import (
         FlexibleArgumentParser,
         cli_env_setup,
