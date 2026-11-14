@@ -1,0 +1,47 @@
+{
+  "functional_Gym_revision": "8b5f3dbde5091d2a0ddd8bcae7d6ffcd78e35459",
+  "job_id": "2636414",
+  "scope": "Five-step live smoke per harness; no full-task or reference-score claim",
+  "model": "Kimi K3 via API",
+  "reasoning": "high",
+  "task": "media_027",
+  "max_steps": 5,
+  "allocation": "One CPU node; harnesses run sequentially",
+  "result": "completed",
+  "passed": true,
+  "cases": {
+    "opencode": {
+      "status": "completed",
+      "pipeline_passed": true,
+      "exit_code": 0,
+      "graded": true,
+      "score": 0.143,
+      "mask_sample": false,
+      "failure_kind": null,
+      "failure_outcome_action": null,
+      "failure_outcome_attribution": null,
+      "native_verify_status": "FAIL",
+      "tool_calls": 5,
+      "tool_errors": 0,
+      "retained_screenshots": 3,
+      "harness_version": "2.1.1"
+    },
+    "browser_use": {
+      "status": "completed",
+      "pipeline_passed": true,
+      "exit_code": 0,
+      "graded": true,
+      "score": 0.143,
+      "mask_sample": false,
+      "failure_kind": null,
+      "failure_outcome_action": null,
+      "failure_outcome_attribution": null,
+      "native_verify_status": "FAIL",
+      "tool_calls": 6,
+      "tool_errors": 0,
+      "retained_screenshots": 2,
+      "harness_version": "browser-use-0.13.7"
+    }
+  },
+  "registry_followup": "After this smoke, the static session-capable-agent registry was updated and 60 configuration-composition cases passed. Native/session runtime and default benchmark config bytes are unchanged from the recorded functional revision."
+}
