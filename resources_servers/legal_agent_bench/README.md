@@ -199,5 +199,6 @@ should list exactly `docx`, `pptx`, and `xlsx`.
 ## Licensing and source modifications
 
 Harvey LAB is MIT-licensed. Its license and the details of the minimal modified
-runtime are in `vendor/harvey_labs/`. Task documents and public skills are
+runtime are recorded in `vendor/harvey_labs/`. The runtime modules are in
+`harness/` and `lab_harbor/`. Task documents and public skills are
 downloaded from the pinned public repository and are never tracked here.
