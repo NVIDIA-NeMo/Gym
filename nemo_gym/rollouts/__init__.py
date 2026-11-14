@@ -53,12 +53,14 @@ if TYPE_CHECKING:
         record_resubmit_offset,
     )
     from nemo_gym.rollouts.rollout_store import RolloutStore
+    from nemo_gym.rollouts.segment_rewards import resolve_segment_rewards
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "enrich_run_result": "rollout_collection",
+    "resolve_segment_rewards": "segment_rewards",
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
     "DispatchLatencyTracker": "rollout_perf",
     "ELAPSED_S_KEY": "health.timeouts",
