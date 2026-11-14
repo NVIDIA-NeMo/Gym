@@ -1,0 +1,12 @@
+name: "strategic_bench_agent"
+resources_server:
+  name: "strategic_bench_server"
+model_server:
+  name: "vllm_policy_model"
+user_model_server:
+  name: "vllm_opponent_model"
+max_turns: 15
+max_steps_per_turn: 5
+user_model_system_prompt: "You are the opposing negotiator. You are tough and uncompromising."
+user_model_stop_token: "[DONE]"
+user_model_tool_choice: "auto"
