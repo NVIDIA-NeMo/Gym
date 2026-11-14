@@ -77,6 +77,11 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.swe_agents_container_setup import (
+    SWE_AGENTS_CONTAINER_ENV,
+    apply_swe_agents_container_setup,
+    swe_agents_container_files,
+)
 
 
 class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig):
@@ -201,6 +206,12 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
         env = dict(self.config.sandbox_config.get("env", {}))
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
+        # Agent and eval sandboxes alike, as the swe_agents harness did; see swe_agents_container_setup.py.
+        # The key keeps its original name because existing training recipes set it.
+        swe_agents_setup = self.config.sandbox_config.get("legacy_container_setup", False)
+        if swe_agents_setup:
+            env = SWE_AGENTS_CONTAINER_ENV | env
+            files = swe_agents_container_files() | (files or {})
 
         spec = SandboxSpec(
             image=body.image_ref,
@@ -223,7 +234,10 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
             self._session_id_to_sandbox[session_id] = sandbox
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = sandbox
-        await sandbox.start(spec)
+        if swe_agents_setup:
+            await sandbox.start_with_setup(spec, apply_swe_agents_container_setup)
+        else:
+            await sandbox.start(spec)
         return sandbox
 
     async def _ensure_git_repo(self, sandbox: AsyncSandbox, workdir: str) -> None:
