@@ -483,6 +483,16 @@ async def test_request_temperature_marks_the_native_model_entry(setup):
     assert config["agent"] == {name: {"temperature": 0.6} for name in BUILTIN_AGENTS}
 
 
+async def test_request_temperature_marks_the_harbor_provider_entry(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_harbor_invocation = True
+    response, _ = await episode(agent, sandbox, temperature=0.6)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert set(config["provider"]) == {"openai"}
+    assert config["provider"]["openai"]["models"]["dummy_model"]["temperature"] is True
+
+
 async def test_prompt_replacement_keeps_request_sampling_on_the_build_agent(setup):
     agent, sandbox = setup
     agent.config.system_prompt_mode = "replace"

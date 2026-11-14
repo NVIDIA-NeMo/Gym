@@ -449,6 +449,16 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # The native model ID affects OpenCode's model-family prompts and tools.
     # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
     sandbox_model_id: str = "dummy_model"
+    # Sandbox-session provider block: the model's declared modalities (OpenCode's `modalities`, e.g.
+    # {input: [text, image], output: [text]}), the provider's per-call timeout in ms (unset: none), and
+    # whether reasoning is replayed through `interleaved: {field: reasoning_content}`.
+    sandbox_model_modalities: dict[Literal["input", "output"], list[str]] | None = None
+    sandbox_provider_timeout_ms: int | None = Field(default=None, gt=0)
+    sandbox_interleaved_reasoning: bool = True
+    # Reproduce Harbor 0.6.6's OpenCode trial for comparisons with Harbor runs: the `openai` provider id, a model
+    # block without `limit.input` or `reasoning`, the prompt as `opencode run`'s argument (OpenCode quotes it)
+    # with an empty stdin, and OPENCODE_FAKE_VCS=git.
+    sandbox_harbor_invocation: bool = False
 
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
@@ -1739,37 +1749,49 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         state.declares_image_input = state.declares_image_input or bool(media) or self.config.image_input
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        model_id = self.config.sandbox_model_id
+        harbor = self.config.sandbox_harbor_invocation
+        provider_id = "openai" if harbor else "nemo_gym"
+        limit = {"context": self.config.context_window, "output": self.config.max_output_tokens}
+        if not harbor:
+            limit["input"] = self.config.context_window
         config = {
-            "model": "nemo_gym/" + self.config.sandbox_model_id,
-            "small_model": "nemo_gym/" + self.config.sandbox_model_id,
-            "enabled_providers": ["nemo_gym"],
+            "model": f"{provider_id}/{model_id}",
+            "small_model": f"{provider_id}/{model_id}",
+            "enabled_providers": [provider_id],
             "autoupdate": False,
             "share": "disabled",
             # A session's opencode_config "attachment" replaces this, so a run on an endpoint with image limits can
             # restore one.
             **({"attachment": copy.deepcopy(UNRESTRICTED_IMAGE_ATTACHMENT)} if state.declares_image_input else {}),
             "provider": {
-                "nemo_gym": {
+                provider_id: {
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
                         "baseURL": base_url,
                         "apiKey": "dummy_key",
-                        "timeout": False,
+                        "timeout": self.config.sandbox_provider_timeout_ms or False,
                     },  # pragma: allowlist secret
                     "models": {
-                        self.config.sandbox_model_id: {
+                        model_id: {
+                            # The Harbor entry is a name, limits and modalities, never a reasoning flag or
+                            # interleaved replay.
+                            **({"name": model_id} if harbor else {}),
                             **(
-                                {"reasoning": self.config.thinking}
-                                if self.config.sandbox_model_id != "dummy_model"
+                                {"reasoning": self.config.thinking} if model_id != "dummy_model" and not harbor else {}
+                            ),
+                            **(
+                                {"interleaved": {"field": "reasoning_content"}}
+                                if self.config.sandbox_interleaved_reasoning and not harbor
                                 else {}
                             ),
-                            "interleaved": {"field": "reasoning_content"},
-                            "limit": {
-                                "context": self.config.context_window,
-                                "input": self.config.context_window,
-                                "output": self.config.max_output_tokens,
-                            },
+                            "limit": limit,
                             **(copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS) if state.declares_image_input else {}),
+                            **(
+                                {"modalities": self.config.sandbox_model_modalities}
+                                if self.config.sandbox_model_modalities is not None
+                                else {}
+                            ),
                         }
                     },
                 }
@@ -1786,7 +1808,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 agents.setdefault(agent, {}).update(sampling)
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
-                config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True
+                config["provider"][provider_id]["models"][model_id]["temperature"] = True
         mcp_servers, mcp_grants = self._granted_mcp_servers(state.request)
         if mcp_servers:
             config["mcp"] = mcp_servers
@@ -1815,14 +1837,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.append("--thinking")
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
+        if harbor:
+            command.extend(["--", prompt])
         payload = {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
+            "stdin_prompt": not harbor,
             "mcp_grants": mcp_grants if mcp_servers else None,
             "env": {
+                **({"OPENCODE_FAKE_VCS": "git"} if harbor else {}),
                 **_private_directories(state.persistent_directory),
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
                 "OPENCODE_CONFIG_CONTENT": (
