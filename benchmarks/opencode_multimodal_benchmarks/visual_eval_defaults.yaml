@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml
+num_samples_in_parallel: 64
+visual_agent:
+  responses_api_agents:
+    opencode_agent:
+      resources_server:
+        type: resources_servers
+        name: opencode_multimodal_benchmarks
+      concurrency: 64
+      max_output_tokens: 32768
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      judge_concurrency: 16
+sandbox:
+  opensandbox:
+    operations:
+      background_poll_interval_s: 2

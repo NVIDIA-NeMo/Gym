@@ -1,0 +1,205 @@
+{
+  "captured_at": "2026-11-14T15:07:55.365474+00:00",
+  "evaluated_commit": "7b6feb78820d5813bd683b65ee9d7ad3f6da89b3",
+  "scope": "Existing real-model runs with the final execution defaults; predates the static-validation and agent-replacement binding fixes.",
+  "policy": "nvidia/qwen/qwen3.8-flash-next",
+  "harness": "OpenCode 1.17.11",
+  "defaults": {
+    "concurrency": 64,
+    "max_output_tokens": 32768,
+    "context_window": 131072,
+    "network_access": "model_only",
+    "websearch": "deny",
+    "webfetch": "deny",
+    "background_poll_interval_s": 2,
+    "reasoning_field": "both"
+  },
+  "token_limit_evidence": "Saved resolved configs redact token-named fields; the inspected outbound model requests below directly record max_tokens=32768. This intentionally replaces the prior explicit profile limit of 131072.",
+  "artifact_root": "cache/visual-defaults-7b6feb788-20261114-r3",
+  "limitations": [
+    "Partial runs are not completed benchmark scores.",
+    "Successful verified rows include observations returned by agent-session close; sandbox records report no cleanup errors, but teardown_confirmed is null. Independent provider deletion confirmation is not recorded.",
+    "No deliberately injected real judge failure was run; regression tests cover judge failure masking."
+  ],
+  "runs": [
+    {
+      "run": "qwen-vstar",
+      "rollout_artifact": "results/qwen-vstar/gym-job-20261114T132601Z-ebe0f7/vstar/artifacts/rollouts.jsonl",
+      "config_artifact": "results/qwen-vstar/gym-job-20261114T132601Z-ebe0f7/vstar/artifacts/rollouts_resolved_config.yaml",
+      "status_snapshot": {
+        "aggregation_status": "complete",
+        "completed_rollout_count": 191,
+        "expected_rollout_count": 191,
+        "failures_by_class": {},
+        "failures_by_kind": {},
+        "model_final_by_kind": {},
+        "remaining_rollout_count": 0
+      },
+      "representative_rollout": {
+        "id": "26-0",
+        "row_sha256": "d25c68745a35fde68ffd90195f4c27d8f01c19147df9b437407e4dbe36897233",
+        "capture_artifact": "results/qwen-vstar/model-calls/26-0.capture.jsonl",
+        "initial_model_request_images": 1,
+        "max_tokens": 32768,
+        "model_http_status": 200,
+        "final_answer_present": true,
+        "extraction_method": "heuristic",
+        "extracted": "B",
+        "reward": 1.0,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "sandbox_outcome": "completed",
+        "cleanup_errors": [],
+        "teardown_confirmed": null
+      },
+      "completed_accuracy": 0.9424083769633508,
+      "resolved_config_checks": {
+        "concurrency": 64,
+        "network_access": "model_only",
+        "judge_required": true,
+        "judge_server": "visual_judge",
+        "judge_model": "azure/openai/gpt-4o-mini",
+        "repeats": 1
+      }
+    },
+    {
+      "run": "qwen-hrbench8k",
+      "rollout_artifact": "results/qwen-hrbench8k/gym-job-20261114T133059Z-8dca99/hrbench8k/artifacts/rollouts.jsonl",
+      "config_artifact": "results/qwen-hrbench8k/gym-job-20261114T133059Z-8dca99/hrbench8k/artifacts/rollouts_resolved_config.yaml",
+      "status_snapshot": {
+        "aggregation_status": "pending",
+        "completed_rollout_count": 798,
+        "expected_rollout_count": 800,
+        "failures_by_class": {
+          "environment_server_failed": 2
+        },
+        "failures_by_kind": {
+          "environment_server_failed": 2
+        },
+        "model_final_by_kind": {},
+        "remaining_rollout_count": 2
+      },
+      "representative_rollout": {
+        "id": "20-0",
+        "row_sha256": "a32e8f0180c8520831a4dac1b3a0e2dff093b98627001b032f565033f103d12e",
+        "capture_artifact": "results/qwen-hrbench8k/model-calls/20-0.capture.jsonl",
+        "initial_model_request_images": 1,
+        "max_tokens": 32768,
+        "model_http_status": 200,
+        "final_answer_present": true,
+        "extraction_method": "heuristic",
+        "extracted": "A",
+        "reward": 1.0,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "sandbox_outcome": "completed",
+        "cleanup_errors": [],
+        "teardown_confirmed": null
+      },
+      "resolved_config_checks": {
+        "concurrency": 64,
+        "network_access": "model_only",
+        "judge_required": true,
+        "judge_server": "visual_judge",
+        "judge_model": "azure/openai/gpt-4o-mini",
+        "repeats": 1
+      }
+    },
+    {
+      "run": "qwen-vtcbench",
+      "rollout_artifact": "results/qwen-vtcbench/gym-job-20261114T133059Z-99e98c/vtcbench/artifacts/rollouts.jsonl",
+      "config_artifact": "results/qwen-vtcbench/gym-job-20261114T133059Z-99e98c/vtcbench/artifacts/rollouts_resolved_config.yaml",
+      "status_snapshot": {
+        "aggregation_status": "pending",
+        "completed_rollout_count": 675,
+        "expected_rollout_count": 680,
+        "failures_by_class": {
+          "environment_server_failed": 4
+        },
+        "failures_by_kind": {
+          "environment_server_failed": 4
+        },
+        "model_final_by_kind": {},
+        "remaining_rollout_count": 5
+      },
+      "representative_rollout": {
+        "id": "40-0",
+        "row_sha256": "b534684acb1afeab007a548a9b548550fa668c89fcb90cff5106558ec944382f",
+        "capture_artifact": "results/qwen-vtcbench/model-calls/40-0.capture.jsonl",
+        "initial_model_request_images": 1,
+        "max_tokens": 32768,
+        "model_http_status": 200,
+        "final_answer_present": true,
+        "extraction_method": "rule",
+        "extracted": "DUCATI",
+        "reward": 1.0,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "sandbox_outcome": "completed",
+        "cleanup_errors": [],
+        "teardown_confirmed": null
+      },
+      "resolved_config_checks": {
+        "concurrency": 64,
+        "network_access": "model_only",
+        "judge_required": true,
+        "judge_server": "visual_judge",
+        "judge_model": "azure/openai/gpt-4o-mini",
+        "repeats": 1
+      }
+    },
+    {
+      "run": "qwen-zerobench",
+      "rollout_artifact": "results/qwen-zerobench/gym-job-20261114T133102Z-9329c5/zerobench/artifacts/rollouts.jsonl",
+      "config_artifact": "results/qwen-zerobench/gym-job-20261114T133102Z-9329c5/zerobench/artifacts/rollouts_resolved_config.yaml",
+      "status_snapshot": {
+        "aggregation_status": "pending",
+        "completed_rollout_count": 192,
+        "expected_rollout_count": 500,
+        "failures_by_class": {
+          "environment_server_failed": 1
+        },
+        "failures_by_kind": {
+          "environment_server_failed": 1
+        },
+        "model_final_by_kind": {},
+        "remaining_rollout_count": 308
+      },
+      "representative_rollout": {
+        "id": "0-0",
+        "row_sha256": "4a547564f50525877b164f9a4e21f52ce6e4c99ea4e311c80c79b24f1a811297",
+        "capture_artifact": "results/qwen-zerobench/model-calls/0-0.capture.jsonl",
+        "initial_model_request_images": 1,
+        "max_tokens": 32768,
+        "model_http_status": 200,
+        "final_answer_present": true,
+        "extraction_method": "last-curly-brace",
+        "extracted": "7.48",
+        "reward": 0.0,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "sandbox_outcome": "completed",
+        "cleanup_errors": [],
+        "teardown_confirmed": null
+      },
+      "resolved_config_checks": {
+        "concurrency": 64,
+        "network_access": "model_only",
+        "judge_required": false,
+        "judge_server": null,
+        "judge_model": null,
+        "repeats": 5
+      }
+    }
+  ],
+  "vtcbench_judge_route": {
+    "capture_artifact": "results/qwen-vtcbench/model-calls/177-0.capture.jsonl",
+    "model_ref": {
+      "type": "responses_api_models",
+      "name": "visual_judge"
+    },
+    "model": "azure/openai/gpt-4o-mini",
+    "status_code": 200,
+    "response_present": true
+  }
+}

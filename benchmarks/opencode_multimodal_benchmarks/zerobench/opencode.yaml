@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Provider-managed OpenCode evaluation. Supply model and sandbox settings separately.
+# Alias for the catalog default. Supply model and sandbox settings separately.
 config_paths:
 - benchmarks/opencode_multimodal_benchmarks/zerobench/config.yaml
-- benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml

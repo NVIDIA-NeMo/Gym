@@ -9,11 +9,11 @@ used independently of OpenCode:
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
-to `simple_agent` with no external task tools. For OpenCode evaluation, use the
-provider-backed recipes below and configure the model and sandbox provider
-separately. Each recipe composes its catalog with
-[`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs inside the
-sandbox through Gym's shared agent-session lifecycle.
+to `opencode_agent`. Configure the model and sandbox provider separately. Each
+catalog includes [`visual_eval_defaults.yaml`](visual_eval_defaults.yaml), which loads
+[`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs
+inside the sandbox through Gym's shared agent-session lifecycle. The `opencode.yaml`
+recipes remain aliases for these defaults.
 
 | Recipe | Network policy | WebFetch / WebSearch |
 | --- | --- | --- |
@@ -40,7 +40,31 @@ Resume historical runs with their recorded Gym revision and configuration.
 ## Run configuration
 
 Supply a policy model using Gym's [model configuration guide](../../fern/versions/latest/pages/model-server/index.mdx).
-For judged tasks, explicitly configure the shared resources-server instance:
+Pass the deployment configuration to both `gym eval prepare` and `gym eval run`
+with `--config run.yaml`: preparation also validates the selected agent's configuration.
+For example, `run.yaml` can compose the OpenAI model adapter and set the required
+model and sandbox image:
+
+```yaml
+config_paths:
+- responses_api_models/openai_model/configs/openai_model.yaml
+policy_model_name: <vision-model-id>
+policy_base_url: ${oc.env:POLICY_BASE_URL}
+policy_api_key: ${oc.env:POLICY_API_KEY}
+visual_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_config:
+        image: <image-with-visual-tools-and-offline-opencode-assets>
+```
+
+Supply the model adapter's endpoint and credentials, and the OpenSandbox
+provider's `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`, through the runtime
+environment. See the agent session setup linked above for image requirements.
+VStar, HRBench8K and VTCBench default to `azure/openai/gpt-4o-mini` through
+`visual_judge`. Supply `GYM_JUDGE_BASE_URL` and `GYM_JUDGE_API_KEY` in the runtime
+environment. ZeroBench starts no judge. To select a different judge, configure
+the shared resources-server instance:
 
 ```yaml
 opencode_multimodal_benchmarks:
@@ -50,10 +74,23 @@ opencode_multimodal_benchmarks:
       judge_server: visual_judge
 ```
 
-Also configure the `visual_judge` model-server instance and its runtime credentials.
-This route captures judge calls with Gym's rollout correlation. Alternatively,
-set `judge_endpoint` and `judge_api_key_env` for direct HTTP judging. The catalog
-does not select a hosted model or endpoint. ZeroBench requires no judge.
+The configured `visual_judge` route captures judge calls with Gym's rollout
+correlation. For direct HTTP judging, also disable that imported model server.
+Pass these overrides to both preparation and evaluation (replace the endpoint
+and key-variable name with your deployment's values):
+
+```bash
+++visual_judge=null \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_server=null \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_endpoint=https://judge.example/v1/chat/completions \
+++opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_api_key_env=DIRECT_JUDGE_API_KEY
+```
+
+These settings can alternatively go in `env.yaml`. A plain `--config run.yaml`
+has lower priority than the selected benchmark and may have its judge route
+overwritten. With the overrides above, `GYM_JUDGE_BASE_URL` and
+`GYM_JUDGE_API_KEY` are unnecessary; only the selected direct judge's credential
+is needed. Endpoints and credentials remain deployment inputs.
 
 The shared verifier defaults to a 120-second timeout and three transport attempts
 per judge request. VTCBench additionally
@@ -64,6 +101,23 @@ For each evaluation, retain the resolved config and inspect rollout health,
 coverage and judge failures. Enable model-call capture when collecting evidence.
 A valid manifest and passing verifier fixtures do not establish score parity or
 harness conformance.
+
+The [2026-11-14 rollout evidence](evidence/visual-defaults-20261114.json) records
+representative real Qwen requests for all four catalogs, image delivery, the
+32768-token request limit, verifier outputs and a VTCBench judge call. It labels
+unfinished evaluations as partial and records the limits of cleanup telemetry.
+These runs use the execution settings above; they predate the static-validation
+and agent-replacement binding fixes.
+
+For vLLM-compatible model endpoints, add
+`--config benchmarks/opencode_multimodal_benchmarks/default_eval.yaml` to preparation
+and evaluation. This model-independent profile uses the vLLM adapter, preserves history thinking
+(`truncate_history_thinking: false`), propagates context-overflow errors and pins
+temperature 0.6/top-p 0.95. Reasoning serialization retains the adapter default;
+no `reasoning_field` override is applied. Supply `policy_model_name` in `run.yaml`,
+`POLICY_BASE_URL` and `POLICY_API_KEY` in the environment, plus the sandbox deployment settings. With this profile, omit
+the OpenAI adapter from `run.yaml` and omit `--model-type openai_model` from the
+run command. Other policy adapters remain supported.
 
 ## Grading and recovery
 
@@ -100,7 +154,9 @@ Catalog pairings have no whole-episode deadline by default. To set one, configur
 event loop's monotonic clock. Cleanup has a separate
 `cleanup_timeout_seconds` budget and runs after the episode deadline.
 
-The OpenCode overlay has a 131072-token context/output ceiling and requests a
+The four catalogs use a 131072-token context window, a 32768-token output limit,
+agent and collector concurrency of 64, judge concurrency of 16, and a two-second
+sandbox polling interval. OpenCode requests a
 final answer after 65 steps. This request is advisory; tools remain available. Its `timeout` setting (optionally narrowed by request metadata
 `agent_timeout_sec`) is a separate harness execution deadline, enforced
 by the shared OpenCode sandbox session using the monotonic clock; installation

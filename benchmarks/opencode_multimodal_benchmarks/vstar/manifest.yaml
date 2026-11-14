@@ -19,7 +19,7 @@ reward:
 determinism: unknown
 dataset_owner: opencode_multimodal_benchmarks
 resources_server: opencode_multimodal_benchmarks
-agent_server: simple_agent
+agent_server: opencode_agent
 datasets:
 - name: vstar
   type: benchmark
