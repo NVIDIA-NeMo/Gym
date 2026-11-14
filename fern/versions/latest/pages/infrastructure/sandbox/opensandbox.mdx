@@ -185,8 +185,10 @@ provider-side setup that follows (the reconnect, the readiness probe and `setup.
 comes that much sooner, and at once if more than one interval has already passed. A create that takes longer
 than the whole lease loses its sandbox. Stopping a sandbox stops its renewal, and so does a crash of the process that
 created it: the service then deletes the sandbox within one `renew_ttl_s` instead of at the end of the spec's
-lifetime. A failed renewal is logged and tried again at the next interval; if the OpenSandbox API is
-unreachable for longer than `renew_ttl_s - renew_interval_s`, live sandboxes expire. Without `renew_ttl_s`,
+lifetime. A failed renewal is logged and tried again within what is left of the lease, at most one interval
+later and sooner as the expiry nears. A sandbox survives an outage if the API answers again at least one
+`renew_timeout_s` plus a few seconds before its lease runs out, so live sandboxes expire once the OpenSandbox API
+is unreachable for longer than about `renew_ttl_s - renew_interval_s - renew_timeout_s`. Without `renew_ttl_s`,
 `renew_interval_s` alone refreshes the spec's whole `ttl_s` at every interval, and a renewal that fails fails
 the sandbox's later operations.
 

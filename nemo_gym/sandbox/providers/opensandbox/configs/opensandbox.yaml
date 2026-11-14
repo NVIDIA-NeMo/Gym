@@ -62,7 +62,7 @@ sandbox:
       # With a lease, a sandbox whose creating process crashed is deleted within one renew_ttl_s instead of at
       # its full TTL, which suits runs that checkpoint and can restore.
       # But every live sandbox then depends on its process reaching the management API each interval: an API
-      # outage longer than renew_ttl_s minus renew_interval_s ends them.
+      # outage longer than about renew_ttl_s minus renew_interval_s minus renew_timeout_s ends them.
       # Many benchmark configs that do not checkpoint compose this file, so the lease stays off here; a config
       # that checkpoints sandboxes should set these keys.
       #   renew_ttl_s: 1200

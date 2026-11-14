@@ -577,3 +577,42 @@ def test_provider_without_parked_polling_gets_a_no_op_scope() -> None:
     sandbox._handle = handle("plain", Commands())
     sandbox._stopped = False
     assert isinstance(sandbox.parked_exec_polling(), nullcontext)
+
+
+async def test_a_poll_wait_ends_at_the_interval_or_a_wakeup_and_starts_no_helper_task(
+    monkeypatch: pytest.MonkeyPatch, poll_waits_timed_by_sleep: Any
+) -> None:
+    # The provider's own wait, on the event loop's timer.
+    monkeypatch.setattr(opensandbox_provider.OpenSandboxProvider, "_wait_command_poll", poll_waits_timed_by_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider()
+    poll = opensandbox_provider._BackgroundCommandPoll()
+    tasks_before = asyncio.all_tasks()
+
+    # The interval ends the wait when nothing wakes it.
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await asyncio.wait_for(provider._wait_command_poll(poll, interval_s=0.05), HANG_GUARD_S)
+    assert loop.time() - started >= 0.04
+
+    # A wakeup ends a long wait at once, and is used up by it.
+    waiting = asyncio.create_task(provider._wait_command_poll(poll, interval_s=3600))
+    await asyncio.sleep(0)
+    # Every poll of every command waits here: the wait itself must not start tasks of its own.
+    assert asyncio.all_tasks() - tasks_before == {waiting}
+    poll.wakeup.set()
+    await asyncio.wait_for(waiting, HANG_GUARD_S)
+    assert not poll.wakeup.is_set()
+
+    # One delivered before the wait began ends it without waiting.
+    poll.wakeup.set()
+    await asyncio.wait_for(provider._wait_command_poll(poll, interval_s=3600), HANG_GUARD_S)
+    assert not poll.wakeup.is_set()
+
+    # A cancelled wait is cancelled, not taken for the interval running out, and leaves no wakeup behind.
+    waiting = asyncio.create_task(provider._wait_command_poll(poll, interval_s=3600))
+    await asyncio.sleep(0)
+    poll.wakeup.set()
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert not poll.wakeup.is_set()

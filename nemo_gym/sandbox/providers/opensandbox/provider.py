@@ -455,6 +455,23 @@ def _is_deleted_output_error(exception: BaseException) -> bool:
     return "combined output file" in message and "no such file or directory" in message
 
 
+# The shortest wait before a failed lease renewal is tried again.
+RENEW_RETRY_MIN_S = 1.0
+
+
+def _renewal_retry_delay(remaining_s: float, *, interval_s: float, timeout_s: float) -> float:
+    """How long to wait before a failed lease renewal is tried again, given what is left of the sandbox's TTL.
+
+    Half of what is left once one more request's timeout is set aside, so the tries continue up to the expiry and
+    come closer together as it nears: a full interval's wait after each failure could put the next try past it.
+    Never longer than the interval, nor shorter than ``RENEW_RETRY_MIN_S``. Once the TTL has run out nothing is
+    left to save, and the tries go back to the interval until the service says the sandbox is gone.
+    """
+    if remaining_s <= 0:
+        return interval_s
+    return min(interval_s, max(RENEW_RETRY_MIN_S, (remaining_s - timeout_s) / 2))
+
+
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     """Match kill errors meaning the sandbox is already gone (terminate's goal state).
 
@@ -838,7 +855,7 @@ class OpenSandboxCreateConfig:
     # A lease: each sandbox is created with this TTL, capped by the spec's ``ttl_s``, and every renewal sets it to
     # now plus this TTL again, never past the spec's lifetime. The sandbox lives while the creating process renews
     # it, so the service deletes a crashed process's sandboxes within one TTL instead of at the end of the spec's
-    # lifetime. A renewal that fails is logged and tried again at the next interval. Requires ``renew_interval_s``.
+    # lifetime. A renewal that fails is logged and tried again before the lease runs out. Requires ``renew_interval_s``.
     renew_ttl_s: float | None = None
     # Per-call budget of one renewal: a hung renew must not use up the TTL it extends.
     # Unset, the connection's request timeout applies (60 s without one).
@@ -1575,16 +1592,14 @@ class OpenSandboxProvider:
         if poll.wakeup.is_set():
             poll.wakeup.clear()
             return
-        sleep_task = asyncio.create_task(asyncio.sleep(interval_s))
-        wake_task = asyncio.create_task(poll.wakeup.wait())
+        # A timeout around the wait, not a sleep raced against it: this runs for every poll of every command, and
+        # two helper tasks per poll add up.
         try:
-            done, _ = await asyncio.wait({sleep_task, wake_task}, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
+            async with asyncio.timeout(interval_s):
+                await poll.wakeup.wait()
+        except TimeoutError:
+            pass
         finally:
-            sleep_task.cancel()
-            wake_task.cancel()
-            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
             poll.wakeup.clear()
 
     async def _wait_while_parked(
@@ -1777,7 +1792,7 @@ class OpenSandboxProvider:
         mid-body, one request per try; a page that still fails, any other answer, or a malformed listing raises
         ``SandboxSnapshotError`` instead of returning a partial listing. So does a listing that is not complete
         within ``operations.snapshot_list_timeout_s``. A page without items ends the listing whatever it says of
-        a next page.
+        a next page; a page with items must say whether another follows.
         """
         budget_s = self._operations.snapshot_list_timeout_s
         budget = asyncio.timeout(budget_s)
@@ -1816,7 +1831,15 @@ class OpenSandboxProvider:
                     )
             pages_read.append(page)
             # An empty page is the end even if the server reports another: the loop must not outlive the store.
-            if not items or pagination.get("hasNextPage") is not True:
+            if not items:
+                return found
+            has_next_page = pagination.get("hasNextPage")
+            if not isinstance(has_next_page, bool):
+                # Taking a missing or mistyped flag for "no more pages" would return a partial listing.
+                raise SandboxSnapshotError(
+                    f"OpenSandbox snapshot listing page {page} does not say whether another page follows"
+                )
+            if not has_next_page:
                 return found
             page += 1
 
@@ -2465,24 +2488,29 @@ class OpenSandboxProvider:
         Without a lease every renewal sets the TTL to ``ttl_s`` again, and one that fails after its retries, or
         that finds the sandbox gone, ends the loop and fails the sandbox's later operations. With a lease
         (``renew_ttl_s``) every renewal sets it to the lease, never past ``lifetime_s`` (the spec's ``ttl_s``) from
-        creation; a renewal that fails is logged and the next one tries again, since the sandbox has the lease
-        minus one interval of slack, and one that finds the sandbox gone (stopped or deleted elsewhere) ends the
-        loop quietly.
+        creation; a renewal that fails is logged and tried again within what is left of the TTL the service last
+        accepted (see ``_renewal_retry_delay``), and one that finds the sandbox gone (stopped or deleted elsewhere)
+        ends the loop quietly.
         """
         interval_s = self._create.renew_interval_s
         lease = self._create.renew_ttl_s is not None
         loop = asyncio.get_running_loop()
-        lifetime_end = None if lifetime_s is None else loop.time() + lifetime_s
+        lifetime_end = None if lifetime_s is None else created_at + lifetime_s
         timeout_s = self._create.renew_timeout_s or self._connection.request_timeout_s or 60
         spent_s = loop.time() - created_at
 
         async def renew() -> None:
             # Only the first wait is shortened by what the create spent since its request was sent.
             already_waited_s = spent_s
+            # When the TTL the service last accepted runs out; a failed renewal is retried before then.
+            expires_at = created_at + ttl_s
+            retry_s: float | None = None
             while True:
                 # Jittered downward only: a renewal later than the interval could miss a TTL just above it.
-                await asyncio.sleep(max(0.0, interval_s * random.uniform(0.9, 1.0) - already_waited_s))
+                wait_s = max(0.0, interval_s * random.uniform(0.9, 1.0) - already_waited_s)
+                await asyncio.sleep(wait_s if retry_s is None else min(wait_s, retry_s))
                 already_waited_s = 0.0
+                retry_s = None
                 duration = ttl_s
                 if lifetime_end is not None:
                     duration = min(duration, lifetime_end - loop.time())
@@ -2495,16 +2523,20 @@ class OpenSandboxProvider:
                         sandbox_id=handle.sandbox_id,
                         timeout_s=timeout_s,
                     )
+                    expires_at = loop.time() + duration
                 except Exception as error:
                     if not lease:
                         raise
                     if _is_missing_sandbox_delete_error(error):
                         LOGGER.info("OpenSandbox sandbox %r is gone; stopping its renewal", handle.sandbox_id)
                         return
+                    retry_s = _renewal_retry_delay(
+                        expires_at - loop.time(), interval_s=interval_s, timeout_s=timeout_s
+                    )
                     LOGGER.warning(
-                        "OpenSandbox lifetime renewal failed for sandbox %r; retrying in about %gs: %r",
+                        "OpenSandbox lifetime renewal failed for sandbox %r; retrying in at most %gs: %r",
                         handle.sandbox_id,
-                        interval_s,
+                        retry_s,
                         error,
                     )
 

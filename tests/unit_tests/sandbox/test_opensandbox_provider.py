@@ -621,6 +621,114 @@ async def test_a_failed_lease_renewal_is_logged_and_the_next_one_tries_again(
     await provider.aclose()
 
 
+def _skip_sleeps(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Make every sleep move the event loop's clock forward instead of waiting; returns the real sleep."""
+    loop = asyncio.get_running_loop()
+    real_time, real_sleep = loop.time, asyncio.sleep
+    skipped = 0.0
+
+    async def skipping_sleep(delay: float) -> None:
+        nonlocal skipped
+        skipped += delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
+    monkeypatch.setattr(asyncio, "sleep", skipping_sleep)
+    return real_sleep
+
+
+async def test_the_spec_lifetime_is_counted_from_the_create_request_not_from_when_renewal_starts(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease_s, interval_s, lifetime_s, startup_s = 200, 50, 1000, 120
+    monkeypatch.setattr(opensandbox_provider.random, "uniform", lambda low, high: high)
+    real_sleep = _skip_sleeps(monkeypatch)
+    loop = asyncio.get_running_loop()
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": lease_s, "renew_interval_s": interval_s}, probe={"command": None}
+    )
+    sdk_create = FakeSandbox.create.__func__
+
+    async def slow_create(cls: Any, *args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(startup_s)
+        return await sdk_create(cls, *args, **kwargs)
+
+    monkeypatch.setattr(FakeSandbox, "create", classmethod(slow_create))
+    ends_at: list[float] = []
+
+    async def renew(self: Any, duration: timedelta) -> None:
+        ends_at.append(loop.time() - created_at + duration.total_seconds())
+
+    monkeypatch.setattr(FakeSandbox, "renew", renew, raising=False)
+
+    created_at = loop.time()
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=lifetime_s))
+    task = provider._renewals[handle.sandbox_id]
+    for _ in range(5000):
+        if task.done():
+            break
+        await real_sleep(0)
+    assert task.done() and task.exception() is None, "the loop ends once the spec's lifetime is used up"
+    await provider.aclose()
+
+    # No renewal extends the sandbox past the spec's ttl_s from its create request, whatever the startup took.
+    assert max(ends_at) == pytest.approx(lifetime_s, abs=5)
+    assert all(end <= lifetime_s + 1 for end in ends_at)
+
+
+async def test_a_failed_lease_renewal_is_retried_before_the_lease_runs_out(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every try times out while the API is down from just before the first renewal until 150 s before the lease
+    ends. A full interval's wait after each failure would put the next try after the expiry."""
+    lease_s, interval_s, timeout_s, outage_ends_s = 1200, 300, 30, 1050
+    monkeypatch.setattr(opensandbox_provider.random, "uniform", lambda low, high: high)
+    real_sleep = _skip_sleeps(monkeypatch)
+    loop = asyncio.get_running_loop()
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": lease_s, "renew_interval_s": interval_s, "renew_timeout_s": timeout_s},
+        probe={"command": None},
+        operations={"retries": 0},
+    )
+    tried_at: list[float] = []
+    renewed_at: list[float] = []
+
+    async def renew(self: Any, duration: timedelta) -> None:
+        tried_at.append(loop.time() - created_at)
+        if tried_at[-1] < outage_ends_s:
+            await asyncio.sleep(timeout_s)
+            raise RuntimeError("renew timed out")
+        renewed_at.append(tried_at[-1])
+
+    monkeypatch.setattr(FakeSandbox, "renew", renew, raising=False)
+
+    created_at = loop.time()
+    await provider.create(SandboxSpec(image="example"))
+    for _ in range(5000):
+        if len(renewed_at) >= 2:
+            break
+        await real_sleep(0)
+    await provider.aclose()
+
+    assert tried_at[0] == pytest.approx(interval_s, abs=5)
+    assert len([at for at in tried_at if at < outage_ends_s]) >= 3
+    assert outage_ends_s <= renewed_at[0] < lease_s, "renewed before the lease taken at create would expire"
+    gaps = [later - earlier for earlier, later in zip(tried_at, tried_at[1:])]
+    assert max(gaps) <= interval_s + timeout_s + 5, "a retry never waits longer than the interval"
+    assert renewed_at[1] - renewed_at[0] == pytest.approx(interval_s, abs=5), "then the interval is kept again"
+
+
+@pytest.mark.parametrize(
+    ("remaining_s", "expected_s"),
+    [(870, 300), (540, 255), (255, 112.5), (31, 1.0), (10, 1.0), (0, 300), (-60, 300)],
+    ids=["far", "nearer", "near", "floor", "inside-one-timeout", "expired", "long-expired"],
+)
+def test_a_renewal_retry_waits_half_of_what_is_left_of_the_lease_and_never_past_the_interval(
+    remaining_s: float, expected_s: float
+) -> None:
+    assert opensandbox_provider._renewal_retry_delay(remaining_s, interval_s=300, timeout_s=30) == expected_s
+
+
 def _sandbox_gone() -> RuntimeError:
     gone = RuntimeError("Renew sandbox failed: [KUBERNETES::SANDBOX_NOT_FOUND]")
     gone.status_code = 404  # type: ignore[attr-defined]

@@ -803,6 +803,11 @@ class AsyncSandbox:
         """The user an exec runs as when it names none: ``SandboxSpec.user``, else the provider's own default."""
         return self._spec.user if self._spec is not None else None
 
+    @property
+    def default_workdir(self) -> str | None:
+        """The directory an exec runs in when it names none: ``SandboxSpec.workdir``, else the provider's own."""
+        return self._spec.workdir if self._spec is not None else None
+
     def set_default_user(self, user: str | int | None) -> None:
         """Change the default exec user of a running sandbox.
 

@@ -73,6 +73,7 @@ import asyncio
 import contextlib
 import dataclasses
 import fcntl
+import functools
 import hashlib
 import logging
 import os
@@ -319,12 +320,14 @@ class _SnapshotIndex:
         except FileNotFoundError:
             return 0
 
-    def snapshot_ids(self) -> dict[str, list[str]]:
-        """Every indexed snapshot, by checkpoint."""
+    def snapshot_ids(self, *, excluding: frozenset[str] = frozenset()) -> dict[str, list[str]]:
+        """Every indexed snapshot, by checkpoint; the folders of the checkpoints in ``excluding`` are not read."""
         if not self.root.is_dir():
             return {}
         indexed: dict[str, list[str]] = {}
         for folder in self.root.iterdir():
+            if folder.name in excluding:
+                continue
             try:
                 indexed[folder.name] = sorted(path.name for path in folder.iterdir())
             except (FileNotFoundError, NotADirectoryError):
@@ -607,9 +610,13 @@ class SandboxSessionCheckpointer:
         if index is None:
             raise SandboxCheckpointError(key, "cannot be checkpointed without a state_dir to index its snapshot")
         sandbox = entry.sandbox
+        # The exec defaults as they are now, not as the sandbox was created: setup may have changed them
+        # (``set_default_user``, ``set_default_workdir``), and the fork must run commands as the same user in the
+        # same directory.
+        current_spec = dataclasses.replace(entry.spec, user=sandbox.default_user, workdir=sandbox.default_workdir)
         # Before any snapshot is taken: a spec that cannot be written fails every commit the same way.
         try:
-            spec = _SPEC_JSON.validate_python(spec_to_json(entry.spec))
+            spec = _SPEC_JSON.validate_python(spec_to_json(current_spec))
         except ValidationError as error:
             raise SandboxCheckpointError(key, f"has a spec that cannot be checkpointed: {error}") from error
         if isinstance(provider, ConnectableProvider):
@@ -850,8 +857,8 @@ class SandboxSessionCheckpointer:
 
     async def _delete_snapshots_locked(self, index: _SnapshotIndex, kept: frozenset[str]) -> int:
         """Delete what ``kept`` drops; returns how many snapshots could not be deleted."""
-        indexed = await asyncio.to_thread(index.snapshot_ids)
-        dropped = {checkpoint_id: ids for checkpoint_id, ids in indexed.items() if checkpoint_id not in kept}
+        # Kept checkpoints are not read: the sweep leaves their snapshots by the checkpoint hash in the name.
+        dropped = await asyncio.to_thread(functools.partial(index.snapshot_ids, excluding=kept))
         provider = self._provider
         if not isinstance(provider, SupportsSandboxSnapshot):
             return 0
@@ -864,8 +871,9 @@ class SandboxSessionCheckpointer:
         )
         for checkpoint_id in dropped:
             await asyncio.to_thread(index.remove_if_empty, checkpoint_id)
+        # Every dropped checkpoint's id, deleted or not: a delete that failed above is not tried again here.
         swept = await self._sweep_unindexed(
-            index, kept, {snapshot_id for ids in indexed.values() for snapshot_id in ids}
+            index, kept, {snapshot_id for ids in dropped.values() for snapshot_id in ids}
         )
         return deleted.count(False) + swept.count(False)
 

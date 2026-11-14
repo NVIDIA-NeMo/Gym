@@ -775,6 +775,32 @@ async def test_restore_forks_the_snapshot_and_the_fork_holds_the_checkpoints_fil
     assert provider.snapshots == {}
 
 
+async def test_restore_keeps_the_exec_defaults_that_setup_changed_after_the_sandbox_was_created(
+    state_dir: Path,
+) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", "s2")
+    # Setup creates the task's user and directory inside the sandbox, then makes them the defaults.
+    sandbox = checkpointer.get("s1")
+    sandbox.set_default_user("agent")
+    sandbox.set_default_workdir("/home/agent/task")
+    states = await checkpointer.export(["s1", "s2"], checkpoint_id="c1")
+
+    fresh = make_checkpointer(state_dir, provider)
+    await fresh.restore(states)
+    await fresh.settle()
+
+    restored = fresh.get("s1")
+    assert (restored.default_user, restored.default_workdir) == ("agent", "/home/agent/task")
+    fork_spec = provider.boxes[restored.sandbox_id]["spec"]
+    assert (fork_spec.user, fork_spec.workdir) == ("agent", "/home/agent/task")
+    # The next checkpoint of the fork carries them on, and a sandbox whose defaults never changed keeps its spec's.
+    again = await fresh.export(["s1"], checkpoint_id="c2")
+    assert (state_of(again, "s1").spec["user"], state_of(again, "s1").spec["workdir"]) == ("agent", "/home/agent/task")
+    untouched = fresh.get("s2")
+    assert (untouched.default_user, untouched.default_workdir) == (SPEC.user, SPEC.workdir)
+
+
 async def test_a_none_state_restores_no_sandbox(state_dir: Path) -> None:
     provider = FakeSnapshotProvider()
     checkpointer = await seeded(provider, state_dir, "s1", "s2")
@@ -1319,6 +1345,46 @@ async def test_release_sweeps_this_servers_snapshots_the_index_never_recorded(st
     assert kept in provider.snapshots and all(snapshot_id in provider.snapshots for snapshot_id in foreign)
     assert ops(provider, "list_snapshots") == [checkpointer.snapshot_name_prefix]
     assert set(checkpointer.indexed_snapshots) == {"c2"}
+
+
+def test_the_index_reader_does_not_open_the_folders_of_excluded_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = checkpoint_sandbox._SnapshotIndex(tmp_path / "snapshots")
+    for checkpoint_id, snapshot_id in [("c1", "snap-1"), ("c2", "snap-2"), ("c2", "snap-3"), ("c3", "snap-4")]:
+        index.mark(checkpoint_id, snapshot_id)
+    opened: list[str] = []
+    iterdir = Path.iterdir
+
+    def recording_iterdir(self: Path) -> Any:
+        opened.append(self.name)
+        return iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", recording_iterdir)
+
+    assert index.snapshot_ids(excluding=frozenset({"c2", "c9"})) == {"c1": ["snap-1"], "c3": ["snap-4"]}
+    assert sorted(opened) == ["c1", "c3", "snapshots"], "a kept checkpoint's snapshots are never enumerated"
+    assert set(index.snapshot_ids()) == {"c1", "c2", "c3"}
+
+
+async def test_a_release_does_not_sweep_a_dropped_snapshot_whose_delete_just_failed(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1")
+    kept_state = await checkpointer.export(["s1"], checkpoint_id="c1")
+    dropped_state = await checkpointer.export(["s1"], checkpoint_id="c2")
+    kept_id, dropped_id = state_of(kept_state, "s1").snapshot_id, state_of(dropped_state, "s1").snapshot_id
+    provider.fail[("delete_snapshot", dropped_id)] = RuntimeError("delete refused")
+
+    with pytest.raises(SnapshotDeleteIncompleteError):
+        await checkpointer.delete_snapshots(frozenset({"c1"}))
+
+    # Tried once by the index, not a second time by the sweep that lists it under this server's prefix.
+    assert ops(provider, "delete_snapshot") == [dropped_id]
+    assert checkpointer.indexed_snapshots == {"c1": [kept_id], "c2": [dropped_id]}
+    assert {kept_id, dropped_id} <= set(provider.snapshots)
+
+    await checkpointer.delete_snapshots(frozenset({"c1"}))
+    assert checkpointer.indexed_snapshots == {"c1": [kept_id]} and set(provider.snapshots) == {kept_id}
 
 
 async def test_a_snapshot_already_gone_leaves_the_index(state_dir: Path) -> None:

@@ -456,6 +456,25 @@ async def test_a_malformed_listing_raises(monkeypatch: pytest.MonkeyPatch, paylo
         await _provider().list_snapshots("ng-")
 
 
+@pytest.mark.parametrize("pagination", [{}, {"hasNextPage": None}, {"hasNextPage": "false"}, {"hasNextPage": 0}])
+async def test_a_page_with_items_that_does_not_say_whether_another_follows_raises(
+    monkeypatch: pytest.MonkeyPatch, pagination: dict[str, Any]
+) -> None:
+    listing = {"items": [{"id": "s1", "name": "ng-example"}], "pagination": pagination}
+    calls = _management(monkeypatch, [_ManagementResponse(200, listing)])
+
+    # Taken for "no more pages", this would leave the later pages' snapshots out of a sweep without a word.
+    with pytest.raises(SandboxSnapshotError, match="page 1 does not say whether another page follows"):
+        await _provider().list_snapshots("ng-")
+
+    assert len(calls) == 1
+
+
+async def test_an_empty_page_ends_the_listing_without_a_next_page_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [_ManagementResponse(200, {"items": [], "pagination": {}})])
+    assert await _provider().list_snapshots("ng-") == []
+
+
 async def test_a_listed_snapshot_that_reports_no_state_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = {"items": [{"id": "a", "name": "ng-1"}], "pagination": {"hasNextPage": False}}
     _management(monkeypatch, [_ManagementResponse(200, listing)])
