@@ -1160,6 +1160,15 @@ class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
 
 
 class NeMoGymResponseUsage(ResponseUsage):
+    """Token usage of a response; for an agent, the sum over its policy-model responses that finished.
+
+    A detail such as ``input_tokens_details.cached_tokens`` (cache reads) is the count the model or
+    harness reported. When it reported none, or reported a zero that only stands for "absent", set
+    None: consumers read 0 as a measured "no cache hits". Use 0 only for a known zero, such as a
+    response that made no model call, and say why in a comment. Use ``accumulate_response_usage``
+    or ``sum_from_list`` to add usages; they keep an unknown detail unknown.
+    """
+
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
@@ -1170,6 +1179,7 @@ class NeMoGymResponseUsage(ResponseUsage):
             total = accumulate_response_usage(total, usage)
         if total is not None:
             return total
+        # The sum over no responses is a known zero, details included.
         return cls(
             input_tokens=0,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),

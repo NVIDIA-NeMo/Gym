@@ -116,7 +116,7 @@ class TestParsePrimeAgentEvents:
     def test_empty(self) -> None:
         items, usage = parse_prime_agent_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_assistant_text_and_usage(self) -> None:
         line = _message_end(
@@ -129,6 +129,22 @@ class TestParsePrimeAgentEvents:
         assert isinstance(items[0], NeMoGymResponseOutputMessage)
         assert items[0].content[0].text == "the answer is 4"
         assert usage == {"input_tokens": 105, "output_tokens": 20, "cached_tokens": 5}
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5, 7], 12), ([5, 0], None), ([0, 5], None), ([5, None], None)],
+    )
+    def test_cached_tokens_sum_only_measured_cache_reads(self, cache_reads, expected) -> None:
+        lines = "\n".join(
+            _message_end(
+                "assistant",
+                [{"type": "text", "text": "ok"}],
+                usage={"input": 10, "output": 1, **({} if cache_read is None else {"cacheRead": cache_read})},
+            )
+            for cache_read in cache_reads
+        )
+        # Pi writes cacheRead=0 when the backend reported no cache details, so zero is not a measurement.
+        assert parse_prime_agent_events(lines)[1]["cached_tokens"] == expected
 
     def test_user_and_non_terminal_events_ignored(self) -> None:
         user = _message_end("user", [{"type": "text", "text": "hi"}])
@@ -165,7 +181,7 @@ class TestParsePrimeAgentEvents:
         line = _message_end("assistant", [], stopReason="error", errorMessage="model failed")
         items, usage = parse_prime_agent_events(line)
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_reasoning_is_preserved_separately(self) -> None:
         line = _message_end(
@@ -189,12 +205,13 @@ class TestResponses:
         agent = _make_agent()
         request = MagicMock()
         request.path_params = {}
-        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, "test-model", False)
+        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}, "test-model", False)
         with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
             response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
         assert len(response.output) == 1
         assert response.output[0].content[0].text == ""
+        assert response.usage.input_tokens_details.cached_tokens is None
 
     async def test_timeout_preserves_partial_output_and_sets_metadata(self) -> None:
         agent = _make_agent()
@@ -300,7 +317,7 @@ class TestRunPrimeAgent:
         assert socket.parent.parent == Path("/tmp")
         assert not socket.parent.exists()
         assert output[0].content[0].text == "partial answer"
-        assert usage == {"input_tokens": 7, "output_tokens": 3, "cached_tokens": 0}
+        assert usage == {"input_tokens": 7, "output_tokens": 3, "cached_tokens": None}
         assert model == agent.config.model
         assert timed_out is True
 

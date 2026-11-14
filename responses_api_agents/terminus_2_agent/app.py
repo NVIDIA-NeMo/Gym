@@ -457,11 +457,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         final_metrics = trajectory.get("final_metrics", {})
         input_tokens = final_metrics.get("total_prompt_tokens", 0)
         output_tokens = final_metrics.get("total_completion_tokens", 0)
-        cached_tokens = final_metrics.get("total_cached_tokens", 0)
+        cached_tokens = final_metrics.get("total_cached_tokens")
         if input_tokens == 0 and output_tokens == 0:
             input_tokens = context.n_input_tokens or 0
             output_tokens = context.n_output_tokens or 0
-            cached_tokens = context.n_cache_tokens or 0
+            cached_tokens = context.n_cache_tokens
 
         return NeMoGymResponse(
             id=terminal_response_id or f"resp_{uuid4().hex}",

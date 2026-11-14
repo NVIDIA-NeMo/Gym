@@ -161,10 +161,10 @@ def _openclaw_output_items(envelope: dict[str, Any]) -> list[Any]:
     return output_items
 
 
-def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
+def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int | None]]:
     envelope = _decode_last_json_dict_suffix(stdout)
     if not envelope:
-        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
     output_items = _openclaw_output_items(envelope)
 
     meta = envelope.get("meta") if isinstance(envelope.get("meta"), dict) else {}
@@ -176,7 +176,9 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     return output_items, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "cached_tokens": cache_read,
+        # The pinned provider defaults unavailable backend cache details to zero, so only a positive
+        # count is a measurement.
+        "cached_tokens": cache_read if cache_read > 0 else None,
     }
 
 
@@ -1666,7 +1668,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
-        cached_tokens = usage.get("cached_tokens", 0)
+        cached_tokens = usage.get("cached_tokens")
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",

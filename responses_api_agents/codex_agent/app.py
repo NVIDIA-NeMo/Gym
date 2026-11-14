@@ -339,7 +339,6 @@ def parse_exec_jsonl(
     *,
     structured_reasoning: bool = False,
     include_partial: bool = False,
-    conservative_usage_details: bool = False,
 ) -> tuple[list[Any], dict]:
     """Convert ``codex exec --json`` JSONL stdout into (output_items, metadata).
 
@@ -349,15 +348,18 @@ def parse_exec_jsonl(
     successful retry. Tool-shaped items are mapped to a
     ``function_call`` + ``function_call_output`` pair so verifiers see one uniform trajectory
     shape across agent harnesses; reasoning is buffered and prepended to the next assistant
-    message inside ``<think>`` tags (mirroring the Claude Code agent). Sandbox session callers use
-    ``conservative_usage_details`` because the pinned CLI defaults absent backend cache/reasoning
-    counters to zero: only positive integers establish measured details in this artifact.
+    message inside ``<think>`` tags (mirroring the Claude Code agent). The pinned CLI defaults absent
+    backend cache/reasoning counters to zero, so only positive integers establish measured details;
+    otherwise ``cached_input_tokens`` and ``reasoning_tokens`` are None.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
-    if conservative_usage_details:
-        metadata.update(cached_input_tokens=None, reasoning_tokens=None)
+    metadata: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": None,
+        "reasoning_tokens": None,
+    }
     usage_seen = False
     errors: list[str] = []
     unfinished: dict[str, dict[str, Any]] = {}
@@ -401,14 +403,11 @@ def parse_exec_jsonl(
                 ("reasoning_output_tokens", "reasoning_tokens"),
             ):
                 value = usage.get(source)
-                if conservative_usage_details:
-                    # Zero is ambiguous in Codex JSONL, not a known backend measurement.
-                    if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
-                        metadata[target] = None
-                    else:
-                        metadata[target] = (metadata[target] or 0) + value
+                # Zero is ambiguous in Codex JSONL, not a known backend measurement.
+                if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
+                    metadata[target] = None
                 else:
-                    metadata[target] += int(value or 0)
+                    metadata[target] = (metadata[target] or 0) + value
             usage_seen = True
             continue
 
@@ -1167,7 +1166,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "\n".join(json.dumps(event) for event in parse_events),
             structured_reasoning=True,
             include_partial=True,
-            conservative_usage_details=True,
         )
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
@@ -1811,13 +1809,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=usage.get("cached_input_tokens", 0)
-                ),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                    reasoning_tokens=usage.get("reasoning_tokens", 0)
-                ),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},

@@ -549,7 +549,7 @@ def _parse_opencode_session(
 
 def parse_opencode_session(
     db_path: Path, *, root_session_only: bool = False, gym_reasoning: bool = False
-) -> tuple[list[Any], dict[str, int]]:
+) -> tuple[list[Any], dict[str, int | None]]:
     """Convert an OpenCode session database into the existing Gym response shape.
 
     ``root_session_only`` restricts the transcript to sessions without a
@@ -560,14 +560,17 @@ def parse_opencode_session(
     millisecond. With ``gym_reasoning``, set when OpenCode calls a Gym Model
     Server, the reasoning block that starts a reply's text is left out like
     OpenCode's own reasoning parts, and a message whose reply was only that
-    block keeps an empty answer.
+    block keeps an empty answer. ``cached_tokens`` is None unless every step reported a positive
+    cache read: OpenCode stores zero for a counter the backend did not report.
     """
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
     reasoning_tokens = 0
+    cached_tokens: int | None = None
+    cache_measured = True
     if not db_path.is_file():
-        return output_items, {"input_tokens": 0, "output_tokens": 0}
+        return output_items, {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     scope = " where session_id in (select id from session where parent_id is null)" if root_session_only else ""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -593,6 +596,11 @@ def parse_opencode_session(
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
             input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+            cache_read = cache.get("read")
+            if type(cache_read) is not int or cache_read <= 0:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + cache_read
             output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
             reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
@@ -640,6 +648,7 @@ def parse_opencode_session(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning_tokens,
+        "cached_tokens": cached_tokens if cache_measured else None,
     }
 
 

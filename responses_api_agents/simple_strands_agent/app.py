@@ -372,7 +372,9 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         usage = result.get("usage") or {}
         input_tokens = int(usage.get("inputTokens") or 0)
         output_tokens = int(usage.get("outputTokens") or 0)
-        cached_tokens = int(usage.get("cacheReadInputTokens") or 0)
+        # Strands omits cacheReadInputTokens when the model reported no cache reads; that stays unknown.
+        cache_read = usage.get("cacheReadInputTokens")
+        cached_tokens = cache_read if type(cache_read) is int and cache_read >= 0 else None
         reasoning_tokens = int(usage.get("reasoningTokens") or 0)
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",

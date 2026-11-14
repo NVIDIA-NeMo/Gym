@@ -313,7 +313,7 @@ class TestParseOpencodeSession:
     def test_missing_db(self, tmp_path) -> None:
         items, usage = parse_opencode_session(tmp_path / "nope.db")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_assistant_text(self, tmp_path) -> None:
         db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "the answer is 4"}])])
@@ -448,7 +448,34 @@ class TestParseOpencodeSession:
         assert actual.input_tokens == 150
         assert actual.output_tokens == 7915
         assert actual.output_tokens_details.reasoning_tokens == 4406
+        # No step reported a cache read, so the response does not claim zero.
+        assert actual.input_tokens_details.cached_tokens is None
         assert actual.total_tokens == 8065
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5760, 40], 5800), ([5760, 0], None), ([5760, None], None), ([0], None)],
+    )
+    def test_step_finish_cached_tokens_sum_only_measured_cache_reads(
+        self, tmp_path: Path, cache_reads: list[int | None], expected: int | None
+    ) -> None:
+        steps = [
+            {
+                "type": "step-finish",
+                "tokens": {"input": 122, "output": 22, "cache": {} if read is None else {"read": read}},
+            }
+            for read in cache_reads
+        ]
+        db = _session_db(tmp_path, [("assistant", steps)])
+        items, usage = parse_opencode_session(db)
+        # OpenCode stores zero for a cache counter the backend did not report, so zero is not a measurement.
+        assert usage["cached_tokens"] == expected
+        agent = _make_agent()
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None))
+        episode = asyncio.run(
+            agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), collect_observations=False)
+        )
+        assert episode.response.usage.input_tokens_details.cached_tokens == expected
 
     def test_preserves_tree_parallel_tools_compaction_and_reasoning(self, tmp_path) -> None:
         db = _session_db(
