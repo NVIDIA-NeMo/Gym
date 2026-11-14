@@ -31,8 +31,11 @@ def run(config: dict) -> dict:
             deterministically_verified=False,
         )
         if result.get("original_result"):
-            result["original_result"].update(accuracy_score=verdict["reward"], trajectory_score=verdict["reward"],
-                                             trajectory_analysis=verdict["analysis"])
+            result["original_result"].update(
+                accuracy_score=verdict["reward"],
+                trajectory_score=verdict["reward"],
+                trajectory_analysis=verdict["analysis"],
+            )
         if result.get("execution_health"):
             result["execution_health"]["task_success"] = result["task_success"]
     except Exception as error:

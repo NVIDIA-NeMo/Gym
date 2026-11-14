@@ -84,11 +84,13 @@ def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(api_model_caller, "call_vision_api", policy)
     monkeypatch.setattr(get_tool("web_search"), "call", lambda *args, **kwargs: "Evidence: 42")
-    monkeypatch.setattr(
-        GPT4VisionClient,
-        "query",
-        lambda *args, **kwargs: ("" if judge == "provider-error" else judge, "Explanation: fixture"),
-    )
+
+    def judge_query(*args, **kwargs):
+        if judge == "deferred":
+            raise AssertionError("The agent must not call the answer judge")
+        return ("" if judge == "provider-error" else judge, "Explanation: fixture")
+
+    monkeypatch.setattr(GPT4VisionClient, "query", judge_query)
     monkeypatch.setattr(api_processors, "compute_score", api_processors.compute_score)
     for key in (
         "VERIFIER_API_KEY",

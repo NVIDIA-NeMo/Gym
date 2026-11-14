@@ -11,9 +11,11 @@ from resources_servers.agentvista import verifier_worker
 
 def test_verifier_preserves_native_predictions_and_measured_zero(monkeypatch):
     seen = []
+
     def verify_source(root):
         assert isinstance(root, Path)
         return {}
+
     monkeypatch.setattr(verifier_worker, "verify_source", verify_source)
     monkeypatch.setattr(
         verifier_worker,
@@ -59,6 +61,7 @@ def test_judge_failure_never_becomes_measured_zero(monkeypatch, error):
     def verify_source(root):
         assert isinstance(root, Path)
         return {}
+
     monkeypatch.setattr(verifier_worker, "verify_source", verify_source)
     monkeypatch.setattr(
         verifier_worker,
@@ -93,18 +96,34 @@ async def test_public_verify_retries_share_a_judge_and_persist_the_score(tmp_pat
 
     from nemo_gym.client import ServerClient
     from resources_servers.agentvista.app import AgentVistaResources, AgentVistaResourcesConfig
-    from responses_api_agents.agentvista_agent.runtime.results import AgentVistaVerifyRequest, policy_response
     from responses_api_agents.agentvista_agent.app import AgentVistaRunRequest
+    from responses_api_agents.agentvista_agent.runtime.results import AgentVistaVerifyRequest, policy_response
 
-    config = AgentVistaResourcesConfig(host="127.0.0.1", port=1234, entrypoint="app.py", name="agentvista_resources",
-        source_root=str(tmp_path), dataset="unused", image_folder=str(tmp_path), output_root=str(tmp_path / "output"))
+    config = AgentVistaResourcesConfig(
+        host="127.0.0.1",
+        port=1234,
+        entrypoint="app.py",
+        name="agentvista_resources",
+        source_root=str(tmp_path),
+        dataset="unused",
+        image_folder=str(tmp_path),
+        output_root=str(tmp_path / "output"),
+    )
     server = AgentVistaResources(config=config, server_client=MagicMock(spec=ServerClient))
-    body = AgentVistaRunRequest(responses_create_params={"input": "Act"},
-        verifier_metadata={"task_id": "task", "category_id": "fixture", "source_sha256": "hash"})
-    raw = {"artifacts": str(tmp_path), "verification_pending": True, "mask_sample": True,
-           "judge_responses": ["wrong"], "verify": {"status": "ERROR"}}
+    body = AgentVistaRunRequest(
+        responses_create_params={"input": "Act"},
+        verifier_metadata={"task_id": "task", "category_id": "fixture", "source_sha256": "hash"},
+    )
+    raw = {
+        "artifacts": str(tmp_path),
+        "verification_pending": True,
+        "mask_sample": True,
+        "judge_responses": ["wrong"],
+        "verify": {"status": "ERROR"},
+    }
     request = AgentVistaVerifyRequest(**body.model_dump(), response=policy_response(body, raw, "fixture"))
     calls = []
+
     async def spawn(*args, **kwargs):
         calls.append(args)
         path = Path(args[-1])
@@ -113,6 +132,7 @@ async def test_public_verify_retries_share_a_judge_and_persist_the_score(tmp_pat
         pending.pop("verification_pending")
         (path.parent / "result.json").write_text(json.dumps(pending))
         return SimpleNamespace(wait=AsyncMock(return_value=0), returncode=0)
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     first, second = await asyncio.gather(server.verify(request), server.verify(request))
     assert first.reward == second.reward == 0 and not first.mask_sample
@@ -122,7 +142,55 @@ async def test_public_verify_retries_share_a_judge_and_persist_the_score(tmp_pat
     assert (await restarted.verify(request)).mask_sample is False
     assert len(calls) == 1
     # A worker's preassigned score is never accepted as a measured result.
-    request.response.agentvista_result = {"artifacts": str(tmp_path), "mask_sample": False,
-                                          "verify": {"status": "PASS", "reward": 1.0}}
+    request.response.agentvista_result = {
+        "artifacts": str(tmp_path),
+        "mask_sample": False,
+        "verify": {"status": "PASS", "reward": 1.0},
+    }
     forged = await server.verify(request)
     assert forged.mask_sample and forged.reward == 0 and forged.verify_status == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_verifier_timeout_kills_its_process_and_masks_the_sample(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nemo_gym.client import ServerClient
+    from resources_servers.agentvista import app
+
+    server = app.AgentVistaResources(
+        config=app.AgentVistaResourcesConfig(
+            host="127.0.0.1",
+            port=1234,
+            entrypoint="app.py",
+            name="verifier",
+            source_root=str(tmp_path),
+            dataset="unused",
+            image_folder=str(tmp_path),
+            output_root=str(tmp_path),
+            verifier_timeout=1,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    waits = []
+
+    async def wait():
+        waits.append(True)
+        if len(waits) == 1:
+            await asyncio.Event().wait()
+        return 0
+
+    process = SimpleNamespace(pid=1234567, returncode=None, wait=wait)
+
+    async def spawn(*args, **kwargs):
+        return process
+
+    kills = []
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(app.os, "killpg", lambda pid, sig: kills.append((pid, sig)))
+    result = await server._judge({"result": {"verification_pending": True, "mask_sample": True}}, "timeout-test")
+    assert result["mask_sample"] and result["failure_kind"] == "agentvista:verifier"
+    assert kills == [(process.pid, app.signal.SIGKILL)]
+    assert len(waits) == 2

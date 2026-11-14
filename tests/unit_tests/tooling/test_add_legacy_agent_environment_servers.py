@@ -285,7 +285,9 @@ def test_server_names_match_the_relays_gym_generates(agent_name: str, agent_type
 
 def test_agentvista_session_template_does_not_get_a_legacy_relay(tmp_path: Path) -> None:
     config = tmp_path / "agentvista.yaml"
-    config.write_text("agentvista_agent:\n  responses_api_agents:\n    agentvista_agent:\n      entrypoint: app.py\n      resources_server: null\n")
+    config.write_text(
+        "agentvista_agent:\n  responses_api_agents:\n    agentvista_agent:\n      entrypoint: app.py\n      resources_server: null\n"
+    )
     before = config.read_text()
     assert migration.main([str(config)]) == 0
     assert config.read_text() == before
