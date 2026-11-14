@@ -531,6 +531,10 @@ class AnthropicConverter:
             else:
                 raise NotImplementedError(f"Unsupported Responses output item for Anthropic response: {item_type}")
 
+        # Messages clients drop blank text blocks when they echo history, so omit
+        # them from the served response; keep an all-blank response unchanged.
+        content = [block for block in content if block["type"] != "text" or block["text"].strip()] or content
+
         usage = response.usage.model_dump() if response.usage is not None else None
         message = NeMoGymAnthropicMessage.model_validate(
             {

@@ -36,7 +36,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
@@ -779,6 +779,7 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
+        allow_system_suffix: bool = False,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -799,6 +800,7 @@ class _CaptureMiddleware:
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
         self._parent_resolution_mode = parent_resolution_mode
+        self._allow_system_suffix = allow_system_suffix
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -852,18 +854,6 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
-        if (
-            capture_wanted
-            and self._parent_resolution_mode == "source_history"
-            and dialect is not None
-            and dialect not in ("responses", "chat")
-        ):
-            await Response(
-                content='{"detail":"Source-history capture currently requires Responses or Chat"}',
-                status_code=422,
-                media_type="application/json",
-            )(scope, receive, send)
-            return
         if token_capture_requested and dialect is None and token_sink is not None:
             marked_incomplete = False
             response_started = False
@@ -951,6 +941,7 @@ class _CaptureMiddleware:
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
                 parent_resolution_mode=self._parent_resolution_mode,
+                allow_system_suffix=self._allow_system_suffix,
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1270,6 +1261,9 @@ def install_model_call_capture(
         external_staging=external_staging,
         parent_resolution_mode=(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
+        ),
+        allow_system_suffix=(
+            capture_settings.token_id_capture.allow_system_suffix if capture_settings is not None else False
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,

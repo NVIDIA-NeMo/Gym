@@ -98,6 +98,15 @@ Source-history candidates carry an explicit source-match proof. Deploy compatibl
 revisions together: a missing proof is an error, not permission to assume an exact match.
 Direct roots retain replay evidence and framework safety checks so later calls can continue them.
 
+`token_id_capture.allow_system_suffix` defaults to `false` and requires `source_history` with
+`external_staging_backend: vllm_worker`. Dynamo staging supports source-history capture with this
+setting off; system-suffix admission is not enabled for that backend. Enable it only with a worker that
+checks that the full tokenized prompt starts with the separately rendered historical prefix
+before installing captured tokens. This permits appended system messages such as CLI budget
+updates. If the template moves the update ahead of the historical prefix, the worker must
+capture a new root (`worker_rooted`). Workers that only check message boundaries must leave
+this setting disabled.
+
 Staging admissions, snapshots, commit coordinates, manifests and receipts identify the current capture
 attempt with `capture_key`. A carried-over `CallRecord.source_capture_key` identifies the earlier
 attempt that staged that call; when absent, the receipt's own capture key applies. Logical rollout IDs,
@@ -148,7 +157,8 @@ ordinary rollout output for framework reconstruction instead of Gym's single-cha
 | Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
 | Other Responses history items, including `web_search_call`, `custom_tool_call`, `custom_tool_call_output`, and opaque `compaction` | Refused with HTTP 422 before capture intent. |
 | Chat Completions with explicit history | Supported, including buffered SSE; one choice. Omitted or null `n` means one. |
-| `/v1/messages` | Refused with HTTP 422. |
+| Messages with explicit history | Supported, including buffered SSE. |
+| Messages content block kinds | `text`, `image`, `tool_use`, `tool_result`, `thinking`, and `redacted_thinking`, converted to Responses history items. Other block kinds, such as `server_tool_use`, are unsupported. |
 | Responses `previous_response_id` or `conversation` | Refused with HTTP 422; full input must be visible. |
 | Chat `n` other than null or 1 | Refused with HTTP 422. |
 
