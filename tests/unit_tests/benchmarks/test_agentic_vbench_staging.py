@@ -489,7 +489,8 @@ def _truncate_body(conn) -> None:
 
 def _stall(conn) -> None:
     conn.recv(65536)
-    time.sleep(1.0)
+    # Not time.sleep: the tests replace the module's time.sleep, which is the global one, with a no-op.
+    threading.Event().wait(1.0)
 
 
 @pytest.mark.parametrize(
