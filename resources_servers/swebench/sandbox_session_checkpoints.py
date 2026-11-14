@@ -361,4 +361,4 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
 
     async def delete_external_state(self, kept: frozenset[str]) -> None:
         # Also in a process that has not created a sandbox yet: the index holds what a crashed process took.
-        await self._checkpointer().release(kept)
+        await self._checkpointer().delete_snapshots(kept)
