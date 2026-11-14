@@ -4,6 +4,7 @@
 import ast
 import json
 import logging
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -851,22 +852,54 @@ def test_prepare_annotations_are_not_a_runtime_requirement(tmp_path: Path) -> No
     validate_environment(manifest_path)
 
 
-@pytest.mark.parametrize(
-    ("changes", "message"),
-    [
-        ({"name": "other"}, "identity"),
-        ({"kind": "benchmark", "canonical_split": "test", "standard_prompt_config": "prompt.yaml"}, "kind"),
-    ],
-)
-def test_manifest_identity_matches_its_catalog_path(changes: dict, message: str, tmp_path: Path) -> None:
+def test_manifest_kind_matches_its_catalog_tree(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path)
     raw = load_manifest(manifest_path).model_dump(mode="json", exclude_none=True)
-    raw.update(changes)
-    if changes.get("kind") == "benchmark":
-        raw["datasets"][0].update(type="benchmark", prepare_script="prepare.py")
+    raw.update(kind="benchmark", canonical_split="test", standard_prompt_config="prompt.yaml")
+    raw["datasets"][0].update(type="benchmark", prepare_script="prepare.py")
     manifest_path.write_text(dump_manifest(raw), encoding="utf-8")
 
-    with pytest.raises(EnvironmentValidationError, match=message):
+    with pytest.raises(EnvironmentValidationError, match="kind"):
+        validate_environment(manifest_path)
+
+
+def test_manifest_name_is_an_id_that_need_not_match_its_folder(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    _replace_manifest(manifest_path, name="renamed")
+
+    assert validate_environment(manifest_path).name == "renamed"
+
+
+def test_a_manifest_at_the_root_of_a_catalog_tree_is_refused(tmp_path: Path) -> None:
+    # Catalog discovery refuses it, so validation must too, although its name no longer has to match a folder.
+    manifest_path = _asset(tmp_path)
+    root_manifest = manifest_path.rename(tmp_path / "environments/manifest.yaml")
+    _replace_manifest(root_manifest, config_path="demo/config.yaml")
+
+    with pytest.raises(EnvironmentValidationError, match="named catalog directory"):
+        validate_environment(root_manifest)
+
+
+def test_two_manifests_in_one_tree_cannot_declare_one_name(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    copy_path = tmp_path / "environments/copy/manifest.yaml"
+    copy_path.parent.mkdir()
+    copy = load_manifest(manifest_path).model_copy(update={"config_path": "../demo/config.yaml"})
+    copy_path.write_text(dump_manifest(copy), encoding="utf-8")
+
+    for path in (manifest_path, copy_path):
+        with pytest.raises(EnvironmentValidationError, match="also declared by"):
+            validate_environment(path)
+
+
+def test_a_renamed_manifest_cannot_take_another_configs_path(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    _replace_manifest(manifest_path, name="other")
+    other_config = tmp_path / "environments/other/config.yaml"
+    other_config.parent.mkdir()
+    other_config.write_text(manifest_path.with_name("config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="path of another config"):
         validate_environment(manifest_path)
 
 
@@ -1077,6 +1110,13 @@ def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: P
         validate_environment(manifest_path, validate_datasets=False)
 
 
+@pytest.fixture(autouse=True)
+def _link_targets_resolve_only_in_test_folders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link target is looked up in the linking manifest's own root and then in the search roots. Leave the search
+    roots out, so a manifest in the Gym checkout can never satisfy or change a test's link."""
+    monkeypatch.setattr("nemo_gym.environment.validation.component_search_roots", lambda: [])
+
+
 def _linked_manifest(tmp_path: Path, *, name: str = "demo/variant", **changes: object) -> Path:
     """A second benchmark manifest beside the asset's, reusing its config and declaring a link."""
     main_path = tmp_path / "benchmarks/demo/manifest.yaml"
@@ -1174,20 +1214,20 @@ def test_a_link_is_written_as_the_targets_declared_name(absolute: bool, tmp_path
     _asset(tmp_path, kind="benchmark")
     written = str(tmp_path / "benchmarks/demo") if absolute else "./demo"
 
-    with pytest.raises(EnvironmentValidationError, match="must be written as the name"):
+    with pytest.raises(EnvironmentValidationError, match="has no manifest"):
         validate_environment(_linked_manifest(tmp_path, setup_of=written))
 
 
 @pytest.mark.parametrize("absolute", [False, True], ids=["parent-relative", "absolute"])
 def test_a_link_cannot_reach_a_manifest_outside_the_catalog(absolute: bool, tmp_path: Path) -> None:
-    # The manifest outside benchmarks/ declares exactly the string the link uses, so comparing names alone passes.
+    # The manifest outside benchmarks/ declares exactly the string the link uses; only manifests in the catalog count.
     main_path = _asset(tmp_path, kind="benchmark")
     written = str(tmp_path / "outside") if absolute else "../outside"
     outside = tmp_path / "outside/manifest.yaml"
     outside.parent.mkdir()
     outside.write_text(dump_manifest(load_manifest(main_path).model_copy(update={"name": written})), encoding="utf-8")
 
-    with pytest.raises(EnvironmentValidationError, match="must be written as the name"):
+    with pytest.raises(EnvironmentValidationError, match="has no manifest"):
         validate_environment(_linked_manifest(tmp_path, protocol_of=written))
 
 
@@ -1231,6 +1271,35 @@ def test_a_setup_of_a_harbor_backed_benchmark_runs_the_same_target(
     else:
         with pytest.raises(EnvironmentValidationError, match="another Harbor target"):
             validate_environment(setup_path)
+
+
+def test_a_link_to_a_manifest_that_fails_to_load_says_so(tmp_path: Path) -> None:
+    setup_path = _linked_manifest(tmp_path, setup_of="demo")
+    (tmp_path / "benchmarks/demo/manifest.yaml").write_text("name: [broken\n", encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="fails to load"):
+        validate_environment(setup_path)
+
+
+def test_a_link_finds_its_target_by_name_not_by_folder(tmp_path: Path) -> None:
+    main_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(main_path, name="main_id")
+
+    report = validate_environment(_linked_manifest(tmp_path, setup_of="main_id"))
+
+    assert report.name == "demo/variant"
+
+
+def test_a_setup_in_another_root_finds_a_benchmark_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    core = tmp_path / "core"
+    _asset(core, kind="benchmark")
+    other_repo = tmp_path / "other_repo"
+    shutil.copytree(core / "benchmarks/demo", other_repo / "benchmarks/demo_setup")
+    setup_path = other_repo / "benchmarks/demo_setup/manifest.yaml"
+    _replace_manifest(setup_path, name="demo_setup", setup_of="demo")
+    monkeypatch.setattr("nemo_gym.environment.validation.component_search_roots", lambda: [core])
+
+    assert validate_environment(setup_path, validate_datasets=False).name == "demo_setup"
 
 
 def test_link_outside_a_catalog_directory_is_rejected(tmp_path: Path) -> None:
