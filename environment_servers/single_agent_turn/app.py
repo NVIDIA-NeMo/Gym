@@ -12,10 +12,11 @@ from uuid import uuid4
 from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_EPISODE_STEP_LIMIT_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
@@ -30,6 +31,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
+    AGENT_SESSION_AGENT_TYPES,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -51,14 +53,17 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NgFailureEvent,
     RequestFailureLog,
+    accumulate_response_usage,
     model_sampling_path_segment,
     rebuild_failure,
 )
 from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    RESOURCES_TASK_STATE_PATH,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
+    CheckpointMode,
     CleanupContext,
     CleanupHandle,
     DirectHTTPToolAccess,
@@ -67,6 +72,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesTaskState,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
@@ -144,6 +150,32 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
+    max_episode_steps: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "Drive the agent one step per activation (one model call and the tool calls it makes), up to this many "
+            "steps in the episode. The agent must keep a session, run the tools it calls and stop after one step "
+            "(simple_agent with max_steps: 1); the server checks at startup. The episode ends after the first step "
+            "in which the model called no tool or that did not complete, and with end_on_task_state once the "
+            "resources server reports that the task ended. Its episodes take part in checkpoints as restarts. "
+            "Unset, the agent runs its own loop in one activation."
+        ),
+    )
+    end_on_task_state: bool = Field(
+        default=False,
+        description=(
+            "With max_episode_steps, read the resources session's task state after each step "
+            f"(GET {RESOURCES_TASK_STATE_PATH}, ResourcesTaskState) and end the episode once the task has ended, "
+            "before the next model call. For a resources server whose task ends through its state rather than "
+            "through one tool's call"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _task_state_is_read_between_steps(self) -> "SingleAgentTurnEnvironmentServerConfig":
+        if self.end_on_task_state and self.max_episode_steps is None:
+            raise ValueError("end_on_task_state reads the task state between steps: set max_episode_steps too")
+        return self
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -161,6 +193,34 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         for name in self.tool_server_names:
             self._check_tool_server(name, self.config.resources_server.name)
         self._check_mcp_server_names()
+        if self.config.max_episode_steps is not None:
+            self._check_step_driven_agent()
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        # The step loop records no boundary between steps, so an episode it drives starts over after a crash.
+        return "restart_only" if self.config.max_episode_steps is not None else self.checkpoint_mode
+
+    def _check_step_driven_agent(self) -> None:
+        """Refuse to drive an agent one step per activation that cannot take its steps so: the agent must keep a
+        session (``AGENT_SESSION_AGENT_TYPES``), run the tools it calls, and stop after one step (``max_steps: 1``),
+        or a step taken after the task ended, within the same activation, would count."""
+        name = self.config.agent_server.name
+        instance = self.server_client.global_config_dict.get(name)
+        agents = instance.get("responses_api_agents") if isinstance(instance, (dict, DictConfig)) else None
+        agent_type = next(iter(agents), None) if isinstance(agents, (dict, DictConfig)) and len(agents) == 1 else None
+        config = get_first_server_config_dict(self.server_client.global_config_dict, name) if agent_type else {}
+        problems = []
+        if agent_type not in AGENT_SESSION_AGENT_TYPES:
+            problems.append(f"its type {agent_type!r} keeps no agent session")
+        if config.get("execute_tools") is False:
+            problems.append("it does not run the tools it calls (execute_tools: false)")
+        if config.get("max_steps") != 1:
+            problems.append(f"it stops after max_steps: {config.get('max_steps')} steps per activation, not 1")
+        if problems:
+            raise ValueError(
+                f"Environment Server {self.config.name!r} drives {name!r} one step per activation "
+                f"(max_episode_steps: {self.config.max_episode_steps}), but " + "; ".join(problems)
+            )
 
     def _check_mcp_server_names(self) -> None:
         """Refuse a pairing that grants two MCP endpoints listed under one name: MCP clients name each tool by the
@@ -673,15 +733,85 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             params = params.model_copy(
                 update={"input": [*input_items, NeMoGymEasyInputMessage(role="user", content=handles.observation)]}
             )
+        if self.config.max_episode_steps is not None:
+            return await self._run_steps(request, handles, params)
+        # The episode's only activation.
+        # A restore before its reply invokes it again, and the agent gives the reply it already gave.
+        return await self._activate_agent(request, handles, params, activation=1)
+
+    async def _run_steps(
+        self, request: SingleAgentTurnRequest, handles: "SessionHandles", params: Any
+    ) -> NeMoGymResponse:
+        """Drive the agent one step per activation, up to ``max_episode_steps``.
+
+        Each activation continues the conversation with every step before it. The episode ends after the first step
+        in which the model called no tool or that did not complete, as the agent's own loop ends, and with
+        ``end_on_task_state`` once the resources session reports that its task ended. The reply carries every step's
+        output and their summed usage, as one activation's would; each step's failure report is saved as it arrives.
+        """
+        limit = self.config.max_episode_steps
+        conversation = (
+            ([NeMoGymEasyInputMessage(role="user", content=params.input)] if params.input else [])
+            if isinstance(params.input, str)
+            else list(params.input)
+        )
+        outputs: list[Any] = []
+        usage = None
+        for step in range(1, limit + 1):
+            response = await self._activate_agent(
+                request,
+                handles,
+                params.model_copy(update={"input": [*conversation, *outputs]}),
+                activation=step,
+                # The agent then counts its one step as completed, and keeps one record of the episode's invocation.
+                headers={AGENT_EPISODE_STEP_LIMIT_HEADER: str(limit)},
+            )
+            outputs.extend(response.output)
+            usage = accumulate_response_usage(usage, response.usage)
+            # A step that did not complete ends the episode, as a step without a tool call does. A reply may omit its
+            # status (a model server may send none, and the simple agent passes that on), so only a status other
+            # than completed, or truncation, counts as not completing.
+            if (
+                response.status not in (None, "completed")
+                or response.incomplete_details is not None
+                or not any(item.type == "function_call" for item in response.output)
+            ):
+                break
+            if self.config.end_on_task_state and await self._task_ended(handles):
+                break
+        return response.model_copy(update={"output": outputs, "usage": usage})
+
+    async def _task_ended(self, handles: "SessionHandles") -> bool:
+        """Whether the episode's task has ended, as its resources session reports it (``RESOURCES_TASK_STATE_PATH``)."""
+        try:
+            state_http_response = await self.server_client.get(
+                server_name=self.config.resources_server.name,
+                url_path=RESOURCES_TASK_STATE_PATH,
+                cookies=handles.resources_cookies,
+            )
+            await raise_boundary_failure(state_http_response)
+            return ResourcesTaskState.model_validate(await get_response_json(state_http_response)).task_ended
+        except Exception as error:
+            # Read during the agent's turn, between its steps.
+            raise dependency_failure(error, stage="agent") from error
+
+    async def _activate_agent(
+        self,
+        request: SingleAgentTurnRequest,
+        handles: "SessionHandles",
+        params: Any,
+        *,
+        activation: int,
+        headers: dict[str, str] | None = None,
+    ) -> NeMoGymResponse:
+        """One activation of the agent session, number ``activation``; the failure report its reply carries is saved."""
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=self._agent_responses_path(request),
                 json=params,
                 cookies=handles.agent_cookies,
-                # The episode's only activation.
-                # A restore before its reply invokes it again, and the agent gives the reply it already gave.
-                headers={AGENT_ACTIVATION_HEADER: "1"},
+                headers={AGENT_ACTIVATION_HEADER: str(activation), **(headers or {})},
             )
             await raise_boundary_failure(agent_http_response)
             response_cookies = _cookies(agent_http_response)

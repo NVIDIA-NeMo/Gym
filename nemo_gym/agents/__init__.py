@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.agents.base_responses_api_agent import (
         AGENT_ACTIVATION_HEADER,
+        AGENT_EPISODE_STEP_LIMIT_HEADER,
         AGENT_SESSION_COOKIE_KEY,
         ROLLOUT_STOP_METADATA_KEY,
         AgentCloseSessionRequest,
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
 _PUBLIC_API = {
     "ActivationConflictError": "utils.ordered_operations",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
+    "AGENT_EPISODE_STEP_LIMIT_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",
     "AGENT_SESSION_COOKIE_KEY": "base_responses_api_agent",
     "AGENT_TIMEOUT_METADATA_KEY": "utils.task_timeout",

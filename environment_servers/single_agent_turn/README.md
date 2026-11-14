@@ -51,6 +51,22 @@ environment_servers:
 
 When the tools served to an episode come from several MCP endpoints, each endpoint lists itself under its server's `mcp_server_name`, or else its server's name, and MCP clients name every tool `mcp__<name>__<tool>`. The Environment Server does not start when two granted endpoints list themselves under one name, since their tools would collide.
 
+### Driving the agent one step at a time
+
+By default the agent runs its own loop in the episode's one activation. Set `max_episode_steps` to drive it one step per activation instead (one model call and the tool calls it makes), up to that many steps in the episode, and `end_on_task_state` to end the episode once the Resources Server reports that the task ended. This suits a Resources Server whose task ends through its state, such as a task row that several operations can close, rather than through one tool's call:
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    resources_tool_transports: [direct_http]
+    max_episode_steps: 50
+    end_on_task_state: true
+```
+
+Each activation continues the conversation with every step before it, and carries the episode's step limit in the `x-ng-agent-episode-step-limit` header, so the agent records one invocation for the episode, as its own loop would, and counts a step as incomplete only at the episode's limit. The episode ends after the first step in which the model called no tool or that did not complete (a reply without a status counts as completed), and with `end_on_task_state` after the step that ended the task: between steps the server reads `GET /task_state` on the episode's Resources session, which answers `ResourcesTaskState` (`{"task_ended": ...}`). The reply carries every step's output and their summed usage, as one activation's would, and each step's failure report is kept.
+
+The agent must keep an agent session, run the tools it calls, and stop after one step: the simple agent with `max_steps: 1`. The server checks that at startup, since a step taken after the task ended, within one activation, would count. A Resources Server whose pairing needs this agent can set `allowed_agents`, so that `gym env resolve` refuses another `--agent-type` before anything starts. The step loop records no checkpoint boundary between steps, so its episodes take part in checkpoints as restarts.
+
 With partial-rollout checkpointing on, the agent of an episode that grants `mcp` access or any tool server holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt. An episode that grants any tool server restarts from its input after a crash instead of continuing from a checkpoint. One that grants only `mcp` access continues from a checkpoint only if its agent borrows the sandbox the Resources seed lent (`sandbox_access`) and re-binds restored sessions to new tool grants (`rebinds_tool_accesses`, as the OpenCode agent does). Otherwise it restarts from its input.
 
 A restore rebuilds a borrowed sandbox under a new ID. When the replacement attempt continues an episode whose agent had not closed yet, it first seeds the Resources and agent sessions again: the Resources Server returns the restored sandbox, and the agent re-binds its restored session to that sandbox and to the replacement attempt's tool grants, such as a new MCP session token. Seeding again is idempotent, so a checkpoint does not wait for it, and a crash during it seeds again after the next restore. An episode without a borrowed sandbox seeds nothing again.

@@ -25,7 +25,7 @@ from typing import Any, ClassVar
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
@@ -40,6 +40,7 @@ from pydantic import (
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_EPISODE_STEP_LIMIT_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
@@ -465,6 +466,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         activation: Activation | None = None,
+        step_limit_owned_by_caller: bool = False,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
@@ -810,7 +812,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
-                invocation_status = "incomplete"
+                # A caller that drives the session's steps owns the episode's limit (AGENT_EPISODE_STEP_LIMIT_HEADER):
+                # this step completed, and the episode goes on with the caller's next activation.
+                invocation_status = "completed" if step_limit_owned_by_caller else "incomplete"
                 break
             await commit_boundary()
 
@@ -854,6 +858,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
                 "seed an agent session before calling /v1/responses"
             )
+        # A caller that drives the session one step per activation names the episode's step limit, which it owns.
+        episode_step_limit = _episode_step_limit(request) if state is not None else None
         participant = self.checkpoint_participant
         target = self._activation_target(state, rollout_id)
         index = None
@@ -881,14 +887,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             activation_scope = participant.activation(session_key, episode_id, index=index)
         async with activation_scope as activation:
             invocation_id = "root"
+            step_limit_owned_by_caller = False
             if state is not None:
                 # A session spans several activations, and its observations keep one invocation per activation.
                 # The first keeps "root" so single-activation sessions report what they did before.
                 # An activation continued from a restored boundary was already counted, so it keeps its ID.
                 if activation is None or activation.continuation is None:
                     state.activations = index if index is not None else state.activations + 1
-                if state.activations > 1:
+                # The steps of a caller-driven session extend one invocation, the episode's, as the agent's own loop
+                # does, so they keep "root" (below, where the observations are kept).
+                if state.activations > 1 and episode_step_limit is None:
                     invocation_id = f"activation-{state.activations}"
+                # The episode's last step stops at the caller's limit, as the agent's own loop stops at its max_steps.
+                step_limit_owned_by_caller = episode_step_limit is not None and state.activations < episode_step_limit
             observed_invocation = None
             if collect_trajectory:
                 observed_invocation = AgentInvocation(invocation_id=invocation_id, in_session=state is not None)
@@ -916,6 +927,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     rollout_id=rollout_id or "unscoped",
                     collect_trajectory=collect_trajectory,
                     activation=activation,
+                    step_limit_owned_by_caller=step_limit_owned_by_caller,
                 )
             except BaseException as error:
                 if observed_invocation is not None:
@@ -929,13 +941,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if trajectory is not None:
                     # A session returns agent evidence at close, where the Environment Server records it.
                     previous = state.observations
+                    records = list(previous.records) if previous else []
+                    invocations = list(trajectory.invocations)
+                    if episode_step_limit is not None:
+                        invocations = _extend_episode_invocation(records, invocations)
                     state.observations = AgentObservationBundle(
                         source="simple_agent",
-                        records=[
-                            *(previous.records if previous else []),
-                            *trajectory.invocations,
-                            *trajectory.tool_calls,
-                        ],
+                        records=[*records, *invocations, *trajectory.tool_calls],
                         gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
                     )
 
@@ -1310,6 +1322,38 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
+
+
+def _episode_step_limit(request: Request) -> int | None:
+    """The episode's step limit a caller that drives the session's steps sends (AGENT_EPISODE_STEP_LIMIT_HEADER)."""
+    raw = request.headers.get(AGENT_EPISODE_STEP_LIMIT_HEADER)
+    if raw is None:
+        return None
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 0
+    if limit < 1:
+        raise HTTPException(422, f"{AGENT_EPISODE_STEP_LIMIT_HEADER} must be a positive integer, got {raw!r}")
+    return limit
+
+
+def _extend_episode_invocation(records: list[Any], invocations: list[AgentInvocation]) -> list[AgentInvocation]:
+    """Fold a caller-driven step's invocation into the episode's, the session's record with the same ID.
+
+    The caller sends the whole conversation with each step, so the step's conversation already holds every earlier
+    one: the record is replaced in place, with every step's model calls, rather than repeated with the history it
+    already holds. The evidence then reads as the agent's own loop's. Returns the invocations still to append.
+    """
+    if not invocations:
+        return invocations
+    step = invocations[0]
+    for position in range(len(records) - 1, -1, -1):
+        record = records[position]
+        if isinstance(record, AgentInvocation) and record.invocation_id == step.invocation_id:
+            records[position] = step.model_copy(update={"model_calls": [*record.model_calls, *step.model_calls]})
+            return invocations[1:]
+    return invocations
 
 
 def _cookies(response: Any) -> dict[str, str]:
