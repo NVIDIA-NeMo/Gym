@@ -126,9 +126,10 @@ if [ "${#missing[@]}" -gt 0 ]; then
       exit 1
     fi
 fi
-# Stock OpenCode can download ripgrep itself. A system copy avoids per-session
-# downloads, but must not make cached runtimes or non-root/RHEL images unusable.
+# OpenCode's grep and glob tools run rg. Without one they fail inside the trajectory, where no
+# check sees them, so setup fails instead unless the owner lets OpenCode download rg on demand.
 # NG_OPENCODE_SKIP_RIPGREP=1: the adapter stages a pinned rg for the session instead.
+# NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1: a missing rg only warns, as OpenCode downloads one when it can.
 if [ "${NG_OPENCODE_SKIP_RIPGREP:-0}" != 1 ] && ! command -v rg >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then
     if command -v apk >/dev/null 2>&1; then
@@ -137,7 +138,14 @@ if [ "${NG_OPENCODE_SKIP_RIPGREP:-0}" != 1 ] && ! command -v rg >/dev/null 2>&1;
       (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep) || true
     fi
   fi
-  command -v rg >/dev/null 2>&1 || echo 'Warning: optional ripgrep is unavailable; OpenCode can download it on demand' >&2
+  if ! command -v rg >/dev/null 2>&1; then
+    if [ "${NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD:-0}" = 1 ]; then
+      echo 'Warning: ripgrep is unavailable; OpenCode can download it on demand' >&2
+    else
+      echo 'OpenCode grep and glob tools need ripgrep: preinstall rg in the task image, pin one with sandbox_ripgrep_path and sandbox_ripgrep_sha256, or set sandbox_ripgrep_download: true if the sandbox can download it' >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$cached" = true ]; then
   exit 0
