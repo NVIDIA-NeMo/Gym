@@ -80,6 +80,7 @@ class JudgeGrading:
     dependencies: list[ModelCallRef] = field(default_factory=list)
     unidentified_calls: int = 0
     parsed_dependencies: set[int] = field(default_factory=set)
+    rejected_dependencies: set[int] = field(default_factory=set)
 
 
 _judge_grading: ContextVar[JudgeGrading | None] = ContextVar("judge_grading", default=None)
@@ -94,6 +95,17 @@ def record_parsed_judge_verdict() -> None:
     grading = _judge_grading.get()
     if grading is not None and grading.dependencies:
         grading.parsed_dependencies.add(len(grading.dependencies) - 1)
+
+
+def record_rejected_judge_reply() -> None:
+    """Account for a received reply rejected by the parser before retrying the same rubric.
+
+    The reply remains a dependency of the final grade, but cannot count as a parsed verdict.
+    A successful grading still requires a later accepted, parsed reply.
+    """
+    grading = _judge_grading.get()
+    if grading is not None and grading.dependencies:
+        grading.rejected_dependencies.add(len(grading.dependencies) - 1)
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)

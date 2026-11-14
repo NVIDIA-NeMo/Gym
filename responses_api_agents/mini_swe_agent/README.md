@@ -61,7 +61,8 @@ response output are rebuilt from the CLI's records; the model emitted only the b
 ### mini-SWE adapters
 
 [`miniswe_sandboxed_agent`](../miniswe_sandboxed_agent/README.md) is deprecated but remains available. It also runs mini-SWE 2.4.6 through agent sessions, and
-the Terminal Bench 4 and Terminal-Bench-Science presets use it. It installs mini-SWE in the sandbox at setup, as the
+the deprecated `terminal_bench_4/miniswe_legacy_agent` preset and the Terminal-Bench-Science preset use it
+(`terminal_bench_4/miniswe` runs this adapter). It installs mini-SWE in the sandbox at setup, as the
 task user, from PyPI, so the sandbox needs PyPI access, and it reports `miniswe_termination`. This adapter installs a
 runtime built on the agent server at seed, so the sandbox needs no network; it runs mini-SWE under Gym's process
 supervisor, can start its own sandbox, serves `mcp` tool grants, and reports `mini_swe_termination`. Use this adapter

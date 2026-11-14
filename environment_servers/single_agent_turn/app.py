@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -139,6 +139,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Resources server's. Unset, the bound agent's own `tool_servers`, so an agent moved off the legacy_agent relay
     # keeps the tool servers its /run seeded.
     tool_servers: list[ResourcesServerRef] | None = None
+    forward_agent_evidence: bool = False
     # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
@@ -489,6 +490,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     task_data=task_input.task_data,
+                    # As _verify_body sends them: a server whose session is built from the task's history or tools
+                    # reads them at seed. Tool servers' seeds do not get them.
+                    responses_create_params=task_input.responses_create_params.model_dump(
+                        mode="json", exclude_unset=True
+                    ),
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(seed_http_response)
@@ -613,6 +619,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
                     sandbox_access=seed.sandbox_access,
+                    agent_context=request.task.task_input.agent_seed_context,
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(agent_create_http_response)
@@ -735,7 +742,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
+                json=self._verify_body(request, agent_response)
+                | verification_failure_fields(agent_response)
+                | (
+                    {"ng_trajectory": trajectory.model_dump(mode="json")}
+                    if self.config.forward_agent_evidence and trajectory is not None
+                    else {}
+                )
+                | (
+                    {"ng_agent_observations": observations.model_dump(mode="json")}
+                    if self.config.forward_agent_evidence and observations is not None
+                    else {}
+                ),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
@@ -803,7 +821,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     @staticmethod
     def _model_request_not_sent(response: NeMoGymResponse) -> bool:
-        """A selected connector failure is safe only if every attempt of that operation never connected."""
+        """A selected connector failure is safe only if every attempt of that operation never connected.
+
+        A connection that was refused and one that timed out connecting were both never made.
+        """
         report = FailureReport.model_validate(response.model_extra["failure_report"])
         selected = report.events[report.failure_id]
         if (
@@ -821,12 +842,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if any(not event.operation_id or not event.attempt_id for event in observed):
             return False
         attempts = [event for event in observed if event.operation_id == selected.operation_id]
-        connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+        unconnected_types = {
+            f"{error_type.__module__}.{error_type.__qualname__}"
+            for error_type in (ClientConnectorError, ConnectionTimeoutError)
+        }
         return len({event.attempt_id for event in attempts}) == len(attempts) and all(
             isinstance(event.details, ModelFailureDetails)
             and event.details.request_upload_complete is False
             and event.foreign_error is not None
-            and event.foreign_error.exception_type == connector_type
+            and event.foreign_error.exception_type in unconnected_types
             for event in attempts
         )
 
@@ -874,8 +898,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             self.server_client.global_config_dict,
             self.config.agent_server.name,
         )
-        token_capture = bool(block.get("enabled", False)) and (
-            bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        token_capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled", False))
+            and (bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         # The agent is the one the training framework trains, so its model calls carry the episode's values.

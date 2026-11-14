@@ -220,3 +220,14 @@ def test_a_driver_run_cut_before_its_inventory_resumes_instead_of_restarting_fre
     env = _sbatch_env(slurm_bin)
     assert env["GYM_RESUBMIT"] == "1" and env["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
     assert all(before[path] == digest for path, digest in _saved(job_dir).items() if path in before)
+
+
+def test_the_verdict_of_a_fresh_restart_is_its_own_resubmit_command_not_a_new_submission(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    job_dir = _cut_before_inventory(tmp_path, slurm_bin)
+
+    for out in (recover(*_handle(job_dir)), inspect_recovery(*_handle(job_dir))):
+        verdict = out.operator_verdict
+        assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+        assert verdict["action"].endswith(f"`{COMMAND}`")
