@@ -84,6 +84,7 @@ class OpenCodeToolReward(BaseModel):
     base_reward: float
     auxiliary_reward: float
     exploration_reward: float
+    success_reward: float
     penalty_reward: float
     bash_success_count: int
     tool_call_count: int
@@ -95,8 +96,8 @@ class OpenCodeToolReward(BaseModel):
     def for_answer(self, base_reward: float, config: OpenCodeToolRewardConfig) -> "OpenCodeToolReward":
         """Apply the verifier result to the recorded tool evidence."""
         if config.penalty_mode == "proportional":
-            # Exploration stores bonuses and penalties together; separate them before scaling only costs.
-            bonus = 0.0 if config.correct_only else self.exploration_reward - self.penalty_reward
+            # Keep the capped success bonus independent of penalties and their ordering.
+            bonus = 0.0 if config.correct_only else self.success_reward
             if base_reward >= config.correct_answer_reward_threshold:
                 bonuses = config.correct_tool_call_bonuses
                 bonus = bonuses[min(self.bash_success_count, len(bonuses) - 1)]
@@ -207,6 +208,7 @@ def score_opencode_tools(
         base_reward=base_reward,
         auxiliary_reward=0.0,
         exploration_reward=exploration,
+        success_reward=min(successes * config.tool_success_reward, config.tool_success_reward_cap),
         penalty_reward=penalties,
         bash_success_count=successes,
         rate_limited_search_count=rate_limits,

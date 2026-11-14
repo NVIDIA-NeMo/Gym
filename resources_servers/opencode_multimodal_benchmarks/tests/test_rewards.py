@@ -668,6 +668,37 @@ def test_proportional_mode_separates_exploration_bonuses_from_penalties(correct_
     assert result.auxiliary_reward == pytest.approx(expected)
 
 
+@pytest.mark.parametrize("failure_index", [0, 10, 13])
+@pytest.mark.parametrize("correct_only", [True, False])
+@pytest.mark.parametrize("base", [0.0, 0.5, 1.0])
+def test_proportional_success_bonus_cap_is_independent_of_failure_order(failure_index, correct_only, base):
+    calls = [call(i) for i in range(14)]
+    config = bonus_config().model_copy(update={"penalty_mode": "proportional", "correct_only": correct_only})
+    result = score_opencode_tools(
+        execution_records(calls, statuses={str(failure_index): ("error", None)}), calls, base, config
+    )
+    assert result.bash_success_count == 13
+    assert result.tool_error_count == 1
+    assert result.success_reward == pytest.approx(0.2)
+    assert result.penalty_reward == pytest.approx(-0.05)
+    # Correct answers use the existing schedule; other answers retain the correct_only gate.
+    bonus = 0.01 if base == 1.0 else (0.0 if correct_only else 0.2)
+    assert result.auxiliary_reward == pytest.approx(bonus - base * 0.05)
+    saved = type(result).model_validate_json(result.model_dump_json())
+    assert saved.for_answer(base, config) == result
+    assert saved.for_answer(0.5, config).auxiliary_reward == pytest.approx((0.0 if correct_only else 0.2) - 0.025)
+
+
+@pytest.mark.parametrize("failure_index,expected", [(0, 0.2), (10, 0.2), (13, 0.15)])
+def test_default_mode_retains_existing_exploration_clipping(failure_index, expected):
+    calls = [call(i) for i in range(14)]
+    result = score_opencode_tools(
+        execution_records(calls, statuses={str(failure_index): ("error", None)}), calls, 0.5, bonus_config()
+    )
+    assert result.exploration_reward == pytest.approx(expected)
+    assert result.auxiliary_reward == pytest.approx(expected)
+
+
 def test_proportional_mode_preserves_negative_verifier_scores():
     calls = [call(0)]
     result = score_opencode_tools(

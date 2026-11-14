@@ -17,8 +17,9 @@ the source videos nor a video decoder at import time.
 Prepared rows contain the question and image inputs in
 `responses_create_params.input`. Reference answers and category labels stay in
 `verifier_metadata`; they are not model inputs. No external task tools or sandbox
-are required by the verifier. The catalog configuration uses `simple_agent` for
-image-question answering; a tool-using harness is a separate configuration choice.
+are required by the verifier. The catalog configuration defaults to `opencode_agent`
+with WebSearch, WebFetch and the Agent-X web filter; this harness requires a
+configured sandbox provider.
 
 The independent `agentx-reference-judge-v4` scorer compares only the candidate and
 reference answers. It sends neither the question nor reference justification to
