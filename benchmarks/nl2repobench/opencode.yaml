@@ -74,10 +74,17 @@ nl2repobench_opencode_sandboxed_agent:
       # Before 2026-11-03 this was ProgramBench's rule instead (3 nudges, its own wording): those runs differ.
       # OpenHands' default max_iterations (500): OpenCode's cap on agentic steps, merged into the agent's own
       # opencode_config (permissions etc. are kept). idle_nudge holds it as one budget across resumes.
+      # No compaction: OpenCode would otherwise summarise the conversation near its declared window (and then send its
+      # own "continue, or stop and ask for clarification" message). With auto off, an overflow ends the run with a
+      # context error (summ: CEX). prune (dropping old tool outputs) is off by default; set off explicitly.
+      # (OpenHands 0.56 does trim on overflow, by default with its ConversationWindowCondenser; we chose none.)
       opencode_config:
         agent:
           build:
             steps: 500
+        compaction:
+          auto: false
+          prune: false
       # OpenHands' StuckDetector (it ends a run whose agent repeats itself: same action and result 4 times, same
       # failing action 3 times, an A-B-A-B-A-B alternation, 3 identical replies, 10 compactions in a row).
       stuck_detector: true
