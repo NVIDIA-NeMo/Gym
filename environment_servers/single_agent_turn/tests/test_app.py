@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import json
 import re
 import runpy
 import time
@@ -54,12 +55,14 @@ from nemo_gym.core import (
 )
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
+    AgentContext,
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     SimpleServer,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
+    SingleAgentTurnTaskInput,
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
@@ -149,6 +152,31 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
 
 
+async def test_the_tasks_agent_context_reaches_the_agent_seed_and_not_the_resources_server() -> None:
+    environment_server, client = _environment_server()
+    request = _request()
+    request.task.task_input = SingleAgentTurnTaskInput.model_validate(
+        {
+            "responses_create_params": {"input": "task"},
+            "instance_id": "task",
+            "agent_context": {"agent": {"values": {"tag": "figqa2"}, "artifacts": {"media": {"path": "figs/1"}}}},
+        }
+    )
+
+    await environment_server.run_request(request)
+
+    create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
+    assert create_body.agent_context == AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}})
+    resources_bodies = [call["json"] for _, path, call in client.calls if path in ("/seed_session", "/verify")]
+    assert len(resources_bodies) == 2
+    assert all("agent_context" not in json.dumps(body) for body in resources_bodies)
+
+    # A task without context seeds the agent with the same body as before.
+    environment_server, client = _environment_server()
+    await environment_server.run_request(_request())
+    assert "agent_context" not in client.calls[1][2]["json"]
+
+
 async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
     client.responses[0] = _Response(
@@ -233,6 +261,13 @@ async def test_the_agents_tool_servers_are_seeded_granted_and_closed() -> None:
     assert seed_body.resources_session_id != resources_seed_body.resources_session_id
     # The tool server sees the episode's task, as its Resources server does.
     assert seed_body.task_data == {"instance_id": "task"}
+    # Only the Resources server's seed carries the task's responses_create_params, as its /verify gets them. The tool
+    # server's seed leaves the key out, so its wire shape is unchanged.
+    assert "responses_create_params" not in search_calls[0][1]["json"]
+    assert (
+        resources_seed_body.responses_create_params
+        == _request().task.task_input.responses_create_params.model_dump(mode="json", exclude_unset=True)
+    )
     assert search_calls[1][1]["cookies"] == {"session": "cookie-value"}
     [access] = _agent_seed_body(client).tool_accesses
     assert access.name == "tavily"
@@ -933,10 +968,15 @@ async def test_failed_agent_response_still_reaches_verification(reward: float, m
     assert result.result.response.status == "failed"
 
 
+@pytest.mark.parametrize("forward_agent_evidence", [None, False, True])
 @pytest.mark.parametrize("mask_sample", [False, True])
 @pytest.mark.parametrize("result_path", ["episode-request", "flat-adapter"])
-async def test_results_preserve_verification_and_observations(mask_sample: bool, result_path: str) -> None:
+async def test_results_preserve_verification_and_observations(
+    mask_sample: bool, result_path: str, forward_agent_evidence: bool | None
+) -> None:
     environment, client = _environment_server()
+    if forward_agent_evidence is not None:
+        environment.config.forward_agent_evidence = forward_agent_evidence
     observations = {
         "source": "hermes",
         "records": [
@@ -981,6 +1021,15 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     assert result.result.ng_agent_observations == AgentObservationBundle.model_validate(observations)
     # The harness's own turns from the close reach the result in the slot rollout collection reads.
     assert result.result.ng_trajectory == TrajectoryRecord.model_validate(trajectory)
+    verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
+    if forward_agent_evidence:
+        assert verify_body["ng_trajectory"] == TrajectoryRecord.model_validate(trajectory).model_dump(mode="json")
+        assert verify_body["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
+            mode="json"
+        )
+    else:
+        assert "ng_trajectory" not in verify_body
+        assert "ng_agent_observations" not in verify_body
     if result_path != "flat-adapter":
         return
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
