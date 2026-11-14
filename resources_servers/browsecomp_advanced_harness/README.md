@@ -89,6 +89,44 @@ unknown provider, or an unknown `sandbox_config` key refuses the seed with 422.
 configured, or permits the non-isolating `local` provider. It defaults to `false`; production and benchmark configs
 must provide an isolating provider. Configurations with `workspace: none` do not need a tool sandbox.
 
+## Search cache
+
+An optional flat-file cache stores raw search and browse responses so that repeated queries, for example the
+repeats of one task in a training run, skip the provider call. It is off unless `search_cache_dir` is set. Add these
+fields under the resources server's `resources_servers` block:
+
+```yaml
+search_cache_dir: /shared/browsecomp-cache   # unset or empty disables the cache; relative paths resolve
+                                             # against this server's directory
+search_cache_fuzzy_threshold: 0.9            # optional, (0, 1]: serve the closest cached search on an exact miss
+search_cache_read_only: false                # serve from a root you cannot write, without writing to it
+verbose_phase_log: false                     # log every cache get and put, not only the per-rollout totals
+```
+
+- **It changes what the agent retrieves.** Entries are shared across runs and across providers: an Exa entry
+  answers a Tavily run and is formatted as Exa output. When both providers write one key, the Exa entry stays: a
+  Tavily write replaces it only when it is a browse page Exa cut at its character cap. Keep the cache off for
+  baselines and score comparisons.
+- **Fuzzy matching serves another query's results** when the two score above the threshold, for example a query
+  about 2018 answered with the cached results for 2019. Search only; browse always matches the URL exactly.
+- **Each hit is checked against the request.** The current run's excluded domains and `max_results` apply to every
+  hit. An Exa search entry answers only the same `exa_search_type`, and only a request that writes pages when it
+  holds page text. A browse page that Exa cut at a smaller character budget is a miss.
+- **Writes are best-effort.** A failed write is logged as `[cache][put_error]` and counted in the `[cache]`
+  summary at `/verify`; the tool call still returns the provider's result. Startup refuses a writable cache on a root
+  this process cannot write, and a read-only cache on a root that does not exist.
+- **Diagnostics.** The server logs the `[cache]` line (this server process's running totals) and the
+  per-rollout `[browsecomp][phases]` line at `/verify`, plus sandbox start and stop lines, at INFO. Their `rid=` is
+  the resources session id.
+  `NEMO_GYM_LOG_LEVEL=WARNING` silences them.
+- **The cache grows without bound.** Nothing evicts entries; prune the directory between experiments as needed.
+- **Fuzzy index.** With fuzzy matching on, each process appends the queries it caches to its own shard under
+  `<root>/index/`. Merge the shards into the read-only SQLite FTS5 index offline, while no run writes to the root:
+
+  ```bash
+  python resources_servers/browsecomp_advanced_harness/build_cache_index.py /shared/browsecomp-cache
+  ```
+
 ## Sessions
 
 Each rollout has its own session: the provider-call metrics that `/verify` reports and, with `workspace: per_session`, the disk workspace that `search` and `browse` write pages to and `bash_command` reads.

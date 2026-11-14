@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,25 @@ from resources_servers.browsecomp_advanced_harness.tests.test_resources_sessions
 
 def _request(sid: str = "resources-session") -> Request:
     return Request({"type": "http", "session": {SESSION_ID_KEY: sid}})
+
+
+async def test_lifecycle_logging_preserves_failed_close_for_retry(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+    session = SimpleNamespace(
+        sandbox=SimpleNamespace(provider_name="docker", sandbox_id="tool-sandbox"),
+        close=AsyncMock(side_effect=[RuntimeError("stop failed"), None, None]),
+    )
+    shell = shell_module.BrowsecompShellSandbox(
+        session=session, resources_session_id="episode-tools", bash_calls=3, uploaded_pages={"one", "two"}
+    )
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await shell.close(timeout=1)
+    await shell.close(timeout=1)
+    await shell.close(timeout=1)
+    lines = [record.message for record in caplog.records if "[sandbox_stop]" in record.message]
+    assert len(lines) == 2
+    assert "status=failed:RuntimeError" in lines[0] and "status=ok" in lines[1]
+    assert all("provider=docker id=tool-sandbox" in line and "bash_calls=3 pages=2" in line for line in lines)
 
 
 @pytest.fixture

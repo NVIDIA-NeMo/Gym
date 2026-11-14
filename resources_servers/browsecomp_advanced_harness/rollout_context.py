@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Per-rollout telemetry context for the browsecomp harness.
+
+WHY THIS EXISTS. Every tool line the harness printed used to be unattributable:
+`[tavily_call]`, `[judge_call]`, `[browsecomp][bash][timing]` and `[cache]` carry
+no rollout key, and ONE NemoGym process serves the whole run with up to ~944
+rollouts in flight. So "how long did THIS rollout spend in search vs bash?" could
+not be answered from a driver log at all — only leg-wide totals could.
+
+The resources session id is the rollout id: the server binds it for each tool and
+verification request, so every line of one rollout carries the same `rid=`.
+
+A ContextVar rather than a parameter: the print sites are several frames deep
+inside helpers and inside `search_cache.py`, which has no request at all. This
+mirrors the existing `_PROVIDER_RETRY_COUNTS` ContextVar in `app.py`, which
+solves the same attribution problem for provider retry counts.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from contextvars import ContextVar, Token
+from time import time
+from typing import Dict, Optional
+
+
+LOG = logging.getLogger(__name__)
+
+UNKNOWN_ROLLOUT_ID = "-"
+
+_ROLLOUT_ID: ContextVar[str] = ContextVar("_ROLLOUT_ID", default=UNKNOWN_ROLLOUT_ID)
+
+# rid -> {"<phase>_s": seconds, "<phase>_n": count}. Logged on the
+# `[browsecomp][phases]` line at /verify and popped when the session is released.
+_TOTALS: Dict[str, Dict[str, float]] = {}
+_LOCK = threading.Lock()
+
+
+def set_rollout_id(rid: str) -> Token[str]:
+    """Bind the rollout id for the current asyncio task. Returns the reset token."""
+    return _ROLLOUT_ID.set(rid or UNKNOWN_ROLLOUT_ID)
+
+
+def reset_rollout_id(token: Token[str]) -> None:
+    """Restore the caller's context after a tool or verification request."""
+    _ROLLOUT_ID.reset(token)
+
+
+def current_rollout_id() -> str:
+    return _ROLLOUT_ID.get()
+
+
+def record_phase(phase: str, dur_s: float, *, rid: Optional[str] = None) -> None:
+    """Accumulate one phase sample against a rollout.
+
+    Always called, even when per-call logging is off — the totals are the cheap,
+    always-on product (one summary line per rollout) and the per-call lines are
+    the expensive optional detail.
+
+    `rid` is keyword-only so a positional call cannot pass a phase name where a
+    duration belongs.
+    """
+    rid = rid or current_rollout_id()
+    if rid == UNKNOWN_ROLLOUT_ID:
+        # Nothing to attribute to. Accumulating under "-" would grow unbounded
+        # for the process lifetime and blend every rollout together.
+        return
+    with _LOCK:
+        t = _TOTALS.setdefault(rid, {})
+        t[f"{phase}_s"] = t.get(f"{phase}_s", 0.0) + float(dur_s)
+        t[f"{phase}_n"] = t.get(f"{phase}_n", 0) + 1
+
+
+def peek_phase_totals(rid: str) -> Dict[str, float]:
+    with _LOCK:
+        return dict(_TOTALS.get(rid, {}))
+
+
+def pop_phase_totals(rid: str) -> Dict[str, float]:
+    """Read and drop. Called when the resources session is released."""
+    with _LOCK:
+        return _TOTALS.pop(rid, {})
+
+
+def format_phase_totals(totals: Dict[str, float]) -> str:
+    """`bash_exec=1.00s/2 tavily_search=12.34s/3` — sorted for stable diffing."""
+    phases = sorted({k[:-2] for k in totals if k.endswith("_s")})
+    if not phases:
+        return "-"
+    return " ".join(f"{p}={totals.get(f'{p}_s', 0.0):.2f}s/{int(totals.get(f'{p}_n', 0))}" for p in phases)
+
+
+def log_line(tag: str, t: Optional[float] = None, **kv: object) -> None:
+    """Print one telemetry line carrying the rollout id and an ABSOLUTE timestamp.
+
+    The timestamp matters as much as the id: harness prints have never had one,
+    so reconstructing a timeline meant interpolating between the sparse `ts=`
+    anchors nemo-rl timers emit — and there is no anchor at all during the first
+    rollout wave (~65 min).
+    """
+    parts = [tag, f"rid={current_rollout_id()}", f"t={(time() if t is None else t):.3f}"]
+    for k, v in kv.items():
+        if v is None:
+            continue
+        parts.append(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}")
+    LOG.info(" ".join(parts))
+
+
+def reset_all() -> None:
+    """Test hook: drop all accumulated state."""
+    with _LOCK:
+        _TOTALS.clear()
+    _ROLLOUT_ID.set(UNKNOWN_ROLLOUT_ID)
