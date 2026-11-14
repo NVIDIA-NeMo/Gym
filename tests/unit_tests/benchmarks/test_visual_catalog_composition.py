@@ -15,19 +15,18 @@ CATALOG = "benchmarks/opencode_multimodal_benchmarks"
 
 
 @pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
-@pytest.mark.parametrize("mode", ["simple", "openai", "vllm", "training"])
+@pytest.mark.parametrize("mode", ["default", "openai", "vllm", "training"])
 def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypatch):
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-only")
     monkeypatch.setenv("OPENSANDBOX_DOMAIN", "https://sandbox.invalid")
     adapter = "openai_model" if mode == "openai" else "vllm_model"
     model_config = "vllm_model_for_training" if mode == "training" else adapter
     paths = [f"responses_api_models/{adapter}/configs/{model_config}.yaml", f"{CATALOG}/{benchmark}/config.yaml"]
-    overrides = {}
+    overrides = {
+        "visual_agent": {"responses_api_agents": {"opencode_agent": {"sandbox_config": {"image": "test-image"}}}}
+    }
     if mode in {"openai", "vllm"}:
         paths[-1] = f"{CATALOG}/{benchmark}/opencode.yaml"
-        overrides = {
-            "visual_agent": {"responses_api_agents": {"opencode_agent": {"sandbox_config": {"image": "test-image"}}}}
-        }
     if mode == "vllm":
         paths.append(f"{CATALOG}/opencode_eval_vllm.yaml")
     parser = GlobalConfigDictParser()
@@ -60,7 +59,15 @@ def test_catalog_pairings_validate_with_selected_model(benchmark, mode, monkeypa
     assert env.agent_server.name == "visual_agent"
     assert env.resources_server.name == "opencode_multimodal_benchmarks"
     agent = config.visual_agent.responses_api_agents
-    assert next(iter(agent.values())).model_server.name == "policy_model"
+    assert set(agent) == {"opencode_agent"}
+    assert agent.opencode_agent.model_server.name == "policy_model"
+    assert agent.opencode_agent.network_access == "model_only"
+    assert agent.opencode_agent.image_input
+    assert not agent.opencode_agent.token_id_capture
+    assert agent.opencode_agent.opencode_config.permission.webfetch == "deny"
+    assert agent.opencode_agent.opencode_config.permission.websearch == "deny"
+    manifest = OmegaConf.load(ROOT / CATALOG / benchmark / "manifest.yaml")
+    assert manifest.agent_server == "opencode_agent"
     resources = config.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks
     assert resources.datasets[0].num_repeats == (5 if benchmark == "zerobench" else 1)
     if mode == "vllm":

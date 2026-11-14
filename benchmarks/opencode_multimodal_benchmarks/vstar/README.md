@@ -7,8 +7,9 @@
 Prepared rows contain the question and image inputs in
 `responses_create_params.input`. Reference answers and category labels stay in
 `verifier_metadata`; they are not model inputs. No external task tools or sandbox
-are required by the verifier. The catalog configuration uses `simple_agent` for
-image-question answering; a tool-using harness is a separate configuration choice.
+are required by the verifier. The catalog defaults to `opencode_agent` with
+a vision-capable model and an OpenSandbox session. Networking is `model_only`;
+WebSearch and WebFetch are disabled.
 
 Multiple-choice accuracy. Extract the visible final answer using the public option matcher; ambiguous answers go to a reference-blind extraction judge.
 
@@ -19,10 +20,13 @@ record both the metric key and its scale when comparing results.
 
 ## Prepare and check
 
-Run from the Gym repository root after obtaining the dataset:
+Run from the Gym repository root after obtaining the dataset. Supply the model
+and sandbox settings described in [run configuration](../README.md#run-configuration)
+for preparation as well as evaluation:
 
 ```bash
 gym eval prepare --benchmark opencode_multimodal_benchmarks/vstar \
+  --config run.yaml \
   +prepare_script_args.benchmark=vstar \
   +prepare_script_args.tsv=/data/vstar.tsv \
   +prepare_script_args.sha256=<source-sha256>
@@ -47,6 +51,7 @@ See [run configuration](../README.md#run-configuration) before running:
 
 ```bash
 gym eval run --benchmark opencode_multimodal_benchmarks/vstar \
+  --config run.yaml \
   --model-type openai_model --split benchmark --limit 5 --num-repeats 1 \
   --output results/vstar_smoke.jsonl
 ```
@@ -64,8 +69,7 @@ for adapted evaluation code. No benchmark data is included in this entry.
 
 | Harness | Configuration | Status |
 | --- | --- | --- |
-| `simple_agent` | This catalog entry, with a vision-capable model | Experimental; no task tools |
-| `opencode_agent` | This entry plus [`opencode_sessions.yaml`](../opencode_sessions.yaml) and a sandbox provider | Experimental; OpenCode 1.17.11, initial images and text, one activation |
+| `opencode_agent` | Default; this entry includes [`opencode_sessions.yaml`](../opencode_sessions.yaml) | Experimental; OpenCode 1.17.11, initial images and text, one activation |
 
 The OpenCode session path uses configured sampling defaults or request overrides
 and supports both evaluation and training capture. Shared media handling embeds

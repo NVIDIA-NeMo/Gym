@@ -9,11 +9,10 @@ used independently of OpenCode:
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
-to `simple_agent` with no external task tools. For OpenCode evaluation, use the
-provider-backed recipes below and configure the model and sandbox provider
-separately. Each recipe composes its catalog with
-[`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs inside the
-sandbox through Gym's shared agent-session lifecycle.
+to `opencode_agent`. Configure the model and sandbox provider separately. Each
+catalog includes [`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs
+inside the sandbox through Gym's shared agent-session lifecycle. The `opencode.yaml`
+recipes remain aliases for these defaults.
 
 | Recipe | Network policy | WebFetch / WebSearch |
 | --- | --- | --- |
@@ -40,6 +39,27 @@ Resume historical runs with their recorded Gym revision and configuration.
 ## Run configuration
 
 Supply a policy model using Gym's [model configuration guide](../../fern/versions/latest/pages/model-server/index.mdx).
+Pass the deployment configuration to both `gym eval prepare` and `gym eval run`
+with `--config run.yaml`: preparation also validates the selected agent's configuration.
+For example, `run.yaml` can compose the OpenAI model adapter and set the required
+model and sandbox image:
+
+```yaml
+config_paths:
+- responses_api_models/openai_model/configs/openai_model.yaml
+policy_model_name: <vision-model-id>
+policy_base_url: ${oc.env:POLICY_BASE_URL}
+policy_api_key: ${oc.env:POLICY_API_KEY}
+visual_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_config:
+        image: <image-with-visual-tools-and-offline-opencode-assets>
+```
+
+Supply the model adapter's endpoint and credentials, and the OpenSandbox
+provider's `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`, through the runtime
+environment. See the agent session setup linked above for image requirements.
 For judged tasks, explicitly configure the shared resources-server instance:
 
 ```yaml
