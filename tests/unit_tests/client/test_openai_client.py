@@ -63,6 +63,38 @@ class TestOpenAIUtils:
         logged = "Request kwargs:" in capsys.readouterr().out
         assert logged is debug_enabled
 
+    @pytest.mark.parametrize("base_url", ["https://example.com", "https://example.com/v1"])
+    async def test_generate_uses_server_root_and_preserves_token_metadata(self, monkeypatch, base_url: str) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url=base_url)
+        response = SimpleNamespace(ok=True)
+        payload = {"output_ids": [11], "meta_info": {"output_token_logprobs": [[-0.5, 11, "a"]]}}
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(openai_client_module, "get_response_json", AsyncMock(return_value=payload))
+
+        result = await client.create_generate(input_ids=[3], return_logprob=True)
+
+        assert result == payload
+        request.assert_awaited_once_with(
+            method="POST", url="https://example.com/generate", json={"input_ids": [3], "return_logprob": True}
+        )
+
+    async def test_generate_propagates_endpoint_errors(self, monkeypatch) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = SimpleNamespace(ok=False)
+        error = ClientResponseError(request_info=None, history=(), status=500, message="context length exceeded")
+        monkeypatch.setattr(client, "_request", AsyncMock(return_value=response))
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock(side_effect=error))
+        read_json = AsyncMock()
+        monkeypatch.setattr(openai_client_module, "get_response_json", read_json)
+
+        with pytest.raises(ClientResponseError) as raised:
+            await client.create_generate(input_ids=[3], return_logprob=True)
+
+        assert raised.value is error
+        read_json.assert_not_awaited()
+
     async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         response = SimpleNamespace(ok=True)

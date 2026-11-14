@@ -787,6 +787,15 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await self._read_response_json(response)
 
+    async def create_generate(self, **kwargs: Any) -> Dict[str, Any]:
+        """Post generation parameters to SGLang's ``/generate`` endpoint."""
+        base_url = self.base_url.removesuffix("/v1")
+        request_kwargs = dict(url=f"{base_url}/generate", json=kwargs)
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await self._read_response_json(response)
+
     async def create_embeddings(self, **kwargs):
         """POST ``{base_url}/embeddings`` with ``kwargs`` as the JSON body and return the parsed response dict."""
         request_kwargs = dict(
