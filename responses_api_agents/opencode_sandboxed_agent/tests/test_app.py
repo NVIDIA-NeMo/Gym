@@ -331,6 +331,46 @@ class TestOpenCodeSandboxedAgent:
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 
+    async def test_data_home_in_tmp_sets_xdg_for_run_and_session_commands(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        config = self._create_config().model_copy(update={"opencode_data_home_in_tmp": True})
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+            ]
+        )
+        sandbox_mock.download = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex="abc"))
+        )
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: "my session"},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        run_call, session_list_call, export_call = sandbox_mock.exec.await_args_list[:3]
+        assert "XDG_DATA_HOME=/tmp/nemo-gym-opencode-abc" in run_call.kwargs["command"]
+        # the session list/export must read the same data dir the run wrote to
+        assert session_list_call.kwargs["env"] == {"XDG_DATA_HOME": "/tmp/nemo-gym-opencode-abc"}
+        assert export_call.kwargs["env"] == {"XDG_DATA_HOME": "/tmp/nemo-gym-opencode-abc"}
+
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(
             config=self._create_config(),

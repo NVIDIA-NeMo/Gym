@@ -84,7 +84,9 @@ def test_task_image_registry_template_lowercases_name(tmp_path: Path) -> None:
     image = task_image(task, registry_template="my-registry.example.com/org/{name}:1.0")
 
     assert image == "my-registry.example.com/org/mixedcase_task-1:1.0"
-    # The default (upstream) registry is left untouched by this - task.name itself is unaffected.
+    # The default (upstream) registry lowercases too (upstream's "more-Itertools" is published as more-itertools);
+    # task.name itself is unaffected.
+    assert task_image(task) == "ghcr.io/multimodal-art-projection/nl2repobench/mixedcase_task-1:1.0"
     assert task.name == "MixedCase_Task-1"
 
 

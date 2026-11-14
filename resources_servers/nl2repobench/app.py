@@ -229,6 +229,94 @@ for b in glob.glob("/usr/local/bin/*"):
 print("workspace-install scrub removed", removed)
 PYEOF"""
 
+# no_internet_preinstalled + scrub_target_installs: remove the reference project ITSELF from the agent sandbox. An audit of
+# all 104 upstream images (2026-11-02) found the real implementation in 13 of them outside what the scrubs above reach,
+# and agents copied it into /workspace (paillier, pytorch-grad-cam, pytz, asteval all scored 1.0 that way):
+#   - pip installs from a local checkout, under a distribution name that is not the task name (paillier -> phe,
+#     pytorch-grad-cam -> grad_cam). Every such target install records direct_url.json {"url": "file:///<checkout>"};
+#     real dependencies come from an index and have no file:// URL (scikit-learn in the sklearn-pandas image does not).
+#   - `setup.py install` eggs named after the target, imported via easy-install.pth (pytz-2025.2-py3.10.egg).
+#   - the checkout itself left at the root (/project in asteval, /app in paillier, /jinja with the held-out tests).
+# Not reachable this way: targets vendored inside pip/setuptools (six, tenacity, typing_extensions, more_itertools);
+# deleting those breaks pip, so they need excluding from a clean score instead.
+# NL2REPO_SCRUB_PREFIX re-roots every path, for the unit tests only.
+_TARGET_INSTALL_SCRUB_COMMAND = r"""python3 - <<'PYEOF'
+import glob, json, os, re, shutil
+P = os.environ.get("NL2REPO_SCRUB_PREFIX", "")
+IDENTS = set("__IDENTS__".split())
+norm = lambda s: re.sub(r"[-_.]", "", s.lower())
+# Never deleted as a "checkout", whatever a direct_url.json says.
+KEEP = {"/", "/usr", "/usr/local", "/usr/lib", "/opt", "/tmp", "/root", "/home", "/bin", "/sbin", "/lib", "/lib64",
+        "/etc", "/var", "/srv", "/mnt", "/media", "/proc", "/sys", "/dev", "/boot", "/run", "/workspace"}
+removed = []
+
+def rm(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.lexists(path):
+        os.remove(path)
+    else:
+        return
+    removed.append(path[len(P):] or "/")
+
+roots = set(glob.glob(P + "/usr/local/lib/python3*/site-packages") + glob.glob(P + "/usr/lib/python3*/dist-packages")
+            + glob.glob(P + "/usr/local/lib/python3*/dist-packages") + glob.glob(P + "/usr/local/venv/lib/python3*/site-packages")
+            + glob.glob(P + "/openhands/micromamba/envs/*/lib/python3*/site-packages"))
+checkouts = {"/project"}
+for root in roots:
+    for di in glob.glob(root + "/*.dist-info"):
+        try:
+            url = json.load(open(di + "/direct_url.json")).get("url", "")
+        except (OSError, ValueError):
+            continue
+        if not url.startswith("file://"):
+            continue
+        checkouts.add(os.path.normpath(url[len("file://"):] or "/"))
+        tops = set()
+        if os.path.exists(di + "/RECORD"):
+            for line in open(di + "/RECORD"):
+                rel = line.split(",")[0]
+                path = os.path.normpath(os.path.join(root, rel))
+                if not path.startswith(di) and os.path.isfile(path):
+                    rm(path)
+                if not rel.startswith(".."):
+                    tops.add(os.path.join(root, rel.split("/")[0]))
+        for top in tops:  # package dirs the RECORD emptied, typically left holding only __pycache__
+            if os.path.isdir(top) and not any(f.endswith(".py") for _, _, fs in os.walk(top) for f in fs):
+                rm(top)
+        rm(di)
+    for egg in glob.glob(root + "/*.egg"):
+        if norm(re.sub(r"-\d.*$", "", os.path.basename(egg))) in IDENTS:
+            rm(egg)
+    # Target-named package dirs left with no code (only __pycache__/*.pyc, or nothing) after a RECORD-driven scrub
+    # (_WORKSPACE_INSTALL_SCRUB_COMMAND empties them by name but keeps the dir, so `import <target>` still succeeds
+    # as an empty namespace package). Dirs with any other file (.py, .so, data) are left alone.
+    for d in glob.glob(root + "/*/"):
+        d = d.rstrip("/")
+        if norm(os.path.basename(d)) in IDENTS and all(
+            f.endswith(".pyc") for _, _, fs in os.walk(d) for f in fs
+        ):
+            rm(d)
+    pth = root + "/easy-install.pth"
+    if os.path.isfile(pth):
+        lines = open(pth).read().splitlines(True)
+        keep = [l for l in lines if norm(re.sub(r"-\d.*$", "", os.path.basename(l.strip()))) not in IDENTS]
+        if keep != lines:
+            open(pth, "w").writelines(keep)
+            removed.append(pth[len(P):])
+# Root-level directories named after the target that hold a project (pyproject/setup files or tests).
+for entry in os.listdir(P + "/"):
+    full = "/" + entry
+    if norm(entry) in IDENTS and os.path.isdir(P + full) and any(
+        os.path.exists(P + full + "/" + m) for m in ("pyproject.toml", "setup.py", "setup.cfg", "tests", "test")
+    ):
+        checkouts.add(full)
+for d in sorted(checkouts):
+    if d not in KEEP and not d.startswith(("/usr/", "/proc/", "/sys/", "/workspace")):
+        rm(P + d)
+print("target-install scrub removed", len(removed), " ".join(removed[:40]))
+PYEOF"""
+
 # Timeout for the agent-side workspace collection tar command.
 WORKSPACE_COLLECT_TIMEOUT_S = 300.0
 # Per-command timeout for install/test commands run in the fresh verifier sandbox.
@@ -367,6 +455,10 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # under /workspace with a legacy `setup.py develop` / egg-link or editable install, e.g. task images built from the finished reference repo),
     # their console-script stubs, and pip caches. Off by default so existing eval behavior is byte-identical. Added 2026-10-24.
     scrub_workspace_installs: bool = False
+    # no_internet_preinstalled only: also remove the reference project itself - pip installs from a local file:// checkout,
+    # target-named eggs, and the checkout left at the root (/project, /app, /<task>). See _TARGET_INSTALL_SCRUB_COMMAND.
+    # Off by default so existing eval behavior is byte-identical. Added 2026-11-02.
+    scrub_target_installs: bool = False
     # no_internet_preinstalled only: grade in verify_image_override instead of the agent's task image. Needed when the task
     # image ships the reference repo under /workspace (the verifier extracts the agent workspace over /workspace without
     # wiping it). Off by default. Added 2026-10-24.
@@ -746,6 +838,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         raise RuntimeError(
                             f"Failed to scrub /workspace installs in agent sandbox for {task_id(task)!r}: "
                             f"{ws_scrub.stderr or ws_scrub.stdout or '(no output)'}"
+                        )
+                if self.config.scrub_target_installs:
+                    target_scrub = await sandbox.exec(
+                        command=_TARGET_INSTALL_SCRUB_COMMAND.replace(
+                            "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
+                        ),
+                        cwd="/",
+                        timeout_s=120,
+                    )
+                    if target_scrub.return_code != 0:
+                        raise RuntimeError(
+                            f"Failed to scrub the reference project's installs in agent sandbox for {task_id(task)!r}: "
+                            f"{target_scrub.stderr or target_scrub.stdout or '(no output)'}"
                         )
             elif mode == "block_target":
                 await self._install_pip_git_guard(sandbox, task)

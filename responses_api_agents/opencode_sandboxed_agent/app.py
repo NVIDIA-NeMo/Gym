@@ -398,6 +398,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
     opencode_model_call_timeout: Optional[int] = None
+    # Keep OpenCode's data dir (XDG_DATA_HOME) under /tmp even when observations are off. For task images that run as a
+    # user without a writable home (NL2RepoBench more-itertools runs as `appuser`), where the default $HOME/.local/share
+    # fails with EACCES before the agent's first turn. Off by default: unchanged command line for everyone else.
+    opencode_data_home_in_tmp: bool = False
 
     # Sandbox config
     sandbox_provider: str
@@ -713,7 +717,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         xdg_home_str = ""
         remote_data_home = None
-        if collect_observations:
+        # Observations read OpenCode's session database, so it goes to a known /tmp path; opencode_data_home_in_tmp does
+        # the same for images whose user has no writable home (see the config field).
+        if collect_observations or self.config.opencode_data_home_in_tmp:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
 
