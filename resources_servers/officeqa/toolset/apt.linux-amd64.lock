@@ -1,0 +1,15 @@
+tesseract-ocr=5.5.0-1+b1
+tesseract-ocr-eng=1:4.1.0-2
+poppler-utils=25.03.0-5+deb13u4
+ghostscript=10.05.1~dfsg-1+deb13u3
+libglib2.0-0t64=2.84.4-3~deb13u5
+ripgrep=14.1.1-1+b4
+imagemagick=8:7.1.1.43+dfsg1-1+deb13u12
+qpdf=12.2.0-1
+pdfgrep=2.2.0-0.1+b2
+curl=8.14.1-2+deb13u7
+gawk=1:5.2.1-2+b1
+bash=5.2.37-2+b10
+file=1:5.46-5
+ca-certificates=20250419+deb13u1
+fonts-dejavu-core=2.37-8

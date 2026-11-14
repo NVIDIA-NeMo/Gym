@@ -29,6 +29,8 @@ VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
+# True while handling a request whose rollout skips token capture; see ``skips_token_capture``.
+_SKIP_TOKEN_CAPTURE: ContextVar[bool] = ContextVar("nemo_gym_skip_token_capture", default=False)
 _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
 _VERIFIER_MODEL_REQUESTS: ContextVar[Optional[list[str]]] = ContextVar(
     "nemo_gym_verifier_model_requests", default=None
@@ -120,6 +122,18 @@ def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
 
 
+def current_session_key() -> Optional[str]:
+    """The key an upstream router or endpoint selection uses to keep one conversation on one replica.
+
+    None outside a rollout. A session is a rollout attempt: the key is the capture key (`<rollout id>[-a<N>]`),
+    so a retry attempt gets its own session, and every agent that makes model calls inside the same attempt
+    shares one. The outbound session header and the vLLM model server's endpoint selection both read this
+    function, so they agree on what a session is. When a model call can name its agent instance, this is the
+    one place that has to learn it.
+    """
+    return _ROLLOUT_ID.get()
+
+
 def current_episode_id() -> Optional[EpisodeId]:
     """Return the logical rollout and attempt carried by the current capture key."""
     capture_key = _ROLLOUT_ID.get()
@@ -133,6 +147,62 @@ def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
         yield
     finally:
         _ROLLOUT_ID.reset(token)
+
+
+def skips_token_capture(body: BaseModel | Mapping[str, Any] | None) -> bool:
+    """Return whether a run request or row skips token capture for its rollout.
+
+    A training framework sets ``_ng_skip_token_capture: true`` on a rollout it does not train on, such as a validation
+    rollout, so none of the rollout's model calls is captured. ``false``, ``null`` or no value leaves capture to the
+    run's ``token_id_capture`` block: a rollout can turn capture off, never on.
+    """
+    # Imported here because global_config imports feature modules that import the episode identity.
+    from nemo_gym.config.global_config import (
+        ROLLOUT_ID_KEY_NAME,
+        ROLLOUT_INDEX_KEY_NAME,
+        SKIP_TOKEN_CAPTURE_KEY_NAME,
+        TASK_INDEX_KEY_NAME,
+    )
+
+    if isinstance(body, Mapping):
+        value = body.get(SKIP_TOKEN_CAPTURE_KEY_NAME)
+    elif isinstance(body, BaseModel):
+        # BaseRunRequest declares the key as ``skip_token_capture``; other models may keep it as an extra field.
+        value = getattr(body, "skip_token_capture", None)
+        if value is None:
+            value = (body.model_extra or {}).get(SKIP_TOKEN_CAPTURE_KEY_NAME)
+    else:
+        return False
+    # ``null`` counts as unset, as for ``_ng_rollout_id``: a table that sets the column on some rows writes it on the
+    # others.
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        row = ""
+        if isinstance(body, Mapping):
+            identity = {
+                key: body[key]
+                for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ROLLOUT_ID_KEY_NAME)
+                if body.get(key) is not None
+            }
+            row = f" (row {identity})" if identity else ""
+        raise ValueError(f"{SKIP_TOKEN_CAPTURE_KEY_NAME} must be true or false{row}; got {value!r}")
+    return value
+
+
+def current_rollout_skips_token_capture() -> bool:
+    """Return ``True`` while handling a request whose rollout skips token capture."""
+    return _SKIP_TOKEN_CAPTURE.get()
+
+
+@contextmanager
+def skip_token_capture_context(skip: bool) -> Iterator[None]:
+    """Skip token capture for the model calls made inside the block when ``skip`` is ``True``."""
+    token = _SKIP_TOKEN_CAPTURE.set(skip)
+    try:
+        yield
+    finally:
+        _SKIP_TOKEN_CAPTURE.reset(token)
 
 
 def current_verifier_invocation_id() -> Optional[str]:

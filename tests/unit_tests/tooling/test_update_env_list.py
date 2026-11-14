@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Test catalog metadata and README generation through its pre-commit hook."""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import scripts.update_env_list as update_env_list
+import yaml
 from scripts.update_env_list import visit_agent_datasets
 
 
@@ -112,3 +120,60 @@ desktop_agent:
     assert server.config_metadata.description == "Desktop benchmark"
     assert server.config_metadata.value == "GUI evaluation"
     assert server.config_metadata.types == ["validation"]
+
+
+def _prepare_readme_hook_repository(directory: Path) -> None:
+    """Create a catalog large enough to exercise pre-commit filename batching."""
+    root = Path(__file__).resolve().parents[3]
+    configuration = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
+    hook = next(h for repo in configuration["repos"] for h in repo["hooks"] if h["id"] == "update-readme-table")
+    runner = directory / "generate_readme.py"
+    runner.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(root)!r})\n"
+        "from scripts.update_env_list import main\n"
+        "with Path('calls.jsonl').open('a') as log:\n"
+        "    print(json.dumps(sys.argv[1:]), file=log)\n"
+        "main()\n"
+    )
+    hook.update(language="system", entry=shlex.join([sys.executable, str(runner)]))
+    hook.pop("additional_dependencies", None)
+    (directory / ".pre-commit-config.yaml").write_text(yaml.safe_dump({"repos": [{"repo": "local", "hooks": [hook]}]}))
+    (directory / "responses_api_agents").mkdir()
+    configs = directory / "resources_servers" / "hook_example" / "configs"
+    configs.mkdir(parents=True)
+    for number in range(128):
+        (configs / f"example_{number}.yaml").write_text(
+            yaml.safe_dump(
+                {"hook_example": {"resources_servers": {"hook_example": {"domain": "math"}}}}
+                | _agent_config({"name": "train", "type": "train", "license": "Apache 2.0"})
+            )
+        )
+    for arguments in (["init", "--quiet"], ["add", "."]):
+        subprocess.run(["git", *arguments], cwd=directory, check=True, capture_output=True, timeout=30)
+
+
+def test_readme_hook_generates_once_without_filenames_and_is_idempotent(tmp_path: Path) -> None:
+    """Run the configured hook twice and check dispatch, generated content, and stability."""
+    readme = tmp_path / "README.md"
+    prefix = "# Catalog\n\n<!-- START_TRAINING_SERVERS_TABLE -->\n"
+    suffix = "<!-- END_TRAINING_SERVERS_TABLE -->\n\nFooter stays here.\n"
+    readme.write_text(prefix + "outdated table\n" + suffix)
+    _prepare_readme_hook_repository(tmp_path)
+    command = [sys.executable, "-m", "pre_commit", "run", "update-readme-table", "--all-files", "--color=never"]
+    environment = {**os.environ, "PRE_COMMIT_HOME": str(tmp_path / "hook-cache")}
+    first = subprocess.run(command, cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=60)
+    assert first.returncode == 1, first.stdout + first.stderr
+    assert "files were modified by this hook" in first.stdout
+    generated = readme.read_text()
+    assert generated.startswith(prefix)
+    assert generated.endswith(suffix)
+    assert "Hook Example" in generated
+    assert "outdated table" not in generated
+    assert [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()] == [[]]
+
+    second = subprocess.run(command, cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=60)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert readme.read_text() == generated
+    assert [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()] == [[], []]

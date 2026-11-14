@@ -46,12 +46,12 @@ Before moving on, confirm each of these in the code:
 - [ ] A seed the adapter cannot serve (a sandbox it cannot use, a required tool grant it never consumes) raises `AgentSeedRejectedError`; optional grants it does not use are skipped.
 - [ ] If the adapter supports MCP grants, it wires the episode URL and headers into the harness and enforces required-server readiness before inference. Follow [MCP grant integration](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#mcp-grant-integration), including runtimes that silently skip failed plugins. MCP access and sandbox ownership are independent decisions.
 - [ ] Close returns an `AgentObservationBundle`, with gaps for evidence the harness cannot report, even when activation failed.
-- [ ] Agent sessions run with `num_workers: 1`.
+- [ ] All agent-session state lives in the session, so several workers are safe; anything else overrides `multiple_workers_unsupported_reason()`.
 - [ ] A sandbox failure never falls back to running on the host.
 - [ ] An adapter that creates its own sandbox exposes `network_access` (`inherit`, `model_only`, `model_and_tools`) and passes the spec through `restrict_sandbox_network` before creating it. Settings it cannot enforce raise `AgentSeedRejectedError` (a final 422), and a restricted sandbox gets its runtime by upload or from a preinstalled `sandbox_runtime_dir`. See [Restrict the egress of an owned sandbox](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#restrict-the-egress-of-an-owned-sandbox).
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
 - [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
-- [ ] A sandbox runner that needs only the standard library is uploaded as `RUNNER_FILE` from `nemo_gym.agents.utils.sandbox_session` and launched by a `SandboxCommand` with `stdlib_runner=True`, as `codex_agent` does. It then runs under a neutral process name with no `.py` in its command line, so a `pkill python3` or `pkill -f '\.py'` in the task cannot stop it.
+- [ ] A CLI harness launches through the shared `harness_runner.sh` (`HARNESS_RUNNER_FILE` and `HARNESS_RUNNER_SCRIPT`) with `SandboxCommand(argv=...)`. A Python SDK shim uses an explicit interpreter from an adapter-managed runtime, such as `SandboxPythonRuntime`, rather than the task image's Python. See [Code layout](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#code-layout).
 - [ ] Only an error that ends the harness's run fails the response, by the harness's own rule at the pinned version. See [Convert outputs without silent loss](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#convert-outputs-without-silent-loss).
 - [ ] Usage is reported only when every model call has a usage record, with call references collected from every record the harness writes. Otherwise usage stays unknown, with a gap.
 
@@ -101,7 +101,7 @@ Conformance is a merge check from the Observability level up (Step 7). At the Ev
 - **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. The registry key is the adapter's directory name without `_agent`. The probes give the adapter its own local sandbox rather than a borrowed one. Run on Linux with a new output directory:
 
   ```bash
-  python scripts/run_harness_conformance.py --harness <registry-key> --output <new-dir>
+  python -m scripts.run_harness_conformance --harness <registry-key> --output <new-dir>
   ```
 
   Sort each failure by where it comes from, and change only that side:

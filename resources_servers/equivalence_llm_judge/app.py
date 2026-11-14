@@ -26,18 +26,17 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from statistics import fmean
 from typing import Any, ClassVar, Optional
-from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -47,7 +46,9 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture, call_judge, record_parsed_judge_verdict
+from resources_servers.equivalence_llm_judge.slice_metrics import compute_slice_metrics
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 
@@ -57,19 +58,34 @@ JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
 SLICES_PREFIX = "slices/"
 
 
+_LABEL_MARKUP = re.compile(r"[*_`]")
+_LABEL_COLON_SPACING = re.compile(r"\s*:\s*")
+
+
+def _fold_for_label_match(text: str) -> str:
+    """Fold text for a tolerant label search.
+
+    Casefold, drop bold, italic and code marks, and normalise the spacing around colons, so that
+    ``Judgement: Yes``, ``Judgement: **no**`` and ``**Judgement:** no`` fold to the same ``judgement: no``
+    as the configured label.
+    """
+    return _LABEL_COLON_SPACING.sub(": ", _LABEL_MARKUP.sub("", text.casefold()))
+
+
 def _match_verdict_labels(
     text: str, equal_label: str, not_equal_label: str, case_insensitive: bool = False
 ) -> list[str]:
     """Return non-overlapping verdict labels in text order.
 
     Consume each match so INCORRECT does not also count as CORRECT. With ``case_insensitive`` the
-    search runs on the ``str.casefold`` forms of the text and the labels, so "Judgement: Yes" matches
-    the configured "Judgement: yes"; the returned entries are always the configured labels as written.
+    search runs on the folded forms of the text and the labels (see ``_fold_for_label_match``), so
+    "Judgement: Yes" and "Judgement: **yes**" match the configured "Judgement: yes"; the returned entries
+    are always the configured labels as written.
     """
     labels = (equal_label, not_equal_label)
     if case_insensitive:
-        text = text.casefold()
-        needles = tuple(label.casefold() for label in labels)
+        text = _fold_for_label_match(text)
+        needles = tuple(_fold_for_label_match(label) for label in labels)
     else:
         needles = labels
     eq_needle, neq_needle = needles
@@ -125,38 +141,6 @@ def _parse_judge_verdict(
     return matches[-1] if matches else None, issues
 
 
-def _compute_slice_metrics(tasks: list[list[dict[str, Any]]], fields: list[str]) -> dict[str, Any]:
-    """Accuracy per label of each configured row field, e.g. HLE-Diamond's reasoning/knowledge partition.
-
-    Emits ``slices/<field>/<label>/{question_count,rollout_count,mean/reward}`` plus the number of
-    rollouts whose label is missing. Masked rollouts never reach here, so slices share the headline's
-    denominator semantics. Empty ``fields`` emits nothing, and a run in which no rollout was judged
-    emits no metrics at all (``compute_metrics`` returns early, as it did before this hook).
-    """
-    metrics: dict[str, Any] = {}
-    for field in fields:
-        rows_by_label: dict[str, list[dict[str, Any]]] = {}
-        questions_by_label: Counter[str] = Counter()
-        missing = 0
-        for task in tasks:
-            labels_in_task: set[str] = set()
-            for rollout in task:
-                label = rollout.get(field)
-                if label is None or (isinstance(label, str) and not label.strip()):
-                    missing += 1
-                    continue
-                rows_by_label.setdefault(str(label), []).append(rollout)
-                labels_in_task.add(str(label))
-            questions_by_label.update(labels_in_task)
-        metrics[f"{SLICES_PREFIX}{field}/missing_label_rollouts"] = missing
-        for label, rows in sorted(rows_by_label.items()):
-            prefix = f"{SLICES_PREFIX}{field}/{quote(label, safe='')}/"
-            metrics[prefix + "question_count"] = questions_by_label[label]
-            metrics[prefix + "rollout_count"] = len(rows)
-            metrics[prefix + "mean/reward"] = fmean(float(rollout.get("reward") or 0.0) for rollout in rows)
-    return metrics
-
-
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the LLM judge server.
 
@@ -182,10 +166,12 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
-    # Match the two labels case-insensitively (str.casefold) when parsing the verdict. Off by default,
-    # which keeps the byte-exact match every existing config was measured with. HLE-Diamond turns it on:
-    # upstream's judge reads a structured `correct: yes|no` field whose case cannot vary, whereas here a
-    # judge that writes "Judgement: Yes" would otherwise yield no_verdict and a reward of 0.
+    # Match the two labels tolerantly when parsing the verdict: case-insensitive (str.casefold), ignoring
+    # bold, italic and code marks, and with any spacing around colons, so a judge that writes
+    # "Judgement: Yes", "Judgement: **no**" or "**Judgement:** yes" is read like "Judgement: yes".
+    # Off by default, which keeps the byte-exact match every existing config was measured with. The HLE
+    # configs turn it on: upstream's judge reads a structured `correct: yes|no` field whose form cannot
+    # vary, whereas here such replies would otherwise yield no_verdict and a reward of 0.
     judge_labels_case_insensitive: bool = False
     # Optional regex to extract the question from the last user message.
     # If provided and a match is found, the first non-empty capture group is used;
@@ -207,10 +193,12 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
 
-    # Row fields to slice accuracy by (e.g. ["partition"] for HLE-Diamond). Each configured field adds
-    # slices/<field>/<label>/{question_count,rollout_count,mean/reward} to agent_metrics and promotes the
-    # slice means to key_metrics. Empty by default: metrics are unchanged.
+    # Row fields to slice by (e.g. ["partition"]). Each slice adds counts, reward/token means,
+    # and repeat intervals under slices/<field>/<label>/; reward means also appear in key_metrics.
+    # Empty by default: metrics are unchanged.
     report_slice_fields: list[str] = Field(default_factory=list)
+    # Optional pairs of row fields, e.g. [["modality", "category"]].
+    report_slice_cross_fields: list[tuple[str, str]] = Field(default_factory=list)
 
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
@@ -243,10 +231,10 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
         if (
             self.judge_labels_case_insensitive
             and self.judge_equal_label != self.judge_not_equal_label
-            and self.judge_equal_label.casefold() == self.judge_not_equal_label.casefold()
+            and _fold_for_label_match(self.judge_equal_label) == _fold_for_label_match(self.judge_not_equal_label)
         ):
             raise ValueError(
-                "judge_equal_label and judge_not_equal_label differ only in case, so "
+                "judge_equal_label and judge_not_equal_label differ only in case or markup, so "
                 "judge_labels_case_insensitive=true could never tell the verdicts apart"
             )
         return self
@@ -689,6 +677,18 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             record_parsed_judge_verdict()
         return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
 
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        if not (self.config.report_slice_fields or self.config.report_slice_cross_fields):
+            return await super().aggregate_metrics(body)
+        # Slice aggregation is CPU work; keep request handling responsive.
+        return await asyncio.to_thread(
+            compute_aggregate_metrics,
+            body.verify_responses,
+            compute_metrics_fn=self.compute_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
+            get_key_metrics_fn=self.get_key_metrics,
+        )
+
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         """Aggregate parsing issues, recovering missing diagnostics from saved responses.
 
@@ -737,10 +737,10 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         if not judged:
             return {}
-        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
+        metrics = compute_slice_metrics(tasks, self.config.report_slice_fields, self.config.report_slice_cross_fields)
+        metrics[JUDGEMENT_PARSING_ISSUE_RATE] = rollouts_with_issues / judged
         for kind, count in sorted(kind_counts.items()):
             metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
-        metrics.update(_compute_slice_metrics(tasks, self.config.report_slice_fields))
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -764,3 +764,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     LLMJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LLMJudgeResourcesServer.run_webserver()  # noqa: F401

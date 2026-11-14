@@ -18,7 +18,7 @@ from nemo_gym.cli import eval as eval_cli
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _run, _settle
+from tests.unit_tests.eval.test_rejudge_saved_judge_failures import ANSWER, _run, _settle
 
 
 @pytest.fixture
@@ -129,3 +129,105 @@ def test_the_e2e_entry_point_uses_the_same_ordering_and_the_custom_driver_branch
     built_in = e2e[driver_call : e2e.index("collection_completed = True", driver_call)]
     assert "_collect_and_rejudge(rch, rollout_collection_config, global_config_dict, output_fpath)" in built_in
     assert "_collect_and_rejudge(rch, config, " in inspect.getsource(eval_cli.collect_rollouts)
+
+
+def test_a_rejected_run_that_the_pass_completes_ends_with_its_aggregate_and_a_settled_batch_status(
+    tmp_path, monkeypatch
+) -> None:
+    """The real collector rejects a strict run and removes its aggregate; the pass completes it and the aggregate returns."""
+    import orjson
+
+    import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.rollouts.batch_status import observe_materialized_rows
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+    from tests.unit_tests.rollouts.test_rollout_collection import (
+        AsyncMock,
+        FakeResponse,
+        compute_aggregate_metrics,
+        install_fake_server_client,
+    )
+
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
+    input_fpath = tmp_path / "input.jsonl"
+    input_fpath.write_text(
+        "".join(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    "agent_ref": {"name": "my_agent"},
+                    "x": i,
+                    "task_source": "src",
+                }
+            ).decode()
+            + "\n"
+            for i in range(2)
+        )
+    )
+    output = tmp_path / "rollouts.jsonl"
+    manifest_fpath = tmp_path / "batch_manifest.json"
+    run_config = {
+        "input_jsonl_fpath": str(input_fpath),
+        "output_jsonl_fpath": str(output),
+        "batch_manifest_fpath": str(manifest_fpath),
+        "route_failures_to_sidecar": True,
+        "disable_health_check": True,
+        "require_complete": True,
+    }
+    config = RolloutCollectionConfig(**run_config)
+    rows = collection.RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+    [(agent, observed)] = observe_materialized_rows(rows).items()
+    manifest_fpath.write_bytes(
+        orjson.dumps(
+            {
+                "schema_version": "1",
+                "members": {
+                    "bench": {
+                        "agent_name": agent,
+                        "task_sources": observed.task_sources,
+                        "dataset_sha256": observed.dataset_sha256,
+                        "expected_task_count": observed.task_count,
+                        "expected_rollout_count": observed.rollout_count,
+                        "repeat_policy": observed.repeat_policy.model_dump(),
+                        "resolved_recipe_sha256": "a" * 64,
+                        "metric_keys": ["mean/reward"],
+                    }
+                },
+            }
+        )
+    )
+    judge_down = {
+        "_ng_failure_id": "judge-0",
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": "judge_failed",
+        "_ng_failure_class": "judge_failed",
+        "response": ANSWER,
+    }
+
+    async def post(server_name, url_path, json, **kwargs):
+        if url_path == "/run":
+            return FakeResponse(200, judge_down if json["x"] == 0 else {"reward": 1.0, "response": {}})
+        return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    aggregate = aggregate_metrics_path_for(output)
+    aggregate.write_text("[]")  # an earlier segment's aggregate, which the rejected run removes
+
+    async def judge_answers(self, config):
+        failure = RolloutStore.read(output, import_legacy=False).failures()[0]
+        _settle(output, failure, 1.0)
+        # The pass starts from the rejected run: no score published, aggregation still pending.
+        assert not aggregate.exists()
+        pending = orjson.loads((tmp_path / "batch_status.json").read_bytes())
+        assert pending["members"][agent]["aggregation_status"] == "pending"
+
+    monkeypatch.setattr(rollout_reverification.RolloutReverificationHelper, "run_from_config", judge_answers)
+
+    eval_cli._collect_and_rejudge(collection.RolloutCollectionHelper(), config, run_config, output)
+
+    metrics = orjson.loads(aggregate.read_bytes())
+    assert metrics[0]["key_metrics"]["mean/reward"] == 1.0
+    status = orjson.loads((tmp_path / "batch_status.json").read_bytes())
+    assert status["members"][agent]["aggregation_status"] == "complete"
+    assert status["members"][agent]["completed_rollout_count"] == 2

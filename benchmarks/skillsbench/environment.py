@@ -2,11 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Install official SkillsBench skills into a prebuilt OpenSandbox task image."""
 
+from __future__ import annotations
+
 import json
 import os
+import time
+from typing import TYPE_CHECKING
 
-from harbor.models.task.config import NetworkMode, NetworkPolicy
 
+if TYPE_CHECKING:
+    from harbor.environments.base import ExecResult
+    from harbor.models.task.config import NetworkPolicy
+
+from benchmarks.skillsbench.observations import VERIFIER_EXECUTION_FILE, verifier_command
 from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import NemoGymSandboxEnvironment
 
 
@@ -24,7 +32,7 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
 
     def validate_network_policy_support(self, network_policy: NetworkPolicy | None = None) -> None:
         policy = network_policy or self.network_policy
-        if policy.network_mode == NetworkMode.NO_NETWORK and self._allow_unenforced_internet_isolation:
+        if policy.network_mode == "no-network" and self._allow_unenforced_internet_isolation:
             self.logger.warning("SkillsBench no-network task is running with unenforced isolation by explicit opt-in")
             return
         super().validate_network_policy_support(policy)
@@ -36,6 +44,32 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
         except BaseException:
             await self.stop(delete=True)
             raise
+
+    async def exec(self, command: str, *args, **kwargs) -> ExecResult:
+        # The agent executor wraps every action in its own shell. Only Harbor's
+        # direct verifier invocation matches this command, including redirection.
+        # Keep the witness on the host, outside downloaded sandbox log trees.
+        verifying = command == verifier_command()
+        if verifying:
+            witness = self.trial_paths.result_path.parent / VERIFIER_EXECUTION_FILE
+            witness.unlink(missing_ok=True)
+        started = time.time()
+        result = await super().exec(command, *args, **kwargs)
+        if verifying and result.return_code == -1:
+            await self.stop(delete=True)
+            raise RuntimeError("Verifier command outcome is unknown; remote termination is unconfirmed")
+        if verifying:
+            witness.write_text(
+                json.dumps(
+                    {
+                        "command": command,
+                        "return_code": result.return_code,
+                        "started_at": started,
+                        "finished_at": time.time(),
+                    }
+                )
+            )
+        return result
 
     async def _stage_skills(self) -> None:
         if self._skill_mode == "no-skill":

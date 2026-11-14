@@ -1466,7 +1466,7 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,
-        LONG_STEPS,
+        LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 1.0"),
         {"plan": "P", "build": "B"},
         default_episode_timeout_seconds=0.1,
         harness_setup_allowance_s=0,
@@ -1474,27 +1474,30 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
         sandbox_ready_timeout_s=1,
         image_pull_retries=0,
     )
-    # Two turns of 0.3 + 0.3 s once the sandbox is ready, and the seed's own bound before that (one attempt of
+    # Two turns of 1 + 1 s once the sandbox is ready, and the seed's own bound before that (one attempt of
     # the ready timeout plus the create grace): well above the run-wide default of 0.1 s.
     seed_bound = 1 + SEED_CREATE_GRACE_S
-    assert server._post_seed_budget_s(task) == pytest.approx(1.2)
+    assert server._post_seed_budget_s(task) == pytest.approx(4.0)
     assert server._seed_bound_s(task) == pytest.approx(seed_bound)
-    assert server._episode_bound_s(task) == pytest.approx(seed_bound + 1.2)
+    assert server._episode_bound_s(task) == pytest.approx(seed_bound + 4.0)
     # The nominal one-start allowance that sizes a sandbox lifetime within the default is unchanged.
-    assert server._task_budget_s(task) == pytest.approx(2.2)
+    assert server._task_budget_s(task) == pytest.approx(5.0)
     # The episode deadline (opened before the seed) and the sandbox lifetime follow the whole bound.
-    assert server._episode_budget_s(task) == pytest.approx(seed_bound + 1.2)
-    assert await server.episode_timeout_seconds(request_for(task)) == pytest.approx(seed_bound + 1.2)
+    assert server._episode_budget_s(task) == pytest.approx(seed_bound + 4.0)
+    # The lookup is bounded by the 0.1 s default and falls back to it when the snapshot is still copying (a slow
+    # runner), so snapshot the task first: this asserts the budget, not the copy speed.
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
+    assert await server.episode_timeout_seconds(request) == pytest.approx(seed_bound + 4.0)
     # A single-turn task keeps the run-wide cap.
     single_server, single_task, _, _ = make_server(
         tmp_path / "single", monkeypatch, default_episode_timeout_seconds=0.1
     )
     assert single_server._episode_budget_s(single_task) == 0.1
     assert await single_server.episode_timeout_seconds(request_for(single_task)) == 0.1
-    # The harness takes 0.2 s per turn: over the 0.1 s default on its own, and the two turns leave 0.8 s of their
-    # 1.2 s budget to the verifier runs and the filesystem work (round 32: 0.5 s turns left 0.2 s and failed on a
-    # loaded node), so both turns are scored. `test_the_task_deadline_ends_an_overrunning_turn` keeps the deadline
-    # firing on a turn that outruns the budget.
+    # Each 0.2 s turn exceeds the 0.1 s default on its own. Leave 3.6 s for verification and filesystem work
+    # on loaded CI runners: this tests the derived budget, not their speed. The separate
+    # `test_the_task_deadline_ends_an_overrunning_turn` still checks deadline enforcement.
     server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
     server.server_client.slow_seconds = 0.2
     with caplog.at_level("WARNING"):
@@ -1502,10 +1505,10 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
     assert (
-        f"hello: its 2 steps need up to 1s once the sandbox is ready (harness setup, setup.sh and healthcheck "
-        f"bounds, agent and verifier budgets, hooks and grace per step), 2s with one sandbox start and up to "
-        f"{seed_bound + 1.2:.0f}s with every image pull retry; default_episode_timeout_seconds=0 is below that "
-        f"bound, so the episode deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 1.2:.0f}s)"
+        f"hello: its 2 steps need up to 4s once the sandbox is ready (harness setup, setup.sh and healthcheck "
+        f"bounds, agent and verifier budgets, hooks and grace per step), 5s with one sandbox start and up to "
+        f"{seed_bound + 4.0:.0f}s with every image pull retry; default_episode_timeout_seconds=0 is below that "
+        f"bound, so the episode deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 4.0:.0f}s)"
     ) in caplog.text
     # The derived deadline is the task's own budget, not a blank cheque: `test_the_task_deadline_ends_an_overrunning_turn`
     # keeps the task deadline firing on a turn that runs past it.
@@ -1550,18 +1553,17 @@ async def test_a_task_lookup_slower_than_the_default_leaves_the_episode_the_defa
     assert await server.episode_timeout_seconds(request_for(task)) == pytest.approx(server._episode_bound_s(task))
 
 
-SLOW_SEED_STEPS = LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 0.5")
+SLOW_SEED_STEPS = LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 1.0")
 
 
 async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budget(tmp_path, monkeypatch):
     """Round 24 (G11 review): the derived deadline was `sandbox_ready_timeout_s` plus the post-seed budget and
     opens at the request, while the seed's own bounds are larger (the create grace, pull retries, a sidecar's
     start), so a seed longer than one ready timeout ate the final turns' budget and the episode died with the base
-    server's generic timeout, retried and never scored. The bound now covers the seed's own: a seed of 3.5 s on a
-    ready timeout of 1 s leaves two turns of 0.2 s their 2 s budget (round 32: the turns take 0.2 s, not 0.5 s;
-    round 36: the steps budget 0.5 s each for the agent and the verifier, not 0.3 s, so the two turns leave the
-    verifier runs and the filesystem work 1.6 s of headroom where 0.8 s expired on a loaded CI node, and the seed
-    is slower still, so the episode outlives the former bound by a margin)."""
+    server's generic timeout, retried and never scored. The bound now covers the seed's own: a seed of 5.5 s on a
+    ready timeout of 1 s leaves two turns of 0.2 s their 4 s budget. Each step budgets 1 s for the agent and 1 s
+    for the verifier, leaving the verifier runs and filesystem work 3.6 s of headroom on a loaded CI node. The
+    seed alone exceeds the former nominal bound of 5 s, so the larger turn budgets preserve the regression."""
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,
@@ -1573,10 +1575,14 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
         sandbox_ready_timeout_s=1,
         image_pull_retries=0,
     )
+    # Resolve the snapshot before the 0.1 s lookup deadline: this test exercises a slow sandbox seed,
+    # while the separate slow-lookup test covers falling back to the default episode budget.
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
     create = server._create_sandbox
 
     async def slow_create(task, workdir, *, episode_key=None):
-        await asyncio.sleep(3.5)
+        await asyncio.sleep(5.5)
         return await create(task, workdir, episode_key=episode_key)
 
     monkeypatch.setattr(server, "_create_sandbox", slow_create)
@@ -1584,14 +1590,14 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     server.server_client.slow_seconds = 0.2
     started = time.monotonic()
 
-    response = await server.run_request(request_for(task))
+    response = await server.run_request(request)
 
     elapsed = time.monotonic() - started
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
-    # The episode outlived the former bound (one ready timeout plus the turns, 3 s) because the seed alone took
-    # 3.5 s of it; the whole bound (`_episode_bound_s`) still has the turns' 2 s after the seed's 76 s.
-    assert elapsed >= 3.9 > server._task_budget_s(task) == pytest.approx(3.0)
+    # The episode outlived the former bound (one ready timeout plus the turns, 5 s) because the seed alone took
+    # 5.5 s of it; the whole bound (`_episode_bound_s`) still has the turns' 4 s after the seed's 76 s.
+    assert elapsed >= 5.9 > server._task_budget_s(task) == pytest.approx(5.0)
 
 
 async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_refused_naming_the_setting(

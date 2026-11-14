@@ -1,11 +1,11 @@
 name: automationbench
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
-integration_profile: custom-gym-agent-loop
+integration_profile: custom-gym-verifier
 domain: other
 description: AutomationBench enterprise workflows scored by guardrail-gated objective
-  completion.
+  completion, run with simple_agent sessions against the automationbench resources server.
 modality: text
 licensing: MIT
 authors:
@@ -16,7 +16,7 @@ reward:
   - 1.0
   higher_is_better: true
 determinism: unknown
-agent_server: verifiers_agent
+agent_server: simple_agent
 datasets:
 - name: example
   type: example
@@ -31,4 +31,4 @@ model_server: policy_model
 canonical_split: benchmark
 prompt_source: prepared
 lifecycle: active
-resources_server: null
+resources_server: automationbench

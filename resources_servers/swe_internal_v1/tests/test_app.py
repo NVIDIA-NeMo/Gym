@@ -199,7 +199,7 @@ class TestParseVerificationOutput:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -333,7 +333,7 @@ class TestServerWiring:
         assert fields["evaluation_timeout"].default == 1800
 
     def test_yaml_enables_anti_cheat_and_names_both_servers(self) -> None:
-        config = yaml.safe_load((SERVER_DIR / "configs" / "swe_internal_v1.yaml").read_text())
+        config = yaml.safe_load((SERVER_DIR / "configs" / "swe_internal_v1_legacy_agent.yaml").read_text())
         base = config["swe_internal_v1_resources_server"]["resources_servers"]["swe_internal_v1"]
         golden = config["swe_internal_v1_golden_patch_resources_server"]["resources_servers"]["swe_internal_v1"]
         assert base["apply_anti_cheating"] is True and base["is_verifying_golden_patch"] is False
@@ -382,6 +382,8 @@ class TestAgentNetworkPolicy:
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
         monkeypatch.setattr(agent_tools, "get_server_url", lambda name: model_url)
         server = SimpleNamespace(
+            _session_id_to_sandbox={},
+            _verifier_sandboxes={},
             _sandbox_files={},
             config=SimpleNamespace(
                 sandbox_config=sandbox_config or {},
@@ -394,7 +396,8 @@ class TestAgentNetworkPolicy:
         body = app.SweInternalV1InstanceRequest(
             instance_id="task-1", image_ref="img", run_script="run", parsing_script="parse"
         )
-        return await app.SweInternalV1ResourcesServer._create_sandbox(server, body, for_agent=for_agent)
+        session = {"session_id": "s"} if for_agent else {"verifier_session_id": "s"}
+        return await app.SweInternalV1ResourcesServer._create_sandbox(server, body, **session)
 
     async def test_off_by_default(self, monkeypatch) -> None:
         sandbox = await self._create(monkeypatch, enforce=False, for_agent=True)

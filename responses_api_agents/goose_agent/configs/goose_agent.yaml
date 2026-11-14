@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Goose borrows SandboxAccess from the Environment Server. The run configuration binds the
+# independent benchmark and agent; this config selects only the harness and model.
+goose_agent:
+  responses_api_agents:
+    goose_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      goose_version: 1.54.0
+      concurrency: 32
+      # Seconds per activation, enforced by the sandbox's process supervisor.
+      timeout: 3600
+      max_turns: 1000
+      # false disables Goose's summon extension (delegate/load), for a solo control.
+      delegate: true
+      # The served model's context window, for Goose's compaction (GOOSE_CONTEXT_LIMIT).
+      context_limit: null
+      system_prompt: null
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host

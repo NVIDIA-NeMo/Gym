@@ -137,6 +137,8 @@ token_id_capture:
 ```
 
 This requires a framework worker implementing Gym's capture protocol; stock vLLM alone is insufficient.
+For NeMo RL's engines behind a Dynamo frontend, set `external_staging_backend: dynamo_worker` instead; see
+[Token capture through Dynamo](/main/model-server/vllm#token-capture-through-dynamo).
 Keep the usual per-agent capture opt-in or `all_agents: true`. `rebuild_response: false` preserves
 ordinary rollout output for framework reconstruction instead of Gym's single-chain rebuilding.
 
@@ -178,6 +180,8 @@ staging using the internal `x-ng-capture-refused` response header. A ledger impl
 `refuse_call` settles that intent and retains its audit row, excluding it from the training
 manifest. This header is between the worker and Gym; harnesses neither send nor receive it.
 An error without a matching acknowledgement still leaves capture incomplete.
+A Dynamo frontend forwards only an error's status and message, so there the worker's acknowledgement ends the
+error message, and the model server moves it to this header.
 
 The model server also exposes `POST /ng-rollout/{rollout_id}/training-token-capture/context/measure`.
 This is a rollout-scoped model route, not a bearer-protected control endpoint.
@@ -346,6 +350,22 @@ policy_model:
     vllm_model:
       entrypoint: app.py
 ```
+
+### Trajectory schema selection
+
+The default trajectory schema is `"1.0"`. To retain qualified v2 tool timing, add:
+
+```yaml
+model_call_capture:
+  trajectory_schema_version: "2.0"
+```
+
+`observability_enabled` and `model_call_capture_dir` remain top-level settings as shown above.
+Direct callers can use `run_examples(..., trajectory_schema_version="2.0")`; an explicit argument
+wins over the configured version. Schema selection also applies with `enrich_results=False`:
+the default projects raw results to v1, while selecting v2 preserves producer evidence without
+upgrading legacy evidence or reading captures. Direct HTTP `/run` replies remain raw producer
+evidence; schema negotiation happens at collection or export.
 
 Model servers and `rollout_collection` must resolve `model_call_capture_dir` to the same location.
 For separate pods or nodes, mount that absolute path in every producer and the collector. Multiple
