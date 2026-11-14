@@ -138,7 +138,9 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config)
     assert len(configs) == 2
     with pytest.warns(DeprecationWarning, match="stripped legacy agent_ref"):
-        paths = TrainDataProcessor()._collate_samples_single_type(dataset["type"], configs, task_data_validation="off")
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            dataset["type"], configs, task_data_validation="off", output_dir=tmp_path / "prepared"
+        )
     materialized, flat = ([json.loads(line) for line in path.read_text().splitlines()] for path in paths)
     assert len(materialized) == len(flat) == 4
     assert materialized[0] == materialized[1]
@@ -302,7 +304,9 @@ def test_prompt_config_is_applied_before_materialization(tmp_path):
     configs = GlobalConfigDictParser().filter_for_server_instance_configs(
         OmegaConf.create(_resources_server("rs", [dataset]))
     )
-    (path,) = TrainDataProcessor()._collate_samples_single_type("benchmark", configs, task_data_validation="off")
+    (path,) = TrainDataProcessor()._collate_samples_single_type(
+        "benchmark", configs, task_data_validation="off", output_dir=tmp_path / "prepared"
+    )
     row = json.loads(path.read_text())
     assert row["task_id"] == {"taskset": "bench", "task_id": "i1"}
     assert row["task_input"]["responses_create_params"]["input"] == [
@@ -337,7 +341,9 @@ def test_collation_rejects_misplaced_fields_before_materialization(tmp_path, tas
         OmegaConf.create(_resources_server("resources", [dataset], implementation="code_gen"))
     )
     with pytest.raises(ValueError, match=r"wire reads from verifier_metadata.*unit_tests \(1 rows\)"):
-        TrainDataProcessor()._collate_samples_single_type("example", configs, task_data_validation="error")
+        TrainDataProcessor()._collate_samples_single_type(
+            "example", configs, task_data_validation="error", output_dir=tmp_path / "prepared"
+        )
 
 
 class CustomTaskInput(BaseModel):
@@ -361,7 +367,9 @@ def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
     metrics = processor._validate_samples_and_aggregate_metrics_single_dataset(configs[0].datasets[0])
     assert metrics.offending_example_idxs == []
     assert metrics.metrics.number_of_examples == 2
-    (path,) = processor._collate_samples_single_type("example", configs, task_data_validation="error")
+    (path,) = processor._collate_samples_single_type(
+        "example", configs, task_data_validation="error", output_dir=tmp_path / "prepared"
+    )
     prepared = [json.loads(line) for line in path.read_text().splitlines()]
     assert prepared == [{"task_id": {"taskset": "custom", "task_id": "0"}, "task_input": row}] * 2
     validator = TaskDataValidator("external_custom", TypeAdapter(CustomTaskInput), str(path))

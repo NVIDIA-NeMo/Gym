@@ -780,7 +780,10 @@ class TestHarborLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row({})])
         with pytest.raises(ValueError, match=r"(?s)against the `harbor` schema.*_ng_digest"):
             processor._collate_samples_single_type(
-                "validation", in_scope, task_data_validation=config.effective_task_data_validation
+                "validation",
+                in_scope,
+                task_data_validation=config.effective_task_data_validation,
+                output_dir=tmp_path / "prepared",
             )
 
     def test_materialized_row_passes(self, tmp_path, monkeypatch):
@@ -788,7 +791,10 @@ class TestHarborLayoutThroughTheProcessor:
             tmp_path, monkeypatch, [self._row({"_ng_digest": "a" * 64})]
         )
         paths = processor._collate_samples_single_type(
-            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
         assert len(paths) == 1 and json.loads(paths[0].read_text())["task_input"]["task_data"] == {
             "_ng_digest": "a" * 64
@@ -806,7 +812,10 @@ class TestHarborLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
 
         paths = processor._collate_samples_single_type(
-            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
 
         [prepared] = [json.loads(line) for line in paths[0].read_text().splitlines()]
@@ -891,12 +900,18 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
         with pytest.raises(ValueError, match=r"(?s)against the `tau2` schema.*seed"):
             processor._collate_samples_single_type(
-                "validation", in_scope, task_data_validation=config.effective_task_data_validation
+                "validation",
+                in_scope,
+                task_data_validation=config.effective_task_data_validation,
+                output_dir=tmp_path / "prepared",
             )
 
     def test_valid_row_passes(self, tmp_path, monkeypatch):
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row()])
         paths = processor._collate_samples_single_type(
-            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            "validation",
+            in_scope,
+            task_data_validation=config.effective_task_data_validation,
+            output_dir=tmp_path / "prepared",
         )
         assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1

@@ -112,7 +112,7 @@ two, so the prepared files would grow to 1534 x `num_repeats` rows.
 |---|---|---|
 | `data/birdbench_<dialect>_<split>.jsonl` | 1 per task | prepare |
 | `data/bird_verified_train.json` | cached download | prepare, train split |
-| `data/..._prepare.jsonl`, `<output>/rollouts/preprocessed_datasets/benchmark.jsonl` | 1 per task | `gym eval run` (applies the prompt) |
+| `<output>/rollouts/preprocessed_datasets/prepared/benchmark/..._prepare.jsonl`, `<output>/rollouts/preprocessed_datasets/benchmark.jsonl` | 1 per task | `gym eval run` (applies the prompt) |
 | `results/<split>_<dialect>/<model>/rollouts.jsonl`, `rollouts_aggregate_metrics.json` | 1 per task x `--num-repeats` | eval |
 
 ## Evaluating a model

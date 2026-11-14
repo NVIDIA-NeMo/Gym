@@ -1231,6 +1231,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
         server_instance_configs: List[ServerInstanceConfig],
         task_data_validation: str = "warn",
         num_repeats: Optional[Union[int, Dict[str, int]]] = None,
+        *,
+        output_dir: Path,
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -1244,7 +1246,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 if d.type == "benchmark" and d.prompt_config:
                     prompt_cfg = load_prompt_config(d.prompt_config)
 
-                data_path = Path(d.jsonl_fpath)
+                data_path = output_dir / Path(d.jsonl_fpath).name
                 # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
                 # file (previously a second declaration silently truncated the first, so all copies
                 # carried the last declarer's stamp). Candidates are tried until one is unused, so
@@ -1260,8 +1262,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 )
                 prepare_path = next(p for p in candidates if p not in used_prepare_paths)
                 used_prepare_paths.add(prepare_path)
-                # Create the artifact dir if needed (the prepared file is written next to the
-                # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
+                # Prepared rows belong to this run; source datasets may be shared or read-only.
                 prepare_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # The routing stamp: task_source names the declaring instance; the agent is
@@ -1390,6 +1391,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 server_instance_configs=server_instance_configs,
                 task_data_validation=config.effective_task_data_validation,
                 num_repeats=config.num_repeats,
+                output_dir=parent / "prepared" / type,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

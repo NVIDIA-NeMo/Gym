@@ -1267,7 +1267,7 @@ class TestNumRepeatsDataPreparation:
         )
 
         # Verify 6 writes occurred (2 lines * 3 repeats each)
-        expected_prepare_file = test_file.with_name(f"{test_file.stem}_prepare.jsonl")
+        expected_prepare_file = Path("prepared/example") / f"{test_file.stem}_prepare.jsonl"
         prepare_mock = write_filenames_to_mock[expected_prepare_file]
         assert len(prepare_mock.return_value.write.call_args_list) == 6
 
@@ -1360,14 +1360,12 @@ class TestCollateSamples:
 
         assert list(write_filenames_to_mock.keys()) == [
             Path("example_metrics.json"),
-            Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
+            Path("prepared/example/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
 
     def test_collate_creates_missing_parent_dir(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-        # The prepared-output file is written next to the dataset's jsonl_fpath. When that dir does not
-        # exist in the cwd (e.g. a built-in dataset resolved from the install root while collating from
-        # a fresh cwd), the write must create the parent instead of crashing with FileNotFoundError.
+        # A fresh run creates its own prepared-output directory, without writing beside the input.
         missing_dir = tmp_path / "does" / "not" / "exist"
         assert not missing_dir.exists()
         cfg = _make_agent_instance_config(
@@ -1377,10 +1375,11 @@ class TestCollateSamples:
         # Bypass the dataset read so the source file isn't needed; we're exercising the write path.
         monkeypatch.setattr(processor, "_iter_dataset_lines", lambda d: iter(['{"foo": "bar"}']))
 
-        paths = processor._collate_samples_single_type("example", [cfg])
+        paths = processor._collate_samples_single_type("example", [cfg], output_dir=tmp_path / "prepared")
 
-        prepare_path = missing_dir / "data_prepare.jsonl"
+        prepare_path = tmp_path / "prepared/data_prepare.jsonl"
         assert paths == [prepare_path]
+        assert not missing_dir.exists()
         assert prepare_path.exists()  # parent dir auto-created; write did not crash
         assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
@@ -1392,7 +1391,9 @@ class TestCollateSamples:
             "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(data), "num_repeats": 3}]
         )
         for num_repeats, expected in ((None, [0, 0, 0, 1, 1, 1]), (2, [0, 1])):
-            (path,) = TrainDataProcessor()._collate_samples_single_type("example", [cfg], num_repeats=num_repeats)
+            (path,) = TrainDataProcessor()._collate_samples_single_type(
+                "example", [cfg], num_repeats=num_repeats, output_dir=tmp_path / "prepared"
+            )
             assert [json.loads(line)["id"] for line in path.read_text().splitlines()] == expected
 
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
@@ -1519,9 +1520,27 @@ class TestCollateTaskSourceStamping:
 
     ROWS = [{"responses_create_params": {"input": []}, "question": "q1"}]
 
+    def test_runs_sharing_a_dataset_do_not_overwrite_prepared_rows(self, tmp_path):
+        source = tmp_path / "source.jsonl"
+        source.write_text(json.dumps(self.ROWS[0]) + "\n")
+        original = source.read_bytes()
+        prepared = []
+        for name in ("first", "second"):
+            cfg = _make_agent_instance_config(
+                name, [{"name": "shared", "type": "example", "jsonl_fpath": str(source)}]
+            )
+            (path,) = TrainDataProcessor()._collate_samples_single_type("example", [cfg], output_dir=tmp_path / name)
+            prepared.append(path)
+        assert self._read(prepared[0])[0]["task_source"] == "first"
+        assert self._read(prepared[1])[0]["task_source"] == "second"
+        assert source.read_bytes() == original
+        assert not source.with_name("source_prepare.jsonl").exists()
+
     def _collate(self, tmp_path, monkeypatch, configs):
         monkeypatch.chdir(tmp_path)
-        return TrainDataProcessor()._collate_samples_single_type(type="example", server_instance_configs=configs)
+        return TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=configs, output_dir=tmp_path / "prepared"
+        )
 
     def _read(self, path: Path) -> list:
         return [json.loads(line) for line in open(path)]
@@ -1688,7 +1707,9 @@ class TestCollateTaskSourceStamping:
         (declared,) = agent.datasets
         assert declared.type == "benchmark" and declared.prepare_script is None and declared.verified is False
         monkeypatch.chdir(tmp_path)
-        paths = TrainDataProcessor()._collate_samples_single_type(type="benchmark", server_instance_configs=[agent])
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            type="benchmark", server_instance_configs=[agent], output_dir=tmp_path / "prepared"
+        )
         (row,) = self._read(paths[0])
         assert row["task_source"] == "tb21" and row["task_id"] == {"taskset": "tb21", "task_id": "hello"}
 
@@ -1772,7 +1793,7 @@ class TestCollateTaskSourceStamping:
         rs = _instance("rep_rs", "resources_servers", {"entrypoint": "app.py", "domain": "math", "datasets": [d]})
         monkeypatch.chdir(tmp_path)
         TrainDataProcessor()._collate_samples_single_type(
-            type="example", server_instance_configs=[rs], task_data_validation="warn"
+            type="example", server_instance_configs=[rs], task_data_validation="warn", output_dir=tmp_path / "prepared"
         )
         summary = capsys.readouterr().out
         assert "1/2 rows failed" in summary

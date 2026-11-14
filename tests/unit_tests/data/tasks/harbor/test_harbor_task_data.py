@@ -811,8 +811,12 @@ class TestCollate:
         processor._all_server_instance_configs = [agent, env]
         dataset = agent.datasets[0]
         with pytest.warns(UserWarning, match=r"task_data\.py does not load"):
-            paths = processor._collate_samples_single_type(dataset.type, [agent], task_data_validation="warn")
+            paths = processor._collate_samples_single_type(
+                dataset.type, [agent], task_data_validation="warn", output_dir=tmp_path / "prepared"
+            )
         assert len(paths) == 1 and paths[0].is_file()
         assert json.loads(paths[0].read_text())["task_id"] == {"taskset": "ds", "task_id": "q1"}
         with pytest.raises(TaskDataError, match="failed to import: ImportError: no"):
-            processor._collate_samples_single_type(dataset.type, [agent], task_data_validation="error")
+            processor._collate_samples_single_type(
+                dataset.type, [agent], task_data_validation="error", output_dir=tmp_path / "prepared"
+            )
