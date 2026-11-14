@@ -1,0 +1,15 @@
+SaaS-Bench Task Data License
+============================
+
+The contents of the `tasks/` directory (including `description.md`,
+`meta.json`, and `verify.py` files for every task instance) are released
+under the Creative Commons Attribution 4.0 International License (CC BY 4.0).
+
+You may share and adapt this material for any purpose, including commercial
+use, provided that you give appropriate credit, link to the license, and
+indicate if changes were made.
+
+Full license text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+Code under all other directories is licensed under the Apache License,
+Version 2.0 — see LICENSE.

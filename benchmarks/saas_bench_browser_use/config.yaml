@@ -1,0 +1,75 @@
+config_paths:
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+policy_base_url: ${oc.select:saas_bench_policy_base_url,http://127.0.0.1:8000/v1}
+policy_model_name: ${oc.select:saas_bench_policy_model_name,policy}
+policy_api_key: ${oc.env:SAAS_BENCH_MODEL_API_KEY,EMPTY}
+observability_enabled: true
+num_samples_in_parallel: ${oc.select:saas_bench_concurrency,1}
+saas_bench_run_root: ${oc.env:SAAS_BENCH_RUN_ROOT}
+saas_bench_output_root: ${saas_bench_run_root}/episodes
+saas_bench_sampling:
+  temperature: 0.6
+  top_p: 0.95
+  frequency_penalty: 0.0
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      propagate_context_overflow_errors: true
+      sampling_overrides: ${saas_bench_sampling}
+saas_bench_agent:
+  responses_api_agents:
+    saas_bench_agent:
+      entrypoint: app.py
+      num_workers: 1
+      tasks_dir: ${oc.env:SAAS_BENCH_TASKS_DIR,tasks}
+      task_selector: ${oc.select:saas_bench_tasks,all}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      output_root: ${saas_bench_output_root}
+      command: ${oc.env:SAAS_BENCH_OPENCODE,opencode}
+      opencode_version: 1.17.11
+      concurrency: ${oc.select:saas_bench_concurrency,1}
+      slot_capacity: ${oc.select:saas_bench_slot_capacity,4}
+      inconclusive_verification_retries: ${oc.select:saas_bench_inconclusive_verification_retries,1}
+      max_steps: ${oc.select:saas_bench_max_steps,200}
+      mcp_timeout_ms: ${oc.select:saas_bench_mcp_timeout_ms,180000}
+      agent_timeout: ${oc.select:saas_bench_agent_timeout,3600}
+      episode_timeout: ${oc.select:saas_bench_episode_timeout,7200}
+      context_tokens: ${oc.select:saas_bench_context_tokens,262144}
+      output_tokens: ${oc.select:saas_bench_output_tokens,32768}
+      viewport_width: ${oc.select:saas_bench_viewport_width,1280}
+      viewport_height: ${oc.select:saas_bench_viewport_height,960}
+      datasets:
+      - name: saas_bench_browser_use
+        type: benchmark
+        jsonl_fpath: benchmarks/saas_bench_browser_use/data/saas_bench_browser_use_benchmark.jsonl
+        license: CC-BY-4.0
+        prompt_config: null
+        prepare_script: benchmarks/saas_bench/prepare.py
+        num_repeats: 1
+      harness: browser_use
+      cache_root: ${oc.env:SAAS_BENCH_CACHE_ROOT}
+      worker_python: ${oc.env:SAAS_BENCH_WORKER_PYTHON,null}
+      source_root: ${oc.select:saas_bench_bundle_root,responses_api_agents/saas_bench_agent/data/runtime}
+saas_bench_environment_server:
+  environment_servers:
+    saas_bench_environment:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: saas_bench_agent
+      source_root: ${oc.select:saas_bench_bundle_root,responses_api_agents/saas_bench_agent/data/runtime}
+      harness: browser_use
+      model_name: ${policy_model_name}
+      default_episode_timeout_seconds: 7500
+      cleanup_timeout_seconds: 210
+prepare_script_args:
+  harness: browser_use
+  task_selector: ${oc.select:saas_bench_tasks,all}
+  data_dir: ${oc.env:SAAS_BENCH_DATA_DIR}
+  bundle_root: ${oc.select:saas_bench_bundle_root,responses_api_agents/saas_bench_agent/data/runtime}
+  output_fpath: benchmarks/saas_bench_browser_use/data/saas_bench_browser_use_benchmark.jsonl
+model_call_capture_dir: ${saas_bench_output_root}/model-calls

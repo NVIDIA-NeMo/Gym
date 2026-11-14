@@ -1,0 +1,52 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Debian's service(8) re-execs init scripts through `env -i`, which strips
+# LD_PRELOAD and takes the uid shim with it. Ownership checks in scripts like
+# postgresql's then see real root and refuse to start. Invoke the init script
+# directly so it keeps our environment.
+svc="$1"
+
+# pg_ctlcluster rebuilds the environment before exec'ing pg_ctl, which drops
+# LD_PRELOAD again, so pg_ctl sees real root and refuses to run. Start the
+# server directly with the shim and a forced uid in place instead.
+if [ "$svc" = "postgresql" ] && [ "${2:-start}" = "start" ]; then
+  pg_bin="$(ls -1d /usr/lib/postgresql/*/bin/postgres 2>/dev/null | tail -1)"
+  pg_uid="$(awk -F: '$1 == "postgres" { print $3 }' /etc/passwd 2>/dev/null)"
+  if [ -n "$pg_bin" ] && [ -n "$pg_uid" ]; then
+    pg_ver="$(echo "$pg_bin" | awk -F/ '{ print $5 }')"
+    pg_data="/var/lib/postgresql/$pg_ver/main"
+    pg_conf="/etc/postgresql/$pg_ver/main/postgresql.conf"
+    mkdir -p /var/run/postgresql /var/log/postgresql 2>/dev/null
+    echo " * Starting PostgreSQL $pg_ver directly (uid $pg_uid)"
+    SAAS_FORCE_UID="$pg_uid" setsid "$pg_bin" -D "$pg_data" \
+      -c config_file="$pg_conf" \
+      >>/var/log/postgresql/saas-postgres.log 2>&1 &
+    exit 0
+  fi
+fi
+
+# Compose gives each service its own netns and thus its own :80. This stack
+# shares one, so a second nginx has to listen somewhere else.
+if [ "$svc" = "nginx" ] && [ -n "${SAAS_NGINX_LISTEN_PORT:-}" ]; then
+  p="$SAAS_NGINX_LISTEN_PORT"
+  for conf in /etc/onlyoffice/documentserver/nginx/ds.conf \
+              /etc/nginx/conf.d/*.conf /etc/nginx/sites-enabled/*; do
+    [ -f "$conf" ] || continue
+    sed -i -e "s/listen 0\.0\.0\.0:80;/listen 0.0.0.0:$p;/g" \
+           -e "s/listen \[::\]:80 default_server;/listen [::]:$p default_server;/g" \
+           -e "s/listen 80;/listen $p;/g" "$conf"
+  done
+fi
+
+if [ -n "$svc" ] && [ -x "/etc/init.d/$svc" ]; then
+  shift
+  exec "/etc/init.d/$svc" "$@"
+fi
+for real in /usr/sbin/service /sbin/service; do
+  if [ -x "$real" ]; then
+    exec "$real" "$@"
+  fi
+done
+echo "service: unknown service $svc" >&2
+exit 1

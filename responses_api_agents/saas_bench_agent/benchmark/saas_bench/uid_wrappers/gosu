@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+export SAAS_FAKE_ID=1
+user="${1%%:*}"
+shift
+case "$user" in
+  ''|*[!0-9]*)
+    # Report the uid the image gave that account; tools that map the effective
+    # uid back to a name fail when it is absent from /etc/passwd.
+    uid="$(awk -F: -v u="$user" '$1 == u { print $3 }' /etc/passwd 2>/dev/null)"
+    ;;
+  *) uid="$user" ;;
+esac
+# Export rather than only writing the per-pid file, so forked children inherit it.
+export SAAS_FORCE_UID="${uid:-999}"
+echo "$SAAS_FORCE_UID" > /tmp/.saas-euid-$$
+[ $# -gt 0 ] || exec /bin/sh
+exec "$@"

@@ -1,0 +1,509 @@
+{
+  "source_repository": "https://github.com/UniPat-AI/SaaS-Bench",
+  "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+  "upstream_version": "pre-v1.1",
+  "files": [
+    {
+      "source_path": "saas_bench/__init__.py",
+      "vendored_sha256": "a306f651cd8b90fe49b9676050630cc73c162c8f2a2389ec08e61b69b7e4de16",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/__init__.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "origin": "upstream",
+      "python_ast_unchanged": true
+    },
+    {
+      "source_path": "saas_bench/agent.py",
+      "vendored_sha256": "7324cea3c60798f6adc37e24fd4cf048141a72f1c18572697b10b3936a5aa328",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/agent.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "a0da16e5ffd304869b28ae850a474e6cbdf6d6d174182e822860e9aff17375fb",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Gym model/runtime attribution, rootless application lifecycle or conclusive live-state verification; see VENDORING.md."
+    },
+    {
+      "source_path": "saas_bench/loader.py",
+      "vendored_sha256": "dcaf3f9b1051c074527b1d811d59fc478ce83a0f0fb9447be49f54b038a9ed8c",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/loader.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "b588edc837a64ec45e1ef115191f098c9a8f608228396968de86bfbb02e6304c",
+      "origin": "upstream",
+      "python_ast_unchanged": true
+    },
+    {
+      "source_path": "saas_bench/slot.py",
+      "vendored_sha256": "33b7baef9660050f34fe8388ef119b5c572eb36f7ce2cdf942a5e49ce64e7093",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/slot.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "bb19570706dc8446a9919e45fed83422efc2bd65c2e2ef92f723bf189b91648b",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Gym model/runtime attribution, rootless application lifecycle or conclusive live-state verification; see VENDORING.md."
+    },
+    {
+      "source_path": "saas_bench/enroot_slot.py",
+      "vendored_sha256": "aa0201ebde397d3c2d24bbd947a0f9d963bdd4608bbd57acaea5ec4c81993882",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/verify_runner.py",
+      "vendored_sha256": "9b18a7b494cb588d298af89caa3d3b1f126ed53e3fa4a20dac53b614da1cbb91",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/verify_runner.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "4fc062a1017dfcea7f68d23955edf695529f9d649940fe6eb7aa794d5a29499d",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Gym model/runtime attribution, rootless application lifecycle or conclusive live-state verification; see VENDORING.md."
+    },
+    {
+      "source_path": "saas_bench/runtime_assets.py",
+      "vendored_sha256": "71aa1ba0745e77e1b80c867233856721be51bfc4c3319fdb1fbe0dd4ebbc6550",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/apps.yaml",
+      "vendored_sha256": "2ba506d02fdcbfcabdc3f71879bd8c3b537dabfc18829f2d9b110282452a3139",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/apps.yaml",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "6f50a5b4133eeeaee6cb80ee5bd1038f7bb13245a79e3fbad972005dd7aa990a",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "saas_bench/uid_shim.c",
+      "vendored_sha256": "a388dd8b4eb22ef32c0a56d56a31ad7e5920877fc46ebd7e316c5d552e25f852",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/oo_community_init.sh",
+      "vendored_sha256": "33ac0286cc2c0c9c9c9433290135e7bf719cd5c5e3da8bf90a898b6f1d342a51",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/oo_documentserver_init.sh",
+      "vendored_sha256": "85ba34f2bc7a3a8c70858d0aa9c98b5630f22b19825644b3a7ed2576db511831",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/gosu",
+      "vendored_sha256": "a0fc77b0a1e10e2cbba1b882a6e48701e32cfcef54596e9e95c27eb8c7e2d2b9",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/id",
+      "vendored_sha256": "bc6ffb67175d971c2369336814357b78833eb7f6a7960f1b93ee8cfaa4df17d0",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/runuser",
+      "vendored_sha256": "69811aef1048b09154ea22e909fc68f16c302ca2002f4ec07a0c104950044729",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/service",
+      "vendored_sha256": "f91c8ee10e4cbd815e37901b1ad46e55860e1df2b8d024ed987923bf4aff54e3",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/setpriv",
+      "vendored_sha256": "02e1c2a1d90d42a035dcfde92084e37ad5d4d21ba5b3dfdd0c41c0c5a474ff66",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/su",
+      "vendored_sha256": "7613dac20c55a7c98d97c6c58b6840b4df678698b651e1faa01eddf8eb247bc8",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/su-exec",
+      "vendored_sha256": "a0fc77b0a1e10e2cbba1b882a6e48701e32cfcef54596e9e95c27eb8c7e2d2b9",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/uid_wrappers/sudo",
+      "vendored_sha256": "36462bda47e4e3ec52487a5120c7151ac49496b328e99aae638246cd40043a10",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/__init__.py",
+      "vendored_sha256": "c20802bc69d0a742d6c117df62298daf04fb4bddb6452ab1dd2373f894943d63",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/browser.py",
+      "vendored_sha256": "e09884ab62407b5c2cc98d8616329cd53fca696aa69aca901e4c67e03b79fcbc",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/core.py",
+      "vendored_sha256": "c951f983457b09d884c89a05cd78e8d3a37494acc73892cfc860ee330d76c059",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/observability.py",
+      "vendored_sha256": "96cf49524c5cbf31de9ba9ca06732f930be4edba0e7cc6921d46806ce1a6efdb",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/prompts.py",
+      "vendored_sha256": "29f6f6e227d8419d14da6782e75364342b56ae2e9539e297c4cc5884367a786a",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/protocol.py",
+      "vendored_sha256": "c4b60cb2634a7659ce8ff5a3a48cd8d80dddbcc0b183b9f28351de8284c8cff8",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/runtime_check.py",
+      "vendored_sha256": "56bbe623b51ea5781c273c73b5897deed148a348cf9dce0ad4494f4823e72631",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/verifier.py",
+      "vendored_sha256": "c35a57fa0466978d2890f14923b91f09281c3737adc169d29b31c12ac7bf48fe",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/visual_refresh.mjs",
+      "vendored_sha256": "92fbaddd6b8e326621679056db33e1a166583f08d034e4b5553c39186369945c",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/opencode/worker.py",
+      "vendored_sha256": "8107d225bda31c4d9125421b8625f16a94e20e5b0260d11109b16f24d4174e97",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "docker/README.md",
+      "vendored_sha256": "ee24b34f2b8ab6b2e7d44ac402e5d53ad3342eb26b7c79070c3c4ce9d3ed79e8",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/README.md",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "50569743565d1d16d6742eee6e957c616a163875054b194961e4fc8fe79af965",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "docker/code-server-deps.Dockerfile",
+      "vendored_sha256": "728dfafa89f78f8b4545a48ba5b4ce20f04540ba9e59d32257067fad17f457ef",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/code-server-deps.Dockerfile",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "cbfa6104253374cb4b3362c206b4313dd8f031402d12c9c5afee7b02f69ef785",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "docker/mattermost.yml.tpl",
+      "vendored_sha256": "cb91779fe93ced8daf0776be7405d9e923c43a3d8f00360551bf632232edad7e",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/mattermost.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "f417dd7eccbcaf04d9025625625d61d71e80e39c06e19d3856091fd1f56d9f65",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "docker/onlyoffice.yml.tpl",
+      "vendored_sha256": "23c58764d02c89577a829dd7f23ab05a6988e96913bf795bd5128ba89b57e047",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/onlyoffice.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "a5ab0b626b19f2644f816561dcc603ed9963794c298d5011261b8e9855a2b677",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "docker/owncloud.yml.tpl",
+      "vendored_sha256": "6012d389ff52eb2397677a196155182fd98b5ac0ddd01b1123a2b0e0801b03f4",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/owncloud.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "42848fd8ec4fea9c508736177066fae4dfccf83c80af49385ba2f611f1896d65",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "docker/pretix.yml.tpl",
+      "vendored_sha256": "6916a414305a0c4c698b2bc787c10d93bc043bc1b17df693b89b35aa63157908",
+      "license": "Apache-2.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/docker/pretix.yml.tpl",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "298157cfccaf8d63851159657ce69dd74e247f89fa6b147d47016ccdfb5bc280",
+      "origin": "upstream"
+    },
+    {
+      "source_path": "docker/seeds/elabel-entrypoint.sh",
+      "vendored_sha256": "32a5343cfedea30628f63e59249d607d30d7cca1f8dc6f994fdd1d4dbf8d6924",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "docker/seeds/recipya/config.json",
+      "vendored_sha256": "8f0283da90bfee6afcdbcba367f0857b4945b9e929c8d904915fc6e8fc757eb1",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "tasks/multi-m/Agriculture/agriculture_003/verify.py",
+      "vendored_sha256": "0b5e9e5374a2ee3f285fc0a55a1f2a0afd57333b6bd11beb077f9acdfeb28512",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_003/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "79fe401b2e5323d6213252798cd99c53a1268545ad7e9f569e0d675d03ff48ba",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
+    },
+    {
+      "source_path": "tasks/multi-m/Agriculture/agriculture_011/verify.py",
+      "vendored_sha256": "e3e1fe1fc7cbe4d07e1211591d5d1a7ee63123f6e4ad28bcd32d27169a9f7b35",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_011/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "fc961efc440b9b2e03789a37e109ef23e27987000e6b4b90e2e00f85837ffccc",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
+    },
+    {
+      "source_path": "tasks/multi-m/Agriculture/agriculture_016/verify.py",
+      "vendored_sha256": "cd3f859771199f72cf255ac44bfa1843bdaf943db6d142bda10b00eef8e5966f",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_016/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "bb83efbb9a088e91a043053aa0dbde76c2b0ba81988f34f43c39418fcaf2da0a",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
+    },
+    {
+      "source_path": "tasks/multi-m/Agriculture/agriculture_031/verify.py",
+      "vendored_sha256": "dbd2098a17ae0dc993bf0ffb7a5b5cde45a6f7b06cc995af9cadb6578d5f7366",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/multi-m/Agriculture/agriculture_031/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "4be322707ce7df1138460bc324b4695d14e64626a1f6d460b8ee902c04233de6",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Register Drupal Unicode NOCASE_UTF8 and route PHP failures to stderr; grading SQL unchanged."
+    },
+    {
+      "source_path": "tasks/uni-m/Business/business_031/verify.py",
+      "vendored_sha256": "aea13377bdec9490a5478087a9617e5dc8fdcfc996ac18e0f674515e0af7bc3a",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_031/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "492de1bd54adbc654daee1c00159884db99bc41fa7a28c420ae5a70422752df2",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use deployed contact DISPLAY_NAME and journal PUBLISHED_AT schema for offboarding checks."
+    },
+    {
+      "source_path": "tasks/uni-m/Business/business_032/verify.py",
+      "vendored_sha256": "51b8a32e2b740c8ed2f37eb3692c044c7f2594f676ee3f04bfb5d73e06bd249b",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_032/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "8ee16868fbbcb337ac1d4a3e938dc012d24b460b7cb99422aa95c99192d05dda",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Normalize NULL debit/credit database values before numeric comparisons."
+    },
+    {
+      "source_path": "tasks/uni-m/Business/business_051/verify.py",
+      "vendored_sha256": "9d6bdd6f112f167de6ab913fe19eda4e6a4e86bca9621bec7f705a69273a6d87",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_051/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "f8684959bddc2a911abd8011a12ae045c07e21c4d904be5394872562866529f0",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use deployed journal schema; require postings in one published journal; report database faults as verifier errors."
+    },
+    {
+      "source_path": "tasks/uni-m/Business/business_052/verify.py",
+      "vendored_sha256": "cf2fbe3007100cb61376feaa342ca065ed5052733b7b1d270c7a5a613fbc7f0b",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_052/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "05f5d7c20d48505b7929232eab9081f0ce40e9d179218411a03552c484deabd3",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Require exactly 24 percent voucher discount (instead of upstream approximate 10.04 or 24); use SALES_ESTIMATES and search matching estimates."
+    },
+    {
+      "source_path": "tasks/uni-m/Business/business_143/verify.py",
+      "vendored_sha256": "fb271e31636c87751179df9a2b1b5cd51529126c9f0e952c6e724ccb14f66e0f",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Business/business_143/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "ff65a2d7816f2d4ba196e4d019af02e62d95ddbf43ab8f6ca857d4efdae740a1",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use MANUAL_JOURNALS_ENTRIES and PUBLISHED_AT schema instead of upstream singular table and STATUS."
+    },
+    {
+      "source_path": "tasks/uni-m/Software/software_008/verify.py",
+      "vendored_sha256": "e2d9acd166e57be70fa8e10cbd2e2945e732002c614d271f80b45dfd08939214",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_008/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "db2dc6a1613cad6d27b6cec4e2a8414cd3f27cfaa309bc3f17e5e7e9747c482b",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Correct literal f-string construction in the title-check diagnostic (no check-weight change)."
+    },
+    {
+      "source_path": "tasks/uni-m/Software/software_025/verify.py",
+      "vendored_sha256": "b1fd2fa82be753377a99fc4240a7a751be03dbcb6030629284491a5bdc4d2a0c",
+      "license": "CC-BY-4.0",
+      "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/tasks/uni-m/Software/software_025/verify.py",
+      "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
+      "source_sha256": "af2e5ff5e0f36dcbe944531deab29c2cdcbfb475da74280e96af85bf733ed642",
+      "origin": "upstream",
+      "python_ast_unchanged": false,
+      "gym_adaptation": "Use JWT authorization for the deployed Taiga API instead of Token authorization."
+    },
+    {
+      "source_path": "scripts/nrt/docker_enroot_shim.py",
+      "vendored_sha256": "1a50daf48c269cfaecb65fefdf65bd0af43f831ff1ac222ed4585c80ff05c54d",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "scripts/nrt/setup_podman_runtime.sh",
+      "vendored_sha256": "fc546336d7a7d06061918a3fc9d844553add808d16a397ab7967c910ced28e01",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "scripts/nrt/load_images_from_tars.sh",
+      "vendored_sha256": "e88824caa45d9a34481d7570524f5875099760c38869472a8c45a9dc3a198b97",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    }
+  ],
+  "external_verifiers": [
+    "tasks/multi-m/Agriculture/agriculture_007/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_012/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_013/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_020/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_021/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_022/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_038/verify.py",
+    "tasks/multi-m/Agriculture/agriculture_042/verify.py",
+    "tasks/multi-m/Media/media_006/verify.py",
+    "tasks/multi-m/Media/media_011/verify.py",
+    "tasks/multi-m/Media/media_012/verify.py",
+    "tasks/multi-m/Media/media_016/verify.py",
+    "tasks/multi-m/Media/media_020/verify.py",
+    "tasks/multi-m/Media/media_024/verify.py",
+    "tasks/multi-m/Media/media_027/verify.py",
+    "tasks/multi-m/Media/media_029/verify.py",
+    "tasks/multi-m/Media/media_033/verify.py",
+    "tasks/multi-m/Media/media_035/verify.py",
+    "tasks/multi-m/Media/media_060/verify.py",
+    "tasks/multi-m/Media/media_063/verify.py",
+    "tasks/multi-m/Media/media_065/verify.py",
+    "tasks/multi-m/Media/media_066/verify.py",
+    "tasks/multi-m/Media/media_067/verify.py",
+    "tasks/multi-m/Media/media_068/verify.py",
+    "tasks/multi-m/Media/media_069/verify.py",
+    "tasks/multi-m/Media/media_070/verify.py",
+    "tasks/multi-m/Media/media_072/verify.py",
+    "tasks/multi-m/Media/media_073/verify.py",
+    "tasks/uni-m/Business/business_023/verify.py",
+    "tasks/uni-m/Business/business_062/verify.py",
+    "tasks/uni-m/Business/business_065/verify.py",
+    "tasks/uni-m/Business/business_084/verify.py",
+    "tasks/uni-m/Business/business_110/verify.py",
+    "tasks/uni-m/Business/business_121/verify.py",
+    "tasks/uni-m/Business/business_135/verify.py",
+    "tasks/uni-m/Business/business_144/verify.py",
+    "tasks/uni-m/Business/business_155/verify.py",
+    "tasks/uni-m/Business/business_302/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_001/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_002/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_007/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_013/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_015/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_017/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_019/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_021/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_023/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_025/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_026/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_030/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_034/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_038/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_045/verify.py",
+    "tasks/uni-m/Healthcare/healthcare_048/verify.py",
+    "tasks/uni-m/Software/software_002/verify.py",
+    "tasks/uni-m/Software/software_004/verify.py",
+    "tasks/uni-m/Software/software_005/verify.py",
+    "tasks/uni-m/Software/software_006/verify.py",
+    "tasks/uni-m/Software/software_009/verify.py",
+    "tasks/uni-m/Software/software_012/verify.py",
+    "tasks/uni-m/Software/software_014/verify.py",
+    "tasks/uni-m/Software/software_018/verify.py",
+    "tasks/uni-m/Software/software_021/verify.py",
+    "tasks/uni-m/Software/software_023/verify.py",
+    "tasks/uni-m/Software/software_024/verify.py",
+    "tasks/uni-m/Software/software_026/verify.py",
+    "tasks/uni-m/Software/software_027/verify.py",
+    "tasks/uni-m/Software/software_029/verify.py",
+    "tasks/uni-m/Software/software_030/verify.py",
+    "tasks/uni-m/Software/software_031/verify.py",
+    "tasks/uni-m/Software/software_032/verify.py",
+    "tasks/uni-m/Software/software_033/verify.py",
+    "tasks/uni-m/Software/software_034/verify.py",
+    "tasks/uni-m/Software/software_035/verify.py",
+    "tasks/uni-m/Software/software_038/verify.py",
+    "tasks/uni-m/Software/software_039/verify.py",
+    "tasks/uni-m/Software/software_040/verify.py",
+    "tasks/uni-m/Software/software_041/verify.py",
+    "tasks/uni-m/Software/software_042/verify.py",
+    "tasks/uni-m/Software/software_043/verify.py",
+    "tasks/uni-m/Software/software_044/verify.py",
+    "tasks/uni-m/Software/software_046/verify.py",
+    "tasks/uni-m/Software/software_047/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_009/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_011/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_014/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_020/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_030/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_032/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_042/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_043/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_052/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_074/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_082/verify.py",
+    "tasks/uni-m/Teamwork/teamwork_083/verify.py"
+  ]
+}
