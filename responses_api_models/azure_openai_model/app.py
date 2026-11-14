@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from asyncio import Semaphore
-from time import time
-from uuid import uuid4
 
 from fastapi import Request
 from openai import AsyncAzureOpenAI
@@ -65,33 +63,9 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             chat_completion_params_dict["model"] = self.config.openai_model
             chat_completion_response = await self._client.chat.completions.create(**chat_completion_params_dict)
 
-        choice = chat_completion_response.choices[0]
-        response_output = self._converter.postprocess_chat_response(choice)
-        response_output_dicts = [item.model_dump() for item in response_output]
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=self.config.openai_model,
-            object="response",
-            output=response_output_dicts,
-            tool_choice=body.tool_choice if "tool_choice" in body else "auto",
-            parallel_tool_calls=body.parallel_tool_calls,
-            tools=body.tools,
-            temperature=body.temperature,
-            top_p=body.top_p,
-            background=body.background,
-            max_output_tokens=body.max_output_tokens,
-            max_tool_calls=body.max_tool_calls,
-            previous_response_id=body.previous_response_id,
-            prompt=body.prompt,
-            reasoning=body.reasoning,
-            service_tier=chat_completion_response.service_tier or body.service_tier,
-            text=body.text,
-            top_logprobs=body.top_logprobs,
-            truncation=body.truncation,
-            metadata=body.metadata,
-            instructions=body.instructions,
-            user=body.user,
+        return self._converter.chat_completion_to_response(
+            responses_create_params=body.model_copy(update={"model": self.config.openai_model}),
+            chat_completion=NeMoGymChatCompletion.model_validate(chat_completion_response.model_dump()),
         )
 
     async def chat_completions(
