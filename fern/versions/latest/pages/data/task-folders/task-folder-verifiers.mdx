@@ -40,6 +40,12 @@ is masked, as `verifier_error` when `bash` or `timeout` is missing and as `provi
   `reward` key, every key is a component: the score is their sum, and the result names them in `reward_components`.
 - `reward.json` wins whenever it exists, even when it is malformed.
 
+A dataset scored another way sets two `[gym.defaults]` keys in its `dataset.toml`: `reward_file_precedence = "txt"`
+reads `reward.txt` first, as Harbor 0.6.6 does, and `reward_json_non_numeric = "ignore"` leaves non-numeric
+`reward.json` values other than `reward` out (a judge's rationale beside its score) instead of invalidating the
+file; a non-numeric `reward` stays invalid. That second key is a Gym rule, not Harbor's: Harbor 0.6.6 rejects such
+a file.
+
 Two tasks of one dataset may write different keys. Gym pads no missing key and renames none.
 
 | Outcome | Reward | `failure_kind` |
@@ -51,6 +57,28 @@ Two tasks of one dataset may write different keys. Gym pads no missing key and r
 These rows count in the score, and a reward written before a timeout still stands. Other failures, such as a lost
 sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in `rollouts.jsonl` but is
 left out of the score.
+
+### Missing rewards
+
+A dataset whose graders can fail for reasons that are not the agent's (a judge service that refused the call) ships
+`missing_reward.py` beside its `dataset.toml`, exporting `classify_missing_reward(evidence)`. The server loads it per
+taskset at startup, as it loads `task_data.py`; a module that does not load refuses that taskset's episodes at seed.
+When `test.sh` finished without writing a reward file, the server copies `/logs/verifier` and `/logs/artifacts`
+(links skipped) to its host, a required transfer whose failure masks the sample, and calls the function in a worker
+thread with a `MissingRewardEvidence` (task id, task folder, `[metadata]`, the two host folders, the exit code). Its
+`MissingRewardVerdict` decides:
+
+- `task` is a measured 0 under the verdict's kind, which must be the dataset's own `<server>:<kind>`.
+- `infrastructure` masks the sample under a registered or namespaced kind.
+- `judge_failed` is Gym's judge-failure class: masked, routed to the failures file, and run again whole on resume,
+  agent included. `gym eval reverify` re-judges through a resources server, which a Harbor row does not name, so it
+  refuses such rows.
+- `None` keeps `harbor:missing_reward`.
+
+A classifier that raises, or answers anything else, masks the sample as the registered `verifier_error`. A timeout
+and an invalid reward file never reach it. The types are in `nemo_gym/data/tasks/harbor/missing_reward.py`. The
+module's content enters every task's digest, as a dataset-level `verifier.py` does, so an episode is refused when
+the file changed after prepare.
 
 ## Python verifiers
 

@@ -85,6 +85,7 @@ from nemo_gym.data.tasks.harbor.materialize import (
     run_config,
     write_rows,
 )
+from nemo_gym.data.tasks.harbor.missing_reward import load_missing_reward_classifier
 from nemo_gym.data.tasks.harbor.package_store import PACKAGE_STORE_SOURCE
 from nemo_gym.data.tasks.harbor.parameterized import is_template_folder, render_template_folder
 from nemo_gym.data.tasks.harbor.prepare_builds import _build_dockerfiles
@@ -319,6 +320,9 @@ def prepare_target(
     # first resolve, build and push every image). Every loaded task's fields are checked again below, before a row
     # is written. Duplicate task IDs are rejected by the folder walk itself, as they are for the image records.
     task_data_schema = load_task_data_schema(dataset_root) if dataset_root.is_dir() else None
+    # So is its missing_reward.py: a classifier that does not load refuses the dataset before any image work.
+    if dataset_root.is_dir():
+        load_missing_reward_classifier(dataset_root)
     if task_data_schema is not None and folder.is_dir():
         check_task_folders(task_data_schema, [folder] if is_task_folder(folder) else iter_task_folders(folder))
 

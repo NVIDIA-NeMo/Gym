@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.data.tasks.harbor.dataset_config import (
+    REWARD_READING_KEYS,
     GymDatasetConfig,
+    GymDatasetDefaults,
     GymTaskOverride,
     apply_dataset_config,
     read_dataset_config,
@@ -30,6 +32,7 @@ from nemo_gym.data.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.missing_reward import MISSING_REWARD_MODULE
 from nemo_gym.data.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborTaskConfig, HarborTaskStep
 from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
 from nemo_gym.data.tasks.harbor.records import (
@@ -721,7 +724,19 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         verifier_digest = hashlib.sha256(shared_verifier.read_bytes()).hexdigest() if shared_verifier else None
     except OSError as exc:
         raise HarborTaskError(f"{shared_verifier}: {exc}") from exc
-    digest = task_digest(folder_digest, dataset, path.name, shared_verifier_digest=verifier_digest)
+    # So does a dataset-level missing_reward.py: it decides how a run that wrote no reward is scored.
+    classifier = root / MISSING_REWARD_MODULE
+    try:
+        classifier_digest = hashlib.sha256(classifier.read_bytes()).hexdigest() if classifier.is_file() else None
+    except OSError as exc:
+        raise HarborTaskError(f"{classifier}: {exc}") from exc
+    digest = task_digest(
+        folder_digest,
+        dataset,
+        path.name,
+        shared_verifier_digest=verifier_digest,
+        missing_reward_digest=classifier_digest,
+    )
     task_data = read_task_fields(path)
 
     return HarborTask(
@@ -756,7 +771,12 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
 
 
 def task_digest(
-    folder_digest: str, dataset: GymDatasetConfig, task_id: str, *, shared_verifier_digest: str | None = None
+    folder_digest: str,
+    dataset: GymDatasetConfig,
+    task_id: str,
+    *,
+    shared_verifier_digest: str | None = None,
+    missing_reward_digest: str | None = None,
 ) -> str:
     """The digest a task is materialized and served under: its folder's content hash plus the dataset slice applied to it.
 
@@ -769,17 +789,26 @@ def task_digest(
     ``shared_verifier_digest`` is the digest of the dataset root's ``verifier.py`` when it grades the task:
     grading code outside the folder is part of the task's identity too.
     """
-    if not dataset.shapes_tasks and shared_verifier_digest is None:
+    if not dataset.shapes_tasks and shared_verifier_digest is None and missing_reward_digest is None:
         return folder_digest
     # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
     # shaping table with a repeat count hashes the same as one without.
     applied: dict[str, Any] = {
-        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
+        "defaults": dataset.defaults.model_dump(
+            mode="json", exclude={"num_repeats", *_reward_keys_at_default(dataset)}
+        ),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
     if shared_verifier_digest is not None:
         applied[VERIFIER_FILE] = shared_verifier_digest
+    if missing_reward_digest is not None:
+        applied[MISSING_REWARD_MODULE] = missing_reward_digest
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
+
+
+def _reward_keys_at_default(dataset: GymDatasetConfig) -> set[str]:
+    defaults = GymDatasetDefaults()
+    return {key for key in REWARD_READING_KEYS if getattr(dataset.defaults, key) == getattr(defaults, key)}
 
 
 def iter_task_folders(root: Path, *, max_depth: int = MAX_DISCOVERY_DEPTH) -> list[Path]:

@@ -39,6 +39,7 @@ import sys
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -164,6 +165,27 @@ class TaskDataSchema:
             ) from exc
 
 
+def import_dataset_module(path: Path, *, prefix: str) -> ModuleType:
+    """Import a Gym module that sits beside ``dataset.toml``, under a private name keyed by its resolved path.
+
+    Raises whatever the import raises; a failed import leaves nothing in ``sys.modules``.
+    """
+    resolved = Path(path).resolve()
+    module_name = f"{prefix}_{hashlib.sha256(str(resolved).encode()).hexdigest()[:16]}"
+    spec = importlib.util.spec_from_file_location(module_name, resolved)
+    if spec is None or spec.loader is None:  # pragma: no cover - importlib internals
+        raise ImportError(f"{path}: could not build an import spec")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec so dataclass and typing machinery that looks the module up finds it.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
 def load_task_data_schema(dataset_root: Path) -> TaskDataSchema | None:
     """Import ``<dataset_root>/task_data.py``; ``None`` when the dataset ships none.
 
@@ -173,20 +195,9 @@ def load_task_data_schema(dataset_root: Path) -> TaskDataSchema | None:
     path = Path(dataset_root) / TASK_DATA_MODULE
     if not path.is_file():
         return None
-    resolved = path.resolve()
-    module_name = f"nemo_gym_harbor_task_data_{hashlib.sha256(str(resolved).encode()).hexdigest()[:16]}"
-    spec = importlib.util.spec_from_file_location(module_name, resolved)
-    if spec is None or spec.loader is None:  # pragma: no cover - importlib internals
-        raise TaskDataError(f"{path}: could not build an import spec")
-    module = importlib.util.module_from_spec(spec)
-    # Registered before exec so dataclass and typing machinery that looks the module up finds it.
-    sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
-    except BaseException as exc:
-        sys.modules.pop(module_name, None)
-        if not isinstance(exc, Exception):
-            raise
+        module = import_dataset_module(path, prefix="nemo_gym_harbor_task_data")
+    except Exception as exc:
         raise TaskDataError(f"{path}: failed to import: {type(exc).__name__}: {exc}") from exc
     model = getattr(module, TASK_DATA_EXPORT, None)
     if model is None:

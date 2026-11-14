@@ -845,7 +845,7 @@ class TestPullDataset:
         second = Manifest.read(destination)
         assert prepared.dataset_digest == second.digest != manifest.digest and second.tasks == manifest.tasks
         assert second.dataset_files_digest == dataset_files_digest(entry) and out.count("Rewrote") == 1
-        assert "a dataset-level task_data.py or verifier.py changed" in out
+        assert "a dataset-level task_data.py or verifier.py or missing_reward.py changed" in out
         # A file the entry no longer has goes, and one it gains arrives.
         (entry / "verifier.py").unlink()
         (entry / "task_data.py").write_text(model)

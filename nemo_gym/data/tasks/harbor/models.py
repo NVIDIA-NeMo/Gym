@@ -365,6 +365,9 @@ class HarborTaskConfig(HarborSettings):
     # it (not a task.toml key): the default a step inherits for a budget it does not name reads scaled by it too,
     # like the budgets the task names (`step_verifier_timeout_sec`).
     _timeout_multiplier: float = PrivateAttr(default=1.0)
+    # The dataset's `[gym.defaults]` reading of the verifier's reward files (not task.toml keys).
+    _reward_file_precedence: Literal["json", "txt"] = PrivateAttr(default="json")
+    _reward_json_non_numeric: Literal["invalid", "ignore"] = PrivateAttr(default="invalid")
 
     @model_validator(mode="before")
     @classmethod
@@ -386,6 +389,14 @@ class HarborTaskConfig(HarborSettings):
     @property
     def is_multi_turn(self) -> bool:
         return bool(self.steps)
+
+    @property
+    def reward_file_precedence(self) -> Literal["json", "txt"]:
+        return self._reward_file_precedence
+
+    @property
+    def reward_json_non_numeric(self) -> Literal["invalid", "ignore"]:
+        return self._reward_json_non_numeric
 
     def step_agent_timeout_sec(self, step: HarborTaskStep) -> float:
         return step.agent.timeout_sec if step.agent.timeout_sec is not None else self.agent.timeout_sec

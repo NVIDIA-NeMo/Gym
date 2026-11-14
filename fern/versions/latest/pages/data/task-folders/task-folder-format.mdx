@@ -20,8 +20,10 @@ Field names and defaults are Harbor's (`task.toml` schema 1.4). To write your fi
 | `task_data.json` | No | The task's own fields. See [Typed task fields](/main/data/task-folders/task-folder-patterns#typed-task-fields). |
 | `steps/` | Multi-step tasks | One folder per step. |
 
-The dataset root may hold `dataset.toml`, `task_data.py` (the model that types task fields) and
-`verifier.py` (a verifier for every single-step task without `tests/`). Do not edit the records Gym writes there
+The dataset root may hold `dataset.toml`, `task_data.py` (the model that types task fields),
+`verifier.py` (a verifier for every single-step task without `tests/`) and `missing_reward.py` (the classifier of
+a verifier run that wrote no reward; see
+[Missing rewards](/main/data/task-folders/task-folder-verifiers#missing-rewards)). Do not edit the records Gym writes there
 at prepare.
 
 The folder name is the task ID, unique across the dataset. Task folders may sit up to six levels down. Hidden
@@ -132,6 +134,11 @@ None of these keys enters a task digest.
 | `num_repeats` | `1` | Rollouts per task for `gym eval run`. `+num_repeats=<n>` replaces it. |
 | `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`, including a step's own. Collect hooks, health checks and build timeouts do not scale. |
 | `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. GPUs, `[steps.verifier.environment]` and Compose sidecars do not scale. |
+| `reward_file_precedence` | `"json"` | Which reward file wins when a verifier writes both: `"json"` (Gym, Harbor 0.7 and later) or `"txt"` (Harbor 0.6.6). |
+| `reward_json_non_numeric` | `"invalid"` | `"ignore"` leaves non-numeric `reward.json` values other than `reward` out instead of invalidating the file (a Gym rule; Harbor 0.6.6 rejects such a file). |
+
+Either reward key at a value other than its default enters every task's digest; at its default it does not, so
+existing datasets keep their digests.
 
 ### [gym.tasks."task-id"]
 

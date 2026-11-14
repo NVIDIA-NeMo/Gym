@@ -38,6 +38,11 @@ TRAINING_SPLITS = ("train", "validation")
 SCALED_RESOURCES = ("cpus", "memory_mb", "storage_mb")
 
 
+# The [gym.defaults] keys that say how reward files are read. At their defaults they stay out of the task digest,
+# so a dataset that sets neither keeps the digest it had before they existed.
+REWARD_READING_KEYS = ("reward_file_precedence", "reward_json_non_numeric")
+
+
 class GymDatasetDefaults(BaseModel):
     """``[gym.defaults]``: generic policy applied to every task of the dataset."""
 
@@ -48,6 +53,12 @@ class GymDatasetDefaults(BaseModel):
     timeout_multiplier: float = Field(default=1.0, gt=0)
     # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments.
     resource_multiplier: float = Field(default=1.0, gt=0)
+    # Which reward file wins when a verifier writes both: "json" (Gym, Harbor >= 0.7) or "txt" (Harbor 0.6.6).
+    reward_file_precedence: Literal["json", "txt"] = "json"
+    # Non-numeric reward.json values other than `reward`: "invalid" makes the file an invalid reward; "ignore"
+    # leaves them out, so {"reward": 0.6, "rationale": "..."} is 0.6 (a Gym rule; Harbor 0.6.6 rejects such a
+    # file). A non-numeric `reward` stays invalid.
+    reward_json_non_numeric: Literal["invalid", "ignore"] = "invalid"
     # Rollouts per task for an evaluation of the dataset. The generated run config starts from it and a
     # `+num_repeats=` on the command line replaces it. A run fact, not a task fact: it never enters a task's digest.
     num_repeats: int = Field(default=1, ge=1, strict=True)
@@ -329,6 +340,8 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
         }
     )
     effective._timeout_multiplier = defaults.timeout_multiplier
+    effective._reward_file_precedence = defaults.reward_file_precedence
+    effective._reward_json_non_numeric = defaults.reward_json_non_numeric
     return effective
 
 
