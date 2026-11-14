@@ -26,6 +26,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     SandboxPythonRuntime,
 )
+from nemo_gym.agents.utils.supervisor_client import EXPIRE_REQUEST_FILE
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -374,20 +375,37 @@ async def test_an_activation_runs_once_and_a_retry_gets_the_same_response(lent_s
 
 
 @linux_only
-async def test_a_crew_that_runs_out_of_time_answers_incomplete(lent_sandbox, runtime, monkeypatch):
+async def test_a_crew_that_runs_out_of_time_answers_incomplete(
+    lent_sandbox: tuple[AsyncSandbox, SandboxAccess], runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, access = lent_sandbox
     workdir = Path(access.workdir)
     model = _model(
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt"}), id="chatcmpl-1"), None
     )
+    agent, request = _agent(timeout=60), _request()
     started = time.monotonic()
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        activation = asyncio.create_task(agent.responses(request, _body()))
+        try:
+            # Imports and crew startup must not consume the deadline before there is work to preserve.
+            assert await asyncio.to_thread(model.blocked.wait, 30), "the crew never reached its second model call"
+            assert (workdir / "partial.txt").read_text() == "partial\n"
+            assert not activation.done()
+            state = agent._require_agent_session(agent._agent_session_id_from_request(request))
+            # Exercise the supervisor's deadline path without marking a rollout stop or closing the session.
+            Path(state.session.session_dir, EXPIRE_REQUEST_FILE).touch()
+            response = await asyncio.wait_for(activation, 30)
+        finally:
+            close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 30)
+            await asyncio.gather(activation, return_exceptions=True)
     finally:
         model.close()
 
     assert time.monotonic() - started < 60
     assert (response.status, response.metadata["crewai_stop_reason"]) == ("incomplete", "timeout")
+    assert ROLLOUT_STOP_METADATA_KEY not in response.metadata
     assert (workdir / "partial.txt").read_text() == "partial\n"
     # The second model call never returned, so the run's usage is unknown.
     assert response.usage is None
