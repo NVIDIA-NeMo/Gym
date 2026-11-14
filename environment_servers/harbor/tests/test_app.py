@@ -1427,6 +1427,97 @@ class TestAgentStage:
         assert response.failure is None, response.failure
         assert any("test.sh" in call["command"] for call in sandbox.execs)
 
+    @pytest.mark.parametrize(
+        ("update", "observations"),
+        [
+            ({"status": "incomplete", "metadata": {"stop_reason": "wall_time"}}, None),
+            (
+                {"status": "incomplete"},
+                {
+                    "source": "opencode",
+                    "records": [
+                        {"kind": "agent_invocation", "invocation_id": "root", "activation_id": 1, "error_type": None},
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": "root-2",
+                            "activation_id": 2,
+                            "error_type": "timeout",
+                        },
+                    ],
+                    "gaps": [],
+                },
+            ),
+        ],
+        ids=["stirrup-wall-time", "opencode-last-activation-timeout"],
+    )
+    async def test_a_run_cut_at_the_task_budget_is_scored_with_a_model_outcome_timeout(
+        self, tmp_path, monkeypatch, update, observations
+    ):
+        """Rollout health exempts the cancelled last call only when the row names the cut with a typed event."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = agent_response().model_dump(mode="json") | update
+        if observations is not None:
+            server.server_client.observations = observations
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        row = response.result.model_dump(mode="json")
+        [event] = row["timeouts"]
+        assert event == {
+            "event_id": f"{response.episode_id.capture_key}:agent-budget",
+            "limit": "agent.timeout_sec",
+            "enforcer": server.config.agent_server.name,
+            "evidence": "internal",
+            "model_outcome": True,
+            "configured_s": float(task.config.agent.timeout_sec),
+        }
+        assert "model_limit_rejections" not in row
+
+    async def test_an_image_limit_400_is_scored_with_a_model_limit_rejection(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        message = "HTTP 400: At most 128 image(s) may be provided in one prompt."
+        turn = self.failed_turn('{"failure_kind":"model_request_error","status_code":400}')
+        turn["error"]["message"] = message
+        server.server_client.turn_response = turn
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        row = response.result.model_dump(mode="json")
+        assert row["model_limit_rejections"] == [
+            {
+                "event_id": f"{response.episode_id.capture_key}:image-limit",
+                "limit": "limit_mm_per_prompt.image",
+                "enforcer": "model_server",
+                "status_code": 400,
+                "message": message,
+            }
+        ]
+        assert "timeouts" not in row
+
+    @pytest.mark.parametrize(
+        "update",
+        [
+            {},
+            {"status": "incomplete"},
+            {
+                "status": "failed",
+                "error": {"code": "server_error", "message": "HTTP 400: At most 128 image(s) may be provided."},
+                "metadata": {AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"agent_limit"}'},
+            },
+        ],
+        ids=["completed", "incomplete-without-a-cut", "image-message-without-a-classified-400"],
+    )
+    async def test_other_endings_carry_no_typed_model_outcome_event(self, tmp_path, monkeypatch, update):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = agent_response().model_dump(mode="json") | update
+
+        response = await run_episode(server, task)
+
+        row = response.result.model_dump(mode="json")
+        assert "timeouts" not in row and "model_limit_rejections" not in row
+
     async def test_failed_close_is_a_cleanup_failure_with_the_turn_attached(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
         request_info = RequestInfo(
