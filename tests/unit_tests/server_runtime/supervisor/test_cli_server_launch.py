@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config.global_config import (
@@ -26,6 +27,7 @@ from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     UV_VENV_DIR_KEY_NAME,
 )
+from nemo_gym.server_runtime.supervisor import server_supervisor
 from nemo_gym.server_runtime.supervisor.server_supervisor import _server_launch_command
 from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV
 from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
@@ -91,3 +93,25 @@ class TestServerLaunchCommand:
         result = subprocess.run(["bash", "-c", stamp_fragment], capture_output=True, text=True, check=True)
 
         assert before_ns <= int(result.stdout) <= time.time_ns()
+
+
+@pytest.mark.parametrize("inactive", [{}, {"entrypoint": None}])
+def test_configured_servers_skip_unset_entrypoints_but_launch_active_servers(tmp_path, monkeypatch, inactive):
+    config = OmegaConf.create(
+        {
+            "disabled": {"resources_servers": {"example": inactive}},
+            "active": {"resources_servers": {"example": {"entrypoint": "app.py"}}},
+        }
+    )
+    resolved = []
+
+    def resolve(path):
+        resolved.append(path)
+        return tmp_path / path
+
+    monkeypatch.setattr(server_supervisor, "_resolve_server_dir", resolve)
+    [server] = list(server_supervisor._configured_servers(config))
+    assert server.top_level_path == "active"
+    assert server.entrypoint_fpath == Path("app.py")
+    assert server.dir_path == tmp_path / "resources_servers/example"
+    assert resolved == [Path("resources_servers/example")]
