@@ -15,6 +15,7 @@
 """Provider-facing sandbox protocol."""
 
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -323,6 +324,47 @@ class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
 
+class SandboxSnapshotError(RuntimeError):
+    """Raised when a provider cannot complete an operation on a snapshot; ``snapshot_id`` names it when known.
+
+    The base of every snapshot error, so ``except SandboxSnapshotError`` handles any snapshot failure.
+    """
+
+    def __init__(self, message: str, *, snapshot_id: str | None = None) -> None:
+        super().__init__(message)
+        self.snapshot_id = snapshot_id
+
+
+class SandboxSnapshotNotFoundError(SandboxSnapshotError, LookupError):
+    """Raised when a provider has no snapshot with the requested id.
+
+    The snapshot may be deleted, or not yet visible on every replica of a snapshot store that is not fully shared.
+    """
+
+
+class SandboxSnapshotFailedError(SandboxSnapshotError):
+    """Raised when a snapshot failed on the provider or did not become ready in time; it cannot create sandboxes."""
+
+
+class SandboxSnapshotInUseError(SandboxSnapshotError):
+    """Raised when a provider refuses to delete a snapshot because something still uses it."""
+
+
+@dataclass(frozen=True)
+class SandboxSnapshotInfo:
+    """One snapshot in a provider's listing.
+
+    ``name`` is the name the snapshot was taken with, and ``None`` only for one taken without a name. ``state`` is
+    the provider's own lifecycle word, lowercased, and ``sandbox_id`` the sandbox the snapshot was taken from;
+    either is ``None`` when the provider does not report it.
+    """
+
+    snapshot_id: str
+    name: str | None
+    state: str | None = None
+    sandbox_id: str | None = None
+
+
 class SandboxProvider(Protocol):
     """Runtime/infra provider contract used by the public sandbox API."""
 
@@ -541,6 +583,74 @@ class SupportsSandboxPauseResume(Protocol):
 
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume a paused sandbox and refresh its handle."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSnapshot(Protocol):
+    """Optional provider capability to snapshot a running sandbox into a durable, independent copy.
+
+    A snapshot is a restore point: ``create_from_snapshot`` builds a new sandbox from it, however the source sandbox
+    changed or ended since. Deleting the source sandbox leaves the snapshot; only ``delete_snapshot`` removes it.
+
+    A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
+    its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
+    other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+    """
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet.
+
+        ``name``, when given, is stored with the snapshot and is the name ``list_snapshots`` matches and returns.
+        """
+        ...
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Return once the snapshot can create sandboxes.
+
+        Raises ``SandboxSnapshotFailedError`` when the snapshot failed or is not ready in time, and
+        ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
+        ...
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot; a snapshot the provider confirms is already gone is not an error.
+
+        Raises ``SandboxSnapshotInUseError`` when the provider refuses because something still uses the snapshot,
+        and ``SandboxSnapshotError`` when the delete fails otherwise.
+        """
+        ...
+
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
+        """Every snapshot whose name starts with ``prefix``, each with the name it was taken with.
+
+        Raises ``SandboxSnapshotError`` if the listing fails; never returns a partial listing.
+        """
+        ...
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        """Create a sandbox from a snapshot in place of ``spec``'s image, with the rest of ``spec``.
+
+        Raises ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxCheckpointPolling(Protocol):
+    """Optional scoped speed-up of command completion checks while a harness is stopped for a checkpoint."""
+
+    def checkpoint_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Wake pending command polls of the sandbox and poll them often until the scope exits."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxParkedPolling(Protocol):
+    """Optional scoped hold of command completion checks while a harness in the sandbox is paused for a checkpoint."""
+
+    def parked_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Hold pending command polls of the sandbox without asking it, and ask again once the scope exits."""
         ...
 
 
