@@ -1,0 +1,17 @@
+# Install nemo-gym[cwsandbox] in the process that manages sandboxes.
+# Include this config with any agent/environment that references the sandbox block.
+# SandboxSpec.image must be a prebuilt, pullable OCI image.
+# Authentication can also use the SDK's default CWSANDBOX_API_KEY resolution.
+sandbox:
+  cwsandbox:
+    connection:
+      api_key: ${oc.env:CWSANDBOX_API_KEY,null}
+      base_url: ${oc.env:CWSANDBOX_BASE_URL,null}
+      request_timeout_s: 3700
+    create:
+      ttl_s: 21600
+      ready_timeout_s: 900
+      # The SDK cannot enforce SandboxSpec.resources.disk_gib; warn rather than silently drop.
+      strict_resources: false
+      # runner_ids: [your-runner-id]
+    default_exec_timeout_s: 1800
