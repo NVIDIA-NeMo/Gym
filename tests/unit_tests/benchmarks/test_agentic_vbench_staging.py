@@ -478,20 +478,23 @@ def _socket_server(handler):
     return server
 
 
+def _drain(conn) -> None:
+    """Half-close, then read what the client still sends until it hangs up: an orderly EOF, never a reset."""
+    conn.shutdown(socket.SHUT_WR)
+    conn.settimeout(2.0)
+    while conn.recv(65536):
+        pass
+
+
 def _drop_before_status_line(conn) -> None:
     conn.recv(65536)
+    _drain(conn)
 
 
 def _truncate_body(conn) -> None:
     conn.recv(65536)
     conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{"content": [')
-    # An orderly EOF after the short body: half-close, then drain what the client still sends until it hangs up,
-    # so the close carries no unread data (which the kernel would turn into a reset) and the next connection is
-    # served as soon as this client gives up.
-    conn.shutdown(socket.SHUT_WR)
-    conn.settimeout(2.0)
-    while conn.recv(65536):
-        pass
+    _drain(conn)
 
 
 def _stall(conn) -> None:
@@ -503,8 +506,8 @@ def _stall(conn) -> None:
 @pytest.mark.parametrize(
     "handler,expected",
     [
-        (_drop_before_status_line, ("RemoteDisconnected",)),
-        # The kernel may turn the early close into a reset before the client reads the short body.
+        # A reset instead of the EOF is possible when the peer closes first; both are transport failures.
+        (_drop_before_status_line, ("RemoteDisconnected", "ConnectionResetError")),
         (_truncate_body, ("IncompleteRead", "ConnectionResetError", "RemoteDisconnected")),
         (_stall, ("TimeoutError",)),
     ],
