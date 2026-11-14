@@ -5,6 +5,7 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -85,15 +86,21 @@ def test_missing_invalid_or_stale_evidence_never_passes(tmp_path, evidence):
     assert "1 unavailable" in check["output"]["title"]
 
 
+@pytest.mark.parametrize("tested_sha", [None, "", "merge-sha"])
 @pytest.mark.parametrize("download_failure", [False, True])
 @pytest.mark.parametrize("listing_failure", [False, True])
 @pytest.mark.parametrize(
     "probe_exit_code,probe_job_result",
     [(0, "success"), (1, "success"), (2, "failure"), (0, "failure"), (0, "cancelled"), (0, "skipped")],
 )
-def test_publisher_downloads_current_attempt_and_posts_check(
-    tmp_path, monkeypatch, download_failure, listing_failure, probe_exit_code, probe_job_result
+def test_publisher_downloads_retained_job_evidence_and_posts_check(
+    tmp_path, monkeypatch, download_failure, listing_failure, probe_exit_code, probe_job_result, tested_sha
 ):
+    if tested_sha is None:
+        monkeypatch.delenv("TESTED_SHA", raising=False)
+    else:
+        monkeypatch.setenv("TESTED_SHA", tested_sha)
+    expected_sha = tested_sha or "tested-sha"
     env = {
         "GITHUB_REPOSITORY": "example/Gym",
         "GITHUB_RUN_ID": "123",
@@ -111,7 +118,7 @@ def test_publisher_downloads_current_attempt_and_posts_check(
 
     def run(args, **kwargs):
         if args[:3] == ["gh", "run", "download"]:
-            assert args[3:9] == ["123", "--repo", "example/Gym", "--name", "harness-conformance-pi-123-2", "--dir"]
+            assert args[3:9] == ["123", "--repo", "example/Gym", "--name", "harness-conformance-pi-123-1", "--dir"]
             write_probe_result(Path(args[9]).parent, "pi", probe_exit_code)
             if download_failure:
                 raise subprocess.CalledProcessError(1, args)
@@ -119,22 +126,41 @@ def test_publisher_downloads_current_attempt_and_posts_check(
             assert args == ["gh", "api", "--method", "POST", "repos/example/Gym/check-runs", "--input", "-"]
             posted.append(json.loads(kwargs["input"]))
 
-    monkeypatch.setattr(checks.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
 
     def artifact_listing(*args, **kwargs):
         if listing_failure:
             raise subprocess.CalledProcessError(1, args[0])
-        return "harness-conformance-pi-123-2\t456\n"
+        if "/attempts/2/jobs?per_page=100" in args[0][3]:
+            return json.dumps(
+                {
+                    "name": "Harness conformance (non-blocking) / pi conformance probes",
+                    "run_attempt": 2,
+                    "status": "completed",
+                    "started_at": "2026-11-06T15:00:00Z",
+                    "completed_at": "2026-11-06T15:10:00Z",
+                }
+            )
+        return json.dumps(
+            {
+                "name": "harness-conformance-pi-123-1",
+                "id": 456,
+                "expired": False,
+                "created_at": "2026-11-06T15:05:00Z",
+            }
+        )
 
-    monkeypatch.setattr(checks.subprocess, "check_output", artifact_listing)
-    failed_conformance = download_failure or probe_exit_code != 0
+    monkeypatch.setattr(subprocess, "check_output", artifact_listing)
+    failed_conformance = listing_failure or download_failure or probe_exit_code != 0
     assert checks.main() == int(failed_conformance or probe_job_result not in ("success", "skipped"))
     assert len(posted) == 1
     assert posted[0]["head_sha"] == "tested-sha"
+    assert f"Tested commit: `{expected_sha}`" in posted[0]["output"]["summary"]
+    assert f"/blob/{expected_sha}/scripts/harness_conformance/README.md" in posted[0]["output"]["summary"]
     assert posted[0]["conclusion"] == ("failure" if failed_conformance else "success")
     assert posted[0]["details_url"] == "https://github.com/example/Gym/actions/runs/123/attempts/2"
     assert posted[0]["external_id"] == "harness-conformance-p0-123-2"
-    if not listing_failure:
+    if not listing_failure and not download_failure:
         assert "https://github.com/example/Gym/actions/runs/123/artifacts/456" in posted[0]["output"]["summary"]
     assert "Harness conformance (non-blocking)" in (tmp_path / "summary.md").read_text()
 
@@ -144,7 +170,7 @@ def test_actionable_summary_counts_scenarios_and_includes_rerun(tmp_path, monkey
     write_probe_result(tmp_path, "codex", 1)
     summary = checks.p0_check(["codex"], artifacts=tmp_path, sha="tested-sha")["output"]["summary"]
     assert "| codex | failed | 1 / 1 | tool_success: tool status differs from the witness |" in summary
-    assert 'python scripts/run_harness_conformance.py --harness codex --output "$(mktemp -d)/probes"' in summary
+    assert 'python -m scripts.run_harness_conformance --harness codex --output "$(mktemp -d)/probes"' in summary
     assert "probes/conformance_report.md" in summary
 
 
@@ -215,3 +241,48 @@ def test_first_failure_includes_checker_assertion_and_reason(tmp_path):
     count, first = failure_details("opencode", tmp_path)
     assert count == "1 / 1"
     assert first == "tool_success: TE-3 / turn.question: non-null model-visible prompt is required"
+
+
+@pytest.mark.parametrize(
+    "event_sha,tested_sha,expected_sha",
+    [
+        (None, None, "local"),
+        ("head-sha", None, "head-sha"),
+        ("head-sha", "", "head-sha"),
+        ("head-sha", "merge-sha", "merge-sha"),
+    ],
+)
+def test_report_identifies_checked_out_revision(tmp_path, monkeypatch, event_sha, tested_sha, expected_sha):
+    for key, value in (("GITHUB_SHA", event_sha), ("TESTED_SHA", tested_sha)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    write_probe_result(tmp_path, "pi", 0)
+    output = tmp_path / "pi" / "probes"
+    assert json.loads((output / "ci-result.json").read_text())["sha"] == expected_sha
+    assert f"Source: `{expected_sha}`" in report("pi", output=output, exit_code=0)
+    assert checks.p0_check(["pi"], artifacts=tmp_path, sha=expected_sha)["conclusion"] == "success"
+
+
+def test_head_stamped_evidence_is_unavailable_when_merge_was_tested(tmp_path, monkeypatch):
+    monkeypatch.delenv("TESTED_SHA", raising=False)
+    monkeypatch.setenv("GITHUB_SHA", "head-sha")
+    write_probe_result(tmp_path, "pi", 0)
+    check = checks.p0_check(["pi"], artifacts=tmp_path, sha="merge-sha")
+    assert check["conclusion"] == "failure"
+    assert check["output"]["title"] == "0 passed, 0 failed, 1 unavailable"
+    assert "Tested commit: `merge-sha`" in check["output"]["summary"]
+
+
+def test_p0_reporter_imports_without_gym_or_site_packages():
+    subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import sys; from scripts.harness_conformance import checks; "
+            "assert not any(name.startswith('nemo_gym') for name in sys.modules)",
+        ],
+        check=True,
+    )

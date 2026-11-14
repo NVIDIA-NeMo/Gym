@@ -58,11 +58,19 @@ if TYPE_CHECKING:
         synthesize_responses_sse,
     )
     from nemo_gym.models.token_capture.external_capture import (
+        DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX,
+        DYNAMO_SESSION_ID_HEADER,
         ExternalCaptureHandler,
         VLLMWorkerCaptureHandler,
+        add_dynamo_gym_extras,
+        dynamo_capture_refusal_suffix,
         make_external_capture_handler,
+        pop_dynamo_call_result,
+        split_dynamo_capture_refusal,
         validate_framework_context_options,
     )
+    from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
+    from nemo_gym.models.token_capture.harness_notes.base import HarnessNote
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -73,7 +81,11 @@ _PUBLIC_API = {
     "Body": "base_responses_api_model",
     "CaptureStore": "model_call_capture",
     "ChatCompletionsConverter": "chat_completions_converter",
+    "DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX": "token_capture.external_capture",
+    "DYNAMO_SESSION_ID_HEADER": "token_capture.external_capture",
     "ExternalCaptureHandler": "token_capture.external_capture",
+    "HARNESS_NOTES": "token_capture.harness_notes",
+    "HarnessNote": "token_capture.harness_notes.base",
     "ModelCallCaptureConfig": "model_call_capture",
     "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PolicyModelParticipant": "_checkpoint",
@@ -81,8 +93,10 @@ _PUBLIC_API = {
     "VLLMConverter": "chat_completions_converter",
     "VLLMConverterResponsesToChatCompletionsState": "chat_completions_converter",
     "VLLMWorkerCaptureHandler": "token_capture.external_capture",
+    "add_dynamo_gym_extras": "token_capture.external_capture",
     "chat_completion_usage_to_response_usage": "chat_completions_converter",
     "context_overflow_error_fields": "base_responses_api_model",
+    "dynamo_capture_refusal_suffix": "token_capture.external_capture",
     "flatten_namespace_tools": "responses_streaming",
     "generation_cut_requester": "_checkpoint",
     "install_model_call_capture": "model_call_capture",
@@ -92,7 +106,9 @@ _PUBLIC_API = {
     "message_content_to_text": "chat_completions_converter",
     "note_generation_backend": "_checkpoint",
     "note_generation_request": "_checkpoint",
+    "pop_dynamo_call_result": "token_capture.external_capture",
     "restore_namespace_tool_calls": "responses_streaming",
+    "split_dynamo_capture_refusal": "token_capture.external_capture",
     "split_responses_input_output_items": "chat_completions_converter",
     "start_model_execution": "model_call_capture",
     "synthesize_chat_completion_sse": "chat_streaming",

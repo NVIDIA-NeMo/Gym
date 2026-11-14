@@ -94,7 +94,7 @@ from nemo_gym.models.token_capture.protocols import (
 logger = logging.getLogger(__name__)
 
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
-ExternalStagingBackend = Literal["vllm_worker", "megatron_worker"]
+ExternalStagingBackend = Literal["vllm_worker", "megatron_worker", "dynamo_worker"]
 
 
 class NonGeneratingRequest(BaseModel):
@@ -178,7 +178,8 @@ class TokenCaptureSettings(BaseModel):
     # It also makes committed parents visible to every serving worker.
     # No additional in-memory coordinator is used.
     external_staging: bool = False
-    # Both backends stage a canonical delta before returning coordinates.
+    # Every backend stages a canonical delta before returning coordinates.
+    # ``dynamo_worker`` serves the policy model server, which sets ``dynamo_frontend: true``.
     external_staging_backend: ExternalStagingBackend = "vllm_worker"
     # Name of the environment variable containing the manifest-route bearer token.
     # The serving process reads the token without adding it to serialized configuration.
@@ -210,10 +211,11 @@ class TokenCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenCaptureConfig":
         block = self.token_id_capture
+        # dynamo_worker is NeMo RL's vLLM engine behind Dynamo's frontend; the dialect measures through a chat call.
         if block.parent_resolution == "source_history" and (
-            not block.external_staging or block.external_staging_backend != "vllm_worker"
+            not block.external_staging or block.external_staging_backend not in ("vllm_worker", "dynamo_worker")
         ):
-            raise ValueError("parent_resolution=source_history requires external vLLM staging")
+            raise ValueError("parent_resolution=source_history requires external vLLM or Dynamo staging")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:
@@ -221,7 +223,7 @@ class TokenCaptureConfig(BaseModel):
                 "token_id_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
-        if block.external_staging_backend == "megatron_worker" and not block.external_staging:
+        if block.external_staging_backend != "vllm_worker" and not block.external_staging:
             raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.

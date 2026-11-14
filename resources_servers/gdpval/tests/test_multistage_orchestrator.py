@@ -2993,7 +2993,7 @@ class TestFailureRouting:
         ]
         rows = [{**row, NG_ENVIRONMENT_SERVER_KEY: "gdpval_environment_server"} for row in rows]
         outcomes: List[Tuple[str, str]] = []
-        monkeypatch.setattr(rollout_collection_module, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(rollout_collection_module, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
             rollout_collection_module,
             "record_rollout_completed",
@@ -4529,8 +4529,10 @@ class TestCachedDeliverableReuse:
         # Each stage's rows are in the materialized inputs before the stage is dispatched.
         assert self.inputs_at_dispatch == [[0], [0, 1]]
 
+    @pytest.mark.parametrize("producer_schema", ["1.0", "2.0"])
+    @pytest.mark.parametrize("requested_schema", [None, "1.0", "2.0"])
     async def test_agent_observations_are_joined_into_a_trajectory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, producer_schema: str, requested_schema: str | None
     ) -> None:
         test = self
 
@@ -4540,7 +4542,10 @@ class TestCachedDeliverableReuse:
 
             def _run_examples_with_metadata(self, rows, **kwargs):
                 async def done(row):
-                    result = {**test._per_reference(row), "ng_agent_observations": {"source": "stirrup"}}
+                    result = {
+                        **test._per_reference(row),
+                        "ng_agent_observations": {"source": "stirrup", "schema_version": producer_schema},
+                    }
                     CaptureStore(tmp_path / "capture").record(
                         maybe_rollout_id_from_run_body(row), _capture_exchange("dispatched")
                     )
@@ -4578,6 +4583,9 @@ class TestCachedDeliverableReuse:
             },
         }
 
+        if requested_schema is not None:
+            global_config["model_call_capture"] = {"trajectory_schema_version": requested_schema}
+
         # A capture left by an earlier run under the same rollout id must not be merged.
         stale_capture = CaptureStore(tmp_path / "capture")
         stale_capture.record(maybe_rollout_id_from_run_body(_materialized_rows(["t0"])[0]), {"stale": True})
@@ -4585,6 +4593,7 @@ class TestCachedDeliverableReuse:
         await run_e2e_multistage(config, global_config)
 
         (row,) = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+        assert row["ng_trajectory"]["schema_version"] == (requested_schema or "1.0")
         assert row["ng_trajectory"]["task_id"] == "t0"
         assert [call["model_call_id"] for call in row["ng_model_call_capture"]["calls"]] == ["dispatched"]
 

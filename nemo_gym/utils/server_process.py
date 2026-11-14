@@ -17,6 +17,7 @@
 The main server process sets these variables before uvicorn starts its workers, so each worker knows its role and the entrypoint it serves.
 """
 
+import sys
 from os import environ, getenv
 
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -41,7 +42,20 @@ def set_is_nemo_gym_fastapi_worker() -> None:  # pragma: no cover
     environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
 
 
-def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:  # pragma: no cover
+def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:
+    """Whether the module calling this, defined in `file`, is the entrypoint this worker serves.
+
+    uvicorn starts each worker with the spawn method.
+    Spawn first re-runs the parent's main script under the name `__mp_main__`,
+    and only then does uvicorn import the entrypoint by module name and serve its `app`.
+    Gym starts a server by running its entrypoint as the main script, so the `__mp_main__` copy is that same file.
+    This returns False for that copy.
+    Otherwise each worker would build the server twice:
+    once in the copy, which nothing serves, before uvicorn's health check starts answering,
+    and once for the app it serves.
+    """
+    if sys._getframe(1).f_globals.get("__name__") == "__mp_main__":
+        return False
     return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
 
 

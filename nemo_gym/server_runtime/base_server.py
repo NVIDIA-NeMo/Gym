@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import resource
+import signal
 import socket
 import sys
 from abc import abstractmethod
@@ -25,16 +26,15 @@ from contextlib import asynccontextmanager
 from functools import partial
 from ipaddress import ip_network
 from os import environ, getenv
-from traceback import format_exc, print_exc
+from traceback import format_exception, print_exception
 from typing import Any, Awaitable, Callable, ClassVar, List, Optional, Protocol, Sequence, TextIO, Tuple, Type
 from urllib.parse import urlsplit, urlunsplit
-from uuid import uuid4
 
 import uvicorn
 from aiohttp import (
     ClientResponseError,
 )
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
@@ -50,7 +50,6 @@ from nemo_gym.client.http_client import (
     _set_tcp_keepalive,
 )
 from nemo_gym.client.server_client import (
-    SESSION_ID_KEY,
     ServerClient,
     rollout_path_prefix,
 )
@@ -65,9 +64,9 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.core.correlation import CorrelationPathError, parse_path
 from nemo_gym.core.episode_context import current_rollout_id
-from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.core.typed_exceptions import NgFailureEvent, route_reply_error
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
     _connect_server_to_ray,
     maybe_ray_cluster_exit,
@@ -78,20 +77,17 @@ from nemo_gym.server_runtime.request_handling.disconnect import (
 from nemo_gym.server_runtime.request_handling.errors import (
     _validation_exception_handler,
 )
+from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware
 from nemo_gym.server_runtime.request_handling.request_context import (
     install_request_context_isolation,
 )
+from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import (
-    SESSION_ACQUIRE_SCOPE_KEY,
-    SESSION_ID_SCOPE_KEY,
     SESSION_SOCKET_DIR_ENV,
     create_session_socket_dir,
     install_session_routing,
 )
-from nemo_gym.server_runtime.request_handling.trace_context import (
-    _ROLLOUT_PREFIX_RE,
-    install_trace_context_path,
-)
+from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
 from nemo_gym.server_runtime.uvicorn_reuse_port import reuse_port_supported, run_with_reuse_port
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.connection_pool import (
@@ -262,6 +258,14 @@ def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
         raise ValueError(f"{server.config.name} needs num_workers=1: {reason}")
 
 
+def _unblock_shutdown_signals() -> None:
+    """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
+    signal mask of the thread that launched it, so a server launched from a thread that blocks these signals, such as
+    any thread of a Ray worker, would otherwise leave RunHelper's interrupt pending and never run its shutdown.
+    Unblocking a signal that is not blocked changes nothing."""
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
@@ -356,100 +360,13 @@ class SimpleServer(BaseServer):
         # - at request time: They execute B first then A
         # - at response time: They return to A first and then B
         # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
-
-        @app.middleware("http")
-        async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            # A new session takes the ID the session router chose, if any
-            # (see nemo_gym.server_runtime.request_handling.session_routing):
-            # an episode seed's resources_session_id, or an ID the router minted.
-            new_session_id = request.scope.get(SESSION_ID_SCOPE_KEY) or str(uuid4())
-            acquire = request.scope.get(SESSION_ACQUIRE_SCOPE_KEY)
-            session = request.session
-            minted = SESSION_ID_KEY not in session
-            session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
-            if acquire is None:
-                response = await call_next(request)
-                if minted and response.status_code >= 400:
-                    # A failed request keeps nothing under a new session, so its reply names none: a seed refused
-                    # for another episode's resources_session_id must not hand this client that session's cookie.
-                    del session[SESSION_ID_KEY]
-                return response
-
-            # With several workers, a session nobody owns, new or named by a cookie whose ownership ended,
-            # becomes this worker's only if the handler uses it, before the reply leaves this worker,
-            # so the client's next request finds its owner.
-            # Starlette's session records each access through request.session; only the handler's count from here.
-            tracks_access = hasattr(session, "mark_accessed")
-            if tracks_access:
-                session.accessed = False
-            response: Response = await call_next(request)
-            used = session.accessed if tracks_access else True
-            if tracks_access:
-                # The reply keeps its Vary: Cookie header, as for any request that reads the session.
-                session.mark_accessed()
-            if used and not acquire():
-                # Another worker took ownership of the same ID meanwhile.
-                # Serving the request here would split the session.
-                return JSONResponse(
-                    {"detail": "This session's ID is already owned by another worker. Retry it."}, status_code=409
-                )
-            if minted and (not used or response.status_code >= 400):
-                # No cookie names an ID that nothing holds, so a later request cannot name a session nobody owns,
-                # and a failed request hands out no cookie, as with one worker.
-                del session[SESSION_ID_KEY]
-            return response
-
-        # Direct MCP dispatch materializes the session itself.
-        add_session_id.skipped_on_direct_mcp_dispatch = True
+        app.add_middleware(SessionIDMiddleware)
 
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
-    def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
-        @app.middleware("http")
-        async def exception_handling_middleware(request: Request, call_next):
-            with RequestFailureLog.capture() as failure_log:
-                error: BaseException | None = None
-                try:
-                    response = await call_next(request)
-                except BaseException as raised:
-                    error = raised
-                    # An agent route failure answers with its cause's body and status.
-                    reply_error = route_reply_error(raised)
-                    response = SimpleServer._failure_reply(self, reply_error)
-                    # These are the same typed observations a successful reply carries.
-                    # A raised route must not turn its actual partial observations into an escaped error string.
-                    from nemo_gym.trajectory.trajectory_record import failure_observations
-
-                    observed = {}
-                    for slot, key in (
-                        ("nemo_gym_agent_observations", "ng_agent_observations"),
-                        ("nemo_gym_agent_trajectory", "ng_trajectory"),
-                    ):
-                        value = getattr(request.state, slot, None)
-                        if isinstance(value, BaseModel):
-                            observed.update(failure_observations({key: value.model_dump(mode="json")}))
-                    if observed:
-                        payload = json.loads(response.body)
-                        payload = payload if isinstance(payload, dict) else {"detail": payload}
-                        payload.update(observed)
-                        response = JSONResponse(
-                            payload,
-                            status_code=response.status_code,
-                            headers={k: v for k, v in response.headers.items() if k != "content-length"},
-                        )
-                # Success or failure, the reply forwards its own failure and those observed while serving it.
-                report = failure_log.reply_report(error)
-                # A nested layer of this middleware may have sent the report already; keep its failure_id.
-                inner = FailureHeader.decode(response.headers)
-                if inner is not None:
-                    report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
-                response.headers.update(FailureHeader.encode(report))
-                return response
-
-        # Direct MCP dispatch handles exceptions in the /mcp request itself.
-        exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
+    def setup_exception_middleware(self, app: FastAPI) -> None:
+        app.add_middleware(ExceptionHandlingMiddleware, failure_reply=partial(SimpleServer._failure_reply, self))
 
     def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
         """The reply for an exception the route did not handle."""
@@ -476,11 +393,11 @@ class SimpleServer(BaseServer):
         if isinstance(e, Exception):
             print(
                 f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
-Formatted exception: {format_exc()}
+Formatted exception: {"".join(format_exception(e))}
 repr(e): {repr(e)}"""
             )
             return JSONResponse(content=repr(e), status_code=500)
-        print_exc()
+        print_exception(e)
         print(
             f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
         )
@@ -567,6 +484,7 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        _unblock_shutdown_signals()
         startup = ServerStartupTimeline(
             getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
             _telemetry_server_type(cls),
@@ -805,7 +723,12 @@ def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
         ] != base_segments:
             continue
         rest = "/" + "/".join(segments[len(base_segments) :])
-        if _ROLLOUT_PREFIX_RE.match(rest):
+        try:
+            resolved = parse_path(rest, allow_empty_rest=True)
+        except CorrelationPathError:
+            # The receiving server answers a malformed prefix; adding a second one would only hide it.
+            return url
+        if resolved is not None and resolved[0].capture_key is not None:
             return url
         rollout_id = current_rollout_id()
         if not rollout_id:

@@ -1,0 +1,16 @@
+collab_intel_agent:
+  responses_api_agents:
+    collab_intel_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      data_root: benchmarks/collab_intel/data/repo
+      # partner seats and referee judges: one OpenAI-compatible endpoint (e.g. a vLLM server), no default.
+      # judge_extra defaults to DeepSeek's thinking-off flag: change it with the judge model.
+      judge_base_url: ${oc.env:COLLAB_INTEL_JUDGE_BASE_URL}
+      judge_model: ${oc.env:COLLAB_INTEL_JUDGE_MODEL}
+      max_concurrent: 16

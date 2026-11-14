@@ -54,7 +54,8 @@ async def test_actual_deadline_collection_resume(tmp_path, monkeypatch, expired,
                     port=0,
                     entrypoint="",
                     agent_server={"name": "agent", "type": "responses_api_agents"},
-                    default_episode_timeout_seconds=0.05,
+                    # Only the expired case may hit the deadline; the other's real round trip gets ample time.
+                    default_episode_timeout_seconds=0.05 if expired else 30,
                 ),
                 server_client=client(),
             )

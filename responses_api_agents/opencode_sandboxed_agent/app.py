@@ -79,8 +79,10 @@ from nemo_gym.core import (
     NeMoGymSummary,
     NgFailureEvent,
     SandboxFailureDetails,
+    agent_route_failure,
     observe_failure,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -90,6 +92,7 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_failure,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
@@ -123,9 +126,10 @@ DEPRECATION_WARNING = (
     "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
     "after the environment-server migration. Where the resources server returns sandbox_access, switch to a session "
     "harness in its allowed_agents under an environment server: opencode_agent where listed (Terminal Bench 2.1), "
-    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro). Setups with no session path yet keep "
-    "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
-    "the HLE search presets (tool_servers) and vibench_agent. "
+    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro); for vibench_agent, that is "
+    "resources_servers/vibench/configs/vibench.yaml. Setups with no session path yet keep working here: SWE "
+    "resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others) and the HLE search "
+    "presets (tool_servers). "
     "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
 )
 
@@ -1488,17 +1492,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ) from error
 
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                failure_reason=self._agent_sandbox_facts(
+            # The provider returned a result that does not say how the command ended: an error type, or the -1
+            # signal-death sentinel. That is sandbox evidence, not a contradiction inside the harness, so it keeps
+            # the registered provider kind (an environment fault, ungraded and rerun under the attempt cap) and the
+            # harness failure only routes it. Neither value is an observed process exit, so no exit code is recorded.
+            handle = getattr(sandbox, "_handle", None)
+            provider = getattr(handle, "provider_name", None)
+            sandbox_id = getattr(handle, "sandbox_id", None)
+            provider_failure = sandbox_failure(
+                operation="exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason=self._agent_sandbox_facts(
                     sandbox,
                     exit_code=result.return_code,
                     reason=result.error_type if isinstance(result.error_type, str) else None,
                 )
                 + "Sandbox command outcome cannot be classified",
-                operation="opencode.execute",
+                provider=provider if isinstance(provider, str) else None,
+                sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                provider_status_reason=result.error_type if isinstance(result.error_type, str) else None,
             )
+            raise agent_route_failure(
+                provider_failure, operation="opencode.execute", stage="agent"
+            ) from provider_failure
         result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
         if len(stdout_parts) < 2:

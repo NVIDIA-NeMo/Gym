@@ -1,7 +1,7 @@
 # Deployment overlay for Terminal Bench 4 on the Harbor task shape (the generic `harbor` environment
 # server). Pass it after `--sandbox opensandbox`:
 #
-#   gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent miniswe_sandboxed_agent \
+#   gym eval run --benchmark terminal_bench_4/miniswe \
 #     --sandbox opensandbox --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml ...
 #
 # The shipped OpenSandbox block backs its background-command status poll off to a 30 s cap, tuned

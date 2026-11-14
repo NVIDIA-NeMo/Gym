@@ -15,7 +15,6 @@ math_with_judge:
 langgraph_rewoo_math_agent:
   responses_api_agents:
     langgraph_agent:
-      num_workers: 1
       entrypoint: rewoo_agent.py
       resources_server:
         type: resources_servers
