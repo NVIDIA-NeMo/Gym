@@ -16,14 +16,15 @@ NeMo Gym evaluation is environment-native: the same dataset, resources server, v
 
 1. **Discover** — find an environment or benchmark that matches your target capability: `gym list benchmarks`, `gym list environments`, `gym search <query>`.
 2. **Configure** — choose a model and agent harness; pre-flight check your config with `gym env validate`.
-3. **Run** — collect rollouts with fixed sampling settings and an explicit repeat count: `gym eval run`. Resume an interrupted run with `--resume`.
-4. **Scale** — shard across jobs and merge outputs with `gym eval aggregate`.
-5. **Verify health** — confirm that rollout records contain complete, internally consistent trajectory and model-call evidence.
-6. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
-7. **Compare** — quantify baseline-to-candidate changes with [`gym eval compare`](/main/evaluation/compare-results). Use [`gym eval compare-suite`](/main/evaluation/compare-results#compare-a-benchmark-suite) to aggregate normalized scores across benchmarks and models.
-8. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
-9. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
-10. **Reverify** — if you change a verifier parameter (grading mode, threshold, judge prompt), recompute rewards on the same rollouts without re-running inference: `gym eval reverify`.
+3. **Plan repeats** — choose fixed benchmark or suite repeat counts from complete-pass SDs with [`gym eval plan-repeats`](/main/evaluation/plan-repeats). Follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats) for a worked walkthrough.
+4. **Run** — collect rollouts with fixed sampling settings and an explicit repeat count: `gym eval run`. Resume an interrupted run with `--resume`.
+5. **Scale** — shard across jobs and merge outputs with `gym eval aggregate`.
+6. **Verify health** — confirm that rollout records contain complete, internally consistent trajectory and model-call evidence.
+7. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
+8. **Compare** — quantify baseline-to-candidate changes with [`gym eval compare`](/main/evaluation/compare-results). Use [`gym eval compare-suite`](/main/evaluation/compare-results#compare-a-benchmark-suite) to aggregate normalized scores across benchmarks and models.
+9. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
+10. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
+11. **Reverify** — if you change a verifier parameter (grading mode, threshold, judge prompt), recompute rewards on the same rollouts without re-running inference: `gym eval reverify`.
 
 The most important rule: vary one thing at a time. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful release-gate score — but it cannot explain what caused the difference.
 
@@ -103,6 +104,10 @@ Customize metrics and key metrics for an environment.
 
 <Card title="Compare Results" href="/main/evaluation/compare-results">
 Compare runs with confidence intervals, or aggregate normalized benchmark scores across models.
+</Card>
+
+<Card title="Plan Repeats" href="/main/evaluation/plan-repeats">
+Choose a repeat budget from complete-pass SDs before collecting a benchmark or suite comparison.
 </Card>
 
 <Card title="Rollout Health Checks" href="/main/evaluation/rollout-health">

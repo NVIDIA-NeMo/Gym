@@ -1355,6 +1355,26 @@ Run paths and optional agent or environment-server selectors come from the suite
 
 Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
 
+### `gym eval plan-repeats`
+
+Plan new repeats from directly supplied complete-pass standard deviations. One YAML file defines one benchmark, model, or suite aggregate, with equal benchmark weights and equal metric weights within each benchmark. Keep an existing baseline fixed or jointly plan a baseline reused across a configurable number of distinct candidate checkpoints.
+
+```bash
+gym eval plan-repeats \
+    --plan planning.yaml \
+    --output-dir results/repeat-planning
+```
+
+| Option | Description |
+| --- | --- |
+| `--plan PATH` | Required planning YAML containing direct SD inputs, aggregation level, baseline mode, and statistical targets. |
+| `--output-dir DIR`, `-o` | Report directory; defaults to the planning YAML's directory. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+Writes `repeat_planning_report.md` and/or `repeat_planning_report.json`, with full-precision numerical evidence in JSON. Statistical targets, candidate experiment count, repeat increments, costs, search bounds, and optional simulation validation are configured in YAML. See [Plan Repeats](/main/evaluation/plan-repeats) for complete examples and the distinction between analytic power and validation through the comparison procedure.
+
+Follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats) for a walkthrough from SD inputs to verified example allocations and the final comparison decision.
+
 ### `gym eval reverify`
 
 Recompute rewards by replaying a stored response through a resources server's `/verify` endpoint — without re-running model inference. The command accepts native Gym rollouts or the initial completed, text-only Relay ATIF v1.7 profile. It starts the resources server automatically from the provided config.

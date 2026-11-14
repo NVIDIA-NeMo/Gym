@@ -2220,6 +2220,28 @@ COMMANDS = {
             ),
         ),
     ),
+    "eval plan-repeats": Command(
+        target="nemo_gym.cli.eval:plan_repeats",
+        summary="Plan fixed benchmark, model, or suite repeats from normalized standard deviations.",
+        flags=(
+            _value_flag(
+                "plan", "repeat_plan_fpath", "Path to the direct-input repeat-planning YAML (required).", quote=True
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the reports (default: the plan YAML's directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
     # Temporary migration aid: the parity gate before an old resources server is deleted for its Harbor path.
     # Register-only flags (no Hydra translation) are consumed by `_dev_compare`, like `gym eval run`'s TARGET.
