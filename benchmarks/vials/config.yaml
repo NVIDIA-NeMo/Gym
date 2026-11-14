@@ -1,0 +1,58 @@
+vials_max_output_tokens: 32768
+vials_temperature: 1.0
+vials_top_p: 1.0
+vials_chat_template_kwargs: null
+vials_agent_timeout_sec: 14400
+
+vials_agent:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      harbor_resolve_paths_from_gym_root: true
+      harbor_unique_job_names: true
+      harbor_jobs_dir: results/vials/harbor
+      harbor_dataset:
+        path: benchmarks/vials/data/harbor
+      harbor_environment:
+        type: docker
+      harbor_worker_env:
+        VIALS_POLICY_BASE_URL: ${policy_base_url}
+        VIALS_POLICY_API_KEY: ${policy_api_key}
+        VIALS_JUDGE_BASE_URL: ${judge_base_url}
+        VIALS_JUDGE_API_KEY: ${judge_api_key}
+        VIALS_JUDGE_MODEL: ${judge_model_name}
+      harbor_agent:
+        import_path: benchmarks.vials.harbor.agent:VialsVisionAgent
+        model_name: ${policy_model_name}
+        override_timeout_sec: ${vials_agent_timeout_sec}
+        kwargs:
+          max_output_tokens: ${vials_max_output_tokens}
+          temperature: ${vials_temperature}
+          top_p: ${vials_top_p}
+          chat_template_kwargs: ${vials_chat_template_kwargs}
+          request_timeout_sec: ${vials_agent_timeout_sec}
+      harbor_verifier:
+        disable: false
+        override_timeout_sec: 600
+      datasets:
+      - name: vials
+        type: benchmark
+        license: Creative Commons Attribution 4.0 International
+        jsonl_fpath: benchmarks/vials/data/harbor/gym.jsonl
+        prepare_script: benchmarks/vials/prepare.py
+        prompt_config: null
+        num_repeats: 1
+      - name: vials_example
+        type: example
+        license: Creative Commons Attribution 4.0 International
+        jsonl_fpath: benchmarks/vials/data/harbor_example.jsonl
+        num_repeats: 1
+
+vials_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vials_agent

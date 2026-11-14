@@ -242,6 +242,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
+| VIALS | MIT (original); Apache-2.0 (NVIDIA integration modifications) | `benchmarks/vials/harbor/task-template/tests/upstream.py`; adapted preparation and task prompts in `benchmarks/vials/` | https://github.com/Handshake-AI-Research/VIALS |
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
@@ -252,6 +253,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
 
+- VIALS: pinned at upstream revision `002a0d25031f02a760da5d14f2c29bbd26eb06e4`. Judge prompts, verdict parsing, and answer extraction are preserved in `benchmarks/vials/harbor/task-template/tests/upstream.py`. Gym's shared Harbor integration runs the VIALS judge in a separate verifier container. The MIT license is reproduced in `benchmarks/vials/UPSTREAM_LICENSE`. The five example tasks are from the separately licensed CC-BY-4.0 dataset revision `9657bf84c6f6e470e1c31123afe3f9152c3655bd`, with individual image sources listed in `benchmarks/vials/attributions.csv`.
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
