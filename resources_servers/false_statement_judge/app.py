@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 from pydantic import ConfigDict, Field
 
@@ -51,6 +51,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
@@ -121,6 +122,8 @@ def parse_points(judge_text: str) -> Optional[int]:
 
 
 class FalseStatementJudgeConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 

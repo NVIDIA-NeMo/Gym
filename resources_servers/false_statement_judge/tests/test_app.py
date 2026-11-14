@@ -39,6 +39,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NgFailureEvent,
 )
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.verification import judge_failsafe
 from resources_servers.false_statement_judge.app import (
     FalseStatementJudgeConfig,
@@ -206,6 +207,22 @@ def _request(response_text: Optional[str] = "A full proof.") -> FalseStatementVe
             tools=[],
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_reverify_on_fresh_server_preserves_grading_inputs() -> None:
+    original = _make_server("<points>2</points>")
+    request = _request("The statement is false; continuity does not imply smoothness.")
+    first = await original.verify(request)
+
+    fresh = _make_server("<points>2</points>")
+    assert await fresh.get_reverify_mode() == ReverifyMode.STATELESS
+    replay = await fresh.verify(FalseStatementVerifyRequest.model_validate(request.model_dump()))
+
+    assert fresh._last_prompt == original._last_prompt
+    assert replay.reward == first.reward == 1.0
+    assert replay.judge_points == first.judge_points == 2
+    assert replay.response == first.response == request.response
 
 
 @pytest.mark.asyncio
