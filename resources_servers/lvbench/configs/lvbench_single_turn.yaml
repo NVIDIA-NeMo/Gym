@@ -1,0 +1,28 @@
+lvbench:
+  resources_servers:
+    lvbench:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: LVBench single-turn video MCQA with fixed-cohort accuracy and category coverage.
+      cohort_manifest: ${lvbench_cohort_manifest}
+
+lvbench_single_turn:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: lvbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+lvbench_single_turn_environment:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: lvbench_single_turn

@@ -1040,15 +1040,27 @@ class TestNeMoGymChatCompletionSchemas:
         "part",
         [
             {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}},
-            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+            {"type": "file", "file": {"file_data": "YWJj", "filename": "test.bin"}},
         ],
-        ids=["audio", "video"],
+        ids=["audio", "file"],
     )
     def test_tool_message_refuses_other_media_parts(self, part: dict) -> None:
         tool_message = {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}, part]}
 
         with pytest.raises(ValidationError):
             NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
+
+    def test_tool_message_preserves_video_and_original_call_id(self) -> None:
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "original-video-call",
+            "content": [
+                {"type": "text", "text": "window"},
+                {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+            ],
+        }
+        parsed = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
+        assert parsed.model_dump(exclude_unset=True)["messages"] == [tool_message]
 
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
