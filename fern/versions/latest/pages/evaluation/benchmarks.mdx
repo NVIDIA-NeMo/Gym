@@ -172,3 +172,45 @@ Contribution checklist for adding a new benchmark to Gym.
 </Card>
 
 </Cards>
+
+## LongFact
+
+LongFact measures factuality in long-form answers. The benchmark prepares all
+2,280 upstream prompts and includes a separate 200-prompt stress set. Configure
+a policy model, an evaluator model and a retrieval backend (Tantivy, Milvus or
+Tavily) before running. Hosted evaluators need their endpoint, API key and model
+identity; Tavily needs its API key except when replaying an existing cache.
+Milvus also needs the optional component dependencies selected by
+`'+config_paths=[benchmarks/longfact/milvus.yaml]'`.
+
+The prompts retain their upstream training-contamination canary and are held
+out for evaluation. The verifier does not deduplicate extracted claims, so
+repetition can inflate F1@100; this reward is unsuitable for RL training.
+
+```bash
+gym eval prepare --benchmark longfact
+gym eval run --benchmark longfact --model-type vllm_model \
+  --model "$POLICY_MODEL" --model-url "$POLICY_BASE_URL" \
+  --model-api-key "$POLICY_API_KEY" --split benchmark \
+  --output results/longfact/rollouts.jsonl
+```
+
+The stress set uses a running server rather than end-to-end serving:
+
+```bash
+gym env start --benchmark longfact --model-type vllm_model \
+  --model "$POLICY_MODEL" --model-url "$POLICY_BASE_URL" \
+  --model-api-key "$POLICY_API_KEY"
+# In another terminal, after the servers are ready:
+gym eval run --no-serve --agent longfact_longfact_simple_agent \
+  --input benchmarks/longfact/data/hard200.jsonl \
+  --output results/longfact-hard200/rollouts.jsonl
+```
+
+The verifier reports SAFE-style F1@100 and claim diagnostics. The optional
+GPT-5 system-card grading mode uses batched fact checks and reports error and
+unsure rates. Neither mode is the official SAFE harness, and the card adaptation
+plans retrieval once rather than browsing iteratively, so its scores are not
+validated as equivalent to the published scores. See the
+[LongFact benchmark guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/longfact/README.md)
+for evaluator and retrieval setup, grading modes and comparability limits.

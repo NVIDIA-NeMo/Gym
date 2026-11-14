@@ -1,0 +1,3 @@
+{"name":"all-supported-f1-at-100","kind":"full_reward","request":{"prompt":"List the factual statements used by this offline fixture.","response_text":"A synthetic response containing one hundred supported fixture facts.","judge_label":"SUPPORTED"},"expected_reward":1.0}
+{"name":"all-contradicted-f1-at-100","kind":"zero_reward","request":{"prompt":"List the factual statements used by this offline fixture.","response_text":"A synthetic response containing one hundred contradicted fixture facts.","judge_label":"CONTRADICTED"},"expected_reward":0.0}
+{"name":"missing-question","kind":"malformed","request":{"prompt":"","response_text":"A fixture response.","judge_label":"SUPPORTED"},"expected_error":"String should match pattern"}
