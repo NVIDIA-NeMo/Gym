@@ -141,16 +141,22 @@ async def test_rescore_source_provenance_stays_out_of_verifier_request(tmp_path,
 
 
 @pytest.mark.parametrize(
-    "reply",
+    ("reply", "message"),
     [
-        {},
-        {"error": "bad"},
-        {"reward": True, "response": {}},
-        {"reward": float("inf"), "response": {}},
-        {"reward": 1.0, "response": []},
+        ({}, "response object and a finite numeric reward"),
+        ({"error": "bad"}, "response object and a finite numeric reward"),
+        ({"reward": True, "response": {}}, "response object and a finite numeric reward"),
+        ({"reward": float("inf"), "response": {}}, "response object and a finite numeric reward"),
+        ({"reward": 1.0, "response": []}, "response object and a finite numeric reward"),
+        pytest.param(None, "JSON object", id="non_object_reply"),
+        pytest.param(
+            {"reward": 10**400, "response": {}},
+            "response object and a finite numeric reward",
+            id="reward_exceeds_float_range",
+        ),
     ],
 )
-async def test_rescore_rejects_malformed_completion_and_can_resume(prepared_run, monkeypatch, reply):
+async def test_rescore_rejects_malformed_completion_and_can_resume(prepared_run, monkeypatch, reply, message):
     from nemo_gym.config.config_types import ConfigError
 
     output, prepare = prepared_run
@@ -168,9 +174,10 @@ async def test_rescore_rejects_malformed_completion_and_can_resume(prepared_run,
 
     monkeypatch.setattr(reverify, "_run_verification_payloads", lambda rows, **_: [malformed(r) for r in rows[:1]])
     config = _config(output, destination)
-    with pytest.raises(ConfigError, match="response object and a finite numeric reward"):
+    with pytest.raises(ConfigError, match=message):
         await reverify.RolloutReverificationHelper().run_from_config(config)
     assert not destination.read_bytes()
+    assert snapshot(output) == before
 
     async def healthy(row):
         return row, {"response": row["response"], "reward": 0.0}
@@ -259,13 +266,18 @@ async def test_rescore_resume_rejects_a_superseded_cached_answer(
 
 
 @pytest.mark.parametrize("alias", [False, True])
-async def test_rescore_partial_resume_reuses_zero_reward_without_rejudging(prepared_run, monkeypatch, alias):
+@pytest.mark.parametrize("blank_lines", [False, True])
+async def test_rescore_partial_resume_reuses_zero_reward_without_rejudging(
+    prepared_run, monkeypatch, alias, blank_lines
+):
     output, _ = _save_two_answers(prepared_run)
     destination = output.parent / "rescored" / "rollouts.jsonl"
     seen = _install_scoring_judge(monkeypatch)
     config = _config(output, destination, limit=1)
     [first] = await reverify.RolloutReverificationHelper().run_from_config(config)
     assert first["reward"] == 0.0 and seen == ["old"]
+    if blank_lines:
+        destination.write_bytes(b"\n \t\n" + destination.read_bytes())
     source = output
     if alias:
         source = output.with_name("shortcut.jsonl")
@@ -280,7 +292,20 @@ async def test_rescore_partial_resume_reuses_zero_reward_without_rejudging(prepa
     assert snapshot(output) == before
 
 
-@pytest.mark.parametrize("change", ["missing_binding", "wrong_answer", "wrong_attempt", "wrong_run"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_binding",
+        "wrong_answer",
+        "wrong_attempt",
+        "wrong_run",
+        "invalid_json",
+        "non_object",
+        "binding_not_object",
+        "bool_attempt",
+        "float_attempt",
+    ],
+)
 async def test_rescore_resume_refuses_unbound_or_foreign_cache(prepared_run, monkeypatch, change):
     from nemo_gym.config.config_types import ConfigError
 
@@ -290,23 +315,36 @@ async def test_rescore_resume_refuses_unbound_or_foreign_cache(prepared_run, mon
     config = _config(output, destination, limit=1)
     await reverify.RolloutReverificationHelper().run_from_config(config)
     [cached] = read_records(destination)
-    if change == "missing_binding":
+    if change == "invalid_json":
+        encoded = b'{"incomplete":'
+    elif change == "non_object":
+        encoded = orjson.dumps([cached])
+    elif change == "binding_not_object":
+        cached["_ng_reverification_source_answer"] = []
+        encoded = orjson.dumps(cached)
+    elif change == "missing_binding":
         cached.pop("_ng_reverification_source_answer")
+        encoded = orjson.dumps(cached)
     else:
         key, value = {
             "wrong_answer": ("answer_sha256", "0" * 64),
             "wrong_attempt": ("attempt", 42),
             "wrong_run": ("run_id", "another-run"),
+            "bool_attempt": ("attempt", False),
+            "float_attempt": ("attempt", 0.0),
         }[change]
         cached["_ng_reverification_source_answer"][key] = value
-    destination.write_bytes(orjson.dumps(cached) + b"\n")
+        encoded = orjson.dumps(cached)
+    destination.write_bytes(encoded + b"\n")
     before = snapshot(destination)
+    source_before = snapshot(output)
     seen = _install_scoring_judge(monkeypatch)
     with pytest.raises(ConfigError, match="fresh output path"):
         await reverify.RolloutReverificationHelper().run_from_config(
             config.model_copy(update={"resume_from_cache": True})
         )
     assert seen == [] and snapshot(destination) == before
+    assert snapshot(output) == source_before
 
 
 @pytest.mark.parametrize("limit", [1, None])

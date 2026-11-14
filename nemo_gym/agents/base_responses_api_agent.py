@@ -22,10 +22,12 @@ from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
-from typing import Any, Awaitable, Callable, ClassVar, Optional
+from types import UnionType
+from typing import Any, Awaitable, Callable, ClassVar, Optional, Union, get_args, get_origin
 from urllib.parse import urlsplit
 from warnings import warn
 
@@ -38,6 +40,7 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    ValidationError,
     field_validator,
     model_serializer,
 )
@@ -102,6 +105,7 @@ from nemo_gym.server_runtime._checkpoint.steps import (
     CHECKPOINT_REBINDS_TOOL_ACCESSES_HEADER,
     CHECKPOINT_RESTART_HEADER,
 )
+from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -179,6 +183,13 @@ class AgentSeedSessionRequest(BaseModel):
     # The task's own time budget for the harness's work, in seconds (Harbor's ``[agent].timeout_sec``).
     # The environment server enforces it; a harness that reads it can stop cleanly and return a partial turn.
     agent_timeout_sec: float | None = Field(default=None, gt=0)
+    agent_context: AgentContext | None = Field(
+        default=None,
+        description=(
+            "Task data the environment prepares for this agent session beyond its initial model input. "
+            "The agent refuses a seed whose context it does not declare. Omitted when the session has none."
+        ),
+    )
 
     @field_validator("tool_accesses")
     @classmethod
@@ -188,12 +199,19 @@ class AgentSeedSessionRequest(BaseModel):
             raise ValueError("tool access names must be unique within an agent session")
         return tool_accesses
 
+    @field_validator("agent_context")
+    @classmethod
+    def omit_empty_agent_context(cls, agent_context: AgentContext | None) -> AgentContext | None:
+        """An empty context is no context, so the seed goes out as one without the key, as older agents accept."""
+        return agent_context if agent_context is not None and agent_context.fields() else None
+
     # Keep the model schema; a serializer return annotation would replace it.
     @model_serializer(mode="wrap")
     def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
         result = handler(self)
-        if self.continuation is None:
-            result.pop("continuation", None)
+        for key in ("continuation", "agent_context"):
+            if getattr(self, key) is None:
+                result.pop(key, None)
         return result
 
 
@@ -367,6 +385,8 @@ class BaseResponsesAPIAgent(BaseServer):
 
     config: BaseResponsesAPIAgentConfig
     calls_model_from_sandbox: ClassVar[bool] = False
+    # The agent_context keys this agent accepts, as a model of them; None accepts none.
+    agent_context_model: ClassVar[type[BaseModel] | None] = None
 
 
 @dataclass
@@ -554,6 +574,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
     # With several workers, which worker owns each agent_session_id (see nemo_gym.server_runtime.request_handling.session_routing).
     _agent_session_owners: Optional[SessionOwners] = PrivateAttr(default=None)
+
+    @classmethod
+    def supports_agent_sessions(cls) -> bool:
+        """Whether the agent implements session seed and close, directly or by inheritance."""
+        # Every agent exposes the session routes, including ones whose handlers raise NotImplementedError.
+        # Check implementations, not route presence.
+        return all(
+            getattr(cls, handler) is not getattr(SimpleResponsesAPIAgent, handler)
+            or getattr(cls, hook) is not getattr(SimpleResponsesAPIAgent, hook)
+            for handler, hook in (
+                ("seed_agent_session", "_seed_agent_session_state"),
+                ("close_agent_session", "_close_agent_session_state"),
+            )
+        )
 
     def owned_session_routing(self) -> dict[str, Any]:
         return {"kind": AGENT_SESSIONS, "agent_sessions": self}
@@ -985,6 +1019,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             error = AgentSeedRejectedError("This agent does not implement episode sessions")
             _log_seed_refusal(body.agent_session_id, error)
             raise error
+        try:
+            self.parse_agent_context(body)
+        except AgentSeedRejectedError as error:
+            _log_seed_refusal(body.agent_session_id, error)
+            raise
         restarts = self._restart_only is not None or (
             self._checkpoint_participant is not None and (self._seed_restarts(body) or self._seed_must_restart(body))
         )
@@ -1270,6 +1309,46 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # The adapter may release a borrowed connection after a final negative
         # termination receipt. Preserve that receipt; release errors still raise.
         return await self._close_agent_session_state(record.state)
+
+    def parse_agent_context(self, request: AgentSeedSessionRequest) -> BaseModel | None:
+        """The seed's agent context as ``agent_context_model``, or None for an agent that declares no model.
+
+        Raise AgentSeedRejectedError when the seed carries a key the model does not declare, misses a required one,
+        or carries a value of the wrong type, and when an agent without a model is sent any context. The seed then
+        answers a terminal 422, so an episode never runs without task data it was given.
+        """
+        fields = request.agent_context.fields() if request.agent_context is not None else {}
+        model = type(self).agent_context_model
+        if model is None:
+            if fields:
+                raise AgentSeedRejectedError(f"This agent does not accept agent_context; it was sent {sorted(fields)}")
+            return None
+        if unknown := sorted(fields.keys() - model.model_fields.keys()):
+            raise AgentSeedRejectedError(f"This agent does not accept agent_context keys {unknown}")
+        context = request.agent_context
+        for name in fields:
+            annotation = model.model_fields[name].annotation
+            variants = get_args(annotation) if get_origin(annotation) in (Union, UnionType) else (annotation,)
+            variants = tuple(variant for variant in variants if variant is not type(None))
+            artifact_variants = tuple(
+                isinstance(variant, type) and issubclass(variant, AgentContextArtifact) for variant in variants
+            )
+            is_artifact = any(artifact_variants)
+            if is_artifact and not all(artifact_variants):
+                raise AgentSeedRejectedError(
+                    f"agent_context field {name!r} cannot mix artifact and value types; declare separate fields"
+                )
+            if is_artifact != (name in context.artifacts):
+                channel = "artifacts" if is_artifact else "values"
+                raise AgentSeedRejectedError(f"agent_context field {name!r} must be supplied through {channel}")
+        try:
+            # Any fields and custom validators can retain or mutate input objects. Keep the saved seed unchanged.
+            return model.model_validate(deepcopy(fields))
+        except ValidationError as error:
+            problems = "; ".join(
+                f"{'.'.join(map(str, problem['loc']))}: {problem['msg']}" for problem in error.errors()
+            )
+            raise AgentSeedRejectedError(f"agent_context does not satisfy {model.__name__}: {problems}") from None
 
     def supports_task_tool_context(self) -> bool:
         """Whether this harness uses the task's own tool declarations.

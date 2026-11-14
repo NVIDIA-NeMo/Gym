@@ -55,10 +55,10 @@ srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --no-container-
 POLICY_PID=$!
 
 # Wait for otel_collector (try multiple health endpoints)
-echo "Waiting for otel_collector at http://localhost:13133..."
+echo "Waiting for otel_collector at http://localhost:4319..."
 OTEL_COLLECTOR_READY=0
 for _i in $(seq 1 60); do
-    if curl -sf "http://localhost:13133/" > /dev/null 2>&1; then
+    if curl -sf "http://localhost:4319/" > /dev/null 2>&1; then
         echo "  otel_collector ready."
         OTEL_COLLECTOR_READY=1
         break
