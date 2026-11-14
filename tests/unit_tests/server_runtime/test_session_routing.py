@@ -891,6 +891,77 @@ class TestOwnershipLifetime:
         clock[0] = 20.0
         assert lifetimes.sweep() == ["s"] and not lifetimes._expiries and len(lifetimes) == 0
 
+    @pytest.mark.parametrize(
+        "path,status", [("/verify", 200), ("/close_session", 200), ("/seed_session", 409), ("/tool", 404)]
+    )
+    def test_ended_session_retains_its_owner_until_metadata_expires(
+        self, monkeypatch: pytest.MonkeyPatch, path: str, status: int
+    ) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(session_routing, "monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(10, starts=("/seed_session",), ends=("/verify", "/close_session"))
+        lifetimes.opened("s")
+        lifetimes.ended("s", retain_until=100.0)
+
+        clock[0] = 20.0
+        assert lifetimes.sweep() == [] and lifetimes.holds("s")
+        # Both the end hook and the router run for a successful close/verify.
+        lifetimes.ended("s")
+        lifetimes.served("s", {"path": path, "headers": []}, status)
+        lifetimes.ended("s", retain_until=40.0)
+        clock[0] = 99.0
+        assert lifetimes.sweep() == [] and lifetimes.holds("s")
+        clock[0] = 100.0
+        assert lifetimes.sweep() == ["s"] and not lifetimes.holds("s")
+        assert not lifetimes._retain_until and not lifetimes._expiries and len(lifetimes) == 0
+
+    @pytest.mark.parametrize("restart", ["seed", "restore", "forget"])
+    def test_new_session_does_not_inherit_old_metadata_retention(
+        self, monkeypatch: pytest.MonkeyPatch, restart: str
+    ) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(session_routing, "monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(10, starts=("/seed_session",), ends=("/close_session",))
+        lifetimes.opened("s")
+        lifetimes.ended("s", retain_until=100.0)
+
+        clock[0] = 20.0
+        if restart == "seed":
+            lifetimes.served("s", {"path": "/seed_session", "headers": []}, 200)
+        elif restart == "restore":
+            lifetimes.opened("s")
+        else:
+            lifetimes.forget("s")
+            assert not lifetimes.holds("s")
+        assert not lifetimes._retain_until
+        lifetimes.ended("s")
+        clock[0] = 31.0
+        assert lifetimes.sweep() == ([] if restart == "forget" else ["s"])
+        assert not lifetimes.holds("s")
+
+    def test_checkpoint_retention_outlives_finite_metadata_retention(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(session_routing, "monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(10, starts=("/seed_session",), ends=("/close_session",))
+        lifetimes.opened("s")
+        lifetimes.ended("s", retain_until=100.0)
+        lifetimes.retain("s")
+
+        clock[0] = 101.0
+        lifetimes.sweep()
+        assert lifetimes.holds("s")
+        lifetimes.ended("s")
+        clock[0] = 112.0
+        assert lifetimes.sweep() == ["s"] and not lifetimes.holds("s")
+
+    @pytest.mark.parametrize("deadline", [float("inf"), float("-inf"), float("nan")])
+    def test_metadata_retention_requires_a_finite_deadline(self, deadline: float) -> None:
+        lifetimes = ResourcesSessionLifetimes(10, starts=("/seed_session",), ends=("/close_session",))
+        lifetimes.opened("s")
+        with pytest.raises(ValueError, match="finite monotonic deadline"):
+            lifetimes.ended("s", retain_until=deadline)
+        assert lifetimes.holds("s") and not lifetimes._retain_until
+
     def test_successful_verify_keeps_its_worker_until_pending_release_succeeds(self, monkeypatch) -> None:
         clock = [0.0]
         pending = {"s"}
