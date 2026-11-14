@@ -63,7 +63,9 @@ class Task:
         workdir_file = self.task_dir / "workdir.txt"
         self.workdir = workdir_file.read_text(encoding="utf-8").strip() if workdir_file.is_file() else "/workspace"
         if not self.workdir.startswith("/workspace"):
-            raise ValueError(f"NL2RepoBench task {self.name!r}: workdir must be /workspace or under it, got {self.workdir!r}")
+            raise ValueError(
+                f"NL2RepoBench task {self.name!r}: workdir must be /workspace or under it, got {self.workdir!r}"
+            )
 
 
 def _parse_test_case_count(raw: str) -> int:

@@ -1044,7 +1044,6 @@ def _coverage_report(expected: int, scored: int, failure_counts: Counter, failur
     )
 
 
-
 _METRICS_HEAVY_KEYS = (
     "response",
     "responses_create_params",

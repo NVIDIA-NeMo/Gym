@@ -14,8 +14,8 @@
 # limitations under the License.
 import asyncio
 import json
-import shutil
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -844,7 +844,12 @@ class TestIdleNudge:
         def said(*texts: str) -> Dict[str, Any]:
             msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "build it"}]}]
             for t in texts:
-                msgs.append({"info": {"role": "assistant"}, "parts": [{"type": "step-start"}, {"type": "text", "text": t}, {"type": "step-finish"}]})
+                msgs.append(
+                    {
+                        "info": {"role": "assistant"},
+                        "parts": [{"type": "step-start"}, {"type": "text", "text": t}, {"type": "step-finish"}],
+                    }
+                )
                 msgs.append({"info": {"role": "user"}, "parts": [{"type": "text", "text": "continue"}]})
             return {"messages": msgs[:-1]}
 
@@ -867,7 +872,15 @@ def test_monologue_stuck_follows_openhands() -> None:
     differ = {"messages": [agent(_step(text("ok"))), user, agent(_step(text("ok!"))), user, agent(_step(text("ok")))]}
     assert not app_module._monologue_stuck(differ)
     # a tool call between them is an observation: not a monologue
-    worked = {"messages": [agent(_step(text("ok"))), user, agent(_step(text("x"), tool), _step(text("ok"))), user, agent(_step(text("ok")))]}
+    worked = {
+        "messages": [
+            agent(_step(text("ok"))),
+            user,
+            agent(_step(text("x"), tool), _step(text("ok"))),
+            user,
+            agent(_step(text("ok"))),
+        ]
+    }
     assert not app_module._monologue_stuck(worked)
     assert not app_module._monologue_stuck({"messages": [agent(_step(text("ok"))), user, agent(_step(text("ok")))]})
 
@@ -881,14 +894,16 @@ def test_stuck_detector_plugin_scenarios() -> None:
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
 
 
-
 def _session(sid: str, tokens: List[int], children: List[str]) -> Dict[str, Any]:
     """An export whose assistant messages used `tokens` input tokens each and whose task calls started `children`."""
     msgs: List[Dict[str, Any]] = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go"}]}]
     for n in tokens:
         msgs.append(
             {
-                "info": {"role": "assistant", "tokens": {"input": n, "output": 1, "reasoning": 0, "cache": {"read": 2, "write": 0}}},
+                "info": {
+                    "role": "assistant",
+                    "tokens": {"input": n, "output": 1, "reasoning": 0, "cache": {"read": 2, "write": 0}},
+                },
                 "parts": [{"type": "text", "text": "ok"}],
             }
         )
@@ -901,8 +916,12 @@ def _session(sid: str, tokens: List[int], children: List[str]) -> Dict[str, Any]
                         "type": "tool",
                         "tool": "task",
                         "callID": f"call_{child}",
-                        "state": {"status": "completed", "input": {"prompt": "x"}, "metadata": {"sessionId": child},
-                                  "output": f'<task id="{child}" state="completed">done</task>'},
+                        "state": {
+                            "status": "completed",
+                            "input": {"prompt": "x"},
+                            "metadata": {"sessionId": child},
+                            "output": f'<task id="{child}" state="completed">done</task>',
+                        },
                     }
                 ],
             }
@@ -914,14 +933,31 @@ def test_child_session_ids_and_token_breakdown() -> None:
     main = _session("ses_main", [10, 20], ["ses_a", "ses_b"])
     # a resumed child is named by task_id; an errored call with no session names none
     main["messages"].append(
-        {"info": {"role": "assistant"}, "parts": [
-            {"type": "tool", "tool": "task", "state": {"status": "completed", "input": {"task_id": "ses_a"}, "output": ""}},
-            {"type": "tool", "tool": "task", "state": {"status": "error", "input": {"prompt": "y"}, "error": "boom"}},
-            {"type": "tool", "tool": "bash", "state": {"status": "completed", "input": {"command": "echo ses_zzz"}}},
-        ]}
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "state": {"status": "completed", "input": {"task_id": "ses_a"}, "output": ""},
+                },
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "state": {"status": "error", "input": {"prompt": "y"}, "error": "boom"},
+                },
+                {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {"status": "completed", "input": {"command": "echo ses_zzz"}},
+                },
+            ],
+        }
     )
     assert app_module._child_session_ids(main) == ["ses_a", "ses_b"]
-    out = app_module._token_breakdown(main, {"ses_a": _session("ses_a", [5], []), "ses_b": _session("ses_b", [7, 1], [])})
+    out = app_module._token_breakdown(
+        main, {"ses_a": _session("ses_a", [5], []), "ses_b": _session("ses_b", [7, 1], [])}
+    )
     assert out["main"]["input"] == 30 and out["main"]["calls"] == 2 and out["main"]["cache_read"] == 4
     assert out["subagents"]["input"] == 13 and out["subagents"]["calls"] == 3
     assert out["per_subagent"]["ses_b"]["input"] == 8
@@ -989,15 +1025,19 @@ async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeyp
     sandbox = MagicMock()
     sandbox.exec = AsyncMock(side_effect=exec_)
     sandbox.download = AsyncMock(side_effect=download)
-    config = TestOpenCodeSandboxedAgent()._create_config().model_copy(
-        update={"opencode_results_dir": str(tmp_path), "sandbox_timeout": 0.2, "wall_grace_s": 0.0}
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(update={"opencode_results_dir": str(tmp_path), "sandbox_timeout": 0.2, "wall_grace_s": 0.0})
     )
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
     monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
     await asyncio.wait_for(
         server.responses(
-            request=MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}),
+            request=MagicMock(
+                session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}
+            ),
             body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
         ),
         timeout=10,
@@ -1032,14 +1072,18 @@ async def test_finish_instruction_is_appended_to_the_first_prompt(tmp_path: Path
         sandbox.exec = AsyncMock(side_effect=exec_)
         sandbox.download = AsyncMock(side_effect=download)
         nudge = app_module.IdleNudgeConfig(text="go on", stop_on_text="TASK_COMPLETE", finish_instruction=instruction)
-        config = TestOpenCodeSandboxedAgent()._create_config().model_copy(
-            update={"opencode_results_dir": str(tmp_path), "idle_nudge": nudge}
+        config = (
+            TestOpenCodeSandboxedAgent()
+            ._create_config()
+            .model_copy(update={"opencode_results_dir": str(tmp_path), "idle_nudge": nudge})
         )
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
         await server.responses(
-            request=MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}),
+            request=MagicMock(
+                session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}
+            ),
             body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "build it"}]),
         )
         [first] = [c for c in commands if "opencode run --title" in c]

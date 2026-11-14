@@ -1095,11 +1095,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         except asyncio.TimeoutError:
             wall_exceeded = True
             run_error_type = "WallTimeExceeded"
-            print(f"OpenCode agent phase passed sandbox_timeout ({self.config.sandbox_timeout:g} s); stopping it",
-                  file=sys.stderr)
+            print(
+                f"OpenCode agent phase passed sandbox_timeout ({self.config.sandbox_timeout:g} s); stopping it",
+                file=sys.stderr,
+            )
             try:
                 await asyncio.wait_for(
-                    sandbox.exec(command="pkill -KILL -f 'opencode run' >/dev/null 2>&1; true", timeout_s=60), timeout=90
+                    sandbox.exec(command="pkill -KILL -f 'opencode run' >/dev/null 2>&1; true", timeout_s=60),
+                    timeout=90,
                 )
             except Exception:
                 print("Could not stop OpenCode after the wall deadline", format_exc(), file=sys.stderr)
@@ -1142,7 +1145,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        results_root = Path(self.config.opencode_results_dir) if self.config.opencode_results_dir else Path(__file__).parent / "results"
+        results_root = (
+            Path(self.config.opencode_results_dir)
+            if self.config.opencode_results_dir
+            else Path(__file__).parent / "results"
+        )
         results_dir: Path = results_root / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname

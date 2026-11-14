@@ -495,7 +495,9 @@ async def test_task_workdir_is_where_the_agent_works(task_assets: Path, monkeypa
 
 async def test_sandbox_metadata_from_config_reaches_the_spec(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
     """nemo.nvidia.com/oom-kill: process (configs/nl2repobench.yaml) must reach OpenSandbox at creation."""
-    config = _config(task_assets).model_copy(update={"sandbox_config": {"metadata": {"nemo.nvidia.com/oom-kill": "process"}}})
+    config = _config(task_assets).model_copy(
+        update={"sandbox_config": {"metadata": {"nemo.nvidia.com/oom-kill": "process"}}}
+    )
     server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
@@ -517,7 +519,10 @@ async def test_verify_image_registry_template_picks_the_grading_image(
     verify_map = tmp_path / "verify_images.json"
     verify_map.write_text('{"example-task": "registry.example/twins/example-task@sha256:abc"}')
     config = _config(task_assets).model_copy(
-        update={"agent_network_mode": "no_internet_preinstalled", "verify_image_registry_template": f"map:{verify_map}"}
+        update={
+            "agent_network_mode": "no_internet_preinstalled",
+            "verify_image_registry_template": f"map:{verify_map}",
+        }
     )
     server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox = AsyncMock()

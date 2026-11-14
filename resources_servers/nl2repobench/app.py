@@ -335,6 +335,7 @@ def _collect_command(workdir: str) -> str:
     """_COLLECT_COMMAND for a task's own project directory (identical for /workspace)."""
     return _COLLECT_COMMAND.replace("-C /workspace .", f"-C {shlex.quote(workdir)} .")
 
+
 # Upstream NL2RepoBench runs the agent in a generic, task-agnostic OpenHands
 # sandbox image - no pre-installed deps, no existing scaffold, nothing but
 # start.md. The paper's grading image (task_image() below) is only ever
@@ -774,7 +775,8 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             task_image(task, registry_template=self.config.verify_image_registry_template)
             if self.config.verify_image_registry_template
             else task_image(task, registry_template=self.config.task_image_registry_template)
-            if mode == "no_internet_preinstalled" and not (self.config.verify_with_override_image and self.config.verify_image_override)
+            if mode == "no_internet_preinstalled"
+            and not (self.config.verify_with_override_image and self.config.verify_image_override)
             else self.config.verify_image_override
             or task_image(task, registry_template=self.config.task_image_registry_template)
         )
@@ -1133,7 +1135,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         commands = task.test_commands.commands
         for index, command in enumerate(commands):
             is_last = index == len(commands) - 1
-            run_command = f"export PYTHONPATH=/workspace${{PYTHONPATH:+:$PYTHONPATH}}; {command}" if upstream else command
+            run_command = (
+                f"export PYTHONPATH=/workspace${{PYTHONPATH:+:$PYTHONPATH}}; {command}" if upstream else command
+            )
             command_result = await sandbox.exec(run_command, cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S)
             last_exit_code = command_result.return_code
             command_output = f"{command_result.stdout or ''}{command_result.stderr or ''}"
