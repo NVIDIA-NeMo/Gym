@@ -53,6 +53,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
+from nemo_gym.sandbox.utils import cpu_cap_env
 
 
 # Reserved keys inside a sandbox block that are not the provider config.
@@ -218,7 +219,8 @@ def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> 
 class SandboxConfig(BaseModel):
     """The ``sandbox_config`` settings a server applies to every sandbox it starts.
 
-    Servers that need more, such as a fixed image, subclass it with their own fields.
+    Servers that need more, such as a fixed image, subclass it with their own fields. With ``derive_cpu_env``, the
+    spec's environment also caps tool parallelism to ``resources.cpu`` (see :func:`~nemo_gym.sandbox.cpu_cap_env`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -229,6 +231,7 @@ class SandboxConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
+    derive_cpu_env: bool = False
 
     @field_validator("resources")
     @classmethod
@@ -242,19 +245,57 @@ class SandboxConfig(BaseModel):
         *,
         image: str | None,
         workdir: str | None,
+        env: Mapping[str, str] | None = None,
         metadata: Mapping[str, str] | None = None,
         files: Mapping[str, str | bytes] | None = None,
+        network_policy: Mapping[str, object] | None = None,
         named_configs: Mapping[str, Any] | None = None,
     ) -> SandboxSpec:
-        """Build the spec of one sandbox; ``metadata`` adds to the provider's and the config's metadata."""
+        """Build the spec of one sandbox.
+
+        Args:
+            sandbox_provider: The server's ``sandbox_provider``, whose ``default_metadata`` the spec starts from.
+            image: The sandbox image.
+            workdir: The sandbox working directory.
+            env: The server's own environment. The CPU caps, then the config's ``env``, override it.
+            metadata: Labels that override the provider's and the config's metadata.
+            files: Files to place in the sandbox, keyed by absolute path.
+            network_policy: The egress rule for this sandbox, as built by
+                :meth:`~nemo_gym.server_runtime.sandbox_network.SandboxNetwork.policy`. It becomes
+                ``provider_options["network_policy"]``.
+            named_configs: The merged global config, to resolve a ``sandbox_provider`` reference.
+
+        Raises:
+            ValueError: If ``network_policy`` is given and ``provider_options`` already sets one.
+        """
+        resources = SandboxResources.from_mapping(self.resources)
+        provider_options = dict(self.provider_options)
+        if network_policy is not None:
+            if "network_policy" in provider_options:
+                raise ValueError(
+                    "sandbox_config.provider_options.network_policy and a server network setting both restrict "
+                    "this sandbox; set one of them"
+                )
+            provider_options["network_policy"] = dict(network_policy)
+        cpu_env = cpu_cap_env(resources.cpu) if self.derive_cpu_env else {}
         return SandboxSpec(
             image=image,
             ttl_s=self.ttl_s,
             ready_timeout_s=self.ready_timeout_s,
             workdir=workdir,
-            env=dict(self.env),
+            env=dict(env or {}) | cpu_env | self.env,
             files=dict(files or {}),
             metadata=resolve_provider_metadata(sandbox_provider, named_configs) | self.metadata | dict(metadata or {}),
-            resources=SandboxResources.from_mapping(self.resources),
-            provider_options=dict(self.provider_options),
+            resources=resources,
+            provider_options=provider_options,
         )
+
+
+class CpuCappedSandboxConfig(SandboxConfig):
+    """``sandbox_config`` for task sandboxes that cap tool parallelism to their CPU limit unless told not to.
+
+    Test runners and build tools size their worker pools by the host's core count, not the sandbox's CPU limit, so
+    without the caps they overcommit a small sandbox on a wide host.
+    """
+
+    derive_cpu_env: bool = True

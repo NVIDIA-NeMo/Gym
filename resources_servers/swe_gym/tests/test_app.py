@@ -477,10 +477,6 @@ class TestAgentSandbox:
         assert TESTBED_ENV["PATH"].startswith("/opt/miniconda3/envs/testbed/bin:")
         assert TESTBED_ENV["CONDA_DEFAULT_ENV"] == "testbed"
 
-    def test_the_app_wires_cpu_cap_env_into_the_spec(self) -> None:
-        source = self._source()
-        assert "cpu_cap_env(sandbox_resources.cpu)" in source and "env=env," in source
-
 
 class TestInSandboxCancellation:
     """A CancelledError raised from inside the sandbox client (a long run tripping an inner timeout) must

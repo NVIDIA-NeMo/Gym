@@ -152,7 +152,7 @@ def test_model_only_lends_a_sandbox_that_reaches_only_the_policy_model(root, mon
     monkeypatch.setattr(
         "nemo_gym.server_runtime.sandbox_lending.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
     )
-    monkeypatch.setattr("nemo_gym.server_runtime.sandbox_lending.get_server_url", lambda name: "http://10.1.2.3:9000")
+    monkeypatch.setattr("nemo_gym.server_runtime.sandbox_network.get_server_url", lambda name: "http://10.1.2.3:9000")
     specs = []
 
     async def start(self: AsyncSandbox, spec) -> None:
