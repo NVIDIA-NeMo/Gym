@@ -15,7 +15,7 @@ reward:
   - 0.0
   - 1.0
   higher_is_better: true
-determinism: deterministic
+determinism: seeded
 resources_server: scrabble
 agent_server: gymnasium_agent
 datasets:

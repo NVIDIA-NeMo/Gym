@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import runpy
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 from fastapi import HTTPException
 from omegaconf import DictConfig
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -127,6 +129,57 @@ class TestReset:
         with pytest.raises(HTTPException) as error:
             await _env(dictionary_path).reset(_row(**overrides), session_id="s")
         assert error.value.status_code == 400
+
+
+_BLANK_ROW = "." * 15
+MALFORMED_BOARDS = {
+    "14 rows": [_BLANK_ROW] * 14,
+    "16 rows": [_BLANK_ROW] * 16,
+    "short row": [_BLANK_ROW] * 14 + ["." * 14],
+    "long row": [_BLANK_ROW] * 14 + ["." * 16],
+    "one-character rows": ["."] * 15,
+    "hash": [_BLANK_ROW] * 14 + ["#" + "." * 14],
+    "blank tile": [_BLANK_ROW] * 14 + ["?" + "." * 14],
+    "non-ASCII letter": [_BLANK_ROW] * 14 + ["\u00c9" + "." * 14],
+}
+
+
+class TestBoardShape:
+    """Dataset validation (TaskData) and /reset must accept exactly the same boards."""
+
+    @pytest.mark.parametrize("board", MALFORMED_BOARDS.values(), ids=MALFORMED_BOARDS.keys())
+    def test_schema_rejects_malformed_board(self, board):
+        with pytest.raises(ValidationError):
+            TaskData.model_validate({"position_id": "x", "board": board, "rack": "AT", "best_score": 4})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("board", MALFORMED_BOARDS.values(), ids=MALFORMED_BOARDS.keys())
+    async def test_reset_rejects_malformed_board(self, dictionary_path, board):
+        with pytest.raises(HTTPException) as error:
+            await _env(dictionary_path).reset(_row(board=board), session_id="s")
+        assert error.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_tiles_and_played_blanks_are_accepted(self, dictionary_path):
+        board = game.apply_move(game.empty_board(), [(7, 7, "C"), (7, 8, "a"), (7, 9, "T")])
+        TaskData.model_validate({"position_id": "x", "board": board, "rack": "S?", "best_score": 4})
+        env = _env(dictionary_path)
+        await env.reset(_row(board=board, rack="S?"), session_id="s")
+        assert env.session_state["s"].board == board
+
+
+@pytest.mark.parametrize("is_worker", [False, True])
+def test_worker_entrypoint(is_worker: bool) -> None:
+    """A uvicorn worker import exports `app`; an ordinary import starts nothing."""
+    with (
+        patch("nemo_gym.utils.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
+        patch("nemo_gym.server_runtime.base_server.SimpleServer.run_webserver") as start,
+    ):
+        module = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="worker_import")
+    assert ("app" in module) == is_worker
+    assert start.call_count == int(is_worker)
+    if is_worker:
+        assert module["app"] is start.return_value
 
 
 class TestStep:

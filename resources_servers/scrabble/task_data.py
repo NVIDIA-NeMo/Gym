@@ -6,7 +6,15 @@ Gymnasium-family environment: reward comes from /step, driven by gymnasium_agent
 position (board and rack) and its best achievable score, so every rollout of a row solves the same puzzle.
 """
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# '.' is an empty square, A-Z a tile, a-z a blank played as that letter. Shared with the server's session
+# state so dataset validation and /reset accept exactly the same boards.
+BoardRow = Annotated[str, Field(min_length=15, max_length=15, pattern=r"^[A-Za-z.]+$")]
+Board = Annotated[list[BoardRow], Field(min_length=15, max_length=15)]
 
 
 class BestMove(BaseModel):
@@ -28,9 +36,7 @@ class TaskData(BaseModel):
         description="Stable identifier of the position, for example 'train-000042'.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
-    board: list[str] = Field(
-        min_length=15,
-        max_length=15,
+    board: Board = Field(
         description="15 rows of 15 characters: '.' empty, A-Z a tile, a-z a blank played as that letter.",
         json_schema_extra={"consumed_by": ["verify", "prompt"]},
     )

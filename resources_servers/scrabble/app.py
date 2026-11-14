@@ -30,9 +30,10 @@ from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validat
 
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseFunctionToolCall
 from nemo_gym.server_runtime import BaseResourcesServerConfig, CheckpointMode
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import GymnasiumServer
 from resources_servers.scrabble import game
-from resources_servers.scrabble.task_data import TaskData
+from resources_servers.scrabble.task_data import Board, TaskData
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,17 +83,12 @@ class PlayMoveRequest(BaseModel):
 class ScrabbleSession(BaseModel):
     """Per-session state. Plain JSON, so it is exported as-is for checkpoints."""
 
-    board: list[str]
+    board: Board
     rack: str
     best_score: int = Field(ge=1)
     max_attempts: int = Field(ge=1)
     illegal_moves: int = 0
     finished: bool = False
-
-    @field_validator("board")
-    @classmethod
-    def _board(cls, value: list[str]) -> list[str]:
-        return game.validate_board(value)
 
     @field_validator("rack")
     @classmethod
@@ -211,3 +207,6 @@ class ScrabbleResourcesServer(GymnasiumServer):
 
 if __name__ == "__main__":
     ScrabbleResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ScrabbleResourcesServer.run_webserver()  # noqa: F401
