@@ -54,3 +54,37 @@ async def test_private_controls_are_rejected(tmp_path, monkeypatch, field):
         await environment.run_legacy(dict(_ng_task_index=0, _ng_rollout_index=0, **{field: {"value": True}}))
     assert rejected.value.status_code == 422
     assert not (tmp_path / "episodes").exists()
+
+
+async def test_aggregation_retains_valid_zero_and_blocks_incomplete_or_failed_headline(tmp_path, monkeypatch):
+    from nemo_gym.config import AggregateMetricsRequest
+    from responses_api_agents.wildclawbench_agent import metrics
+
+    environment, _, _, _ = make_pipeline(tmp_path, sys.executable, monkeypatch)
+    pin = dict(revision="r", tasks={"a": "a.md", "b": "b.md"}, files={"a.md": "a" * 64, "b.md": "b" * 64})
+    monkeypatch.setattr(metrics, "source_pin", lambda: pin)
+    rows = [
+        dict(
+            task_id=k,
+            task_sha256=k * 64,
+            source_revision="r",
+            evaluation_protocol={"gym_protocol": "agent_sessions_v1"},
+            reward=float(i),
+            native_reward=float(i),
+            mask_sample=False,
+        )
+        for i, k in enumerate(["a", "b"])
+    ]
+
+    async def aggregate(values):
+        return await environment.aggregate_metrics(AggregateMetricsRequest(verify_responses=values))
+
+    complete = await aggregate(rows)
+    assert complete.key_metrics == {"wildclawbench/overall_score": 0.5}
+    masked = await aggregate([rows[0], dict(rows[1], reward=0.0, native_reward=None, mask_sample=True)])
+    assert masked.agent_metrics["wildclawbench/num_scored"] == 1
+    assert masked.agent_metrics["wildclawbench/partial_mean_score"] == 0
+    assert not masked.key_metrics
+    failed = await aggregate(rows + [{"_ng_failure_class": "environment_server_failed"}])
+    assert failed.agent_metrics["wildclawbench/num_failed"] == 1
+    assert not failed.key_metrics

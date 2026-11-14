@@ -14,3 +14,8 @@ wildclaw_resources:
           type: responses_api_models
           name: policy_model
         model_name: ${policy_model_name}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/wildclawbench/data/example.jsonl
+          license: MIT

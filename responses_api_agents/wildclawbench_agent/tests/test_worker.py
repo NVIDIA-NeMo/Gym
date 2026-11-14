@@ -5,6 +5,7 @@
 import json
 import signal
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -246,14 +247,10 @@ def test_agent_stage_leaves_grading_and_container_cleanup_to_resources(episode):
     assert "grade" not in state["calls"]
     assert "remove" not in state["calls"]
     assert result["events"]
-    assert json.loads((__import__("pathlib").Path(config["output"]) / "harness_stopped.json").read_text())[
-        "cleanup_confirmed"
-    ]
+    assert json.loads((Path(config["output"]) / "harness_stopped.json").read_text())["cleanup_confirmed"]
 
 
 def test_verifier_requires_confirmed_agent_close_and_preserves_native_score(episode):
-    from pathlib import Path
-
     state, config = episode
     output = Path(config["output"])
     result = worker.execute(config, stage="agent")

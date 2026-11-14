@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from typing import ClassVar
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
@@ -25,6 +26,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.wildclawbench_agent.execution import (
     ExecutionConfig,
     NativeProcess,
@@ -43,11 +45,24 @@ class WildClawSeedRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
     verifier_metadata: dict
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    wildclaw_execution_key: str
+    wildclaw_execution_key: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class WildClawVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+def verify_response_binding(body: BaseVerifyRequest, receipt: dict, model_name: str) -> None:
+    """A native task-state score may only be attached to its actual harness answer."""
+    conversation = openclaw_session_conversation(receipt.get("events", []))
+    expected = [
+        item.model_dump(mode="json")
+        for item in conversation
+        if getattr(item, "role", None) not in {"user", "system", "developer"}
+    ]
+    actual = [item.model_dump(mode="json") for item in body.response.output]
+    if actual != expected or body.response.model != model_name:
+        raise ResourcesSessionConflictError("Verification response differs from the seeded native harness answer")
 
 
 class WildClawResources(SimpleResourcesServer):
@@ -107,7 +122,7 @@ class WildClawResources(SimpleResourcesServer):
                 episode.model_dump(mode="json"),
                 task.model_dump(mode="json"),
             )
-        except (ValueError, OSError):
+        except (ValueError, OSError, KeyError):
             raise ResourcesSeedRejectedError(
                 "Native lease validation failed; inspect the prepared source and task assets"
             ) from None
@@ -120,18 +135,21 @@ class WildClawResources(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: BaseVerifyRequest) -> WildClawVerifyResponse:
         session_id = request.session.get(SESSION_ID_KEY, "")
+        request_hash = hashlib.sha256(json.dumps(body.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
         async with self.verifying(session_id) as verification:
             if verification.is_lost:
                 return WildClawVerifyResponse(
                     **body.model_dump(), **lost_session_verification("Native task session was lost")
                 )
             if not verification.is_live:
-                result = verification.retained
-                if not isinstance(result, dict):
+                retained = verification.retained
+                if not isinstance(retained, dict):
                     return WildClawVerifyResponse(
                         **body.model_dump(), **lost_session_verification("Native verification receipt was lost")
                     )
-                return WildClawVerifyResponse.model_validate(dict(**body.model_dump(), **result))
+                if retained["request_sha256"] != request_hash:
+                    raise ResourcesSessionConflictError("Verification retry differs from its original request")
+                return WildClawVerifyResponse.model_validate(dict(**body.model_dump(), **retained["result"]))
             process = self._owned[session_id]
             # Retain a failure before any await; a disconnected judge is never rerun after cleanup.
             worker = json.loads((process.output / "worker.json").read_text())
@@ -145,7 +163,10 @@ class WildClawResources(SimpleResourcesServer):
                 **failure_fields(["verification_interrupted"]),
                 artifact_dir=str(process.output),
             )
-            verification.retain(result)
+            verification.retain(dict(request_sha256=request_hash, result=result))
+            verify_response_binding(
+                body, json.loads((process.output / "agent_result.json").read_text()), self.config.execution.model_name
+            )
             try:
                 native = await process.invoke("verify", 240)
                 native.pop("events", None)

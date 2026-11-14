@@ -281,3 +281,14 @@ def test_finds_the_agent_references_gym_finds() -> None:
 def test_server_names_match_the_relays_gym_generates(agent_name: str, agent_type: str) -> None:
     # The deprecation warning prints a block to paste; it must match what this script writes.
     assert migration.server_name(agent_name, agent_type) == legacy_environment_server_name(agent_name, agent_type)
+
+
+def test_wildclaw_sessions_do_not_gain_a_legacy_relay() -> None:
+    root = SCRIPT.parents[1]
+    default = yaml.safe_load(
+        (root / "responses_api_agents/wildclawbench_agent/configs/wildclawbench_agent.yaml").read_text()
+    )
+    pairing = yaml.safe_load((root / "benchmarks/wildclawbench/config.yaml").read_text())
+    assert not migration.needs_environment_server(default["wildclaw_agent"])
+    assert not migration.needs_environment_server(pairing["wildclaw_agent"])
+    assert list(pairing["wildclaw_environment_server"]["environment_servers"]) == ["wildclawbench_environment"]

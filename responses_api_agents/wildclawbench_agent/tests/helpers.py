@@ -152,10 +152,16 @@ def make_pipeline(tmp_path, worker_python, monkeypatch):
     client.post.side_effect = post
     client._resolve_base_url.return_value = "http://local:8000"
     # Parent consults the bound agent config to build its activation URL.
-    client.global_config_dict = OmegaConf.create({
-        "wildclaw_agent": {"responses_api_agents": {"wildclawbench_agent": {"entrypoint": "app.py"}}},
-        "wildclaw_resources": {"resources_servers": {"wildclawbench": {"entrypoint": "app.py", "execution": execution.model_dump(mode="json")}}},
-    })
+    client.global_config_dict = OmegaConf.create(
+        {
+            "wildclaw_agent": {"responses_api_agents": {"wildclawbench_agent": {"entrypoint": "app.py"}}},
+            "wildclaw_resources": {
+                "resources_servers": {
+                    "wildclawbench": {"entrypoint": "app.py", "execution": execution.model_dump(mode="json")}
+                }
+            },
+        }
+    )
     environment = WildClawEnvironment(
         config=WildClawEnvironmentConfig(
             name="wildclaw_environment_server",

@@ -281,6 +281,8 @@ else:
     output = Path(first["artifact_dir"])
     assert (output / "cleaned").read_text() == "yes"
     assert (output / "executed").read_text() == "one execution only"
+    assert (output / "worker-agent.log").is_file()
+    assert not (output / "agent.log").exists()
     saved = json.loads((output / "worker.json").read_text())
     assert saved["policy_base_url"] == "http://localhost/rollouts/3-2/v1"
     assert (await environment.run_legacy(request))["reward"] == 0

@@ -139,7 +139,7 @@ class NativeProcess:
             str(config_file),
             "--" + stage,
         ]
-        with (self.output / (stage + ".log")).open("a") as log:
+        with (self.output / ("worker-" + stage + ".log")).open("a") as log:
             self.process = await asyncio.create_subprocess_exec(
                 *command, env=env, stdout=log, stderr=log, start_new_session=True
             )
