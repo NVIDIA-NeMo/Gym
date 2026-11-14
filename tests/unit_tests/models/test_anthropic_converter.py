@@ -20,16 +20,40 @@ inverse direction used by an Anthropic Messages ingress proxy, plus round-trips 
 two directions against drift.
 """
 
+import base64
 import json
+import logging
+import sys
 
 import pytest
 from anthropic.types import Message
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models import anthropic_converter
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
 PNG_DATA_URL = "data:image/png;base64,aGVsbG8="  # "hello"
+
+
+def _pdf(text: str) -> bytes:
+    """A minimal one-page PDF that shows `text`."""
+    content = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        b"<</Length %d>>stream\n%s\nendstream" % (len(content), content),
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    out, offsets = b"%PDF-1.4\n", []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj%s endobj\n" % (number, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    return out + b"trailer<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
 
 
 def _converter() -> AnthropicConverter:
@@ -290,6 +314,108 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].output == [
             {"type": "input_text", "text": "chart"},
             {"type": "input_image", "image_url": PNG_DATA_URL, "detail": "auto"},
+        ]
+
+    @staticmethod
+    def _tool_result_request(block: dict) -> dict:
+        return {
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [block]}],
+                }
+            ],
+        }
+
+    def test_tool_result_pdf_document_becomes_text(self) -> None:
+        pytest.importorskip("pypdf")
+        block = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(_pdf("Hello PDF")).decode(),
+            },
+        }
+
+        params = AnthropicConverter(extract_pdf_text=True).anthropic_request_to_responses(
+            self._tool_result_request(block)
+        )
+
+        assert "Hello PDF" in params.input[0].output
+
+    def test_tool_result_text_document_becomes_text(self) -> None:
+        block = {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "plain"}}
+
+        params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+
+        assert params.input[0].output == "plain"
+
+    def test_tool_result_unreadable_pdf_document_becomes_note(self) -> None:
+        pytest.importorskip("pypdf")
+        block = {
+            "type": "document",
+            "title": "a.pdf",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "bm90IGEgcGRm"},
+        }
+
+        params = AnthropicConverter(extract_pdf_text=True).anthropic_request_to_responses(
+            self._tool_result_request(block)
+        )
+
+        assert params.input[0].output.startswith("[document 'a.pdf': could not read PDF")
+
+    def test_tool_result_pdf_document_without_pypdf_warns(self, monkeypatch, caplog) -> None:
+        monkeypatch.setitem(sys.modules, "pypdf", None)
+        monkeypatch.setattr(anthropic_converter, "_warned_missing_pypdf", False)
+        block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": ""}}
+
+        with caplog.at_level(logging.WARNING, logger=anthropic_converter.__name__):
+            params = AnthropicConverter(extract_pdf_text=True).anthropic_request_to_responses(
+                self._tool_result_request(block)
+            )
+
+        assert params.input[0].output == ""
+        assert params.input[0].call_id == "toolu_1"
+        assert "pypdf is not installed" in caplog.text
+
+    @pytest.mark.parametrize("pdf_available", [False, True])
+    def test_tool_result_pdf_is_skipped_by_default(self, monkeypatch: pytest.MonkeyPatch, pdf_available: bool) -> None:
+        if pdf_available:
+            pytest.importorskip("pypdf")
+        else:
+            monkeypatch.setitem(sys.modules, "pypdf", None)
+        block = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(_pdf("PDF")).decode(),
+            },
+        }
+
+        params = _converter().anthropic_request_to_responses(self._tool_result_request(block))
+
+        assert params.input[0].output == ""
+        assert params.input[0].call_id == "toolu_1"
+
+    def test_skipping_pdf_preserves_adjacent_text_and_images(self) -> None:
+        request = self._tool_result_request({"type": "text", "text": "before"})
+        request["messages"][0]["content"][0]["content"].extend(
+            [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": ""}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+                {"type": "text", "text": "after"},
+            ]
+        )
+
+        params = _converter().anthropic_request_to_responses(request)
+
+        assert params.input[0].output == [
+            {"type": "input_text", "text": "before"},
+            {"type": "input_image", "image_url": PNG_DATA_URL, "detail": "auto"},
+            {"type": "input_text", "text": "after"},
         ]
 
 
