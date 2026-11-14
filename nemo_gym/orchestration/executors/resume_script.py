@@ -169,6 +169,14 @@ RESUME_REFUSED_REASON = (
 )
 # The installer's first error line (else its last line) is cut to this many characters.
 INSTALL_ERROR_MAX_CHARS = 200
+# The typed line that ends the chain when the installed runtime has no recovery reader (``nemo_gym.orchestration.recovery``
+# or its ``continuation_admission``): the runtime predates the recovery module, and retrying installs the same one.
+RECOVERY_RUNTIME_OUTDATED = "recovery_runtime_outdated"
+RECOVERY_RUNTIME_OUTDATED_REASON = (
+    f"{RECOVERY_RUNTIME_OUTDATED}: the Gym runtime this run installs predates nemo_gym.orchestration.recovery, which "
+    "decides whether a chain may continue; the chain does not retry it; point the run's Gym runtime at a version "
+    "that contains that module, then continue with gym eval resubmit --recover"
+)
 # The typed line that ends the chain of a complete run whose required MLflow export has no current receipt.
 EXPORT_RECEIPT_MISSING = "run_complete_export_receipt_missing"
 EXPORT_RECEIPT_MISSING_REASON = (
@@ -776,8 +784,17 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
             [[ -z "$_gym_error" ]] || printf ': %s' "${{_gym_error:0:{install_error_max_chars}}}"
             printf '; the chain does not retry it'
         }}
+        # A runtime without the recovery reader fails on its import, whatever else it prints: name the cause and the fix.
+        _gym_admission_failure() {{
+            if grep -qE "No module named .nemo_gym\\.orchestration(\\.recovery)?.|cannot import name .continuation_admission." "$_gym_admission_err" 2>/dev/null; then
+                cat "$_gym_admission_err" >&9 2>/dev/null
+                printf '%s' "{recovery_runtime_outdated_reason}"
+            else
+                printf 'Installed recovery runtime failed%s' "$(_gym_admission_error)"
+            fi
+        }}
         exec 9>&2 2>"$_gym_admission_err"
-        _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "Installed recovery runtime failed$(_gym_admission_error)"
+        _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "$(_gym_admission_failure)"
         exec 2>&9 9>&-
         cat "$_gym_admission_err" >&2 2>/dev/null
         [[ "$_gym_admission_err" == /dev/null ]] || rm -f -- "$_gym_admission_err"
@@ -1150,6 +1167,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         spinup_timeout_reason=SPINUP_TIMEOUT_REASON,
         driver_install_failed=DRIVER_INSTALL_FAILED,
         install_error_max_chars=INSTALL_ERROR_MAX_CHARS,
+        recovery_runtime_outdated_reason=RECOVERY_RUNTIME_OUTDATED_REASON,
         collection_resume_refused=COLLECTION_RESUME_REFUSED,
         resume_refused_reason=RESUME_REFUSED_REASON,
         provider_credentials_rejected=PROVIDER_CREDENTIALS_REJECTED,
