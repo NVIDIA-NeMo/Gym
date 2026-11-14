@@ -1,0 +1,37 @@
+# ui_generation_agentic with Hermes (hermes_agent) in the lent task sandbox. The task set and routing are in base.yaml.
+#
+# At seed the agent server uploads the Hermes runtime (a pinned CPython plus the pinned Hermes package), which it builds
+# once on the Gym host (that needs uv and GitHub/PyPI access, or a filled cache), so the agent images need no change
+# and the sandbox needs no internet. Hermes calls the policy Gym model server's chat completions endpoint with a
+# placeholder key. In sandbox mode the run's result file is writable by commands the model runs, so the Hermes README
+# advises against using these rollouts as RL training data.
+config_paths:
+  - environments/ui_generation_agentic/base.yaml
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+
+ui_generation_agentic_hermes_agent:
+  _inherit_from: hermes_agent
+  responses_api_agents:
+    hermes_agent:
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      resources_server: null
+      concurrency: 4
+      max_turns: 100
+      # Per model call (reasoning plus one tool call).
+      max_tokens: ${ui_generation_agentic_max_output_tokens}
+      context_length: 131072
+      # Shell and file tools only: no web tools and no delegation, as with the other harnesses.
+      enabled_toolsets: [terminal, file]
+      terminal_timeout: 180
+      sandbox_runner_timeout_seconds: 3600
+
+ui_generation_agentic_environment_server:
+  environment_servers:
+    single_agent_turn:
+      agent_server:
+        type: responses_api_agents
+        name: ui_generation_agentic_hermes_agent

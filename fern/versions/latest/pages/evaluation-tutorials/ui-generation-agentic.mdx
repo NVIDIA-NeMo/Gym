@@ -1,0 +1,103 @@
+---
+title: "Evaluate Agentic UI Generation"
+description: "A coding harness writes one front-end UI file in a per-stack sandbox; the file is built in a clean template and judged."
+position: 8
+---
+
+The `ui_generation_agentic` environment asks a coding harness (OpenCode, Claude Code, Hermes or Codex) to write **one front-end UI file from scratch** inside a sandbox that holds a ready-made project for one of three stacks: Next.js, Vite or a static nginx page. After the agent session ends, the resources server stops what the agent left running, snapshots the file, builds it in a fresh copy of the project template and asks an LLM judge to grade it against the prompt. The reward is `build × score / 4`.
+
+The guard and runtime reference (G1 to G6, guard modes, rollout fields) is in the [server README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ui_generation_agentic).
+
+## What This Tutorial Runs
+
+| Component | Value |
+|---|---|
+| Resources server | `resources_servers/ui_generation_agentic` |
+| Harness compositions | `environments/ui_generation_agentic/{opencode,claude_code,hermes,codex}.yaml` |
+| Environment server | `single_agent_turn`, taskset routing |
+| Example tasks | `resources_servers/ui_generation_agentic/data/example.jsonl` (5 synthetic tasks) |
+| Sandbox provider | OpenSandbox (restricted egress); Docker works with `agent_network_mode: open` |
+| Reward | `build × quality / 4` by default (`reward_score` picks quality, prompt adherence, their mean or minimum) |
+
+## Prerequisites
+
+- Complete [Installation](/get-started/installation).
+- A sandbox provider. With OpenSandbox, set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`; restricted egress (`agent_network_mode: restricted`, the default) needs OpenSandbox's egress sidecar.
+- A policy model and a judge model from different families, in `env.yaml`:
+
+```yaml
+policy_base_url: https://...
+policy_api_key: ...
+policy_model_name: ...
+judge_base_url: https://...
+judge_api_key: ...
+judge_model_name: ...
+```
+
+## Build and Publish the Images
+
+No images are published for you. Build the three agent images from the Dockerfiles in the server's `docker/` folder (base images are pinned by digest, and the Next and Vite npm trees by committed lockfiles), push them to a registry your sandbox provider can pull from, and export the pushed digests:
+
+```bash
+IMAGE_PREFIX=<registry>/<namespace>/ui-gen-agent \
+  resources_servers/ui_generation_agentic/docker/build_images.sh --push
+export UI_GEN_NEXT_IMAGE=<registry>/<namespace>/ui-gen-agent/ui-next@sha256:...
+export UI_GEN_VITE_IMAGE=<registry>/<namespace>/ui-gen-agent/ui-vite@sha256:...
+export UI_GEN_STATIC_IMAGE=<registry>/<namespace>/ui-gen-agent/ui-static@sha256:...
+```
+
+The images bake in OpenCode 1.17.11 and ripgrep, checked by SHA-256. For the Codex composition, build them with `WITH_CODEX=1`, which also bakes in the Codex runtime; the default build leaves it out. Optionally pin each image's manifest with `UI_GEN_{NEXT,VITE,STATIC}_MANIFEST_SHA256`; a seed whose image does not match is refused.
+
+## Make the Policy Reachable from the Sandbox
+
+The harness calls the policy model server from inside the sandbox. With a self-hosted OpenSandbox server on the same machine (Docker runtime), bind only the policy model server to the Docker bridge in an overlay:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      host: 172.17.0.1
+```
+
+Otherwise pass `++use_absolute_ip=true '++absolute_ip_server_types=[responses_api_models]'`. Restricted egress opens every port of the policy model server's host, so the judge model server keeps `host: 127.0.0.1` and stays out of the sandbox's reach.
+
+## Run the Example Smoke Test
+
+End-to-end collection does not take `--split example`, so collate the examples into task envelopes (taskset `ui_generation_agentic:example`), serve the composition, then collect against the running servers:
+
+```bash
+CONFIGS=(--config environments/ui_generation_agentic/opencode.yaml
+         --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+         --model-type vllm_model --config policy_host_overlay.yaml)
+gym dataset collate "${CONFIGS[@]}" --mode example_validation --output-dir prepared
+gym env start "${CONFIGS[@]}" &
+gym eval run --no-serve "${CONFIGS[@]}" --input prepared/example.jsonl --output results/example_rollouts.jsonl \
+  --num-repeats 1 --concurrency 5
+```
+
+Each rollout records `build_passed`, `final_code`, `judge_quality`, `judge_prompt_adherence`, `failure_reason` and the guard settings. A sandbox, provider or judge failure masks the sample (`mask_sample: true`) instead of scoring it 0; the per-stack `masked` metric counts them.
+
+## Prepare Your Own Tasks
+
+No task data ships with the environment. `environments/ui_generation_agentic/prepare.py` turns a JSONL of prompts (`{"id", "prompt" | "messages", "stack"}`) into task rows, writing to a path you choose outside the repository. Rows it cannot convert are skipped and counted in the output's manifest.
+
+```bash
+python environments/ui_generation_agentic/prepare.py --input source.jsonl --output tasks.jsonl
+```
+
+Then add `tasks.jsonl` as a `train` dataset with taskset `ui_generation_agentic:train` through a config overlay that replaces the `datasets` list, and run `gym eval run` with `--split train` (the README has the full overlay).
+
+## Choose a Harness
+
+Swap `opencode.yaml` for another composition:
+
+| Composition | Runtime in the sandbox | Notes |
+|---|---|---|
+| `opencode.yaml` | baked into the images | output cap per call from `ui_generation_agentic_max_output_tokens` |
+| `claude_code.yaml` | uploaded at seed | the Gym host downloads the pinned CLI once; 100-turn limit |
+| `hermes.yaml` | uploaded at seed | built once on the Gym host; 100-turn limit, `temperature: 1.0` |
+| `codex.yaml` | baked in with `WITH_CODEX=1` | cap the output on the model server (`extra_body.max_tokens`) |
+
+<Warning>
+In sandbox mode, the Hermes run's result file is writable by commands the model runs, so the Hermes README advises against using these rollouts as RL training data.
+</Warning>

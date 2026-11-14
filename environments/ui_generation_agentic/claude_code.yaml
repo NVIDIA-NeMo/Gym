@@ -1,0 +1,40 @@
+# ui_generation_agentic with Claude Code (claude_code_agent) in the lent task sandbox. The task set and routing are in
+# base.yaml.
+#
+# The CLI calls the policy Gym model server's Anthropic Messages endpoint (/v1/messages), so any model Gym serves can
+# drive it, and only placeholder credentials enter the sandbox. At seed the agent server uploads the pinned Claude Code
+# binary, downloaded once on the Gym host and checked against the release manifest, so the agent images need no change
+# and the sandbox needs no internet.
+config_paths:
+  - environments/ui_generation_agentic/base.yaml
+  - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
+
+ui_generation_agentic_claude_code_agent:
+  _inherit_from: claude_code_agent
+  responses_api_agents:
+    claude_code_agent:
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      anthropic_api_key: ""
+      resources_server: null
+      # Sandbox sessions require an exact CLI version.
+      claude_code_version: "2.1.108"
+      concurrency: 4
+      # Assistant turns; OpenCode episodes took about 30 to 60 in testing.
+      max_turns: 100
+      timeout: 3600
+      sandbox_install_timeout_seconds: 600
+      # No web tools (the sandbox has no internet) and no subagents, as with OpenCode.
+      disallowed_tools: WebFetch,WebSearch,Task
+      # Keep the model's reasoning as separate reasoning items in the trace instead of <think> text.
+      fold_thinking: false
+
+ui_generation_agentic_environment_server:
+  environment_servers:
+    single_agent_turn:
+      agent_server:
+        type: responses_api_agents
+        name: ui_generation_agentic_claude_code_agent
