@@ -81,8 +81,9 @@ class GymnasiumRunResponse(BaseVerifyResponse):
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
-    # The environment's own reward record of a finished episode (``result.reward_info.reward``): the sum of the
-    # rewards its steps returned. Absent when the environment did not end the episode or reported its own failure.
+    # Saved when the environment ended the episode and reported no failure (``result.reward_info.reward``). Its value
+    # is the agent's sum of the step rewards, the same value as the row ``reward``; it records that the episode ended
+    # cleanly, not a separate grade. Absent when the step limit cut the episode or the environment reported a failure.
     result: dict | None = Field(default=None, exclude_if=lambda value: value is None)
     # The agent's one invocation and the model responses it asked for, so a cut-off answer is the model's observed own.
     ng_agent_observations: AgentObservationBundle | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -319,12 +320,15 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
         environment_failed = step_data.mask_sample or step_data.failure_kind is not None
         observations = None
+        # Tools that run inside the environment's /step are not recorded as tool calls, so ng_perf.num_tool_calls
+        # counts 0 for them (verifiers_agent has the same gap).
         if response_ids and self.rollout_id_from_run(body) is not None:
             observations = AgentObservationBundle(
                 source="gymnasium_agent",
                 records=[
                     AgentInvocation(
                         invocation_id=f"gymnasium_{uuid.uuid4().hex}",
+                        in_session=False,
                         # A cut-off last answer or an episode the step limit ended is incomplete, as other agents mark it.
                         status="completed"
                         if finished

@@ -859,6 +859,15 @@ class TestEnvironmentRewardRecord:
         assert "result" not in row
 
     @pytest.mark.asyncio
+    async def test_an_episode_the_environment_ends_with_truncated_and_no_failure_saves_the_record(self):
+        step = {"observation": None, "reward": 0.5, "terminated": False, "truncated": True, "info": {}}
+        responses = [_model_response("a") | {"id": "r1"}]
+        row = (await self._run([step], model_responses=responses)).model_dump(mode="json")
+        assert row["truncated"] is True
+        assert row["result"] == {"reward_info": {"reward": 0.5}}
+        assert row["ng_agent_observations"]["records"][0]["status"] == "completed"
+
+    @pytest.mark.asyncio
     async def test_an_episode_cut_by_the_step_limit_saves_no_reward_record(self):
         step = {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}}
         row = (await self._run([step], max_steps=1)).model_dump(mode="json")
@@ -914,3 +923,26 @@ class TestAgentObservation:
         step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
         row = (await TestEnvironmentRewardRecord()._run([step], rollout_keys=False)).model_dump(mode="json")
         assert "ng_agent_observations" not in row
+
+    @pytest.mark.asyncio
+    async def test_a_completed_response_with_incomplete_details_is_an_incomplete_invocation(self):
+        step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
+        response = _model_response("a") | {
+            "id": "r1",
+            "status": "completed",
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+        row = (await TestEnvironmentRewardRecord()._run([step], model_responses=[response])).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_response_with_an_empty_id_is_not_added_to_the_model_calls(self):
+        steps = [
+            {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
+            {"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}},
+        ]
+        responses = [_model_response("a") | {"id": ""}, _model_response("b") | {"id": "r2"}]
+        row = (await TestEnvironmentRewardRecord()._run(steps, model_responses=responses)).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r2"]
